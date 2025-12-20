@@ -2,16 +2,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved
 
-import unittest
 
-from jiuwen.core.common.exception.exception import JiuWenBaseException
-from jiuwen.core.utils.tool.param import Param
-from jiuwen.core.utils.tool.param_util import ParamUtil
-from jiuwen.core.utils.tool.service_api.restful_api import RestfulApi
-from jiuwen.core.utils.tool.types import ValueTypeEnum, Type
+import pytest
+
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.utils.tool.param import Param
+from openjiuwen.core.utils.tool.param_util import ParamUtil
+from openjiuwen.core.utils.tool.types import ValueTypeEnum, Type
 
 
-class TestPluginParam(unittest.TestCase):
+class TestPluginParam:
     NEST_TYPE_EXAMPLE = {
         "Array<bool>": "array<boolean>", "list<String>": "array<string>",
         "List<int>": "array<integer>", "array<object>": "array<object>",
@@ -27,7 +27,19 @@ class TestPluginParam(unittest.TestCase):
         'list<object>': [{"a": 1}, 1], 'List<float>': 1.05
     }
     INPUTS = {"location": "上海"}
+    def assertEqual(self, left, right):
+        assert left == right
+        
+    def assertIsInstance(self, left, right):
+        assert isinstance(left, right)
+        
+    def assertFalse(self, value):
+        assert value is False
+        
+    def assertTrue(self, value):
+        return value is True
 
+    @pytest.fixture(autouse=True)
     def setUp(self):
         self.schema_example = {
             "name": "times",
@@ -81,12 +93,12 @@ class TestPluginParam(unittest.TestCase):
 
     def test_unsupported_type_raise_value_error(self):
         for supported_type in self.UNSUPPORTED_TYPE_EXAMPLE:
-            with self.assertRaises(ValueError):
+            with pytest.raises(ValueError):
                 Type(supported_type).json_schema_type()
 
     def test_validate_default_value_should_raise_Exception(self):
         for type_string, default_value in self.DEFAULT_VALUE_EXAMPLE.items():
-            with self.assertRaises(JiuWenBaseException):
+            with pytest.raises(JiuWenBaseException):
                 Param("test", "test", param_type=type_string, default_value=default_value)
 
     def test_schema_should_format_correct(self):
@@ -107,9 +119,9 @@ class TestPluginParam(unittest.TestCase):
 
     def test_validate_schema_should_raise_Exception(self):
         self.schema_example['schema'][0]['type'] = "object"
-        with self.assertRaises(JiuWenBaseException):
+        with pytest.raises(JiuWenBaseException):
             Param(param_type=self.schema_example.get("type"), **self.schema_example)
-        with self.assertRaises(JiuWenBaseException):
+        with pytest.raises(JiuWenBaseException):
             Param("test", "test", param_type="object")
 
     def test_correct_param_should_pass_validate(self):
@@ -171,13 +183,13 @@ class TestPluginParam(unittest.TestCase):
         self.INPUTS = {"location": "上海", "times": None}
         self.schema_example[0]['type'] = "array<object>"
         self.param = [Param(param_type=item.get("type"), **item) for item in self.schema_example]
-        self.assertDictEqual(
+        self.assertEqual(
             ParamUtil.format_input_with_default_when_required(self.param, self.INPUTS),
             {"times": [{"starttime": "2025-07-14", "endtime": "2025-07-14"}], "location": "上海"},
         )
 
         self.INPUTS = {"times": [{"starttime": "2020-01-01"}, {"endtime": "2020-01-02"}], "location": "上海"}
-        self.assertDictEqual(
+        self.assertEqual(
             ParamUtil.format_input_with_default_when_required(self.param, self.INPUTS),
             {
                 "times": [
@@ -191,7 +203,7 @@ class TestPluginParam(unittest.TestCase):
         self.schema_example[2]["default_value"] = 20
         self.INPUTS = {"times": [{"starttime": "2020-01-01"}], "location": "上海", "num": None}
         self.param = [Param(param_type=item.get("type"), **item) for item in self.schema_example]
-        self.assertDictEqual(
+        self.assertEqual(
             ParamUtil.format_input_with_default_when_required(self.param, self.INPUTS),
             {"times": [{"starttime": "2020-01-01", "endtime": "2025-07-14"}], "location": "上海", "num": 20},
         )

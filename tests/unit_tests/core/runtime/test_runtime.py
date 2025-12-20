@@ -1,18 +1,11 @@
-import unittest
-
-from jiuwen.core.runtime.config import Config
-from jiuwen.core.runtime.workflow import WorkflowRuntime, NodeRuntime
-from jiuwen.core.runtime.state import ReadableStateLike
-from jiuwen.core.runtime.workflow_state import InMemoryState
-from jiuwen.core.runtime.utils import update_dict, get_by_schema, root_to_index
+from openjiuwen.core.runtime.agent import AgentRuntime
+from openjiuwen.core.runtime.workflow import WorkflowRuntime, NodeRuntime
+from openjiuwen.core.runtime.state import ReadableStateLike
+from openjiuwen.core.runtime.utils import update_dict, get_by_schema, root_to_index
+from openjiuwen.core.runtime.wrapper import TaskRuntime
 
 
-class ContextTest(unittest.TestCase):
-    def assert_context(self, context: NodeRuntime, node_id: str, executable_id: str, parent_id: str):
-        assert context.node_id() == node_id
-        assert context.executable_id() == executable_id
-        assert context.parent_id() == parent_id
-
+class TestRuntime:
     def test_basic(self):
         # Workflow context/
         context = WorkflowRuntime()
@@ -64,7 +57,7 @@ class ContextTest(unittest.TestCase):
         assert sub_node1_context.state().get_global('c') == 4
         assert sub_node1_context.state().get('url') == '0.0.0.2'
 
-    def test_context_state(self):
+    def test_get_by_schema(self):
         source = {}
         # 增加a.b: nums属性
         update_dict({"a.b.nums": [1, 2, 3]}, source)
@@ -87,6 +80,9 @@ class ContextTest(unittest.TestCase):
         assert get_by_schema({"result": ["abc", "cde"]}, data=source) == {"result": ["abc", "cde"]}
         assert get_by_schema({"result": {"abc": "cde", "result": "${1}"}}, data=source) == {
             "result": {"abc": "cde", "result": None}}
+        assert get_by_schema({"a": "${a.b[-1]}"}, source) == {'a': 3}
+        source1 = {'a': {'b': ['cc', 'dd', 'ee']}}
+        assert get_by_schema({"result": "${a.b[1]}"}, data=source1) == {"result": 'dd'}
 
         assert get_by_schema({"result": ["${abc}", "cde"]}, data=source) == {"result": [None, "cde"]}
         assert get_by_schema({"result": {"abc": "cde", "result": "${a}"}}, data=source) == {
@@ -253,3 +249,22 @@ class ContextTest(unittest.TestCase):
         assert source[1][5] == [None, None, {}]
         assert source[1][3] is None  # Filled with None
         assert source[1][4] is None  # Filled with None
+
+    def test_task_runtime(self):
+        runtime = AgentRuntime("abc")
+        task_runtime = TaskRuntime(inner=runtime)
+        data = {"data": {"a": 1}}
+        task_runtime.update_state({"result": data})
+        assert task_runtime.get_state("result") == {"data": {"a": 1}}
+
+        assert task_runtime.get_state("result") == {"data": {"a": 1}}
+
+        data2 = {"data": {"b": 1}}
+        task_runtime.update_state({"result": data2})
+        assert task_runtime.get_state("result") == {"data": {"a": 1, "b": 1}}
+
+        task_runtime.update_state({"result": None})
+        assert task_runtime.get_state("result") is None
+
+        task_runtime.update_state({"result": data2})
+        assert task_runtime.get_state("result") == {"data": {"b": 1}}

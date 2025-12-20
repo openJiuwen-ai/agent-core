@@ -2,10 +2,10 @@ import asyncio
 
 import pytest
 
-from jiuwen.agent.config.base import AgentConfig
-from jiuwen.core.agent.agent import AgentRuntime
-from jiuwen.core.runtime.config import Config
-from jiuwen.core.runtime.wrapper import TaskRuntime
+from openjiuwen.agent.config.base import AgentConfig
+from openjiuwen.core.agent.agent import AgentRuntime
+from openjiuwen.core.runtime.config import Config
+from openjiuwen.core.runtime.wrapper import TaskRuntime
 
 pytestmark = pytest.mark.asyncio
 

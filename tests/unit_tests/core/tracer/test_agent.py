@@ -1,17 +1,18 @@
 import asyncio
-import unittest
 
-from jiuwen.agent.config.base import AgentConfig
-from jiuwen.core.agent.agent import AgentRuntime
-from jiuwen.core.runtime.config import Config
-from jiuwen.core.runtime.runtime import Runtime
-from jiuwen.core.runtime.wrapper import TaskRuntime
-from jiuwen.core.common.logging import logger
-from jiuwen.core.stream.base import CustomSchema
-from jiuwen.core.workflow.base import Workflow
-from tests.unit_tests.tracer.test_mock_node_with_tracer import StreamNodeWithTracer
-from tests.unit_tests.tracer.test_workflow_tracer import record_tracer_info
-from tests.unit_tests.workflow.test_mock_node import MockEndNode, MockStartNode
+import pytest
+
+from openjiuwen.agent.config.base import AgentConfig
+from openjiuwen.core.agent.agent import AgentRuntime
+from openjiuwen.core.runtime.config import Config
+from openjiuwen.core.runtime.runtime import Runtime
+from openjiuwen.core.runtime.wrapper import TaskRuntime
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.stream.base import CustomSchema
+from openjiuwen.core.workflow.base import Workflow
+from tests.unit_tests.core.tracer.mock_node_with_tracer import StreamNodeWithTracer
+from tests.unit_tests.core.tracer.test_workflow_tracer import record_tracer_info
+from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode
 
 
 class MockLLM:
@@ -38,7 +39,7 @@ class MockPlugin:
 
     async def stream(self, span):
         try:
-            await self.tracer.trigger("tracer_agent", "on_plugin_start", span=span, inputs={"llm": "mock plugin"},
+            await self.tracer.trigger("tracer_agent", "on_plugin_start", span=span, inputs={"llm": "mock tool"},
                                       instance_info={"class_name": "RestFulAPI"})
             await asyncio.sleep(2)
         except Exception as e:
@@ -46,15 +47,17 @@ class MockPlugin:
                                       )
             raise e
         finally:
-            await self.tracer.trigger("tracer_agent", "on_plugin_end", span=span, outputs={"outputs": "mock plugin"},
+            await self.tracer.trigger("tracer_agent", "on_plugin_end", span=span, outputs={"outputs": "mock tool"},
                                       )
 
 
-class MockAgent(unittest.TestCase):
+class TestAgent:
+
     """
-    Agent(llm -> plugin -> workflow)
+    Agent(llm -> tool -> workflow)
     """
 
+    @pytest.fixture(autouse=True)
     def setUp(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
@@ -137,7 +140,7 @@ class MockAgent(unittest.TestCase):
                                       inputs={"intput": "mock chain"},
                                       instance_info={"class_name": "Agent"})  # class_name为必选参数
 
-            # 模拟需要运行llm、plugin
+            # 模拟需要运行llm、tool
             for runner in [MockLLM(self.tracer), MockPlugin(self.tracer)]:
                 runner_span = self.tracer.tracer_agent_span_manager.create_agent_span(agent_span)  # 用于记录父子span关系
                 await runner.stream(runner_span)

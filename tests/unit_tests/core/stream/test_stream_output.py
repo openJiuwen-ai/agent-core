@@ -1,22 +1,23 @@
 import asyncio
-import unittest
 from typing import AsyncIterator, Type
 
+import pytest
 from pydantic import BaseModel
 
-from jiuwen.core.stream.base import StreamMode
-from jiuwen.core.stream.emitter import StreamEmitter
-from jiuwen.core.stream.manager import StreamWriterManager
-from jiuwen.core.stream.writer import StreamWriter
+from openjiuwen.core.stream.base import StreamMode
+from openjiuwen.core.stream.emitter import StreamEmitter
+from openjiuwen.core.stream.manager import StreamWriterManager
+from openjiuwen.core.stream.writer import StreamWriter
 
+pytestmark = pytest.mark.asyncio
 
-class TestStreamOutput(unittest.IsolatedAsyncioTestCase):
-
-    async def asyncSetUp(self):
+class TestStreamOutput:
+    @pytest.fixture(autouse=True)
+    def setup(self):
         self.emitter = StreamEmitter()
         self.manager = StreamWriterManager(self.emitter)
 
-    async def asyncTearDown(self):
+    def teardown(self):
         pass
 
     async def test_stream_output_with_custom_writer(self):
