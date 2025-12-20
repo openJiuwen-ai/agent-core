@@ -1,0 +1,37 @@
+[project]
+name = "openjiuwen"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "~=3.11.0"
+dependencies = [
+    "aiohttp==3.12.15",
+    "mcp==1.12.2",
+    "pydantic==2.11.3",
+    "python-dateutil==2.9.0.post0",
+    "sqlalchemy==2.0.40",
+    "openai==1.101.0",
+    "cacheout==0.16.0"
+]
+
+[tool.uv]
+default-groups = ['dev']
+
+
+[dependency-groups]
+dev = [
+    "coverage==7.8.0",
+    "pytest==8.3.5",
+    "pytest-asyncio==1.2.0",
+    "pytest-html==4.1.1",
+    "pytest-mock==3.11.1",
+]
+
+[tool.coverage.run]
+omit = ["tests/*"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["openjiuwen"]
+addopts = ["-v", "--html=report/index.html", "--self-contained-html"]
