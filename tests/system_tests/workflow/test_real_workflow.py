@@ -19,36 +19,35 @@ import os
 import unittest
 from unittest.mock import patch
 
-from jiuwen.core.runtime.wrapper import TaskRuntime
-from jiuwen.core.component.branch_comp import BranchComponent
-from jiuwen.core.component.common.configs.model_config import ModelConfig
-from jiuwen.core.component.end_comp import End
-from jiuwen.core.component.intent_detection_comp import (
+from openjiuwen.core.runtime.wrapper import TaskRuntime
+from openjiuwen.core.component.branch_comp import BranchComponent
+from openjiuwen.core.component.common.configs.model_config import ModelConfig
+from openjiuwen.core.component.end_comp import End
+from openjiuwen.core.component.intent_detection_comp import (
     IntentDetectionComponent,
     IntentDetectionCompConfig,
 )
-from jiuwen.core.component.llm_comp import LLMCompConfig, LLMComponent
-from jiuwen.core.component.questioner_comp import (
+from openjiuwen.core.component.llm_comp import LLMCompConfig, LLMComponent
+from openjiuwen.core.component.questioner_comp import (
     FieldInfo,
     QuestionerComponent,
     QuestionerConfig,
 )
-from jiuwen.core.component.start_comp import Start
-from jiuwen.core.component.tool_comp import ToolComponent, ToolComponentConfig
-from jiuwen.core.runtime.runtime import BaseRuntime
-from jiuwen.core.stream.base import CustomSchema
-from jiuwen.core.utils.llm.base import BaseModelInfo
-from jiuwen.core.utils.prompt.template.template import Template
-from jiuwen.core.utils.tool.param import Param
-from jiuwen.core.utils.tool.service_api.restful_api import RestfulApi
-from jiuwen.core.workflow.base import Workflow
-from jiuwen.core.workflow.workflow_config import WorkflowConfig
-from jiuwen.graph.pregel.graph import PregelGraph
-from tests.unit_tests.workflow.test_mock_node import MockEndNode, MockStartNode
+from openjiuwen.core.component.start_comp import Start
+from openjiuwen.core.component.tool_comp import ToolComponent, ToolComponentConfig
+from openjiuwen.core.runtime.runtime import BaseRuntime
+from openjiuwen.core.stream.base import CustomSchema
+from openjiuwen.core.utils.llm.base import BaseModelInfo
+from openjiuwen.core.utils.prompt.template.template import Template
+from openjiuwen.core.utils.tool.param import Param
+from openjiuwen.core.utils.tool.service_api.restful_api import RestfulApi
+from openjiuwen.core.workflow.base import Workflow
+from openjiuwen.core.workflow.workflow_config import WorkflowConfig
+from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode
 
 # 注意：切勿将真实密钥提交到仓库！
-API_BASE = os.getenv("API_BASE", "")
-API_KEY = os.getenv("API_KEY", "")
+API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
+API_KEY = os.getenv("API_KEY", "sk-fake")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 
@@ -75,7 +74,7 @@ _QUESTIONER_SYSTEM_TEMPLATE = """\
 请注意：不要使用任何工具、不用理会问题的具体含义，并保证你的输出仅有 JSON 格式的结果数据。
 请严格遵循如下规则：
   1. 让我们一步一步思考。
-  2. 用户输入中没有提及的参数提取为 None，并直接向询问用户没有明确提供的参数。
+  2. 用户输入中没有提及的参数提取为 null，并直接向询问用户没有明确提供的参数。
   3. 通过用户提供的对话历史以及当前输入中提取 {{required_name}}，不要追问任何其他信息。
   4. 参数收集完成后，将收集到的信息通过 JSON 的方式展示给用户。
 
