@@ -3,7 +3,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from typing import Union, Dict, List, Optional, Any
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from openjiuwen.core.utils.tool.schema import ToolCall
 
@@ -33,6 +33,36 @@ class AIMessage(BaseMessage):
     usage_metadata: Optional[UsageMetadata] = None
     raw_content: Optional[str] = None
     reason_content: Optional[str] = None
+
+    @model_validator(mode='before')
+    @classmethod
+    def convert_openai_tool_calls_format(cls, data: Any) -> Any:
+        """Convert OpenAI API format tool_calls to flat ToolCall format.
+
+        OpenAI API format has nested 'function' object:
+        {"id": "xxx", "type": "function", "function": {"name": "...", "arguments": "..."}}
+
+        ToolCall model expects flat format:
+        {"id": "xxx", "type": "function", "name": "...", "arguments": "..."}
+        """
+        if isinstance(data, dict) and 'tool_calls' in data and data['tool_calls']:
+            converted_tool_calls = []
+            for tc in data['tool_calls']:
+                if isinstance(tc, dict) and 'function' in tc and isinstance(tc['function'], dict):
+                    # OpenAI format - convert to flat format
+                    converted_tc = {
+                        'id': tc.get('id'),
+                        'type': tc.get('type', 'function'),
+                        'name': tc['function'].get('name', ''),
+                        'arguments': tc['function'].get('arguments', ''),
+                        'index': tc.get('index')
+                    }
+                    converted_tool_calls.append(converted_tc)
+                else:
+                    # Already flat format or ToolCall instance
+                    converted_tool_calls.append(tc)
+            data['tool_calls'] = converted_tool_calls
+        return data
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
         result = {
