@@ -1,10 +1,10 @@
 import asyncio
 import random
 
-from jiuwen.core.context_engine.base import Context
-from jiuwen.core.graph.executable import Input, Output
-from jiuwen.core.runtime.runtime import Runtime
-from tests.unit_tests.workflow.test_mock_node import MockNodeBase
+from openjiuwen.core.context_engine.base import Context
+from openjiuwen.core.graph.executable import Input, Output
+from openjiuwen.core.runtime.runtime import Runtime
+from tests.unit_tests.core.workflow.mock_nodes import MockNodeBase
 
 
 class StreamNodeWithTracer(MockNodeBase):
@@ -23,9 +23,9 @@ class StreamNodeWithTracer(MockNodeBase):
             await runtime.trace_error(e)
             raise e
 
-        await asyncio.sleep(random.randint(0, 5))
+        await asyncio.sleep(random.randint(0, 2))
         for data in self._datas:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             await runtime.write_custom_stream(data)
         print("StreamNode: output = " + str(inputs))
         return inputs

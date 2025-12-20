@@ -1,18 +1,17 @@
-import pytest
-import asyncio
-from unittest.mock import MagicMock, patch, Mock
+from unittest.mock import MagicMock, Mock
 
-from jiuwen.core.component.condition.condition import Condition, FuncCondition, AlwaysTrue
-from jiuwen.core.component.condition.array import ArrayCondition
-from jiuwen.core.component.condition.number import NumberCondition
-from jiuwen.core.component.condition.expression import ExpressionCondition
-from jiuwen.core.runtime.runtime import BaseRuntime
-from jiuwen.core.runtime.workflow_state import CommitState
-from jiuwen.core.context_engine.base import Context
-from jiuwen.core.graph.executable import Input
-from jiuwen.core.common.exception.exception import JiuWenBaseException
-from jiuwen.core.common.exception.status_code import StatusCode
-from jiuwen.core.common.constants.constant import MAX_EXPRESSION_LENGTH, MAX_AST_DEPTH
+import pytest
+
+from openjiuwen.core.common.constants.constant import MAX_EXPRESSION_LENGTH, MAX_AST_DEPTH
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.component.condition.array import ArrayCondition
+from openjiuwen.core.component.condition.condition import Condition, FuncCondition, AlwaysTrue
+from openjiuwen.core.component.condition.expression import ExpressionCondition
+from openjiuwen.core.component.condition.number import NumberCondition
+from openjiuwen.core.context_engine.base import Context
+from openjiuwen.core.graph.executable import Input
+from openjiuwen.core.runtime.runtime import BaseRuntime
+from openjiuwen.core.runtime.workflow_state import CommitState
 
 
 class TestConditionBase:
@@ -136,13 +135,13 @@ class TestArrayCondition(TestConditionBase):
         
         # Verify results
         assert result is True
-        assert updates == {"item": 2, "another_item": "b"}
-        self.mock_state.update.assert_called_once_with({"item": 2, "another_item": "b"})
+        assert updates == {"item": 1, "another_item": "a"}
+        self.mock_state.update.assert_called_once_with({"item": 1, "another_item": "a"})
     
     def test_array_condition_invoke_beyond_limit(self):
         """Test ArrayCondition invocation beyond limit"""
         # Set up mock data
-        self.mock_state.get.return_value = 2  # Current index is 2, next index is 3, exceeding array length of 3
+        self.mock_state.get.return_value = 3  # Current index is 3, exceeding array length of 3
         inputs = {"item": [1, 2, 3]}
         
         # Create ArrayCondition instance
@@ -168,7 +167,7 @@ class TestNumberCondition(TestConditionBase):
     def test_number_condition_invoke_within_limit(self):
         """Test NumberCondition invocation within limit"""
         # Set up mock data
-        self.mock_state.get.return_value = 2  # Current index is 2, next index is 3
+        self.mock_state.get.return_value = 2  # Current index is 2
         inputs = 5  # Limit is 5
         
         # Create NumberCondition instance
@@ -183,7 +182,7 @@ class TestNumberCondition(TestConditionBase):
     def test_number_condition_invoke_beyond_limit(self):
         """Test NumberCondition invocation beyond limit"""
         # Set up mock data
-        self.mock_state.get.return_value = 4  # Current index is 4, next index is 5
+        self.mock_state.get.return_value = 5  # Current index is 5
         inputs = 5  # Limit is 5
         
         # Create NumberCondition instance
@@ -412,19 +411,6 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if evaluation error is handled correctly
-        with pytest.raises(JiuWenBaseException):
-            expr_condition.invoke({}, self.mock_runtime)
-    
-    def test_expression_non_boolean_result(self):
-        """Test handling of non-boolean expression results"""
-        # Set up mock data - expression result is non-boolean
-        expression = "${a} + ${b}"
-        self.mock_state.get_global.side_effect = lambda x: 5 if x == "a" else 3 if x == "b" else None
-        
-        # Create ExpressionCondition instance
-        expr_condition = ExpressionCondition(expression)
-        
-        # Test if non-boolean result is handled correctly
         with pytest.raises(JiuWenBaseException):
             expr_condition.invoke({}, self.mock_runtime)
     

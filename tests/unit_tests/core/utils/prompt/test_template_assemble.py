@@ -1,16 +1,18 @@
-import unittest
+import pytest
 
-from jiuwen.core.common.exception.exception import JiuWenBaseException
-from jiuwen.core.utils.llm.messages import HumanMessage, AIMessage, ToolCall, FunctionInfo, ToolMessage
-from jiuwen.core.utils.prompt.assemble.variables.variable import Variable
-from jiuwen.core.utils.prompt.template.template import Assembler
-from jiuwen.core.utils.prompt.assemble.variables.textable import TextableVariable
-from jiuwen.core.utils.prompt.index.template_store.template_store import Template
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.utils.llm.messages import HumanMessage, AIMessage, ToolMessage
+from openjiuwen.core.utils.tool.schema import ToolCall
+from openjiuwen.core.utils.prompt.assemble.variables.variable import Variable
+from openjiuwen.core.utils.prompt.template.template import Assembler, Template
+from openjiuwen.core.utils.prompt.assemble.variables.textable import TextableVariable
 
+class TestPromptAssemble:
+    def assertEqual(self, left, right):
+        assert left == right
 
-class TestPromptAssemble(unittest.TestCase):
     def test_textable_variable(self):
-        self.assertRaises(JiuWenBaseException, TextableVariable, text="{{}}")
+        pytest.raises(JiuWenBaseException, TextableVariable, text="{{}}")
         var1 = TextableVariable(text="{{x}}")
         self.assertEqual(["x"], var1.input_keys)
         self.assertEqual("default", var1.name)
@@ -21,7 +23,7 @@ class TestPromptAssemble(unittest.TestCase):
         self.assertEqual("12", var2.value)
 
     def test_textable_variables(self):
-        self.assertRaises(JiuWenBaseException, TextableVariable, text="{{}}")
+        pytest.raises(JiuWenBaseException, TextableVariable, text="{{}}")
         var1 = TextableVariable(text="{{x}}")
         self.assertEqual(["x"], var1.input_keys)
         self.assertEqual("default", var1.name)
@@ -45,7 +47,7 @@ class TestPromptAssemble(unittest.TestCase):
         self.assertEqual(["user.name"], var.placeholders)
 
         text = "Hello, {{}}!"
-        with self.assertRaises(JiuWenBaseException):
+        with pytest.raises(JiuWenBaseException):
             TextableVariable(text=text)
 
     def test_update(self):
@@ -77,7 +79,7 @@ class TestPromptAssemble(unittest.TestCase):
         self.assertEqual(var.value, "")
 
         var = Variable(name="test_var", input_keys=None)
-        self.assertIsNone(var.input_keys)
+        assert (var.input_keys is None)
 
     def test_prepare_inputs(self):
         var = Variable(name="test_var", input_keys=["key1", "key2"])
@@ -135,7 +137,8 @@ class TestPromptAssemble(unittest.TestCase):
                 content="",
                 tool_calls=[
                     ToolCall(type="test",
-                             function=FunctionInfo(name="func", arguments="x"),
+                             name="func",
+                             arguments="x",
                              id="test")]),
             ToolMessage(tool_call_id="test", content=[])
         ])
@@ -157,13 +160,16 @@ class TestPromptAssemble(unittest.TestCase):
         self.assertEqual(
             messages,
             [
-                HumanMessage(content="`#system#`你是一个精通数学领域的问答助手`#user#`[{'role': 'user', 'content': '你是谁'}]")
+                HumanMessage(
+                    content="`#system#`你是一个精通数学领域的问答助手`#user#`[{'role': 'user', 'content': '你是谁'}]")
             ]
         )
 
         #
         template = template.format({"memory": [{"role": "user", "content": "你是谁"}]})
-        self.assertEqual(template.content, "`#system#`你是一个精通{{domain}}领域的问答助手`#user#`[{'role': 'user', 'content': '你是谁'}]")
+        self.assertEqual(template.content,
+                         "`#system#`你是一个精通{{domain}}领域的问答助手`#user#`[{'role': 'user', 'content': '你是谁'}]")
 
         template = template.format({"domain": "数学"})
-        self.assertEqual(template.content, "`#system#`你是一个精通数学领域的问答助手`#user#`[{'role': 'user', 'content': '你是谁'}]")
+        self.assertEqual(template.content,
+                         "`#system#`你是一个精通数学领域的问答助手`#user#`[{'role': 'user', 'content': '你是谁'}]")

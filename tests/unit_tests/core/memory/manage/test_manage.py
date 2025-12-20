@@ -1,0 +1,209 @@
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import os
+import shutil
+from enum import StrEnum
+from typing import List, Tuple
+
+import pytest
+from sqlalchemy import engine, text
+
+from openjiuwen.core.memory.manage.data_id_manager import DataIdManager
+from openjiuwen.core.memory.manage.user_profile_manager import UserProfileManager
+from openjiuwen.core.memory.manage.variable_manager import VariableManager
+from openjiuwen.core.memory.manage.write_manager import WriteManager
+from openjiuwen.core.memory.mem_unit.memory_unit import UserProfileUnit, VariableUnit, MemoryType, ConflictType
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.memory.store.user_mem_store import UserMemStore
+from openjiuwen.core.memory.store.base_semantic_store import BaseSemanticStore
+from openjiuwen.core.memory.store.impl.dbm_kv_store import DbmKVStore as MockKVStore
+
+
+class ContextStoreColumnType(StrEnum):
+    TEXT = 'TEXT'
+    INTEGER = 'INTEGER'
+    REAL = 'REAL'
+    BLOB = 'BLOB'
+    NUMERIC = 'NUMERIC'
+
+
+CONTEXT_CONFIG = {
+    'table': 'user_message',
+    'columns': {
+        'message_id': ContextStoreColumnType.TEXT,
+        'user_id': ContextStoreColumnType.TEXT,
+        'session_id': ContextStoreColumnType.TEXT,
+        'group_id': ContextStoreColumnType.TEXT,
+        'role': ContextStoreColumnType.TEXT,
+        'content': ContextStoreColumnType.TEXT,
+        'timestamp': ContextStoreColumnType.TEXT,
+    }
+}
+
+
+def create(conn: engine.Engine, table: str, columns: dict[str, ContextStoreColumnType]):
+    try:
+        with conn.connect() as conn:
+            conn.execute(text(
+                f"CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY)"
+            ))
+            cursor = conn.execute(text(
+                f"PRAGMA table_info('{table}')"
+            ))
+            existing_items = {row[1] for row in cursor.fetchall()}
+            for column_name, column_type in columns.items():
+                if column_name in existing_items:
+                    continue
+                alter_sql = f"ALTER TABLE {table} ADD COLUMN '{column_name}' {column_type}"
+                conn.execute(text(alter_sql))
+            conn.commit()
+    except Exception as e:
+        logger.error("Failed to create table", exc_info=e)
+
+
+# Mock语义存储实现，避免实际模型加载
+class MockSemanticStore(BaseSemanticStore):
+    """Mock语义存储，用于测试环境，不依赖实际模型"""
+
+    def __init__(self, config, model_config):
+        self.memory_store = {}
+        self.config = config
+        self.model_config = model_config
+
+    async def add_docs(self, docs: List[Tuple[str, str]], table_name: str) -> bool:
+        """模拟添加记忆"""
+        if table_name not in self.memory_store:
+            self.memory_store[table_name] = {}
+
+        for mid, m in docs:
+            self.memory_store[table_name][mid] = {
+                'content': m
+            }
+        return True
+
+    async def delete_docs(self, ids: List[str], table_name: str) -> bool:
+        """模拟删除记忆"""
+        if table_name in self.memory_store:
+            for id_to_remove in ids:
+                self.memory_store[table_name].pop(id_to_remove, None)
+        return True
+
+    async def search(self, query: str, table_name: str, top_k: int) -> List[Tuple[str, float]]:
+        """模拟搜索功能，返回匹配的记忆"""
+        if table_name not in self.memory_store:
+            return []
+
+        # 简单的文本匹配搜索
+        results: List[Tuple[str, float]] = []
+        for memory_id, memory_data in self.memory_store[table_name].items():
+            content = memory_data['content']
+            # 简单的关键词匹配
+            if any(q in content for q in query):
+                # 模拟返回SearchHit对象
+                results.append((memory_id, 0.0))
+
+        # 返回top_k个结果
+        return results[-5:]
+
+    async def delete_table(self, table_name: str) -> bool:
+        """模拟删除索引功能"""
+        if table_name in self.memory_store:
+            del self.memory_store[table_name]
+        return True
+
+
+class TestManage:
+    @pytest.mark.asyncio
+    async def test_basic(self):
+        test_dir = "test_dbm"
+        os.makedirs(test_dir, exist_ok=True)
+        test_file = os.path.join(test_dir, "test_kv_db")
+        mock_kv_store = MockKVStore(test_file)
+        data_id_generator = DataIdManager()
+
+        # 使用Mock语义存储替代实际模型
+        mock_semantic_recall = MockSemanticStore(None, None)
+
+        # path = Path("./sql_db.db")
+        # conn = create_engine(
+        #     f"sqlite:///{path.resolve()}",
+        #     poolclass=QueuePool,
+        #     pool_size=10,
+        #     max_overflow=20,
+        #     pool_pre_ping=True,
+        #     pool_recycle=3600
+        # )
+        # create(conn, CONTEXT_CONFIG['table'], CONTEXT_CONFIG['columns'])
+        # mock_db_store = SqlDbStore(conn)
+        # message_manager = MessageManager(mock_db_store, data_id_generator)
+        mock_mem_store = UserMemStore(mock_kv_store)
+        user_profile_manager = UserProfileManager(
+            semantic_recall_instance=mock_semantic_recall,
+            user_mem_store=mock_mem_store,
+            data_id_generator=data_id_generator,
+            crypto_key=""
+        )
+        variable_manager = VariableManager(mock_kv_store, "")
+        managers = {"user_profile": user_profile_manager, "variable": variable_manager}
+        write_manager = WriteManager(managers, mock_mem_store)
+        test_all_data = [
+            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
+             "profile_mem": "用户非常喜欢川菜，尤其是水煮鱼和麻婆豆腐"},
+            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "personal_information",
+             "profile_mem": "用户的职业是软件工程师，居住在北京市"},
+            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "personal_information",
+             "profile_mem": "用户的副业是抖音直播"},
+            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "assert_information",
+             "profile_mem": "用户的银行账户余额为10000元"},
+            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "social_information",
+             "profile_mem": "用户的朋友圈中有50个好友"},
+            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "other_information",
+             "profile_mem": "用户的宠物是一只金毛犬"},
+            {"user_id": "usrZH2026", "group_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
+             "profile_mem": "用户喜欢打篮球和阅读历史小说"},
+            {"user_id": "usrZH2026", "group_id": "fitnesstrackerv3", "profile_type": "personal_information",
+             "profile_mem": "用户的生日是1990年1月1日"},
+            {"user_id": "usrZH2026", "group_id": "fitnesstrackerv3", "profile_type": "assert_information",
+             "profile_mem": "用户的汽车型号是特斯拉Model 3"},
+            {"user_id": "usrZH2026", "group_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
+             "profile_mem": "用户在Twitter上有200个关注者"},
+        ]
+
+        for item in test_all_data:
+            conflict_info = {'id': '-1', "event": ConflictType.ADD.value, "text": item["profile_mem"]}
+            mem_unit = UserProfileUnit(mem_type=MemoryType.USER_PROFILE, conflict_info=[conflict_info], **item)
+            await write_manager.add_mem([mem_unit])
+            mem_unit = VariableUnit(mem_type=MemoryType.VARIABLE, variable_name=item['profile_type'],
+                                    variable_mem=item['profile_mem'], user_id=item['user_id'],
+                                    group_id=item['group_id'])
+            await write_manager.add_mem([mem_unit])
+
+        query = "用户的职业"
+        res = await variable_manager.query_variable(user_id=test_all_data[0]['user_id'],
+                                                    group_id=test_all_data[0]['group_id'])
+        res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5)
+        assert len(res) == 5
+        # message_by_id = message_manager.get_by_id("15")
+
+        await user_profile_manager.update(res[0]['user_id'], res[0]['group_id'], res[0]['id'],
+                                          "用户不是软件工程师，是系统")
+        ret = await user_profile_manager.get(res[0]['user_id'], res[0]['group_id'], res[0]['id'])
+        assert ret['mem'] == "用户不是软件工程师，是系统"
+
+        res = await user_profile_manager.list_user_profile("usrZH2025", "fitnesstrackerv3")
+        assert len(res) == 6
+
+        res = await user_profile_manager.list_user_profile("usrZH2025", "fitnesstrackerv3", "personal_information")
+        assert len(res) == 2
+        for rr in res:
+            await write_manager.delete_mem_by_id(rr["user_id"], rr["group_id"], rr["id"])
+
+        res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5)
+        assert len(res) == 4
+        await write_manager.delete_mem_by_user_id("usrZH2026", "fitnesstrackerv3")
+        res = await user_profile_manager.search("usrZH2026", "fitnesstrackerv3", query, 5)
+        assert len(res) == 0
+
+        #release resource
+        shutil.rmtree(test_dir)

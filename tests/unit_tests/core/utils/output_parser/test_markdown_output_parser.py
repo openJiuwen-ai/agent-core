@@ -1,16 +1,24 @@
-import unittest
+import pytest
 
-from jiuwen.core.utils.output_parser.markdown_output_parser import (
+from openjiuwen.core.utils.llm.output_parser.markdown_output_parser import (
     MarkdownOutputParser, MarkdownContent, MarkdownElementType
 )
-from jiuwen.core.utils.llm.messages import AIMessage
-from jiuwen.core.utils.llm.messages_chunk import AIMessageChunk
+from openjiuwen.core.utils.llm.messages import AIMessage
+from openjiuwen.core.utils.llm.messages_chunk import AIMessageChunk
 
+pytestmark = pytest.mark.asyncio
 
-class TestMarkdownOutputParser(unittest.IsolatedAsyncioTestCase):
-
+class TestMarkdownOutputParser:
+    @pytest.fixture(autouse=True)
     def setUp(self):
         self.parser = MarkdownOutputParser()
+
+    def assertEqual(self, actual, expect):
+        assert actual == expect
+
+    def assertIn(self, left, right):
+        assert left in right
+
 
     async def test_parse_simple_markdown(self):
         """测试解析简单的Markdown内容"""
@@ -30,7 +38,7 @@ And a link: [OpenAI](https://openai.com)
 """
         result = await self.parser.parse(markdown_text)
 
-        self.assertIsInstance(result, MarkdownContent)
+        assert (isinstance(result, MarkdownContent))
         self.assertEqual(len(result.headers), 2)
         self.assertEqual(result.headers[0]["title"], "Main Title")
         self.assertEqual(result.headers[0]["level"], "1")
@@ -57,7 +65,7 @@ The data shows:
 """)
         result = await self.parser.parse(ai_message)
 
-        self.assertIsInstance(result, MarkdownContent)
+        assert (isinstance(result, MarkdownContent))
         self.assertEqual(len(result.headers), 1)
         self.assertEqual(result.headers[0]["title"], "Analysis Results")
 
@@ -66,7 +74,7 @@ The data shows:
         self.assertEqual(result.images[0]["url"], "https://example.com/chart.png")
 
         self.assertEqual(len(result.lists), 1)
-        self.assertIn("Item 1: Important finding", result.lists[0])
+        assert ("Item 1: Important finding" in result.lists[0])
 
     async def test_parse_code_blocks(self):
         """测试解析各种代码块"""
@@ -178,17 +186,17 @@ Here are some images:
     async def test_parse_empty_content(self):
         """测试解析空内容"""
         result = await self.parser.parse("")
-        self.assertIsNone(result)
+        assert (result is None)
 
         result = await self.parser.parse(None)
-        self.assertIsNone(result)
+        assert (result is None)
 
     async def test_parse_plain_text(self):
         """测试解析纯文本（无Markdown元素）"""
         plain_text = "This is just plain text without any markdown formatting."
         result = await self.parser.parse(plain_text)
 
-        self.assertIsInstance(result, MarkdownContent)
+        assert isinstance(result, MarkdownContent)
         self.assertEqual(result.raw_content, plain_text)
         self.assertEqual(len(result.headers), 0)
         self.assertEqual(len(result.code_blocks), 0)
@@ -210,7 +218,7 @@ Here are some images:
             parsed_objects.append(obj)
 
         # 应该有多个中间结果，最后一个包含完整内容
-        self.assertGreater(len(parsed_objects), 0)
+        assert (len(parsed_objects) > 0)
 
         final_result = parsed_objects[-1]
         self.assertEqual(len(final_result.headers), 1)
@@ -263,7 +271,7 @@ Here are some images:
         self.assertEqual(len(final_result.lists), 1)
 
         # 验证元素顺序
-        self.assertGreater(len(final_result.elements), 0)
+        assert (len(final_result.elements) > 0)
         # 第一个元素应该是 "Report" 标题
         self.assertEqual(final_result.elements[0].type, MarkdownElementType.HEADER)
         self.assertEqual(final_result.elements[0].content["title"], "Report")
@@ -354,7 +362,7 @@ print("code")
         result = await self.parser.parse(markdown_text)
 
         # 验证元素按原文顺序排列
-        self.assertGreater(len(result.elements), 0)
+        assert (len(result.elements) > 0)
 
         # 验证顺序：Header -> Link -> Header -> Code -> Image -> List
         expected_order = [
@@ -371,7 +379,7 @@ print("code")
 
         # 验证位置信息
         for i in range(len(result.elements) - 1):
-            self.assertLess(result.elements[i].start_pos, result.elements[i + 1].start_pos)
+            assert (result.elements[i].start_pos < result.elements[i + 1].start_pos)
 
     async def test_get_elements_by_type(self):
         """测试按类型获取元素"""
@@ -394,7 +402,3 @@ print("code")
         self.assertEqual(headers[1].content["title"], "Title 2")
         self.assertEqual(links[0].content["text"], "Link 1")
         self.assertEqual(links[1].content["text"], "Link 2")
-
-
-if __name__ == '__main__':
-    unittest.main()
