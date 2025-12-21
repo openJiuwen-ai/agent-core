@@ -360,12 +360,18 @@ class LLMController(BaseController):
         )
         agent_context.add_message(mock_tool_msg)
 
-        # Write interrupted task stream data
-        await self._write_message_stream_data(output, interruption_state.runtime)
+        # 流式返回：只返回第一个中断
+        first_interrupt = self._get_first_interrupt(output)
+        logger.info(
+            f"Task has {self._count_interactions(output)} "
+            f"interrupts, returning only the first one for streaming"
+        )
 
-        # Return interruption result (stop processing, wait for user input)
-        logger.info(f"Task interrupted, return interaction requests")
-        return self._unwrap_result(output)
+        # Write interrupted task stream data (only first interrupt)
+        await self._write_message_stream_data(first_interrupt, interruption_state.runtime)
+
+        # Return interruption result (only first interrupt)
+        return self._unwrap_result(first_interrupt)
 
     async def _handle_task_error(
             self,
@@ -1156,6 +1162,72 @@ class LLMController(BaseController):
             return {"output": payload, "result_type": "answer"}
 
         return {"output": result, "result_type": "answer"}
+
+    def _get_first_interrupt(
+            self,
+            interaction_data: Optional[list]
+    ) -> list:
+        """从 interaction_data 中提取第一个中断用于流式返回
+        
+        当产生多个中断时，状态中保存所有中断，
+        但流式输出只返回第一个中断给用户。
+        
+        Args:
+            interaction_data: OutputSchema 列表，包含所有中断
+            
+        Returns:
+            list: 只包含第一个 __interaction__ 的 OutputSchema 列表
+                  保持其他类型的 chunk（tracer等）不变
+        """
+        if not interaction_data:
+            return []
+        
+        first_interrupt_found = False
+        result = []
+        
+        for chunk in interaction_data:
+            if isinstance(chunk, OutputSchema) and chunk.type == const.INTERACTION:
+                # 只保留第一个 __interaction__
+                if not first_interrupt_found:
+                    result.append(chunk)
+                    first_interrupt_found = True
+                    logger.info(
+                        f"Found first interrupt: component_id="
+                        f"{chunk.payload.id if hasattr(chunk.payload, 'id') else 'unknown'}"
+                    )
+                else:
+                    # 跳过后续的 __interaction__
+                    logger.info(
+                        f"Skipping additional interrupt: component_id="
+                        f"{chunk.payload.id if hasattr(chunk.payload, 'id') else 'unknown'}"
+                    )
+            else:
+                # 保留非 __interaction__ 类型的 chunk（如 tracer）
+                result.append(chunk)
+        
+        return result
+
+    def _count_interactions(
+            self,
+            interaction_data: Optional[list]
+    ) -> int:
+        """统计 interaction_data 中的中断数量
+        
+        Args:
+            interaction_data: OutputSchema 列表
+            
+        Returns:
+            int: 中断数量
+        """
+        if not interaction_data:
+            return 0
+        
+        count = 0
+        for chunk in interaction_data:
+            if isinstance(chunk, OutputSchema) and chunk.type == const.INTERACTION:
+                count += 1
+        
+        return count
 
     def create_message(self, inputs: Dict) -> Message:
         """Create message object - override to support query field"""
