@@ -5,6 +5,7 @@ from typing import Any
 import aiohttp
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.embed_models.base import EmbedModel
+from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 
 
@@ -44,10 +45,19 @@ class APIEmbedModel(EmbedModel):
         session = getattr(self, "_session", None)
         proxy_url = UrlUtils.get_global_proxy_url(self.api_url)
         if not session or session.closed:
+            url_is_https = self.api_url.startswith("https://")
+            ssl_verify, ssl_cert = SslUtils.get_ssl_config("EMBED_SSL_VERIFY", "EMBED_SSL_CERT",
+                                                           ["false"], url_is_https)
+            if ssl_verify:
+                ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
+                connector = aiohttp.TCPConnector(ssl=ssl_context)
+            else:
+                connector = aiohttp.TCPConnector(ssl=False)
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
                 headers=self._headers,
-                proxy=proxy_url
+                proxy=proxy_url,
+                connector=connector
             )
         return self._session
 
