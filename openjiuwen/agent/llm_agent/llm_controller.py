@@ -178,7 +178,6 @@ class LLMController(BaseController):
 
                 logger.info(
                     f"Resuming interrupted workflow task: {workflow_task.input.target_name}, "
-                    # f"remaining tasks: {len(remaining_tasks)}, "
                     f"last iteration: {saved_iteration}"
                 )
 
@@ -983,7 +982,7 @@ class LLMController(BaseController):
 
         if state_key in interrupted_tasks:
             del interrupted_tasks[state_key]
-            runtime.update_state({"llm_controller ": None})  # clear state first
+            runtime.update_state({"llm_controller": None})  # clear state first
             runtime.update_state({"llm_controller": state})
             logger.info(
                 f"Cleared interrupted state for workflow: {task.input.target_id}, "
@@ -1033,6 +1032,8 @@ class LLMController(BaseController):
             "iteration": interruption_state.current_iteration
         }
 
+        # Clear old state first, then update with new state, which ensures proper cleanup of nested dict keys
+        interruption_state.runtime.update_state({"llm_controller": None})
         interruption_state.runtime.update_state({"llm_controller": state})
 
         logger.info(
