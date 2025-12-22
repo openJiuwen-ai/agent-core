@@ -42,7 +42,6 @@ class TracerWorkflowUtils:
             "loop_node_id": loop_id,
             "loop_index": index
         })
-        runtime.tracer().pop_workflow_span(executable_id, runtime.parent_id())
         return component_metadata
 
     @staticmethod
@@ -148,6 +147,11 @@ class TracerWorkflowUtils:
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_call_done",
                              invoke_id=executable_id,
                              parent_node_id=parent_id)
+        state = runtime.state()
+        loop_id = state.get_global(LOOP_ID)
+        if loop_id is None:
+            return
+        runtime.tracer().pop_workflow_span(executable_id, runtime.parent_id())
 
     @staticmethod
     async def trace(runtime, data: dict = None):
