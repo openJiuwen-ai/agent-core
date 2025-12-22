@@ -10,6 +10,8 @@ from typing import List, Tuple, Callable, Optional, Any
 
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 
 
 class Splitter(ABC):
@@ -32,11 +34,20 @@ class Splitter(ABC):
             **kwargs: Other parameters
         """
         if chunk_size <= 0:
-            raise ValueError(f"chunk_size must be greater than 0, current value: {chunk_size}")
+            raise JiuWenBaseException(
+                StatusCode.INDEXING_CHUNK_SIZE_ERROR.code,
+                f"chunk_size must be greater than 0, current value: {chunk_size}"
+            )
         if chunk_overlap < 0:
-            raise ValueError(f"chunk_overlap must be greater than or equal to 0, current value: {chunk_overlap}")
+            raise JiuWenBaseException(
+                StatusCode.INDEXING_CHUNK_OVERLAP_ERROR.code,
+                f"chunk_overlap must be greater than or equal to 0, current value: {chunk_overlap}"
+            )
         if chunk_overlap >= chunk_size:
-            raise ValueError(f"chunk_overlap ({chunk_overlap}) must be less than chunk_size ({chunk_size})")
+            raise JiuWenBaseException(
+                StatusCode.INDEXING_CHUNK_OVERLAP_ERROR.code,
+                f"chunk_overlap ({chunk_overlap}) must be less than chunk_size ({chunk_size})"
+            )
         
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -70,7 +81,10 @@ class Splitter(ABC):
         
         # Check if has encode method or is callable
         if not (hasattr(tokenizer, "encode") or callable(tokenizer)):
-            raise ValueError("Tokenizer must have encode method or be callable")
+            raise JiuWenBaseException(
+                StatusCode.INDEXING_TOKENIZER_ERROR.code,
+                "Tokenizer must have encode method or be callable"
+            )
     
     @abstractmethod
     def __call__(self, doc: str) -> List[Tuple[str, int, int]]:

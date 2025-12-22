@@ -4,21 +4,22 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from openjiuwen.core.component.common.configs.model_config import ModelConfig, BaseModelInfo
-from openjiuwen.core.memory.config.config import SysMemConfig, MemoryConfig
-from openjiuwen.core.memory.engine.memory_engine import MemoryEngine
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig
+from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.memory.store.impl.dbm_kv_store import DbmKVStore
 from openjiuwen.core.memory.store.impl.milvus_semantic_store import MilvusSemanticStore
 from openjiuwen.core.memory.embed_models.api import APIEmbedModel
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
-from openjiuwen.core.utils.llm.messages import BaseMessage
+from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.common.logging import logger
 
 
 @unittest.skip("skip system test")
 class TestMemoryEngine(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    async def _create_memory_engine() -> MemoryEngine:
+    async def _create_memory_engine() -> LongTermMemory:
         model_provider = ""
         api_key = ""
         api_base = ""
@@ -44,7 +45,7 @@ class TestMemoryEngine(unittest.IsolatedAsyncioTestCase):
             "ai_msg_gen_max_len": 64,
             "history_window_size_to_gen_mem": 5,
         }
-        sys_config = SysMemConfig(**sys_config_dict)
+        sys_config = MemoryEngineConfig(**sys_config_dict)
 
         os.environ["LLM_SSL_VERIFY"] = "false"
         os.environ["RESTFUL_SSL_VERIFY"] = "false"
@@ -83,7 +84,7 @@ class TestMemoryEngine(unittest.IsolatedAsyncioTestCase):
                                         collection_name=collection_name,
                                         embedding_dims=embedding_dims)
 
-        memory_engine = await MemoryEngine.register_store(kv_store=dbm_kv_store,
+        memory_engine = await LongTermMemory.register_store(kv_store=dbm_kv_store,
                                                           semantic_store=sem_store,
                                                           db_store=db_store).create_mem_engine_instance(sys_config)
 
@@ -97,6 +98,7 @@ class TestMemoryEngine(unittest.IsolatedAsyncioTestCase):
                 return True
         return False
 
+    @unittest.skip("skip system test")
     async def test_memory_engine(self):
         logger.set_level("INFO")
         mem_engine = await TestMemoryEngine._create_memory_engine()
@@ -112,7 +114,7 @@ class TestMemoryEngine(unittest.IsolatedAsyncioTestCase):
         }
         user_id = "user_id12345abcd"
         group_id = "group_id12345abcd"
-        mem_config = MemoryConfig(**mem_config_dict)
+        mem_config = MemoryScopeConfig(**mem_config_dict)
         mem_engine.set_group_config(group_id, mem_config)
         recent_message = await mem_engine.get_message_by_id(user_id)
         self.assertIsNone(recent_message)

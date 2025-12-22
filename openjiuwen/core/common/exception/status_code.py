@@ -9,6 +9,10 @@ class StatusCode(Enum):
     SUCCESS = (0, "success")
     ERROR = (-1, "error")
 
+    # Util Error
+    SCHEMA_INVALID_ERROR = (90000, "Schema validation failed: {reason}")
+    SCHEMA_FORMAT_ERROR = (90001, "Schema format failed: {reason}")
+
     # Workflow Component  100000 - 109999
 
     # Workflow: Interactive And Recovery 100000 - 100029
@@ -38,6 +42,13 @@ class StatusCode(Enum):
     LLM_COMPONENT_INIT_LLM_ERROR = (101005, "Failed to init llm, as {error_msg}.")
     LLM_COMPONENT_ASSEMBLE_TEMPLATE_ERROR = (101006, "LLM component assemble template error, as {error_msg}.")
     PROMPT_JSON_SCHEMA_ERROR = (101007, "Invalid json schema, root cause = {error_msg}.")
+
+
+    ## LLM Service 102001 - 102999
+    LLM_SERVICE_CONFIG_ERROR = (102001, "LLM service config error, as {error_msg}.")
+    LLM_SERVICE_MODEL_CONFIG_ERROR = (102002, "LLM model config error, as {error_msg}.")
+    LLM_SERVICE_CALL_MODEL_PARAM_ERROR = (102003, "LLM model call error, as {error_msg}.")
+    LLM_SERVICE_MODEL_CLIENT_TYPE_ERROR = (102004, "LLM model client type error, as {error_msg}.")
 
     ## IntentDetectionComponent 101050 - 101069
     INTENT_DETECTION_COMPONENT_USER_INPUT_ERROR = (101050,
@@ -137,21 +148,29 @@ class StatusCode(Enum):
 
     # Multi-Agent Orchestration 130000 - 139999
     # Multi-Agent Orchestration - Multi-Agent Communication  130000 - 130999
-    # Multi-Agent Orchestration - Single Runtime 131000 - 131999
+    # Multi-Agent Orchestration - Single Session 131000 - 131999
     # Multi-Agent Orchestration - AgentGroup 132000 - 132999
-    AGENT_GROUP_ADD_FAILED = (132000, "failed to add agent, reason: {reason}")
-    AGENT_GROUP_CREATE_FAILED = (132001, "failed to create agent group, reason: {reason}")
-    AGENT_GROUP_EXECUTION_ERROR = (132002, "failed to execute agent group, reason: {reason}")
+    AGENT_GROUP_ADD_FAILED = (132000, "failed to add single_agent, reason: {reason}")
+    AGENT_GROUP_CREATE_FAILED = (132001, "failed to create single_agent group, reason: {reason}")
+    AGENT_GROUP_EXECUTION_ERROR = (132002, "failed to execute single_agent group, reason: {reason}")
 
     # Multi-Agent Orchestration - Multi-Agent Debug 133000 - 133999
-    # Multi-Agent Orchestration - Distribution Runtime 134000 - 134999
+    # Multi-Agent Orchestration - Distribution Session 134000 - 134999
     # Multi-Agent Orchestration - Multi-Agent Runner 131000-131030
 
     # Runner 134000 - 134999
+    REMOTE_AGENT_REQUEST_TIMEOUT = (134001, "RemoteAgent {} request timeout")
     AGENT_NOT_FOUND = (134002, "Agent {} is not found")
-    WORKFLOW_NOT_BOUND_TO_AGENT = (134003, "workflow not bound to agent")
-    TOOL_NOT_BOUND_TO_AGENT = (134004, "tool not bound to agent")
+    WORKFLOW_NOT_BOUND_TO_AGENT = (134003, "workflow not bound to single_agent")
+    TOOL_NOT_BOUND_TO_AGENT = (134004, "tool not bound to single_agent")
     TOOL_NOT_FOUND = (134005, "Tool not found")
+    RUNNER_DISTRIBUTED_MODE_REQUIRED = (134006, "Runner must be initialized with distributed_mode enabled. message: {}")
+    RUNNER_STOPPED = (134007, "Runner not running: {}")
+    REMOTE_AGENT_REQUEST_CANCELLED = (134008, "Remote single_agent request cancelled: {}")
+    REMOTE_AGENT_PROCESS_ERROR = (134009, "Remote single_agent process error. code: {error_code}, message: {error_msg}")
+    # Runner Dmq 134100 - 134199
+    MESSAGE_QUEUE_NOT_RUNNING = (134101, "Message queue is not running: {}")
+    MESSAGE_QUEUE_INIT_ERROR = (134102, "Message queue init error: {}")
 
     # GraphEngine 140000 - 149999
     # GraphEngine - Graph Orchestration and Execution 140000 - 140999
@@ -163,17 +182,71 @@ class StatusCode(Enum):
     NUMBER_CONDITION_ERROR = (140003, "Number condition error")
 
 
-    # ContextEngine 150000 - 159999
+    # ContextEngine 150000 - 154999
     # ContextEngine - Context Structured Storage and Retrieval 150000 - 150999
     # ContextEngine - Context Dynamic Assembly  151000 - 151999
     # ContextEngine - Context Asynchronous Processing 152000 - 152999
     # ContextEngine - Context Common 153000 - 153999
     CONTEXT_ENGINE_MESSAGE_PROCESS_ERROR = (153000, "Message process error: {error_msg}")
+    CONTEXT_ENGINE_ADD_MESSAGE_ERROR = (153001, "Message add message error: {error_msg}")
+    CONTEXT_ENGINE_GET_MESSAGE_ERROR = (153002, "Message get message error: {error_msg}")
+    CONTEXT_ENGINE_POP_MESSAGE_ERROR = (153003, "Message pop message error: {error_msg}")
+    CONTEXT_ENGINE_GET_CONTEXT_WINDOW_ERROR = (153004, "Message get context window error: {error_msg}")
+    CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR = (153005, "Context engine message validation error: {error_msg}")
+
+    #KnowlageBase Retrieval 155000 - 159999
+    #KnowlageBase Retrieval - Embedding 155000 - 155099
+    EMBEDDING_EMPTY_INPUT_ERROR = (155000, "Empty text or texts list provided for embedding")
+    EMBEDDING_MODEL_NOT_FOUND_ERROR = (155001, "Embedding model not found: {error_msg}")
+    EMBEDDING_CONNECTION_ERROR = (155002, "Failed to connect to embedding service: {error_msg}")
+    EMBEDDING_RESPONSE_FORMAT_ERROR = (155003, "Invalid embedding response format: {error_msg}")
+    EMBEDDING_REQUEST_FAILED_ERROR = (155004, "Failed to get embedding after {max_retries} attempts: {error_msg}")
+    EMBEDDING_UNREACHABLE_ERROR = (155005, "Unreachable code in embedding: {error_msg}")
+    # KnowlageBase Retrieval - Indexing 155100 - 155199
+    INDEXING_CHUNK_SIZE_ERROR = (155100, "Invalid chunk size: {error_msg}")
+    INDEXING_CHUNK_OVERLAP_ERROR = (155101, "Invalid chunk overlap: {error_msg}")
+    INDEXING_TOKENIZER_ERROR = (155102, "Tokenizer error: {error_msg}")
+    INDEXING_FILE_NOT_FOUND_ERROR = (155103, "File not found: {error_msg}")
+    INDEXING_UNSUPPORTED_FORMAT_ERROR = (155104, "Unsupported file format: {error_msg}")
+    INDEXING_EMBED_MODEL_REQUIRED_ERROR = (155105, "Embed model is required: {error_msg}")
+    INDEXING_DIMENSION_REQUIRED_ERROR = (155106, "Dimension is required: {error_msg}")
+    INDEXING_PATH_REQUIRED_ERROR = (155107, "Path is required and cannot be empty: {error_msg}")
+    # KnowlageBase Retrieval - Retriever 155200 - 155299
+    RETRIEVER_UNSUPPORTED_MODE_ERROR = (155200, "Unsupported retrieval mode: {error_msg}")
+    RETRIEVER_SCORE_THRESHOLD_ERROR = (155201, "Score threshold is only supported when mode='vector': {error_msg}")
+    RETRIEVER_EMBED_MODEL_REQUIRED_ERROR = (155202, "Embed model is required: {error_msg}")
+    RETRIEVER_UNSUPPORTED_INDEX_TYPE_ERROR = (155203, "Unsupported index type: {error_msg}")
+    RETRIEVER_MODE_INCOMPATIBLE_ERROR = (155204, "Mode is incompatible with index type: {error_msg}")
+    RETRIEVER_NOT_SUPPORT_MODE_ERROR = (155205, "Retriever does not support mode: {error_msg}")
+    RETRIEVER_VECTOR_STORE_REQUIRED_ERROR = (155206, "Vector store is required: {error_msg}")
+    RETRIEVER_COLLECTION_REQUIRED_ERROR = (155207, "Collection is required: {error_msg}")
+    RETRIEVER_GRAPH_RETRIEVER_REQUIRED_ERROR = (155208, "Graph retriever is required: {error_msg}")
+    RETRIEVER_LLM_CLIENT_REQUIRED_ERROR = (155209, "LLM client is required: {error_msg}")
+    RETRIEVER_TOP_K_REQUIRED_ERROR = (155210, "top_k is required: {error_msg}")
+    # KnowlageBase Retrieval - Utils 155300 - 155399
+    UTILS_CONFIG_FILE_NOT_FOUND_ERROR = (155300, "Configuration file not found: {error_msg}")
+    UTILS_PYYAML_REQUIRED_ERROR = (155301, "PyYAML is required: {error_msg}")
+    UTILS_UNSUPPORTED_CONFIG_FORMAT_ERROR = (155302, "Unsupported configuration file format: {error_msg}")
+    UTILS_NO_CONFIG_TO_SAVE_ERROR = (155303, "No configuration to save: {error_msg}")
+    UTILS_CONFIG_NOT_LOADED_ERROR = (155304, "Configuration not loaded: {error_msg}")
+    # KnowlageBase Retrieval - Vector Store 155400 - 155499
+    VECTOR_STORE_PATH_REQUIRED_ERROR = (155400, "Path is required and cannot be empty: {error_msg}")
+    # KnowlageBase Retrieval - Knowledge Base 155500 - 155599
+    KB_PARSER_REQUIRED_ERROR = (155500, "Parser is required: {error_msg}")
+    KB_CHUNKER_REQUIRED_ERROR = (155501, "Chunker is required: {error_msg}")
+    KB_INDEX_MANAGER_REQUIRED_ERROR = (155502, "Index manager is required: {error_msg}")
+    KB_VECTOR_STORE_REQUIRED_ERROR = (155503, "Vector store is required: {error_msg}")
+    KB_BUILD_INDEX_FAILED_ERROR = (155504, "Failed to build index: {error_msg}")
+    KB_BUILD_CHUNK_INDEX_FAILED_ERROR = (155505, "Failed to build chunk index: {error_msg}")
 
     # Development Toolchain 160000 - 169999
     # Development Toolchain - Prompt Generation 160000 - 160999
     # Development Toolchain - Agent DL convertor 161000 - 161999
     # Development Toolchain - NL2Agent 162000 - 162999
+    NL2AGENT_WORKFLOW_INTENTION_DETECT_ERROR = (162000, "NL2Agent workflow intention detect error: {error_msg}")
+    NL2AGENT_WORKFLOW_STATE_ERROR = (162001, "NL2Agent workflow state error: {error_msg}")
+    NL2AGENT_WORKFLOW_DL_GENERATION_ERROR = (162002, "NL2Agent workflow dl generation error: {error_msg}")
+    NL2AGENT_LLM_AGENT_STATE_ERROR = (162010, "NL2Agent llm single_agent state error: {error_msg}")
 
     # Optimization Toolchain 170000 - 179999
     # Optimization Toolchain - Prompt Self-optimization 170000 - 170999
@@ -228,46 +301,48 @@ class StatusCode(Enum):
     URL_INVALID_ERROR = (188004, "Url invalid error, as {error_msg}")
     INVALID_SSL_CERT_ERROR = (188005, "Invalid ssl cert error, as {error_msg}")
 
-    # Runtime 190000 - 199999
-    # Runtime - Resource Management 190000 - 190999
-    RUNTIME_WORKFLOW_GET_FAILED = (190001, "failed to get workflow, reason: {reason}")
-    RUNTIME_WORKFLOW_ADD_FAILED = (190002, "failed to add workflow, reason: {reason}")
-    RUNTIME_WORKFLOW_CONFIG_ADD_FAILED = (190011, "failed to add workflow config, reason: {reason}")
-    RUNTIME_WORKFLOW_CONFIG_GET_FAILED = (190012, "failed to get workflow config, reason: {reason}")
-    RUNTIME_WORKFLOW_TOOL_INFO_GET_FAILED = (190013, "failed to get toolInfo of workflow, reason: {reason}")
+    # Session 190000 - 199999
+    # Session - Resource Management 190000 - 190999
+    SESSION_WORKFLOW_GET_FAILED = (190001, "failed to get workflow, reason: {reason}")
+    SESSION_WORKFLOW_ADD_FAILED = (190002, "failed to add workflow, reason: {reason}")
+    SESSION_WORKFLOW_CONFIG_ADD_FAILED = (190011, "failed to add workflow config, reason: {reason}")
+    SESSION_WORKFLOW_CONFIG_GET_FAILED = (190012, "failed to get workflow config, reason: {reason}")
+    SESSION_WORKFLOW_TOOL_INFO_GET_FAILED = (190013, "failed to get toolInfo of workflow, reason: {reason}")
 
-    # Runtime - Resource Management - Agent Group 190040 - 190049
-    RUNTIME_AGENT_GROUP_ADD_FAILED = (190040, "failed to add agent group, reason: {reason}")
-    RUNTIME_AGENT_GROUP_GET_FAILED = (190041, "failed to get agent group, reason: {reason}")
-    RUNTIME_AGENT_GROUP_REMOVE_FAILED = (190042, "failed to remove agent group, reason: {reason}")
+    # Session - Resource Management - Agent Group 190040 - 190049
+    SESSION_AGENT_GROUP_ADD_FAILED = (190040, "failed to add single_agent group, reason: {reason}")
+    SESSION_AGENT_GROUP_GET_FAILED = (190041, "failed to get single_agent group, reason: {reason}")
+    SESSION_AGENT_GROUP_REMOVE_FAILED = (190042, "failed to remove single_agent group, reason: {reason}")
     
-    # Runtime - Resource Management - Workflow Additional
-    RUNTIME_WORKFLOW_REMOVE_FAILED = (190003, "failed to remove workflow, reason: {reason}")
+    # Session - Resource Management - Workflow Additional
+    SESSION_WORKFLOW_REMOVE_FAILED = (190003, "failed to remove workflow, reason: {reason}")
     
-    # Runtime - Resource Management - Agent 190050 - 190059
-    RUNTIME_AGENT_ADD_FAILED = (190050, "failed to add agent, reason: {reason}")
-    RUNTIME_AGENT_GET_FAILED = (190051, "failed to get agent, reason: {reason}")
-    RUNTIME_AGENT_REMOVE_FAILED = (190052, "failed to remove agent, reason: {reason}")
+    # Session - Resource Management - Agent 190050 - 190059
+    SESSION_AGENT_ADD_FAILED = (190050, "failed to add single_agent, reason: {reason}")
+    SESSION_AGENT_GET_FAILED = (190051, "failed to get single_agent, reason: {reason}")
+    SESSION_AGENT_REMOVE_FAILED = (190052, "failed to remove single_agent, reason: {reason}")
 
-    RUNTIME_TOOL_GET_FAILED = (190101, "failed to get tool, reason: {reason}")
-    RUNTIME_TOOL_ADD_FAILED = (190102, "failed to add tool, reason: {reason}")
-    RUNTIME_TOOL_TOOL_INFO_GET_FAILED = (190103, "failed to get toolInfo of tool, reason: {reason}")
+    SESSION_TOOL_GET_FAILED = (190101, "failed to get tool, reason: {reason}")
+    SESSION_TOOL_ADD_FAILED = (190102, "failed to add tool, reason: {reason}")
+    SESSION_TOOL_TOOL_INFO_GET_FAILED = (190103, "failed to get toolInfo of tool, reason: {reason}")
 
-    RUNTIME_PROMPT_GET_FAILED = (190201, "failed to get prompt template, reason: {reason}")
-    RUNTIME_PROMPT_ADD_FAILED = (190202, "failed to add prompt template, reason: {reason}")
+    SESSION_PROMPT_GET_FAILED = (190201, "failed to get prompt template, reason: {reason}")
+    SESSION_PROMPT_ADD_FAILED = (190202, "failed to add prompt template, reason: {reason}")
 
-    RUNTIME_MODEL_GET_FAILED = (190301, "failed to get model, reason: {reason}")
-    RUNTIME_MODEL_ADD_FAILED = (190302, "failed to add model, reason: {reason}")
+    SESSION_MODEL_GET_FAILED = (190301, "failed to get model, reason: {reason}")
+    SESSION_MODEL_ADD_FAILED = (190302, "failed to add model, reason: {reason}")
 
-    # Runtime - Tracer 191000 - 191999
-    RUNTIME_TRACE_ERROR_FAILED = (191001, "failed to record error trace info, reason: {reason}")
-    RUNTIME_TRACE_AGENT_UNDEFINED_FAILED = (191002, "Failed to handle undefined exception")
+    SESSION_TAG_MANAGE_FAILED = (190401, "failed to manage tag, reason: {reason}")
 
-    # Runtime - State 192000 - 192999
-    RUNTIME_STATE_RUNTIME_NONE = (192000, "Runtime is None, expected BaseRuntime instance")
-    RUNTIME_STATE_INVALID_RUNTIME_TYPE = (192001, "Invalid runtime type: {runtime_type}, expected BaseRuntime")
-    RUNTIME_STATE_INVALID_STATE_TYPE = (192002, "Invalid state type: {state_type}, expected CommitState")
-    # Runtime - StreamWriter 193000 - 193999
+    # Session - Tracer 191000 - 191999
+    SESSION_TRACE_ERROR_FAILED = (191001, "failed to record error trace info, reason: {reason}")
+    SESSION_TRACE_AGENT_UNDEFINED_FAILED = (191002, "Failed to handle undefined exception")
+
+    # Session - State 192000 - 192999
+    SESSION_STATE_SESSION_NONE = (192000, "Session is None, expected BaseSession instance")
+    SESSION_STATE_INVALID_SESSION_TYPE = (192001, "Invalid session type: {session_type}, expected BaseSession")
+    SESSION_STATE_INVALID_STATE_TYPE = (192002, "Invalid state type: {state_type}, expected CommitState")
+    # Session - StreamWriter 193000 - 193999
     STREAM_WRITER_WRITE_SCHEMA_FAILED = (193001,
                                          "failed to write stream, stream schema validate failed, details: {detail}")
     STREAM_WRITER_WRITE_FAILED = (193002, "failed to write stream, reason: {reason}")
@@ -275,17 +350,21 @@ class StatusCode(Enum):
     STREAM_FIRST_FRAME_TIMEOUT_FAILED = (193004, "stream first frame is timeout ({timeout}s), no stream output")
     STREAM_NO_INPUT_FAILED = (193005, "component has {abilities} ability, no stream input")
 
-    # Runtime - Config 194000 - 194999
-    # Runtime - callback 195000 - 195999
-    # Runtime - Stream Actor 196000 - 196099
+    # Session - Config 194000 - 194999
+    # Session - callback 195000 - 195999
+    # Session - Stream Actor 196000 - 196099
     WORKFLOW_MESSAGE_QUEUE_MANAGER_ERROR = (196000, "Message queue manager error: {error_msg}")
 
-    # Runtime - Component Executable 196100 - 196199
-    RUNTIME_COMPONENT_INVALID_RUNTIME_TYPE = (196100, "runtime should be NodeRuntime instance")
-    RUNTIME_COMPONENT_ABILITY_NOT_IMPLEMENTED = (196101, "Component ability '{ability}' is registered but '{method}' "
+    # Session - Component Executable 196100 - 196199
+    SESSION_COMPONENT_INVALID_SESSION_TYPE = (196100, "session should be NodeSession instance")
+    SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED = (196101, "Component ability '{ability}' is registered but '{method}' "
                                                  "method is not implemented. Please implement the '{method}' method "
                                                  "in your component class '{class_name}'.")
-    RUNTIME_COMPONENT_ABILITY_NOT_SUPPORTED = (196102, "{ability} is not supported")
+    SESSION_COMPONENT_ABILITY_NOT_SUPPORTED = (196102, "{ability} is not supported")
+
+    # Session - Checkpointer 197000 - 197099
+    SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR = (197000, "workflow store is None")
+    SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR = (197001, "agent store is None")
 
     # Runtime - Checkpointer 197000 - 197099
     RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR = (197000, "workflow store is None")

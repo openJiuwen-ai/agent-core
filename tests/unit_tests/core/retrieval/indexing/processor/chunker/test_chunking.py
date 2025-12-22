@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.core.retrieval.indexing.processor.chunker.chunking import TextChunker
 from openjiuwen.core.retrieval.common.document import Document
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
 class TestTextChunker:
@@ -25,7 +26,7 @@ class TestTextChunker:
     def test_init_with_token_unit_no_tiktoken():
         """Test initialization with token unit but tiktoken unavailable"""
         with patch("openjiuwen.core.retrieval.indexing.processor.chunker.chunking.tiktoken", None):
-            with pytest.raises(ValueError, match="requires embed_model with tokenizer or tiktoken"):
+            with pytest.raises(JiuWenBaseException, match="requires embed_model with tokenizer or tiktoken"):
                 TextChunker(
                     chunk_size=512,
                     chunk_overlap=50,

@@ -16,6 +16,8 @@ except ImportError:
 
 from pydantic import BaseModel
 
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig
 
 T = TypeVar('T', bound=BaseModel)
@@ -33,7 +35,10 @@ class ConfigManager:
         """Load configuration from file (supports JSON and YAML)"""
         path_obj = Path(path)
         if not path_obj.exists():
-            raise FileNotFoundError(f"Configuration file does not exist: {path}")
+            raise JiuWenBaseException(
+                StatusCode.UTILS_CONFIG_FILE_NOT_FOUND_ERROR.code,
+                f"Configuration file does not exist: {path}"
+            )
         
         suffix = path_obj.suffix.lower()
         if suffix == '.json':
@@ -41,11 +46,17 @@ class ConfigManager:
                 data = json.load(f)
         elif suffix in ['.yaml', '.yml']:
             if yaml is None:
-                raise ImportError("PyYAML is required to support YAML configuration files")
+                raise JiuWenBaseException(
+                    StatusCode.UTILS_PYYAML_REQUIRED_ERROR.code,
+                    "PyYAML is required to support YAML configuration files"
+                )
             with open(path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
         else:
-            raise ValueError(f"Unsupported configuration file format: {suffix}")
+            raise JiuWenBaseException(
+                StatusCode.UTILS_UNSUPPORTED_CONFIG_FORMAT_ERROR.code,
+                f"Unsupported configuration file format: {suffix}"
+            )
         
         # Create configuration object based on data structure
         # Assuming knowledge base config here, can be extended as needed
@@ -55,7 +66,10 @@ class ConfigManager:
     def save_to_file(self, path: str) -> None:
         """Save configuration to file"""
         if 'knowledge_base' not in self._configs:
-            raise ValueError("No configuration to save")
+            raise JiuWenBaseException(
+                StatusCode.UTILS_NO_CONFIG_TO_SAVE_ERROR.code,
+                "No configuration to save"
+            )
         
         kb_config: KnowledgeBaseConfig = self._configs['knowledge_base']
         data = kb_config.model_dump()
@@ -67,11 +81,17 @@ class ConfigManager:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         elif suffix in ['.yaml', '.yml']:
             if yaml is None:
-                raise ImportError("PyYAML is required to support YAML configuration files")
+                raise JiuWenBaseException(
+                    StatusCode.UTILS_PYYAML_REQUIRED_ERROR.code,
+                    "PyYAML is required to support YAML configuration files"
+                )
             with open(path, 'w', encoding='utf-8') as f:
                 yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
         else:
-            raise ValueError(f"Unsupported configuration file format: {suffix}")
+            raise JiuWenBaseException(
+                StatusCode.UTILS_UNSUPPORTED_CONFIG_FORMAT_ERROR.code,
+                f"Unsupported configuration file format: {suffix}"
+            )
     
     def get_config(self, config_type: Type[T]) -> Optional[T]:
         """Get configuration of specified type"""
@@ -84,7 +104,10 @@ class ConfigManager:
         """Get knowledge base configuration"""
         config = self._configs.get('knowledge_base')
         if not config:
-            raise ValueError("Knowledge base configuration not loaded")
+            raise JiuWenBaseException(
+                StatusCode.UTILS_CONFIG_NOT_LOADED_ERROR.code,
+                "Knowledge base configuration not loaded"
+            )
         return config
     
     def update_config(self, config: BaseModel) -> None:

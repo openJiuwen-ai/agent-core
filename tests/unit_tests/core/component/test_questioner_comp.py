@@ -6,24 +6,22 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.core.context_engine.config import ContextEngineConfig
-from openjiuwen.core.context_engine.engine import ContextEngine
-from openjiuwen.core.runtime.interaction.interaction import InteractionOutput
-from openjiuwen.core.runtime.runtime import Runtime
-from openjiuwen.core.runtime.wrapper import TaskRuntime
+from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
+from openjiuwen.core.session import InteractionOutput
+from openjiuwen.core.session import Session
+from openjiuwen.core.session import TaskSession
 from openjiuwen.core.common.constants.constant import INTERACTION
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.questioner_comp import FieldInfo, QuestionerConfig, QuestionerComponent
-from openjiuwen.core.component.start_comp import Start
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import FieldInfo, QuestionerConfig, QuestionerComponent
+from openjiuwen.core.workflow import Start
 from openjiuwen.core.graph.executable import Input
-from openjiuwen.core.runtime.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.runtime.workflow import WorkflowRuntime
-from openjiuwen.core.stream.base import TraceSchema, OutputSchema
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.utils.prompt.template.template import Template
-from openjiuwen.core.workflow.base import Workflow, WorkflowExecutionState, WorkflowOutput
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.session.stream import TraceSchema, OutputSchema
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
@@ -42,27 +40,27 @@ class TestQuestionComp:
         asyncio.set_event_loop(self.loop)
 
     @staticmethod
-    def invoke_workflow(inputs: Input, context: Runtime, flow: Workflow):
+    def invoke_workflow(inputs: Input, context: Session, flow: Workflow):
         loop = asyncio.get_event_loop()
-        feature = asyncio.ensure_future(flow.invoke(inputs=inputs, runtime=context.create_workflow_runtime()))
+        feature = asyncio.ensure_future(flow.invoke(inputs=inputs, session=context.create_workflow_session()))
         loop.run_until_complete(feature)
         return feature.result()
 
     @staticmethod
-    def invoke_workflow_with_workflow_context(inputs: Input, runtime: WorkflowRuntime, flow: Workflow):
+    def invoke_workflow_with_workflow_context(inputs: Input, session: WorkflowSession, flow: Workflow):
         loop = asyncio.get_event_loop()
-        feature = asyncio.ensure_future(flow.invoke(inputs=inputs, runtime=runtime))
+        feature = asyncio.ensure_future(flow.invoke(inputs=inputs, session=session))
         loop.run_until_complete(feature)
         return feature.result()
 
     @staticmethod
     def _create_context(session_id):
-        return TaskRuntime(trace_id=session_id)
+        return TaskSession(trace_id=session_id)
 
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerExecutable._init_prompt")
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
     def test_invoke_questioner_component_in_workflow_initial_ask(self, mock_get_model, mock_init_prompt,
                                                                  mock_llm_inputs,
                                                                  mock_extraction):
@@ -71,11 +69,11 @@ class TestQuestionComp:
             dict(role="system", content="系统提示词"),
             dict(role="user", content="你是一个AI助手")
         ]
-        mock_init_prompt.return_value = Template(name="test", content=mock_prompt_template)
+        mock_init_prompt.return_value = PromptTemplate(name="test", content=mock_prompt_template)
         mock_llm_inputs.return_value = mock_prompt_template
         mock_extraction.return_value = dict(location="hangzhou")
 
-        context = TaskRuntime(trace_id="test")
+        context = TaskSession(trace_id="test")
         flow = Workflow()
 
         key_fields = [
@@ -121,9 +119,9 @@ class TestQuestionComp:
             result={'responseContent': "hangzhou | today"},
             state=WorkflowExecutionState.COMPLETED)
 
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
     def test_invoke_questioner_component_in_workflow_repeat_ask(self, mock_get_model, mock_llm_inputs,
                                                                 mock_extraction):
         """
@@ -178,7 +176,7 @@ class TestQuestionComp:
         flow.add_connection("questioner", "e")
 
         session_id = "test_questioner"
-        workflow_context = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        workflow_context = TaskSession(trace_id=session_id).create_workflow_session()
         first_question = self.invoke_workflow_with_workflow_context({"query": "你好"}, workflow_context, flow)
         first_question = first_question.result[0] if first_question else dict()
         payload = first_question.payload
@@ -189,15 +187,15 @@ class TestQuestionComp:
         user_input = InteractiveInput()
         user_input.update(component_id, "地点是杭州")  # 第一个入参是组件id
 
-        workflow_context = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        workflow_context = TaskSession(trace_id=session_id).create_workflow_session()
         final_result = self.invoke_workflow_with_workflow_context(user_input, workflow_context,
                                                                   flow)  # workflow实例、session id保持一致
         assert final_result.result.get("responseContent") == "hangzhou | today"
 
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerExecutable._init_prompt")
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
     def test_stream_questioner_component_in_workflow_initial_ask_with_tracer(self, mock_get_model, mock_init_prompt,
                                                                              mock_llm_inputs, mock_extraction):
         '''
@@ -216,11 +214,11 @@ class TestQuestionComp:
             dict(role="system", content="系统提示词"),
             dict(role="user", content="你是一个AI助手")
         ]
-        mock_init_prompt.return_value = Template(name="test", content=mock_prompt_template)
+        mock_init_prompt.return_value = PromptTemplate(name="test", content=mock_prompt_template)
         mock_llm_inputs.return_value = mock_prompt_template
         mock_extraction.return_value = dict(location="hangzhou")
 
-        context = TaskRuntime(trace_id="test")
+        context = TaskSession(trace_id="test")
         flow = Workflow()
 
         key_fields = [
@@ -261,23 +259,23 @@ class TestQuestionComp:
         flow.add_connection("s", "questioner")
         flow.add_connection("questioner", "e")
 
-        async def _async_stream_workflow_for_tracer(_flow, _inputs, _runtime, _tracer_chunks):
-            async for chunk in flow.stream(_inputs, _runtime):
+        async def _async_stream_workflow_for_tracer(_flow, _inputs, _session, _tracer_chunks):
+            async for chunk in flow.stream(_inputs, _session):
                 if isinstance(chunk, TraceSchema):
                     _tracer_chunks.append(chunk)
 
         tracer_chunks = []
         self.loop.run_until_complete(_async_stream_workflow_for_tracer(flow, {"query": "查询杭州的天气"},
-                                                                       context.create_workflow_runtime(),
+                                                                       context.create_workflow_session(),
                                                                        tracer_chunks))
         print(tracer_chunks)
 
 
 class TestQuestionerStream:
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
     async def test_invoke_questioner_component_in_workflow_repeat_ask_with_stream_writer_and_context_engine(
             self,
             mock_get_model,
@@ -336,11 +334,11 @@ class TestQuestionerStream:
 
         session_id = "test_questioner"
         config = ContextEngineConfig()
-        ce_engine = ContextEngine("123", config)
-        workflow_context = ce_engine.get_workflow_context(workflow_id="questioner_workflow", session_id=session_id)
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="questioner_workflow")
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
         interaction_output_schema = []
-        async for chunk in flow.stream({"query": "你好"}, workflow_runtime, workflow_context):
+        async for chunk in flow.stream({"query": "你好"}, workflow_session, workflow_context):
             if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
                 interaction_output_schema.append(chunk)
 
@@ -351,14 +349,14 @@ class TestQuestionerStream:
             for item in interaction_output_schema:
                 component_id = item.payload.id
                 user_input.update(component_id, "杭州")
-            workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
-            async for chunk in flow.stream(user_input, workflow_runtime, workflow_context):
+            workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+            async for chunk in flow.stream(user_input, workflow_session, workflow_context):
                 print(f"stream output >>> {chunk}")
 
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_stream_start_questioner_end_with_interaction(self):
-        flow = Workflow(workflow_config=WorkflowConfig())
+        flow = Workflow()
 
         start_component = Start(
             {
@@ -402,11 +400,11 @@ class TestQuestionerStream:
 
         session_id = "test_questioner"
         config = ContextEngineConfig()
-        ce_engine = ContextEngine("123", config)
-        workflow_context = ce_engine.get_workflow_context(workflow_id="questioner_workflow", session_id=session_id)
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="questioner_workflow")
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
         interaction_output_schema = list()
-        async for chunk in flow.stream({"query": "时间为2025-10-01"}, workflow_runtime, workflow_context):
+        async for chunk in flow.stream({"query": "时间为2025-10-01"}, workflow_session, workflow_context):
             if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
                 interaction_output_schema.append(chunk)
 
@@ -415,14 +413,14 @@ class TestQuestionerStream:
             for item in interaction_output_schema:
                 component_id = item.payload.id
                 user_input.update(component_id, "地点是杭州")
-            workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
-            async for chunk in flow.stream(user_input, workflow_runtime, workflow_context):
+            workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+            async for chunk in flow.stream(user_input, workflow_session, workflow_context):
                 print(f"stream output >>> {chunk}")
 
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_invoke_start_questioner_end_with_interaction(self):
-        flow = Workflow(workflow_config=WorkflowConfig())
+        flow = Workflow()
 
         start_component = Start(
             {
@@ -465,8 +463,8 @@ class TestQuestionerStream:
         flow.add_connection("questioner", "e")
 
         session_id = "test_questioner"
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
-        workflow_result = await flow.invoke({"query": "时间为2025-10-01"}, workflow_runtime)
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_result = await flow.invoke({"query": "时间为2025-10-01"}, workflow_session)
         assert workflow_result.state == WorkflowExecutionState.INPUT_REQUIRED
 
         time.sleep(3)
@@ -474,18 +472,18 @@ class TestQuestionerStream:
         if workflow_result.state == WorkflowExecutionState.INPUT_REQUIRED:
             component_id = workflow_result.result[0].payload.id
             assert component_id == "questioner"
-            workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+            workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
             user_feedback = InteractiveInput()
             user_feedback.update(component_id, "地点是杭州")
-            workflow_result = await flow.invoke(user_feedback, workflow_runtime)
+            workflow_result = await flow.invoke(user_feedback, workflow_session)
             assert workflow_result.state == WorkflowExecutionState.COMPLETED
             assert workflow_result.result.get("responseContent", "") == "杭州 | 2025-10-01"
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerExecutable._init_prompt")
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
     async def test_questioner_state_reset_on_second_workflow_invocation(
             self, mock_get_model, mock_init_prompt, mock_llm_inputs, mock_extraction
     ):
@@ -497,7 +495,7 @@ class TestQuestionerStream:
         2. 第二次调用 workflow: 应该重新提问（而不是使用第一次的状态）-> 回答"李四" -> 完成
         3. 验证第二次结果是"李四"，没有残留"张三"
         
-        这个测试验证了底层 workflow runtime 和组件状态管理的正确性，
+        这个测试验证了底层 workflow session 和组件状态管理的正确性，
         不依赖于 WorkflowAgent 层。
         """
         # Mock setup
@@ -506,7 +504,7 @@ class TestQuestionerStream:
             dict(role="system", content="系统提示词"),
             dict(role="user", content="你是一个AI助手")
         ]
-        mock_init_prompt.return_value = Template(name="test", content=mock_prompt_template)
+        mock_init_prompt.return_value = PromptTemplate(name="test", content=mock_prompt_template)
         mock_llm_inputs.return_value = mock_prompt_template
         
         # 第一次调用时返回空字典（触发交互），第二次调用返回 "张三"
@@ -556,22 +554,22 @@ class TestQuestionerStream:
         
         # ========== 第一次调用 workflow ==========
         session_id = "test_questioner_state_reset"
-        workflow_runtime_1 = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        workflow_session_1 = TaskSession(trace_id=session_id).create_workflow_session()
         
         # 第一次调用：触发中断
-        workflow_result_1 = await flow.invoke({"query": "请收集用户信息"}, workflow_runtime_1)
+        workflow_result_1 = await flow.invoke({"query": "请收集用户信息"}, workflow_session_1)
         
         # 验证：应该触发交互
         assert workflow_result_1.state == WorkflowExecutionState.INPUT_REQUIRED
         component_id_1 = workflow_result_1.result[0].payload.id
         assert component_id_1 == "questioner"
         
-        # 第一次回答："张三"（需要创建新的 runtime）
-        workflow_runtime_1_resume = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        # 第一次回答："张三"（需要创建新的 session）
+        workflow_session_1_resume = TaskSession(trace_id=session_id).create_workflow_session()
         user_feedback_1 = InteractiveInput()
         user_feedback_1.update(component_id_1, "张三")
         
-        workflow_result_2 = await flow.invoke(user_feedback_1, workflow_runtime_1_resume)
+        workflow_result_2 = await flow.invoke(user_feedback_1, workflow_session_1_resume)
         
         # 验证：第一次应该完成并返回 "张三"
         assert workflow_result_2.state == WorkflowExecutionState.COMPLETED
@@ -579,15 +577,15 @@ class TestQuestionerStream:
         assert "张三" in response_content_1
         print(f"[OK] 第一次调用完成，返回结果: {response_content_1}")
         
-        # ========== 第二次调用 workflow（新的 runtime）==========
+        # ========== 第二次调用 workflow（新的 session）==========
         # 重置 mock side_effect：第三次返回空（触发交互），第四次返回 "李四"
         mock_extraction.side_effect = [{}, {"name": "李四"}]
         
-        # 使用新的 workflow runtime
-        workflow_runtime_2 = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        # 使用新的 workflow session
+        workflow_session_2 = TaskSession(trace_id=session_id).create_workflow_session()
         
         # 第二次调用：应该重新触发中断（而不是使用第一次的状态）
-        workflow_result_3 = await flow.invoke({"query": "再次收集用户信息"}, workflow_runtime_2)
+        workflow_result_3 = await flow.invoke({"query": "再次收集用户信息"}, workflow_session_2)
         
         # 关键验证：第二次调用应该再次触发交互（重新提问）
         assert workflow_result_3.state == WorkflowExecutionState.INPUT_REQUIRED, \
@@ -596,12 +594,12 @@ class TestQuestionerStream:
         assert component_id_2 == "questioner"
         print(f"[OK] 第二次调用成功触发中断（重新提问）")
         
-        # 第二次回答："李四"（需要创建新的 runtime）
-        workflow_runtime_2_resume = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        # 第二次回答："李四"（需要创建新的 session）
+        workflow_session_2_resume = TaskSession(trace_id=session_id).create_workflow_session()
         user_feedback_2 = InteractiveInput()
         user_feedback_2.update(component_id_2, "李四")
         
-        workflow_result_4 = await flow.invoke(user_feedback_2, workflow_runtime_2_resume)
+        workflow_result_4 = await flow.invoke(user_feedback_2, workflow_session_2_resume)
         
         # 验证：第二次应该完成并返回 "李四"
         assert workflow_result_4.state == WorkflowExecutionState.COMPLETED

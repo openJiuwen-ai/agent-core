@@ -2,13 +2,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from pydantic import BaseModel, Field, field_validator
+from openjiuwen.core.common.schema.param import Param
 from openjiuwen.core.memory.common.crypto import AES_KEY_LENGTH
+from openjiuwen.core.foundation.llm1.schema.config import ModelConfig
+from openjiuwen.core.foundation.llm1.schema.config import ModelClientConfig
 
 
-class SysMemConfig(BaseModel):
-    record_message: bool = Field(default=True)  # record message or not
-    ai_msg_gen_max_len: int = Field(default=256)  # max length of AI message generation memory
-    history_window_size_to_gen_mem: int = Field(default=5)  # history window size to generate memory
+class MemoryEngineConfig(BaseModel):
+    default_model_cfg: ModelConfig = Field(default=None)
+    default_model_client_cfg: ModelClientConfig = Field(default=None)
+    input_msg_max_len: int = Field(default=8192)  # max length of input message
     crypto_key: bytes = Field(default=b'')  # aes key, length must be 32, not enable encrypt memory if empty
 
     @field_validator('crypto_key')
@@ -23,6 +26,8 @@ class SysMemConfig(BaseModel):
         raise ValueError(f"Invalid crypto_key, must be empty or {AES_KEY_LENGTH} bytes length")
 
 
-class MemoryConfig(BaseModel):
-    mem_variables: dict[str, str] = Field(default_factory=dict)  # memory variables config
+class MemoryScopeConfig(BaseModel):
+    mem_variables: list[Param] = Field(default_factory=list)  # memory variables config
     enable_long_term_mem: bool = Field(default=True)  # enable long term memory or not
+    model_cfg: ModelConfig = Field(default=None)
+    model_client_cfg: ModelClientConfig = Field(default=None)

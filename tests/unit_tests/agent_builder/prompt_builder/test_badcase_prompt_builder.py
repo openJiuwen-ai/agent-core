@@ -5,12 +5,12 @@ import re
 from unittest.mock import patch
 from typing import List, Any, Dict, Iterator, AsyncIterator
 
-from openjiuwen.agent_builder.prompt_builder.builder.badcase_prompt_builder import BadCasePromptBuilder
-from openjiuwen.agent_builder.tune.base import EvaluatedCase, Case
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.utils.llm.base import BaseModelClient
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.utils.llm.messages import AIMessage
+from openjiuwen.agent_builder.prompt_builder import BadCasePromptBuilder
+from openjiuwen.agent_builder.tune import EvaluatedCase, Case
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.foundation.llm import AIMessage
 import openjiuwen.agent_builder.prompt_builder.builder.utils as TEMPLATE
 
 
@@ -77,7 +77,7 @@ class MockLLMModel(BaseModelClient):
 
 def test_bad_case_prompt_builder():
     mock_llm = MockLLMModel(api_key="mock_key", api_base="https://api.openai.com")
-    with patch('openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
+    with patch('openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
         mock_get_model.return_value = mock_llm
         config = ModelConfig(
             model_provider="",

@@ -12,6 +12,8 @@ from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 
 
 class VectorRetriever(Retriever):
@@ -55,14 +57,23 @@ class VectorRetriever(Retriever):
             List of retrieval results
         """
         if mode != "vector":
-            raise ValueError(f"VectorRetriever only supports 'vector' mode, got {mode}")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVER_UNSUPPORTED_MODE_ERROR.code,
+                f"VectorRetriever only supports 'vector' mode, got {mode}"
+            )
 
         if score_threshold is not None and mode != "vector":
-            raise ValueError("score_threshold is only supported when mode='vector'")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVER_SCORE_THRESHOLD_ERROR.code,
+                "score_threshold is only supported when mode='vector'"
+            )
 
         # Vector retrieval
         if self.embed_model is None:
-            raise ValueError("embed_model is required for vector search")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVER_EMBED_MODEL_REQUIRED_ERROR.code,
+                "embed_model is required for vector search"
+            )
         
         query_vector = await self.embed_model.embed_query(query)
         search_results = await self.vector_store.search(

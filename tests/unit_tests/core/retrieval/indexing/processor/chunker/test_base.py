@@ -2,12 +2,11 @@
 """
 Text chunker abstract base class test cases
 """
-from unittest.mock import MagicMock
-
 import pytest
 
 from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.common.document import Document
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
 class ConcreteChunker(Chunker):
@@ -48,9 +47,30 @@ class TestChunker:
         assert chunker.length_function == word_count_length
 
     @staticmethod
+    def test_init_invalid_chunk_size_zero():
+        """Test initialization with chunk_size = 0"""
+        with pytest.raises(JiuWenBaseException, match="chunk_size must be greater than 0, current value: 0"):
+            ConcreteChunker(chunk_size=0)
+
+    @staticmethod
+    def test_init_invalid_chunk_size_negative():
+        """Test initialization with negative chunk_size"""
+        with pytest.raises(JiuWenBaseException, match="chunk_size must be greater than 0, current value: -1"):
+            ConcreteChunker(chunk_size=-1)
+
+    @staticmethod
+    def test_init_invalid_overlap_negative():
+        """Test initialization with negative chunk_overlap"""
+        with pytest.raises(
+            JiuWenBaseException,
+            match="chunk_overlap must be greater than or equal to 0, current value: -1"
+        ):
+            ConcreteChunker(chunk_size=100, chunk_overlap=-1)
+
+    @staticmethod
     def test_init_invalid_overlap():
         """Test invalid overlap size"""
-        with pytest.raises(ValueError, match="chunk_overlap must be less than chunk_size"):
+        with pytest.raises(JiuWenBaseException, match="chunk_overlap must be less than chunk_size"):
             ConcreteChunker(chunk_size=100, chunk_overlap=100)
 
     @staticmethod

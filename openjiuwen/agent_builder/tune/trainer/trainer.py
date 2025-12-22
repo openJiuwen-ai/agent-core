@@ -9,7 +9,7 @@ import copy
 from tqdm import tqdm
 
 from openjiuwen.agent_builder.tune.utils import TuneUtils
-from openjiuwen.core.agent.agent import Agent
+from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
@@ -41,11 +41,11 @@ class Trainer:
         self._callbacks = Callbacks()
 
     def train(self,
-              agent: Agent,
+              agent: BaseAgent,
               train_cases: CaseLoader,
               val_cases: Optional[CaseLoader] = None,
               **kwargs
-              ) -> Optional[Agent]:
+              ) -> Optional[BaseAgent]:
         if not self._check_trainable(agent):
             raise JiuWenBaseException(
                 StatusCode.AGENT_BUILDER_AGENT_TRAINER_TRAIN_ERROR.code,
@@ -105,7 +105,7 @@ class Trainer:
         return agent
 
     def evaluate(self,
-                 agent: Agent,
+                 agent: BaseAgent,
                  cases: CaseLoader,
                  ) -> Tuple[float, List[EvaluatedCase]]:
         if not cases.get_cases():
@@ -117,7 +117,7 @@ class Trainer:
         return score, evaluated_cases
 
     def predict(self,
-                agent: Agent,
+                agent: BaseAgent,
                 cases: CaseLoader
                 ) -> List[Dict]:
         def forward(case: Case) -> Dict:
@@ -139,7 +139,7 @@ class Trainer:
             return
         self._callbacks = callbacks
 
-    def _pre_train(self, agent: Agent, **kwargs) -> Progress:
+    def _pre_train(self, agent: BaseAgent, **kwargs) -> Progress:
         max_epoch = kwargs.get('num_iterations', TuneConstant.DEFAULT_ITERATION_NUM)
         TuneUtils.validate_digital_parameter(max_epoch, "num_iterations",
                                              TuneConstant.MIN_ITERATION_NUM, TuneConstant.MAX_ITERATION_NUM)
@@ -150,7 +150,7 @@ class Trainer:
         self._optimizer.bind_parameter(agent.get_llm_calls())
         return progress
 
-    def _update_agent(self, agent: Agent, parameters: Dict[str, TextualParameter | LLMCall]):
+    def _update_agent(self, agent: BaseAgent, parameters: Dict[str, TextualParameter | LLMCall]):
         agent_parameters = agent.get_llm_calls()
         for name, llm_call in agent_parameters.items():
             param = parameters.get(name)
@@ -164,7 +164,7 @@ class Trainer:
                 llm_call.update_user_prompt(param.get_user_prompt().content)
 
     @staticmethod
-    def _check_trainable(agent: Agent) -> bool:
+    def _check_trainable(agent: BaseAgent) -> bool:
         method = getattr(type(agent), "get_llm_calls")
         if not method:
             return False
@@ -178,7 +178,7 @@ class ParameterSearcher:
         self._case_loader = case_loader
 
     def search_best(self,
-                    agent: Agent,
+                    agent: BaseAgent,
                     base_score: float,
                     base_parameters: Dict[str, LLMCall],
                     parameters: List[Dict[str, LLMCall]]):

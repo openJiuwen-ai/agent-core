@@ -5,12 +5,12 @@
 from unittest.mock import patch
 from typing import List, Any, Dict, Iterator, AsyncIterator
 
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.utils.llm.base import BaseModelClient
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.utils.llm.messages import AIMessage
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.foundation.llm import AIMessage
 
-from openjiuwen.agent_builder.prompt_builder.builder.feedback_prompt_builder import FeedbackPromptBuilder
+from openjiuwen.agent_builder.prompt_builder import FeedbackPromptBuilder
 import openjiuwen.agent_builder.prompt_builder.builder.utils as TEMPLATE
 
 MOCK_INTENT = '''```json{"intent": "true",
@@ -81,7 +81,7 @@ class MockLLMModel(BaseModelClient):
 
 def test_feedback_prompt_builder_general():
     mock_llm = MockLLMModel(api_key="mock_key", api_base="https://api.openai.com")
-    with patch('openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
+    with patch('openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
         mock_get_model.return_value = mock_llm
         config = ModelConfig(
             model_provider="",
@@ -104,7 +104,7 @@ def test_feedback_prompt_builder_general():
 
 def test_feedback_prompt_builder_insert():
     mock_llm = MockLLMModel(api_key="mock_key", api_base="https://api.openai.com")
-    with patch('openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
+    with patch('openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
         mock_get_model.return_value = mock_llm
         config = ModelConfig(
             model_provider="",
@@ -130,7 +130,7 @@ def test_feedback_prompt_builder_insert():
 
 def test_feedback_prompt_builder_select():
     mock_llm = MockLLMModel(api_key="mock_key", api_base="https://api.openai.com")
-    with patch('openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
+    with patch('openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
         mock_get_model.return_value = mock_llm
         config = ModelConfig(
             model_provider="",

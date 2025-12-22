@@ -7,20 +7,18 @@ from typing import Any, Union, List, Dict, AsyncIterator
 import pytest
 from unittest.mock import Mock
 
-from openjiuwen.agent.common.enum import ControllerType
-from openjiuwen.agent.common.schema import WorkflowSchema
-from openjiuwen.agent.config.workflow_config import WorkflowAgentConfig
+from openjiuwen.core.common.constants.enums import ControllerType
+from openjiuwen.core.single_agent import WorkflowAgentConfig, WorkflowSchema
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.context_engine.config import ContextEngineConfig
-from openjiuwen.core.context_engine.engine import ContextEngine
-from openjiuwen.core.utils.llm.messages import AIMessage, BaseMessage
-from openjiuwen.core.utils.tool.schema import ToolInfo
-from openjiuwen.core.utils.llm.messages_chunk import BaseMessageChunk
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, ComponentAbility, WorkflowMetadata
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.workflow import ComponentAbility, End, WorkflowCard
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
+from openjiuwen.core.foundation.llm1.schema.message import AssistantMessage, BaseMessage
+from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.llm1.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.workflow.components.llm_related.llm_comp import LLMExecutable
 
 fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
@@ -36,10 +34,12 @@ from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode
 from unittest.mock import patch, AsyncMock
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.component.llm_comp import LLMCompConfig, LLMExecutable, LLMComponent
-from openjiuwen.core.runtime.workflow import WorkflowRuntime, NodeRuntime
-from openjiuwen.core.runtime.wrapper import WrappedNodeRuntime, TaskRuntime
-from openjiuwen.core.utils.llm.base import BaseModelInfo, BaseModelClient
+from openjiuwen.core.workflow import LLMCompConfig, LLMComponent
+from openjiuwen.core.session import WorkflowSession, NodeSession
+from openjiuwen.core.session import WrappedNodeSession, TaskSession
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.foundation.llm1.model import Model
+from openjiuwen.core.foundation.llm1.schema.config import ModelConfig as LLM1ModelConfig, ModelClientConfig
 
 USER_FIELDS = "userFields"
 
@@ -51,7 +51,7 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 
 @pytest.fixture
 def fake_node_ctx():
-    return WrappedNodeRuntime(NodeRuntime(WorkflowRuntime(), "test"))
+    return WrappedNodeSession(NodeSession(WorkflowSession(), "test"))
 
 
 @pytest.fixture
@@ -75,22 +75,38 @@ def fake_model_config() -> ModelConfig:
         ),
     )
 
-class FakeModel(BaseModelClient):
-    def __init__(self, api_key, api_base):
-        super().__init__(api_key=api_key, api_base=api_base)
+class FakeModel(Model):
+    def __init__(self, api_key=None, api_base=None):
+        # 创建假的配置以满足 Model 的初始化要求
+        model_client_config = ModelClientConfig(
+            client_id="fake",
+            client_type="OpenAI",
+            api_key=api_key or "fake-key",
+            api_base=api_base or "https://fake.api.com",
+            timeout=60,
+            max_retries=3,
+            verify_ssl=False,
+            ssl_cert=None
+        )
+        model_config = LLM1ModelConfig(
+            model_name="fake-model",
+            temperature=0.7,
+            top_p=0.9
+        )
+        super().__init__(model_client_config=model_client_config, model_config=model_config)
 
     async def astream(self, messages: Union[List[BaseMessage], List[Dict], str],
                       tools: Union[List[ToolInfo], List[Dict]] = None, **kwargs: Any) -> AsyncIterator[
-        BaseMessageChunk]:
-        yield BaseMessageChunk(role="assistant", content="mocked response")
+        AssistantMessageChunk]:
+        yield AssistantMessageChunk(role="assistant", content="mocked response")
 
     async def ainvoke(self, messages: Union[List[BaseMessage], List[Dict], str],
                       tools: Union[List[ToolInfo], List[Dict]] = None, **kwargs: Any):
-        return BaseMessageChunk(role="assistant", content="mocked response")
+        return AssistantMessage(role="assistant", content="mocked response")
 
 
 @patch(
-    "openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model",
+    "openjiuwen.core.workflow.components.llm_related.llm_comp.Model",
     autospec=True,
 )
 class TestLLMExecutableInvoke:
@@ -98,7 +114,7 @@ class TestLLMExecutableInvoke:
     @pytest.mark.asyncio
     async def test_invoke_success(
             self,
-            mock_get_model,  # 这就是补丁
+            mock_model,  # 这就是补丁
             fake_node_ctx,
             fake_input,
             fake_model_config,
@@ -112,11 +128,11 @@ class TestLLMExecutableInvoke:
                 "required": True,
             }},
         )
-        exe = LLMExecutable(config)
-
+        
         fake_llm = FakeModel(api_base="1111", api_key="ssss")
-
-        mock_get_model.return_value = fake_llm
+        mock_model.return_value = fake_llm
+        
+        exe = LLMExecutable(config)
 
         output = await exe.invoke(fake_input(userFields=dict(query="pytest")), fake_node_ctx, context=Mock())
 
@@ -125,7 +141,7 @@ class TestLLMExecutableInvoke:
     @pytest.mark.asyncio
     async def test_stream_success(
             self,
-            mock_get_model,  # 这就是补丁
+            mock_model,  # 这就是补丁
             fake_node_ctx,
             fake_input,
             fake_model_config,
@@ -139,38 +155,31 @@ class TestLLMExecutableInvoke:
                 "required": True,
             }},
         )
-        exe = LLMExecutable(config)
-
-        #
-        # fake_llm = FakeModel(api_base="1111", api_key="ssss")
-        #
-        # # 模拟异步生成器，返回多个 AIMessage chunk
-        # async def mock_stream_response(model_name, messa: Any):
-        #     for chunk in ["mocked ", "response"]:
-        #         yield AIMessage(content=chunk)
 
         fake_llm = AsyncMock()
 
-        async def mock_stream_response(*, model_name: str, messages: list, **kwargs):
+        async def mock_stream_response(*, model: str, messages: list, **kwargs):
             # yield whatever chunks you want
             for chunk in ["mocked ", "response"]:
-                yield AIMessage(content=chunk)
+                yield AssistantMessage(content=chunk)
 
         fake_llm.astream = mock_stream_response
-        mock_get_model.return_value = fake_llm
+        mock_model.return_value = fake_llm
+        
+        exe = LLMExecutable(config)
 
         # 调用 stream 方法，异步迭代所有 chunk
         chunks = []
         async for chunk in exe.stream(fake_input(userFields=dict(query="pytest")), fake_node_ctx, context=Mock()):
             chunks.append(chunk)
 
-        # 假设 LLMExecutable.stream 会把每个 AIMessage.content 直接 yield 出来
+        # 假设 LLMExecutable.stream 会把每个 AssistantMessage.content 直接 yield 出来
         assert len(chunks) == 2
 
     @pytest.mark.asyncio
     async def test_invoke_llm_exception(
             self,
-            mock_get_model,
+            mock_model,
             fake_node_ctx,
             fake_input,
             fake_model_config,
@@ -184,15 +193,15 @@ class TestLLMExecutableInvoke:
     @pytest.mark.asyncio  # 新增
     async def test_llm_in_workflow(
             self,
-            mock_get_model,
+            mock_model,
             fake_model_config,
     ):
         """LLM 节点在完整工作流中的异步测试"""
-        runtime = WorkflowRuntime()
+        session = WorkflowSession()
 
         # 1. 打桩 LLM
         fake_llm = FakeModel(api_key="111", api_base="ssss")
-        mock_get_model.return_value = fake_llm
+        mock_model.return_value = fake_llm
 
         # 2. 构造工作流
         flow = Workflow()
@@ -222,14 +231,14 @@ class TestLLMExecutableInvoke:
         flow.add_connection("llm", "end")
 
         # 3. 直接异步调用
-        result = await flow.invoke(inputs={"a": 2, "userFields": dict(query="pytest")}, runtime=runtime)
+        result = await flow.invoke(inputs={"a": 2, "userFields": dict(query="pytest")}, session=session)
         assert result is not None
 
     @pytest.mark.asyncio  # 新增
-    async def test_start_llm_end_in_workflow(self, mock_get_model,
+    async def test_start_llm_end_in_workflow(self, mock_model,
                                              fake_model_config):
         fake_llm = FakeModel(api_key="1111", api_base="ssss")
-        mock_get_model.return_value = fake_llm
+        mock_model.return_value = fake_llm
 
         flow = Workflow()
 
@@ -272,8 +281,8 @@ class TestLLMExecutableInvoke:
         flow.add_connection("s", "llm")
         flow.add_connection("llm", "e")
 
-        context = WorkflowRuntime()
-        result = await flow.invoke(inputs={"query": "yzq test query"}, runtime=context)
+        context = WorkflowSession()
+        result = await flow.invoke(inputs={"query": "yzq test query"}, session=context)
         print(f"This is invoke result:{result}")
 
 class TestLLMExecutableInvokeNew:
@@ -283,7 +292,7 @@ class TestLLMExecutableInvokeNew:
         id = "write_poem_workflow"
         version = "1.0"
         name = "poem"
-        flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(name=name, id=id, version=version, )))
+        flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
         start_component = Start(
             {
@@ -321,10 +330,10 @@ class TestLLMExecutableInvokeNew:
         flow.add_connection("llm", "e")
 
         """根据 workflow 实例化 WorkflowAgent。"""
-        from openjiuwen.agent.workflow_agent import WorkflowAgent
-        workflow_id = flow.config().metadata.id
-        workflow_name = flow.config().metadata.name
-        workflow_version = flow.config().metadata.version
+        from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+        workflow_id = flow.card.id
+        workflow_name = flow.card.name
+        workflow_version = flow.card.version
         schema = WorkflowSchema(id=workflow_id,
                                 name=workflow_name,
                                 description="写诗工作流",
@@ -335,7 +344,7 @@ class TestLLMExecutableInvokeNew:
         config = WorkflowAgentConfig(
             id="write_poem_agent",
             version="0.1.0",
-            description="写诗 agent",
+            description="写诗 single_agent",
             workflows=[schema],
             controller_type=ControllerType.WorkflowController,
         )
@@ -349,7 +358,7 @@ class TestLLMExecutableInvokeNew:
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_invoke_start_llm_end_with_stream_writer(self):
-        flow = Workflow(workflow_config=WorkflowConfig())
+        flow = Workflow()
 
         start_component = Start(
             {
@@ -388,16 +397,16 @@ class TestLLMExecutableInvokeNew:
 
         session_id = "test_llm"
         config = ContextEngineConfig()
-        ce_engine = ContextEngine("123", config)
-        workflow_context = ce_engine.get_workflow_context(workflow_id="llm_workflow", session_id=session_id)
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
-        result = await flow.invoke(inputs={"query": "please write a 3-line poem"}, runtime=workflow_runtime, context=workflow_context)
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="llm_workflow")
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        result = await flow.invoke(inputs={"query": "please write a 3-line poem"}, session=workflow_session, context=workflow_context)
         print(f"invoke result >>> {result}")
 
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_invoke_start_llm_end_with_json_output(self):
-        flow = Workflow(workflow_config=WorkflowConfig())
+        flow = Workflow()
 
         start_component = Start(
             {
@@ -446,18 +455,18 @@ class TestLLMExecutableInvokeNew:
 
         session_id = "test_llm"
         config = ContextEngineConfig()
-        ce_engine = ContextEngine("123", config)
-        workflow_context = ce_engine.get_workflow_context(workflow_id="llm_workflow", session_id=session_id)
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="llm_workflow")
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
         result = await flow.invoke(
             inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"},
-            runtime=workflow_runtime, context=workflow_context)
+            session=workflow_session, context=workflow_context)
         print(f"invoke result >>> {result}")
 
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_stream_start_llm_end_with_component_streaming(self):
-        flow = Workflow(workflow_config=WorkflowConfig())
+        flow = Workflow()
 
         start_component = Start(
             {
@@ -498,16 +507,16 @@ class TestLLMExecutableInvokeNew:
 
         session_id = "test_llm"
         config = ContextEngineConfig()
-        ce_engine = ContextEngine("123", config)
-        workflow_context = ce_engine.get_workflow_context(workflow_id="llm_workflow", session_id=session_id)
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
-        async for chunk in flow.stream(inputs={"query": "please write a 3-line poem"}, runtime=workflow_runtime, context=workflow_context):
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="llm_workflow")
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        async for chunk in flow.stream(inputs={"query": "please write a 3-line poem"}, session=workflow_session, context=workflow_context):
             print(f"stream chunk >>> {chunk}")
 
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_stream_start_llm_end_with_component_streaming_with_json_output_schema(self):
-        flow = Workflow(workflow_config=WorkflowConfig())
+        flow = Workflow()
 
         start_component = Start(
             {
@@ -557,10 +566,10 @@ class TestLLMExecutableInvokeNew:
 
         session_id = "test_llm"
         config = ContextEngineConfig()
-        ce_engine = ContextEngine("123", config)
-        workflow_context = ce_engine.get_workflow_context(workflow_id="llm_workflow", session_id=session_id)
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
-        async for chunk in flow.stream(inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"}, runtime=workflow_runtime,
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="llm_workflow")
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        async for chunk in flow.stream(inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"}, session=workflow_session,
                                        context=workflow_context):
             print(f"stream chunk >>> {chunk}")
 
@@ -570,7 +579,7 @@ class TestLLMExecutableInvokeNew:
         id = "write_poem_workflow"
         version = "1.0"
         name = "poem"
-        flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(name=name, id=id, version=version,)))
+        flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
         start_component = Start(
             {
@@ -608,10 +617,10 @@ class TestLLMExecutableInvokeNew:
         flow.add_connection("llm", "e")
 
         """根据 workflow 实例化 WorkflowAgent。"""
-        from openjiuwen.agent.workflow_agent import WorkflowAgent
-        workflow_id = flow.config().metadata.id
-        workflow_name = flow.config().metadata.name
-        workflow_version = flow.config().metadata.version
+        from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+        workflow_id = flow.card.id
+        workflow_name = flow.card.name
+        workflow_version = flow.card.version
         schema = WorkflowSchema(id=workflow_id,
                               name=workflow_name,
                               description="写诗工作流",
@@ -622,7 +631,7 @@ class TestLLMExecutableInvokeNew:
         config = WorkflowAgentConfig(
             id="write_poem_agent",
             version="0.1.0",
-            description="写诗 agent",
+            description="写诗 single_agent",
             workflows=[schema],
             controller_type=ControllerType.WorkflowController,
         )
@@ -631,4 +640,4 @@ class TestLLMExecutableInvokeNew:
         agent.bind_workflows([flow])
 
         result = await agent.invoke({"query": "please write a 3-line poem", "conversation_id": "c123"})
-        print(f"agent invoke result >>> {result}")
+        print(f"single_agent invoke result >>> {result}")

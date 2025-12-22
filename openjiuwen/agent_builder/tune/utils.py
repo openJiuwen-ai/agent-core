@@ -9,8 +9,8 @@ from typing import Optional, List, Dict, Any
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.utils.prompt.template.template import Template
-from openjiuwen.core.utils.llm.messages import BaseMessage, AIMessage
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.llm import BaseMessage, AIMessage
 from openjiuwen.agent_builder.tune.base import Case, EvaluatedCase
 
 
@@ -47,7 +47,7 @@ class TuneUtils:
         return message.content
 
     @staticmethod
-    def get_content_string_from_template(template: Template):
+    def get_content_string_from_template(template: PromptTemplate):
         return "\n".join(msg.content for msg in template.to_messages())
 
     @staticmethod

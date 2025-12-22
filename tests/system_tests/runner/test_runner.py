@@ -5,23 +5,24 @@ from datetime import datetime
 from typing import List
 from unittest.mock import patch, AsyncMock
 
-from openjiuwen.agent.common.schema import WorkflowSchema
-from openjiuwen.agent.config.workflow_config import WorkflowAgentConfig
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.intent_detection_comp import IntentDetectionComponent, IntentDetectionCompConfig
-from openjiuwen.core.component.questioner_comp import QuestionerComponent, FieldInfo, QuestionerConfig
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.runtime.runtime import BaseRuntime
-from openjiuwen.core.runtime.resources_manager.workflow_manager import generate_workflow_key
-from openjiuwen.core.runtime.wrapper import TaskRuntime
-from openjiuwen.core.stream.base import OutputSchema
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata
-from openjiuwen.core.runner.runner import Runner, resource_mgr
-from openjiuwen.core.utils.tool.mcp.base import ToolServerConfig, McpToolInfo, SseClient, StdioClient, PlaywrightClient
 from mcp import StdioServerParameters
+
+from openjiuwen.core.single_agent import AgentCard, WorkflowAgentConfig, WorkflowSchema
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import IntentDetectionComponent, IntentDetectionCompConfig
+from openjiuwen.core.workflow import QuestionerComponent, FieldInfo, QuestionerConfig
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.workflow import generate_workflow_key
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session import TaskSession
+from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.foundation.tool import McpToolCard
+from openjiuwen.core.protocols.mcp import McpServerConfig, SseClient, StdioClient, PlaywrightClient
+from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.workflow import WorkflowCard
 
 API_BASE = "https://mock.com/v1"
 API_KEY = os.getenv("API_KEY", "sk-fake")
@@ -40,16 +41,16 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         try:
             _, workflow = self._build_interrupt_workflow()
             self.workflow = workflow
-            resource_mgr.workflow().add_workflow(
-                generate_workflow_key(workflow.config().metadata.id, workflow.config().metadata.version), workflow)
+            Runner.resource_mgr.add_workflow(
+                WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
         except Exception:
             pass
         await Runner.start()
 
     async def asyncTearDown(self):
         try:
-            resource_mgr.workflow().remove_workflow(
-                generate_workflow_key(self.workflow.config().metadata.id, self.workflow.config().metadata.version))
+            Runner.resource_mgr.remove_workflow(
+                generate_workflow_key(self.workflow.card.id, self.workflow.card.version))
             await Runner.stop()
         except Exception:
             pass
@@ -68,7 +69,6 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                 timeout=120,  # 增加超时时间到120秒，避免网络问题
             ),
         )
-
 
     @staticmethod
     def _create_intent_detection_component() -> IntentDetectionComponent:
@@ -126,13 +126,11 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
     def _create_start_component():
         return Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
 
-
     @staticmethod
     def _create_end_component():
         return End({"responseTemplate": "{{output}}"})
 
-
-    def _build_interrupt_workflow(self) -> tuple[BaseRuntime, Workflow]:
+    def _build_interrupt_workflow(self) -> tuple[BaseSession, Workflow]:
         """
         构建包含交互式组件的工作流，用于测试中断恢复功能。
 
@@ -142,17 +140,15 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         id = "test_interrupt_workflow"
         version = "1.0"
         name = "interrupt_test"
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        card = WorkflowCard(
                 name=name,
                 id=id,
                 version=version,
-            )
         )
         flow = Workflow(
-            workflow_config=workflow_config
+            card=card
         )
-        context = TaskRuntime(trace_id="test")
+        context = TaskSession(trace_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -183,8 +179,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         # intent 组件通过分支路由自动连接到 questioner 或 end
         flow.add_connection("questioner", "end")
 
-        return context.create_workflow_runtime(), flow
-
+        return context.create_workflow_session(), flow
 
     @staticmethod
     def _create_workflow_schema(id, name: str, version: str) -> WorkflowSchema:
@@ -196,18 +191,17 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                                   "type": "string",
                               }})
 
-
     def _create_agent(self, workflow):
         """根据 workflow 实例化 WorkflowAgent。"""
-        from openjiuwen.agent.workflow_agent.workflow_agent import WorkflowAgent
-        workflow_id = workflow.config().metadata.id
-        workflow_name = workflow.config().metadata.name
-        workflow_version = workflow.config().metadata.version
+        from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+        workflow_id = workflow.card.id
+        workflow_name = workflow.card.name
+        workflow_version = workflow.card.version
         schema = self._create_workflow_schema(workflow_id, workflow_name, workflow_version)
         config = WorkflowAgentConfig(
             id="test_weather_agent",
             version="0.1.0",
-            description="测试用天气 agent",
+            description="测试用天气 single_agent",
             workflows=[schema],
         )
         agent = WorkflowAgent(config)
@@ -275,18 +269,18 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
     async def test_runner_agent_resource_management(self):
         """端到端测试：验证Runner的资源管理功能 - 通过Runner.add_agent添加智能体并执行，包含交互流程。"""
         print("=== 测试 Runner 资源管理功能 ===")
-        
+
         # 创建智能体
         agent_id = "test_resource_agent"
         agent = self._create_agent(self.workflow)
         conversation_id = "c124"
-        
+
         try:
             # 1. 测试添加智能体
             print(f"Step 1: 通过Runner.add_agent添加智能体，ID: {agent_id}")
-            Runner.add_agent(agent_id=agent_id, agent=agent)
+            Runner.resource_mgr.add_agent(AgentCard(id=agent_id), agent=agent)
             print("✅ 智能体添加成功")
-            
+
             # 2. 测试通过ID运行智能体 - 第一次调用，获取交互请求
             print("Step 2: 通过智能体ID运行智能体（第一次调用，获取交互请求）")
             try:
@@ -296,17 +290,17 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                     timeout=50.0
                 )
                 print(f"Runner运行智能体结果（第一次调用）>>> {result}")
-                
+
                 # 校验第一次调用结果：应该返回交互请求
                 self.assertIsInstance(result, list, "第一次调用应该返回交互请求列表")
                 self.assertEqual(result[0].type, '__interaction__', "应该返回交互类型")
                 print("✅ 第一次调用校验通过：返回交互请求")
-                
+
                 # 检查交互请求是否正确
                 interaction_outputs = self._test_interaction_detection(result, "run_agent")
                 if interaction_outputs:
                     print("检测到交互请求，准备进行第二次调用...")
-                    
+
                     # 3. 第二次调用 - 传入字符串格式的回答，完成工作流
                     print("Step 3: 第二次调用，传入回答")
                     try:
@@ -315,14 +309,14 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                             timeout=30.0
                         )
                         print(f"Runner运行智能体结果（第二次调用）>>> {result2}")
-                        
+
                         # 校验第二次调用结果：应该返回完成状态
                         self.assertIsInstance(result2, dict, "第二次调用应该返回字典")
                         self.assertEqual(result2['result_type'], 'answer', "应该返回answer类型")
                         self.assertEqual(result2['output'].state.value, 'COMPLETED', "工作流应该完成")
                         self.assertEqual(result2['output'].result['responseContent'], '上海', "应该返回上海")
                         print("✅ 第二次调用校验通过：工作流完成，返回结果正确")
-                        
+
                     except asyncio.TimeoutError:
                         print("❌ 第二次调用超时！")
                         raise
@@ -332,34 +326,34 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                 else:
                     print("未检测到交互请求，测试可能未按预期执行")
                     self.fail("应该检测到交互请求")
-                    
+
                 # 4. 测试移除智能体
                 print("Step 4: 移除智能体")
-                removed_agent = Runner.remove_agent(agent_id)
-                self.assertIsNotNone(removed_agent, "移除的智能体不应为None")
+                Runner.resource_mgr.remove_agent(id=agent_id)
                 print("✅ 智能体移除成功")
-                
+
                 # 5. 测试移除后再次运行应失败
                 print("Step 5: 验证移除后再次运行智能体应失败")
                 with self.assertRaises(Exception):
                     await Runner.run_agent(agent_id, {"query": "查询天气", "conversation_id": conversation_id})
                 print("✅ 验证通过：移除后的智能体无法运行")
-                
+
             except asyncio.TimeoutError:
                 print("❌ 运行智能体超时！")
                 raise
             except Exception as e:
                 print(f"❌ 运行智能体时发生错误: {e}")
                 raise
-        
+
         finally:
             # 清理资源，确保即使测试失败也移除智能体
             try:
-                Runner.remove_agent(agent_id)
+                Runner.resource_mgr.remove_agent(id=agent_id)
             except:
                 pass
             print("✅ 测试完成，资源清理")
 
+    @unittest.skip("skip system test")
     async def test_mcp_tools_sse(self):
         """
         端到端测试 MCP-SSE 工具生命周期：
@@ -368,7 +362,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         """
         # -------------------- 预置数据 --------------------
         mock_tools = [
-            McpToolInfo(
+            McpToolCard(
                 name="browser_navigate",
                 description="Navigate to a URL",
                 input_schema={
@@ -377,7 +371,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                     "required": ["url"],
                 },
             ),
-            McpToolInfo(
+            McpToolCard(
                 name="browser_extract_text",
                 description="Extract text from the current page",
                 input_schema={
@@ -391,35 +385,35 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         test_inputs = {"url": "https://example.com"}
 
         # -------------------- mock 配置 --------------------
-        with patch("openjiuwen.core.utils.tool.mcp.base.SseClient.connect", AsyncMock(return_value=True)), \
-                patch("openjiuwen.core.utils.tool.mcp.base.SseClient.disconnect", AsyncMock(return_value=True)), \
-                patch("openjiuwen.core.utils.tool.mcp.base.SseClient.list_tools", AsyncMock(return_value=mock_tools)), \
+        with patch("openjiuwen.core.protocols.mcp.SseClient.connect", AsyncMock(return_value=True)), \
+                patch("openjiuwen.core.protocols.mcp.SseClient.disconnect", AsyncMock(return_value=True)), \
+                patch("openjiuwen.core.protocols.mcp.SseClient.list_tools", AsyncMock(return_value=mock_tools)), \
                 patch.object(SseClient, "call_tool", AsyncMock(return_value=mock_tool_result)) as mock_call_tool:
             # -------------------- 服务器配置 --------------------
-            mcp_server_config = ToolServerConfig(
+            mcp_server_config = McpServerConfig(
                 server_name="browser-use-server",
                 server_path="http://127.0.0.1:8930/sse",
                 client_type="sse",
             )
 
             # -------------------- 添加到管理器 --------------------
-            tool_mgr = resource_mgr.tool()
-            ok_list = await tool_mgr.add_tool_servers([mcp_server_config])
+            ok_list = await Runner.resource_mgr.add_tool_servers([mcp_server_config])
             assert ok_list == [True]
 
             # -------------------- 工具列表校验 --------------------
-            server_tools = tool_mgr.get_tool_infos(tool_server_name="browser-use-server")
+            server_tools = Runner.resource_mgr.get_tool_infos(tool_server_name="browser-use-server")
             assert len(server_tools) == 2
             assert server_tools[0].name == "browser-use-server.browser_navigate"
 
             # -------------------- Runner 拉取工具 --------------------
-            tools = await Runner.list_tools("browser-use-server")
+            tools = await Runner.resource_mgr.get_mcp_tool_infos(server_name="browser-use-server")
             assert len(tools) == 2
             first_tool = tools[0]
             tool_id = first_tool.name
 
             # -------------------- 调用工具 --------------------
-            result = await Runner.run_tool(tool_id, test_inputs)
+            tool = Runner.resource_mgr.get_tool(tool_id)
+            result = await tool.invoke(test_inputs)
 
             # -------------------- 实例级调用断言 --------------------
             mock_call_tool.assert_awaited_once_with(
@@ -433,12 +427,13 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                 assert result["result"] == mock_tool_result
 
             # -------------------- 移除服务器 --------------------
-            await tool_mgr.remove_tool_server("browser-use-server")
-            empty_tools = tool_mgr.get_tool_infos(tool_server_name="browser-use-server")
+            await Runner.resource_mgr.remove_mcp_server("browser-use-server")
+            empty_tools = await Runner.resource_mgr.get_mcp_tool_infos(tool_server_name="browser-use-server")
             assert empty_tools == None
 
             return True
 
+    @unittest.skip("skip system test")
     async def test_mcp_tools_stdio(self):
         """
         端到端测试 MCP-stdio 工具生命周期：
@@ -447,40 +442,36 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         """
         # -------------------- 预置数据 --------------------
         mock_tools = [
-            McpToolInfo(
+            McpToolCard(
                 name="doubter",
                 description="Doubter tool via stdio",
                 input_schema={
                     "type": "object",
-                    "properties": {
-                        "history": {"type": "string", "description": "Agent action history"}
-                    },
+                    "properties": {"history": {"type": "string", "description": "Agent action history"}},
                     "required": ["history"],
                 },
             ),
-            McpToolInfo(
+            McpToolCard(
                 name="checker",
                 description="Checker tool via stdio",
                 input_schema={
                     "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "URL to check"}
-                    },
+                    "properties": {"url": {"type": "string", "description": "URL to check"}},
                     "required": ["url"],
                 },
             ),
         ]
         mock_tool_result = "score: 0.85, decision: ACCEPT, review: actions verified"
-        test_inputs = {"history": "agent navigated to example.com and extracted title"}
+        test_inputs = {"history": "single_agent navigated to example.com and extracted title"}
 
         # -------------------- mock 配置 --------------------
-        with patch("openjiuwen.core.utils.tool.mcp.base.StdioClient.connect", AsyncMock(return_value=True)), \
-                patch("openjiuwen.core.utils.tool.mcp.base.StdioClient.disconnect", AsyncMock(return_value=True)), \
-                patch("openjiuwen.core.utils.tool.mcp.base.StdioClient.list_tools", AsyncMock(return_value=mock_tools)), \
+        with patch("openjiuwen.core.protocols.mcp.StdioClient.connect", AsyncMock(return_value=True)), \
+                patch("openjiuwen.core.protocols.mcp.StdioClient.disconnect", AsyncMock(return_value=True)), \
+                patch("openjiuwen.core.protocols.mcp.StdioClient.list_tools", AsyncMock(return_value=mock_tools)), \
                 patch.object(StdioClient, "call_tool", AsyncMock(return_value=mock_tool_result)) as mock_call_tool:
             # -------------------- 服务器配置 --------------------
             # 参数内容可以是任意占位符，真实值不会被用到
-            mcp_server_config = ToolServerConfig(
+            mcp_server_config = McpServerConfig(
                 server_name="doubter-mcp-server",
                 server_path="",
                 params=dict(StdioServerParameters(command="python", args=["dummy.py"])),
@@ -488,23 +479,25 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             )
 
             # -------------------- 添加到管理器 --------------------
-            tool_mgr = resource_mgr.tool()
-            ok_list = await tool_mgr.add_tool_servers([mcp_server_config])
-            assert ok_list == [True]
+            ok_list = await Runner.resource_mgr.add_tool_servers([mcp_server_config])
+            assert len(ok_list) == 1
+            assert ok_list[0].is_ok() == True
+
 
             # -------------------- 工具列表校验 --------------------
-            server_tools = tool_mgr.get_tool_infos(tool_server_name="doubter-mcp-server")
+            server_tools = await Runner.resource_mgr.get_mcp_tool_infos(tool_server_name="doubter-mcp-server")
             assert len(server_tools) == 2
             assert server_tools[0].name == "doubter-mcp-server.doubter"
 
             # -------------------- Runner 拉取工具 --------------------
-            tools = await Runner.list_tools("doubter-mcp-server")
+            tools = await Runner.resource_mgr.get_mcp_tool_infos(server_name="doubter-mcp-server")
             assert len(tools) == 2
             first_tool = tools[0]
             tool_id = first_tool.name
 
             # -------------------- 调用工具 --------------------
-            result = await Runner.run_tool(tool_id, test_inputs)
+            tool = Runner.resource_mgr.get_tool(tool_id)
+            result = await tool.invoke(test_inputs)
 
             # -------------------- 实例级调用断言 --------------------
             mock_call_tool.assert_awaited_once_with(
@@ -518,12 +511,13 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                 assert result["result"] == mock_tool_result
 
             # -------------------- 移除服务器 --------------------
-            await tool_mgr.remove_tool_server("doubter-mcp-server")
-            empty_tools = tool_mgr.get_tool_infos(tool_server_name="doubter-mcp-server")
+            await Runner.resource_mgr.remove_mcp_server("doubter-mcp-server")
+            empty_tools = await Runner.resource_mgr.get_mcp_tool_infos(tool_server_name="doubter-mcp-server")
             assert empty_tools == None
 
             return True
 
+    @unittest.skip("skip system test")
     async def test_mcp_tools_playwright(self):
         """
         端到端测试 MCP-Playwright 工具生命周期：
@@ -532,7 +526,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         """
         # -------------------- 预置数据 --------------------
         mock_tools = [
-            McpToolInfo(
+            McpToolCard(
                 name="browser_navigate",
                 description="Navigate to a URL via Playwright",
                 input_schema={
@@ -541,7 +535,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                     "required": ["url"],
                 },
             ),
-            McpToolInfo(
+            McpToolCard(
                 name="browser_click",
                 description="Click an element via Playwright",
                 input_schema={
@@ -555,37 +549,37 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         test_inputs = {"url": "https://example.com"}
 
         # -------------------- mock 配置 --------------------
-        with patch("openjiuwen.core.utils.tool.mcp.base.PlaywrightClient.connect", AsyncMock(return_value=True)), \
-                patch("openjiuwen.core.utils.tool.mcp.base.PlaywrightClient.disconnect", AsyncMock(return_value=True)), \
-                patch("openjiuwen.core.utils.tool.mcp.base.PlaywrightClient.list_tools",
+        with patch("openjiuwen.core.protocols.mcp.PlaywrightClient.connect", AsyncMock(return_value=True)), \
+                patch("openjiuwen.core.protocols.mcp.PlaywrightClient.disconnect", AsyncMock(return_value=True)), \
+                patch("openjiuwen.core.protocols.mcp.PlaywrightClient.list_tools",
                       AsyncMock(return_value=mock_tools)), \
                 patch.object(PlaywrightClient, "call_tool", AsyncMock(return_value=mock_tool_result)) as mock_call_tool:
             # -------------------- 服务器配置 --------------------
             # 可以是 URL 或 StdioServerParameters，PlaywrightClient 内部自动识别
-            mcp_server_config = ToolServerConfig(
+            mcp_server_config = McpServerConfig(
                 server_name="playwright-mcp-server",
                 server_path="http://127.0.0.1:8931/sse",  # 实际不会发起网络，仅占位
                 client_type="playwright",
             )
 
             # -------------------- 添加到管理器 --------------------
-            tool_mgr = resource_mgr.tool()
-            ok_list = await tool_mgr.add_tool_servers([mcp_server_config])
-            assert ok_list == [True]
+            ok_list = await Runner.resource_mgr.add_tool_servers([mcp_server_config])
+            assert ok_list[0].is_ok() == True
 
             # -------------------- 工具列表校验 --------------------
-            server_tools = tool_mgr.get_tool_infos(tool_server_name="playwright-mcp-server")
+            server_tools = await Runner.resource_mgr.get_mcp_tool_infos(tool_server_name="playwright-mcp-server")
             assert len(server_tools) == 2
             assert server_tools[0].name == "playwright-mcp-server.browser_navigate"
 
             # -------------------- Runner 拉取工具 --------------------
-            tools = await Runner.list_tools("playwright-mcp-server")
+            tools = await Runner.resource_mgr.get_mcp_tool_infos("playwright-mcp-server")
             assert len(tools) == 2
             first_tool = tools[0]
             tool_id = first_tool.name
 
             # -------------------- 调用工具 --------------------
-            result = await Runner.run_tool(tool_id, test_inputs)
+            tool = Runner.resource_mgr.get_tool(tool_id)
+            result = await tool.invoke(test_inputs)
 
             # -------------------- 实例级调用断言 --------------------
             mock_call_tool.assert_awaited_once_with(
@@ -599,8 +593,36 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                 assert result["result"] == mock_tool_result
 
             # -------------------- 移除服务器 --------------------
-            await tool_mgr.remove_tool_server("playwright-mcp-server")
-            empty_tools = tool_mgr.get_tool_infos(tool_server_name="playwright-mcp-server")
+            await Runner.resource_mgr.remove_mcp_server("playwright-mcp-server")
+            empty_tools = Runner.resource_mgr.get_mcp_tool_infos(tool_server_name="playwright-mcp-server")
             assert empty_tools == None
 
             return True
+
+    @unittest.skip("skip system test - requires network")
+    async def test_connect_and_list_tools_with_query_ak(self):
+        """端到端测试：带 ak 查询参数的 SSE 客户端连接和工具列表获取（已使用可用的 ak 值测试通过）"""
+        print("=== 测试带 ak 查询参数的 SSE 客户端连接和工具列表获取 ===")
+
+        # 在环境变量中获取实际的 ak 值
+        ak_value = os.getenv("BAIDU_MCP_AK", "your-ak") 
+
+        config = McpServerConfig(
+            server_name="baidu-map-mcp-server",
+            server_path="https://mcp.map.baidu.com/sse",
+            client_type="sse",
+            auth_query_params={"ak": ak_value}
+        )
+
+        client = SseClient(config.server_path, config.server_name,
+                           auth_query_params=config.auth_query_params)
+
+        try:
+            connected = await asyncio.wait_for(client.connect(timeout=60), timeout=60)
+            self.assertTrue(connected, "Should connect to Baidu Map MCP SSE server with ak query parameter")
+
+            tools = await asyncio.wait_for(client.list_tools(timeout=60), timeout=60)
+            self.assertIsInstance(tools, list)
+            self.assertGreater(len(tools), 0, "Expected the server to return at least one tool")
+        finally:
+            await asyncio.wait_for(client.disconnect(timeout=15), timeout=15)

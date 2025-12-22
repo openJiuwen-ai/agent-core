@@ -12,14 +12,14 @@ from openjiuwen.core.common.exception.status_code import StatusCode
 
 
 class MockMessagehandler_stream:
-    async def handle_message(self, request: Any) -> AsyncIterator[str]:
+    async def handle_event(self, request: Any) -> AsyncIterator[str]:
         for i in range(1, 10):
             response = f"MockMessagehandler_stream response for msg : {request}, i is {i}"
             yield response
 
 
 class MockMessagehandler_invoke:
-    async def handle_message(self, request: Any) -> str:
+    async def handle_event(self, request: Any) -> str:
         return "MockMessagehandler_invoke response for msg : " + request
 
 
@@ -41,11 +41,11 @@ class TestMessageQueue:
 
         # stream handler
         subscription1 = mq.subscribe("topic_stream")
-        subscription1.set_message_handler(MockMessagehandler_stream().handle_message)
+        subscription1.set_message_handler(MockMessagehandler_stream().handle_event)
         subscription1.activate()
         # invoke handler
         subscription2 = mq.subscribe("topic_invoke")
-        subscription2.set_message_handler(MockMessagehandler_invoke().handle_message)
+        subscription2.set_message_handler(MockMessagehandler_invoke().handle_event)
         subscription2.activate()
 
         # <1.1> send stream request to stream handler

@@ -6,7 +6,7 @@ import uuid
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.utils.tool.schema import ToolInfo
+from openjiuwen.core.foundation.tool import ToolInfo
 
 
 class TuneConstant:

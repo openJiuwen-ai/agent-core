@@ -6,9 +6,9 @@ from typing import List, Optional, Generator, Literal
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.utils.tool.schema import ToolInfo
-from openjiuwen.core.utils.prompt.template.template import Template
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
+from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.llm import ModelConfig
 
 from openjiuwen.agent_builder.prompt_builder.base import BasePromptBuilder
 import openjiuwen.agent_builder.prompt_builder.builder.utils as TEMPLATE
@@ -22,12 +22,12 @@ class MetaTemplateBuilder(BasePromptBuilder):
         super().__init__(model_config)
         self._meta_template_manager = dict()
 
-    def register_meta_template(self, name: str, meta_template: str | Template):
+    def register_meta_template(self, name: str, meta_template: str | PromptTemplate):
+        template_name = f"{META_TEMPLATE_NAME_PREFIX}{name}"
         if isinstance(meta_template, str):
-            template_to_reg = Template(name=f"{META_TEMPLATE_NAME_PREFIX}{name}", content=meta_template)
-        elif isinstance(meta_template, Template):
+            template_to_reg = PromptTemplate(content=meta_template)
+        elif isinstance(meta_template, PromptTemplate):
             template_to_reg = copy.deepcopy(meta_template)
-            template_to_reg.name = f"{META_TEMPLATE_NAME_PREFIX}{name}"
         else:
             raise JiuWenBaseException(
                 StatusCode.AGENT_BUILDER_META_TEMPLATE_REGISTER_ERROR.code,
@@ -35,10 +35,10 @@ class MetaTemplateBuilder(BasePromptBuilder):
                     error_msg=f"failed to register meta-template: {name}"
                 )
             )
-        self._meta_template_manager.update({template_to_reg.name: template_to_reg})
+        self._meta_template_manager.update({template_name: template_to_reg})
 
     def build(self,
-              prompt: str | Template,
+              prompt: str | PromptTemplate,
               tools: Optional[List[ToolInfo]] = None,
               template_type: Literal["general", "plan", "other"] = "general",
               custom_template_name: Optional[str] = None
@@ -52,7 +52,7 @@ class MetaTemplateBuilder(BasePromptBuilder):
         return response.content
 
     def stream_build(self,
-                     prompt: str | Template,
+                     prompt: str | PromptTemplate,
                      tools: Optional[List[ToolInfo]] = None,
                      template_type: Literal["general", "plan", "other"] = "general",
                      custom_template_name: Optional[str] = None

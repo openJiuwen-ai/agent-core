@@ -3,9 +3,9 @@
 
 from typing import Any, Optional, Tuple
 
-from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.utils.llm.base import BaseModelClient
+from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.mem_unit.memory_unit import VariableUnit
 from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
 
@@ -91,8 +91,8 @@ class VariableManager(BaseMemoryManager):
                 result[k.split(f"{self.SEPARATOR}")[-1]] = v
             return result
         if session_id:
-            key = (f"session_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{group_id}{self.SEPARATOR}"
-                   f"{session_id}{self.SEPARATOR}{name}")
+            key = (f"session_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{group_id}"
+                   f"{self.SEPARATOR}{session_id}{self.SEPARATOR}{name}")
         else:
             key = f"user_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{group_id}{self.SEPARATOR}{name}"
         kv_ret = await self.kv_store.get(key)

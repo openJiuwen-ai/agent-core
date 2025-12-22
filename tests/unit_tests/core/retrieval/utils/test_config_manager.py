@@ -11,6 +11,7 @@ import pytest
 
 from openjiuwen.core.retrieval.utils.config_manager import ConfigManager
 from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
 class TestConfigManager:
@@ -87,7 +88,7 @@ class TestConfigManager:
     def test_load_from_file_not_found():
         """测试加载不存在的文件"""
         manager = ConfigManager()
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(JiuWenBaseException):
             manager.load_from_file("nonexistent.json")
 
     @staticmethod

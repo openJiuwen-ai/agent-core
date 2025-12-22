@@ -5,7 +5,7 @@ from typing import Tuple
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.mem_unit.memory_unit import BaseMemoryUnit
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.utils.llm.base import BaseModelClient
+from openjiuwen.core.foundation.llm import BaseModelClient
 from openjiuwen.core.memory.store.user_mem_store import UserMemStore
 
 

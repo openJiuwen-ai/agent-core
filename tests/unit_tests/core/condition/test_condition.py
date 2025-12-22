@@ -4,22 +4,22 @@ import pytest
 
 from openjiuwen.core.common.constants.constant import MAX_EXPRESSION_LENGTH, MAX_AST_DEPTH
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.component.condition.array import ArrayCondition
-from openjiuwen.core.component.condition.condition import Condition, FuncCondition, AlwaysTrue
-from openjiuwen.core.component.condition.expression import ExpressionCondition
-from openjiuwen.core.component.condition.number import NumberCondition
-from openjiuwen.core.context_engine.base import Context
+from openjiuwen.core.workflow import ArrayCondition
+from openjiuwen.core.workflow import Condition, FuncCondition, AlwaysTrue
+from openjiuwen.core.workflow import ExpressionCondition
+from openjiuwen.core.workflow import NumberCondition
+from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Input
-from openjiuwen.core.runtime.runtime import BaseRuntime
-from openjiuwen.core.runtime.workflow_state import CommitState
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session import CommitState
 
 
 class TestConditionBase:
     
     def setup_method(self):
-        # Create Mock Runtime object for testing
-        self.mock_runtime = MagicMock(spec=BaseRuntime)
-        self.mock_context = MagicMock(spec=Context)
+        # Create Mock Session object for testing
+        self.mock_session = MagicMock(spec=BaseSession)
+        self.mock_context = MagicMock(spec=ModelContext)
         
         # Create a more realistic state mock to simulate CommitState behavior
         self.mock_state = Mock(spec=CommitState)
@@ -30,8 +30,8 @@ class TestConditionBase:
         self.mock_state.commit.return_value = None
         self.mock_state.get_global.return_value = None
         
-        # Set Runtime's state method to return this mock_state
-        self.mock_runtime.state.return_value = self.mock_state
+        # Set Session's state method to return this mock_state
+        self.mock_session.state.return_value = self.mock_state
 
 
 class TestCondition(TestConditionBase):
@@ -40,7 +40,7 @@ class TestCondition(TestConditionBase):
         """Test the basic functionality of the Condition base class"""
         # Create a test class inheriting from Condition
         class TestConditionImpl(Condition):
-            def invoke(self, inputs: Input, runtime: BaseRuntime) -> bool:
+            def invoke(self, inputs: Input, session: BaseSession) -> bool:
                 return True
         
         # Test initialization
@@ -49,7 +49,7 @@ class TestCondition(TestConditionBase):
         
         # Test __call__ method
         self.mock_state.get_inputs.return_value = {}
-        result = condition(self.mock_runtime)
+        result = condition(self.mock_session)
         assert result is True
         self.mock_state.get_inputs.assert_called_once_with("test_input_schema")
         
@@ -61,12 +61,12 @@ class TestCondition(TestConditionBase):
     def test_condition_with_tuple_result(self):
         """Test Condition with tuple result"""
         class TestConditionWithTuple(Condition):
-            def invoke(self, inputs: Input, runtime: BaseRuntime) -> tuple:
+            def invoke(self, inputs: Input, session: BaseSession) -> tuple:
                 return True, {"output_key": "output_value"}
         
         condition = TestConditionWithTuple("test_input_schema")
         self.mock_state.get_inputs.return_value = {}
-        result = condition(self.mock_runtime)
+        result = condition(self.mock_session)
         
         assert result is True
         self.mock_state.set_outputs.assert_called_once_with({"output_key": "output_value"})
@@ -84,7 +84,7 @@ class TestFuncCondition(TestConditionBase):
         func_condition = FuncCondition(test_func)
         
         # Test invoke method
-        result = func_condition.invoke({}, self.mock_runtime)
+        result = func_condition.invoke({}, self.mock_session)
         assert result is True
     
     def test_func_condition_trace_info(self):
@@ -103,11 +103,11 @@ class TestAlwaysTrue(TestConditionBase):
     def test_always_true_invoke(self):
         """Test AlwaysTrue's invoke method"""
         always_true = AlwaysTrue()
-        result = always_true.invoke({}, self.mock_runtime)
+        result = always_true.invoke({}, self.mock_session)
         assert result is True
         
         # Test again to ensure it always returns True
-        result = always_true.invoke({"key": "value"}, self.mock_runtime)
+        result = always_true.invoke({"key": "value"}, self.mock_session)
         assert result is True
 
 
@@ -131,7 +131,7 @@ class TestArrayCondition(TestConditionBase):
         array_condition = ArrayCondition({"item": "${input.item}", "another_item": "${input.another_item}"})
         
         # Test invoke method
-        result, updates = array_condition.invoke(inputs, self.mock_runtime)
+        result, updates = array_condition.invoke(inputs, self.mock_session)
         
         # Verify results
         assert result is True
@@ -148,7 +148,7 @@ class TestArrayCondition(TestConditionBase):
         array_condition = ArrayCondition({"item": "${input.item}"})
         
         # Test invoke method
-        result = array_condition.invoke(inputs, self.mock_runtime)
+        result = array_condition.invoke(inputs, self.mock_session)
         
         # Verify results
         assert result is False
@@ -174,7 +174,7 @@ class TestNumberCondition(TestConditionBase):
         number_condition = NumberCondition("${input.limit}")
         
         # Test invoke method
-        result = number_condition.invoke(inputs, self.mock_runtime)
+        result = number_condition.invoke(inputs, self.mock_session)
         
         # Verify results
         assert result is True  # 3 < 5
@@ -189,7 +189,7 @@ class TestNumberCondition(TestConditionBase):
         number_condition = NumberCondition("${input.limit}")
         
         # Test invoke method
-        result = number_condition.invoke(inputs, self.mock_runtime)
+        result = number_condition.invoke(inputs, self.mock_session)
         
         # Verify results
         assert result is False  # 5 < 5 is False
@@ -214,7 +214,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test invoke method
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         
         # Verify results
         assert result is True
@@ -229,7 +229,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test invoke method
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         
         # Verify results
         assert result is False
@@ -240,7 +240,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition("")
         
         # Test invoke method
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         
         # Verify results
         assert result is True
@@ -255,7 +255,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test trace_info method
-        trace_info = expr_condition.trace_info(self.mock_runtime)
+        trace_info = expr_condition.trace_info(self.mock_session)
         
         # Verify results
         assert trace_info["bool_expression"] == expression
@@ -272,7 +272,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if preprocessed expression can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
 
     def test_expression_preprocessing_keywords(self):
@@ -285,7 +285,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if preprocessed expression can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
 
     def test_expression_preprocessing_functions(self):
@@ -298,7 +298,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if preprocessed expression can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
 
     def test_expression_arithmetic_operators(self):
@@ -311,7 +311,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if expression with arithmetic operations can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
 
     def test_expression_comparison_operators(self):
@@ -320,21 +320,21 @@ class TestExpressionCondition(TestConditionBase):
         expression_1 = "${a} == ${b} && ${c} != ${d}"
         self.mock_state.get_global.side_effect = lambda x: 5 if x == "a" or x == "b" else 10 if x == "c" else 20 if x == "d" else None
         expr_condition_1 = ExpressionCondition(expression_1)
-        result_1 = expr_condition_1.invoke({}, self.mock_runtime)
+        result_1 = expr_condition_1.invoke({}, self.mock_session)
         assert result_1 is True
 
         # Test in, not in
         expression_2 = "${a} in ${list} && ${b} not_in ${list}"
         self.mock_state.get_global.side_effect = lambda x: 1 if x == "a" else 4 if x == "b" else [1, 2, 3] if x == "list" else None
         expr_condition_2 = ExpressionCondition(expression_2)
-        result_2 = expr_condition_2.invoke({}, self.mock_runtime)
+        result_2 = expr_condition_2.invoke({}, self.mock_session)
         assert result_2 is True
 
         # Test is, is not
         expression_3 = "${a} is None && ${b} is not None"
         self.mock_state.get_global.side_effect = lambda x: None if x == "a" else "value" if x == "b" else None
         expr_condition_3 = ExpressionCondition(expression_3)
-        result_3 = expr_condition_3.invoke({}, self.mock_runtime)
+        result_3 = expr_condition_3.invoke({}, self.mock_session)
         assert result_3 is True
 
     def test_expression_boolean_operators(self):
@@ -347,7 +347,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if expression with boolean operations can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
 
     def test_expression_unary_operators(self):
@@ -360,7 +360,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if expression with unary operations can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
 
     def test_expression_data_structures(self):
@@ -373,7 +373,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if expression can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
 
     def test_expression_func_calls(self):
@@ -386,7 +386,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if expression with function call can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
 
     def test_expression_syntax_error(self):
@@ -399,7 +399,7 @@ class TestExpressionCondition(TestConditionBase):
         
         # Test if syntax error is handled correctly
         with pytest.raises(JiuWenBaseException):
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
     
     def test_expression_eval_error(self):
         """Test expression evaluation error handling"""
@@ -412,7 +412,7 @@ class TestExpressionCondition(TestConditionBase):
         
         # Test if evaluation error is handled correctly
         with pytest.raises(JiuWenBaseException):
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
     
     def test_disallowed_operations(self):
         """Test handling of disallowed operations"""
@@ -420,21 +420,21 @@ class TestExpressionCondition(TestConditionBase):
         expression_1 = "disallowed_var > 5"
         expr_condition_1 = ExpressionCondition(expression_1)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_1.invoke({}, self.mock_runtime)
+            expr_condition_1.invoke({}, self.mock_session)
         
         # Test disallowed attribute access
         expression_2 = "${a}.disallowed_attr"
         self.mock_state.get_global.side_effect = lambda x: object() if x == "a" else None
         expr_condition_2 = ExpressionCondition(expression_2)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_2.invoke({}, self.mock_runtime)
+            expr_condition_2.invoke({}, self.mock_session)
         
         # Test disallowed function call
         expression_3 = "str(${a})"
         self.mock_state.get_global.side_effect = lambda x: 5 if x == "a" else None
         expr_condition_3 = ExpressionCondition(expression_3)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_3.invoke({}, self.mock_runtime)
+            expr_condition_3.invoke({}, self.mock_session)
 
     def test_complex_nested_expressions(self):
         """Test complex nested expressions"""
@@ -446,7 +446,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if complex nested expression can be evaluated correctly
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
     
     def test_security_mechanism(self):
@@ -455,25 +455,25 @@ class TestExpressionCondition(TestConditionBase):
         expression_1 = "__import__('os').system('ls')"
         expr_condition_1 = ExpressionCondition(expression_1)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_1.invoke({}, self.mock_runtime)
+            expr_condition_1.invoke({}, self.mock_session)
         
         # Test prohibited system command
         expression_2 = "import('os').system('ls')"
         expr_condition_2 = ExpressionCondition(expression_2)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_2.invoke({}, self.mock_runtime)
+            expr_condition_2.invoke({}, self.mock_session)
         
         # Test prohibited file operation
         expression_3 = "open('test.txt', 'r')"
         expr_condition_3 = ExpressionCondition(expression_3)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_3.invoke({}, self.mock_runtime)
+            expr_condition_3.invoke({}, self.mock_session)
         
         # Test prohibited nested eval
         expression_4 = "eval('2 + 2')"
         expr_condition_4 = ExpressionCondition(expression_4)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_4.invoke({}, self.mock_runtime)
+            expr_condition_4.invoke({}, self.mock_session)
     
     def test_prevent_object_method_escape(self):
         """Test prevention of object method escape attacks"""
@@ -484,7 +484,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         with pytest.raises(JiuWenBaseException) as excinfo:
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
         # Either the regex check or the attribute access check will trigger
         assert "prohibited" in str(excinfo.value) or "Disallowed operation" in str(excinfo.value)
         
@@ -493,7 +493,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         with pytest.raises(JiuWenBaseException) as excinfo:
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
         # Either the regex check or the attribute access check will trigger
         assert "prohibited" in str(excinfo.value) or "Disallowed operation" in str(excinfo.value)
     
@@ -504,7 +504,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         with pytest.raises(JiuWenBaseException) as excinfo:
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
         # This should be caught by the regex check for disallowed operations
         assert "Disallowed operation" in str(excinfo.value)
         
@@ -515,7 +515,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         with pytest.raises(JiuWenBaseException) as excinfo:
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
         # Either the regex check or the attribute access check will trigger
         assert "prohibited" in str(excinfo.value) or "Disallowed operation" in str(excinfo.value)
     
@@ -526,7 +526,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         with pytest.raises(JiuWenBaseException):
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
         
         # Test large dictionary creation
         # We can't actually create a dictionary with 1000000000 keys in the test,
@@ -537,7 +537,7 @@ class TestExpressionCondition(TestConditionBase):
         
         # This would normally fail during parsing or execution due to resource limits
         try:
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
         except JiuWenBaseException:
             pass  # Expected behavior
         
@@ -550,7 +550,7 @@ class TestExpressionCondition(TestConditionBase):
         
         # For this test, we just need to ensure it doesn't crash and raises the expected exception type
         try:
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
         except JiuWenBaseException:
             pass  # Expected behavior
     
@@ -560,7 +560,7 @@ class TestExpressionCondition(TestConditionBase):
         expression_1 = "is_not_empty([0] * (10 ** 10))"
         expr_condition_1 = ExpressionCondition(expression_1)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_1.invoke({}, self.mock_runtime)
+            expr_condition_1.invoke({}, self.mock_session)
         
         # Test large list referenced by variable
         large_list = [1] * 100001  # Exceeds maximum allowed size
@@ -568,13 +568,13 @@ class TestExpressionCondition(TestConditionBase):
         expression_2 = "is_not_empty(${large_list})"
         expr_condition_2 = ExpressionCondition(expression_2)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_2.invoke({}, self.mock_runtime)
+            expr_condition_2.invoke({}, self.mock_session)
         
         # Test large exponentiation protection
         expression_3 = "2 ** 1000"
         expr_condition_3 = ExpressionCondition(expression_3)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_3.invoke({}, self.mock_runtime)
+            expr_condition_3.invoke({}, self.mock_session)
     
     def test_large_list_literal_protection(self):
         """Test large list literal protection mechanism"""
@@ -583,7 +583,7 @@ class TestExpressionCondition(TestConditionBase):
         expression = "len([1, 2, 3, " + ", ".join([str(i) for i in range(4, 101)]) + "]) == 100"
         expr_condition = ExpressionCondition(expression)
         # For smaller lists, it should work normally
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
         
         # Test another case that might cause memory issues
@@ -591,7 +591,7 @@ class TestExpressionCondition(TestConditionBase):
         expression_large = "${very_large_list} * 2"
         expr_condition_large = ExpressionCondition(expression_large)
         with pytest.raises(JiuWenBaseException):
-            expr_condition_large.invoke({}, self.mock_runtime)
+            expr_condition_large.invoke({}, self.mock_session)
     
     def test_expression_length_limit(self):
         """Test expression length limit protection"""
@@ -606,7 +606,7 @@ class TestExpressionCondition(TestConditionBase):
         
         # The safe expression should initialize successfully
         try:
-            safe_condition.invoke({}, self.mock_runtime)
+            safe_condition.invoke({}, self.mock_session)
         except JiuWenBaseException as e:
             if "length exceeds maximum allowed length" in str(e):
                 pytest.fail("Expression within length limit was rejected")
@@ -628,7 +628,7 @@ class TestExpressionCondition(TestConditionBase):
         self.mock_state.get_global.side_effect = lambda x: 1 if x == "a" else None
         deep_condition = ExpressionCondition(too_deep_nesting)
         with pytest.raises(JiuWenBaseException) as excinfo:
-            deep_condition.invoke({}, self.mock_runtime)
+            deep_condition.invoke({}, self.mock_session)
         assert "nesting depth exceeds maximum allowed depth" in str(excinfo.value)
     
     def test_ast_nesting_depth_limit(self):
@@ -637,7 +637,7 @@ class TestExpressionCondition(TestConditionBase):
         normal_expression = "(((${a} > 0) && (${b} < 100)))"
         expr_condition = ExpressionCondition(normal_expression)
         self.mock_state.get_global.side_effect = lambda x: 5 if x == "a" else 50 if x == "b" else None
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is True
         
         # Test expression with excessive nesting depth (should throw exception)
@@ -651,7 +651,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(nested_expr)
         self.mock_state.get_global.side_effect = lambda x: 5 if x == "a" else None
         with pytest.raises(JiuWenBaseException) as excinfo:
-            expr_condition.invoke({}, self.mock_runtime)
+            expr_condition.invoke({}, self.mock_session)
         assert "nesting depth exceeds maximum allowed depth" in str(excinfo.value)
 
     def test_string_comparison_with_true_literal(self):
@@ -661,22 +661,24 @@ class TestExpressionCondition(TestConditionBase):
 
         def _mock_get_global_true(x):
             return "true" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_true
-        
+
         # Create ExpressionCondition instance
         expr_condition = ExpressionCondition(expression)
-        
+
         # Test invoke method - should return True for string comparison
-        result = expr_condition.invoke({}, self.mock_runtime)
-        
+        result = expr_condition.invoke({}, self.mock_session)
+
         # Verify results - string "true" should equal string "true"
         assert result is True
 
         # Test with different string value - should return False
         def _mock_get_global_false(x):
             return "false" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_false
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is False
 
     def test_string_comparison_with_false_literal(self):
@@ -686,22 +688,24 @@ class TestExpressionCondition(TestConditionBase):
 
         def _mock_get_global_false(x):
             return "false" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_false
-        
+
         # Create ExpressionCondition instance
         expr_condition = ExpressionCondition(expression)
-        
+
         # Test invoke method - should return True for string comparison
-        result = expr_condition.invoke({}, self.mock_runtime)
-        
+        result = expr_condition.invoke({}, self.mock_session)
+
         # Verify results - string "false" should equal string "false"
         assert result is True
 
         # Test with different string value - should return False
         def _mock_get_global_true(x):
             return "true" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_true
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
         assert result is False
 
     def test_string_literal_preservation_with_boolean_identifier(self):
@@ -712,13 +716,14 @@ class TestExpressionCondition(TestConditionBase):
 
         def _mock_get_global_true(x):
             return "true" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_true
 
         # Create ExpressionCondition instance
         expr_condition = ExpressionCondition(expression)
 
         # Test invoke method
-        result = expr_condition.invoke({}, self.mock_runtime)
+        result = expr_condition.invoke({}, self.mock_session)
 
         # Verify results - both conditions should be True
         assert result is True
@@ -728,9 +733,10 @@ class TestExpressionCondition(TestConditionBase):
 
         def _mock_get_global_false(x):
             return "false" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_false
         expr_condition2 = ExpressionCondition(expression2)
-        result2 = expr_condition2.invoke({}, self.mock_runtime)
+        result2 = expr_condition2.invoke({}, self.mock_session)
         # First part is True (string comparison), second part is True (boolean), so overall is True
         assert result2 is True
 
@@ -741,9 +747,10 @@ class TestExpressionCondition(TestConditionBase):
 
         def _mock_get_global_true(x):
             return "true" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_true
         expr_condition1 = ExpressionCondition(expression1)
-        result1 = expr_condition1.invoke({}, self.mock_runtime)
+        result1 = expr_condition1.invoke({}, self.mock_session)
         assert result1 is True
 
         # Test single quote string literal with "false"
@@ -751,9 +758,10 @@ class TestExpressionCondition(TestConditionBase):
 
         def _mock_get_global_false(x):
             return "false" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_false
         expr_condition2 = ExpressionCondition(expression2)
-        result2 = expr_condition2.invoke({}, self.mock_runtime)
+        result2 = expr_condition2.invoke({}, self.mock_session)
         assert result2 is True
 
         # Test single quote string with different value should return False
@@ -761,9 +769,10 @@ class TestExpressionCondition(TestConditionBase):
 
         def _mock_get_global_false2(x):
             return "false" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_false2
         expr_condition3 = ExpressionCondition(expression3)
-        result3 = expr_condition3.invoke({}, self.mock_runtime)
+        result3 = expr_condition3.invoke({}, self.mock_session)
         assert result3 is False
 
         # Test mixed scenario with single quotes and boolean identifier
@@ -771,9 +780,10 @@ class TestExpressionCondition(TestConditionBase):
 
         def _mock_get_global_true2(x):
             return "true" if x == "a" else None
+
         self.mock_state.get_global.side_effect = _mock_get_global_true2
         expr_condition4 = ExpressionCondition(expression4)
-        result4 = expr_condition4.invoke({}, self.mock_runtime)
+        result4 = expr_condition4.invoke({}, self.mock_session)
         assert result4 is True
 
 

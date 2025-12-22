@@ -9,6 +9,7 @@ import requests
 
 from openjiuwen.core.retrieval.embedding.ollama_embedding import OllamaEmbedding
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
 @pytest.fixture
@@ -50,7 +51,7 @@ class TestOllamaEmbedding:
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
-            with pytest.raises(ValueError, match="not found in available models"):
+            with pytest.raises(JiuWenBaseException, match="not found in available models"):
                 OllamaEmbedding(config=ollama_config)
 
     @classmethod
@@ -61,7 +62,7 @@ class TestOllamaEmbedding:
                 "Connection refused"
             )
 
-            with pytest.raises(ConnectionError, match="Could not connect to Ollama"):
+            with pytest.raises(JiuWenBaseException, match="Could not connect to Ollama"):
                 OllamaEmbedding(config=ollama_config)
 
     @classmethod
@@ -150,7 +151,7 @@ class TestOllamaEmbedding:
             mock_get.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError, match="Empty text provided"):
+            with pytest.raises(JiuWenBaseException, match="Empty text provided"):
                 await model.embed_query("   ")
 
     @pytest.mark.asyncio
@@ -211,7 +212,7 @@ class TestOllamaEmbedding:
             mock_to_thread.return_value = mock_failure_response
 
             model = OllamaEmbedding(config=ollama_config, max_retries=2)
-            with pytest.raises(RuntimeError, match="Failed to get embedding"):
+            with pytest.raises(JiuWenBaseException, match="Failed to get embedding"):
                 await model.embed_query("test query")
             assert mock_to_thread.call_count == 2
 
@@ -236,7 +237,7 @@ class TestOllamaEmbedding:
             mock_to_thread.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError, match="No embeddings in response"):
+            with pytest.raises(JiuWenBaseException, match="No embeddings in response"):
                 await model.embed_query("test query")
 
     @pytest.mark.asyncio
@@ -308,7 +309,7 @@ class TestOllamaEmbedding:
             mock_get.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError, match="Empty texts list provided"):
+            with pytest.raises(JiuWenBaseException, match="Empty texts list provided"):
                 await model.embed_documents([])
 
     @pytest.mark.asyncio
@@ -323,7 +324,7 @@ class TestOllamaEmbedding:
             mock_get.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError, match="chunks are empty"):
+            with pytest.raises(JiuWenBaseException, match="chunks are empty"):
                 await model.embed_documents(["text 1", "   ", "text 2"])
 
     @pytest.mark.asyncio
@@ -338,7 +339,7 @@ class TestOllamaEmbedding:
             mock_get.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError):
+            with pytest.raises(JiuWenBaseException):
                 await model.embed_documents(["   ", "  ", ""])
 
     @classmethod

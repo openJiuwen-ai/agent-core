@@ -8,31 +8,30 @@
 2. str类型中断（人机交互文本）- 应该正常执行工作流
 """
 import os
+import uuid
 
 os.environ["LLM_SSL_VERIFY"] = "false"
 os.environ["RESTFUL_SSL_VERIFY"] = "false"
 
 import unittest
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, List
 
-from openjiuwen.agent.config.workflow_config import WorkflowAgentConfig
-from openjiuwen.agent.workflow_agent.workflow_agent import WorkflowAgent
-from openjiuwen.core.component.base import WorkflowComponent, ComponentConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.start_comp import Start
+from openjiuwen.core.single_agent import WorkflowAgentConfig
+from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+from openjiuwen.core.workflow import ComponentConfig, WorkflowCard, WorkflowComponent
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import Start
 from openjiuwen.core.graph.executable import Output, Input
-from openjiuwen.core.runtime.base import ComponentExecutable
-from openjiuwen.core.runtime.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.runtime.runtime import Runtime
-from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.stream.base import OutputSchema
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session import Session
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.utils.llm.base import BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.common.logging import logger
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
@@ -58,7 +57,7 @@ class UserInputsConfig(ComponentConfig):
     inputs: List[UserInputElem] = field(default_factory=list)
 
 
-class UserInputComponent(ComponentExecutable, WorkflowComponent):
+class UserInputComponent(WorkflowComponent):
     """
     用户输入组件 - 返回dict格式的中断
     
@@ -70,7 +69,7 @@ class UserInputComponent(ComponentExecutable, WorkflowComponent):
         super().__init__()
         self.input_conf_list: List[UserInputElem] = conf.inputs
 
-    async def invoke(self, inputs: Input, runtime: Runtime, context: Any) -> Output:
+    async def invoke(self, inputs: Input, session: Session, context: Any) -> Output:
         # 准备要请求的字段列表（dict格式）
         request_dict = {
             elem.input_name: {
@@ -81,8 +80,8 @@ class UserInputComponent(ComponentExecutable, WorkflowComponent):
             for elem in self.input_conf_list
         }
 
-        # 使用 runtime.interact 请求用户输入（传入dict）
-        result = await runtime.interact(request_dict)
+        # 使用 session.interact 请求用户输入（传入dict）
+        result = await session.interact(request_dict)
 
         # 验证必填字段
         for input_elem in self.input_conf_list:
@@ -120,15 +119,13 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         构建包含UserInputComponent的工作流
         这个工作流会产生dict格式的中断
         """
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        workflow_card = WorkflowCard(
                 name="用户输入工作流",
                 id="user_input_flow",
                 version="1.0",
                 description="测试dict格式中断的工作流"
-            )
         )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=workflow_card)
 
         # 创建组件
         start = self._create_start_component()
@@ -166,7 +163,7 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
 
         return flow
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_dict_interrupt_should_return_again(self):
         """
         测试场景1：dict类型中断应该再次返回
@@ -184,7 +181,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         agent = WorkflowAgent(agent_config)
         agent.add_workflows([workflow])  # 使用add_workflows添加工作流
 
-        session_id = "test_dict_interrupt_001"
+        # 使用固定的 conversation_id 保持会话状态
+        session_id = "test-dict-interrupt-001"
 
         # 2. 第一次调用 - 触发中断
         result1 = []
@@ -239,8 +237,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(final_chunks), 1, "应该有一个workflow_final")
         logger.info(f"最终结果: {final_chunks[0].payload}")
 
-    @unittest.skip("skip system test - requires network")
-    async def test_str_interrupt_should_continue(self):
+    @unittest.skip("skip system test")
+    async def test_str_interrupt_should_continue_with_questioner(self):
         """
         测试场景2：str类型中断应该正常执行
         
@@ -252,7 +250,7 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         logger.info("\n========== 测试：str类型中断应该正常执行 ==========")
 
         # 导入QuestionerComponent
-        from openjiuwen.core.component.questioner_comp import QuestionerComponent, QuestionerConfig, FieldInfo
+        from openjiuwen.core.workflow.components.llm_related.questioner_comp import QuestionerComponent, QuestionerConfig, FieldInfo
 
         # 创建模型配置
         model_config = ModelConfig(
@@ -268,15 +266,13 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         )
 
         # 1. 构建包含Questioner的工作流
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        workflow_card = WorkflowCard(
                 name="问答工作流",
                 id="questioner_flow",
                 version="1.0",
                 description="测试str格式中断的工作流"
-            )
         )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=workflow_card)
 
         start = self._create_start_component()
         questioner_config = QuestionerConfig(
@@ -302,7 +298,7 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         构建包含QuestionerComponent的工作流
         这个工作流会产生str格式的中断
         """
-        from openjiuwen.core.component.questioner_comp import QuestionerComponent, QuestionerConfig, FieldInfo
+        from openjiuwen.core.workflow.components.llm_related.questioner_comp import QuestionerComponent, QuestionerConfig, FieldInfo
 
         # 创建模型配置
         model_config = ModelConfig(
@@ -317,15 +313,13 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        workflow_card = WorkflowCard(
                 name="问答工作流",
                 id="questioner_flow",
                 version="1.0",
                 description="测试str格式中断的工作流"
-            )
         )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=workflow_card)
 
         start = self._create_start_component()
         questioner_config = QuestionerConfig(
@@ -346,7 +340,7 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
 
         return flow
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_str_interrupt_should_continue(self):
         """
         测试场景2：str类型中断应该正常执行
@@ -370,7 +364,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         agent = WorkflowAgent(agent_config)
         agent.add_workflows([flow])  # 使用add_workflows添加工作流
 
-        session_id = "test_str_interrupt_001"
+        # 使用固定的 conversation_id 保持会话状态
+        session_id = "test-str-interrupt-001"
 
         # 3. 第一次调用 - 触发中断（Questioner返回str）
         result1 = []
@@ -443,7 +438,7 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(final_chunks_4), 1, "应该完成工作流（str中断+InteractiveInput）")
             logger.info(f"第四次调用最终结果: {final_chunks_4[0].payload}")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_workflow_jump_with_mixed_interrupts(self):
         """
         测试场景3：工作流跳转与混合中断类型
@@ -465,8 +460,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         questioner_workflow = self._build_questioner_workflow()
 
         # 更新workflow的metadata.description，用于意图识别
-        user_input_workflow.config().metadata.description = "查询天气信息、温度、气象数据"
-        questioner_workflow.config().metadata.description = "询问地点信息、位置查询"
+        user_input_workflow.card.description = "查询天气信息、温度、气象数据"
+        questioner_workflow.card.description = "询问地点信息、位置查询"
 
         # 创建模型配置
         model_config = ModelConfig(
@@ -493,7 +488,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         agent = WorkflowAgent(agent_config)
         agent.add_workflows([user_input_workflow, questioner_workflow])
 
-        session_id = "test_workflow_jump_001"
+        # 使用固定的 conversation_id 保持会话状态
+        session_id = "test-workflow-jump-001"
 
         # ========== 步骤1: user_input_flow触发dict中断 ==========
         

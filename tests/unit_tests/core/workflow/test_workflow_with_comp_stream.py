@@ -8,21 +8,20 @@ from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.component.base import WorkflowComponent, SimpleComponent
-from openjiuwen.core.component.end_comp import End, EndConfig
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.component.workflow_comp import SubWorkflowComponent
-from openjiuwen.core.context_engine.base import Context
+from openjiuwen.core.workflow import Input, Output, WorkflowCard
+from openjiuwen.core.workflow import End, EndConfig
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.workflow import WorkflowComponent
+from openjiuwen.core.workflow.components.flow_related.workflow_comp import SubWorkflowComponent
+from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable
-from openjiuwen.core.runtime.base import ComponentExecutable, Input, Output
-from openjiuwen.core.runtime.constants import END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY, WORKFLOW_EXECUTE_TIMEOUT
-from openjiuwen.core.runtime.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.runtime.runtime import BaseRuntime, Runtime
-from openjiuwen.core.runtime.workflow import WorkflowRuntime
-from openjiuwen.core.stream.base import StreamMode, BaseStreamMode, OutputSchema
-from openjiuwen.core.workflow.base import Workflow, WorkflowOutput, WorkflowChunk
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata, ComponentAbility, \
-    WorkflowInputsSchema
+from openjiuwen.core.session import END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY, WORKFLOW_EXECUTE_TIMEOUT
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session import BaseSession, Session
+from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.session.stream import StreamMode, BaseStreamMode, OutputSchema
+from openjiuwen.core.workflow import Workflow, WorkflowOutput, WorkflowChunk
+from openjiuwen.core.workflow import ComponentAbility
 from tests.unit_tests.core.workflow.mock_nodes import ComputeComponent2, DualAbilityWithErrorComponent
 
 pytestmark = pytest.mark.asyncio
@@ -30,18 +29,18 @@ pytestmark = pytest.mark.asyncio
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 
 
-class MockStreamNode(ComponentExecutable, WorkflowComponent):
+class MockStreamNode(WorkflowComponent):
     def __init__(self):
         super().__init__()
 
-    async def invoke(self, inputs, runtime: BaseRuntime, context: Context = None) -> WorkflowOutput:
+    async def invoke(self, inputs, session: BaseSession, context: ModelContext = None) -> WorkflowOutput:
         return inputs
 
     async def stream(
             self,
             inputs,
-            runtime: BaseRuntime,
-            context: Context = None,
+            session: BaseSession,
+            context: ModelContext = None,
             stream_modes: list[StreamMode] = None
     ) -> AsyncIterator[WorkflowChunk]:
         await asyncio.sleep(0.3)
@@ -53,32 +52,31 @@ class MockStreamNode(ComponentExecutable, WorkflowComponent):
 
 async def test_no_stream_called():
     with pytest.raises(JiuWenBaseException) as error:
-        config = WorkflowConfig()
-        flow = Workflow(config)
+        flow = Workflow()
         flow.set_start_comp("start", Start())
         flow.set_end_comp("end", End(), inputs_schema={}, response_mode="streaming")
         flow.add_workflow_comp("stream", MockStreamNode(), inputs_schema={})
         flow.add_connection("start", "stream")
         flow.add_stream_connection("stream", "end")
-        runtime = WorkflowRuntime()
-        runtime.config().set_envs({WORKFLOW_EXECUTE_TIMEOUT: 0.2})
-        await flow.invoke({"a": "生成markdown回复"}, runtime)
+        session = WorkflowSession()
+        session.config().set_envs({WORKFLOW_EXECUTE_TIMEOUT: 0.2})
+        await flow.invoke({"a": "生成markdown回复"}, session)
 
     assert error.value.error_code == StatusCode.WORKFLOW_INVOKE_TIMEOUT.code
     with pytest.raises(JiuWenBaseException) as error:
-        runtime = WorkflowRuntime()
-        runtime.config().set_envs({WORKFLOW_EXECUTE_TIMEOUT: 0.2})
-        async for chunk in flow.stream({"a": "生成markdown回复"}, runtime,
+        session = WorkflowSession()
+        session.config().set_envs({WORKFLOW_EXECUTE_TIMEOUT: 0.2})
+        async for chunk in flow.stream({"a": "生成markdown回复"}, session,
                                        stream_modes=[BaseStreamMode.OUTPUT]):
             logger.info(chunk)
     assert error.value.error_code == StatusCode.WORKFLOW_STREAM_TIMEOUT.code
 
 
-class Producer(ComponentExecutable, WorkflowComponent):
-    async def invoke(self, inputs: Input, runtime: Runtime, context: Context) -> Output:
+class Producer(WorkflowComponent):
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         return {"output": inputs.get("array")}
 
-    async def stream(self, inputs: Input, runtime: Runtime, context: Context) -> AsyncIterator[Output]:
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         logger.info(f"producer inputs: {inputs}")
         for v in inputs.get("array"):
             logger.info(f"send stream frame {v}")
@@ -104,13 +102,13 @@ async def test_multi_stream_workflow():
         OutputSchema(type='end node stream', index=12, payload={'answer': 2}),
         OutputSchema(type='end node stream', index=13, payload={'answer': 3})]
 
-    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
         chunks.append(chunk)
     assert chunks == expect_chunks
 
-    res = await wf.invoke({"inputs": [1, 2, 3]}, WorkflowRuntime())
+    res = await wf.invoke({"inputs": [1, 2, 3]}, WorkflowSession())
     logger.info(res)
     assert res.result == expect_chunks
 
@@ -140,15 +138,18 @@ async def test_batch_multi_stream_workflow():
 
     wf = create_component_workflow_with_template()
 
-    res = await wf.invoke({"inputs": [1, 2, 3]}, WorkflowRuntime())
+    res = await wf.invoke({"inputs": [1, 2, 3]}, WorkflowSession())
     logger.info(res)
     assert res.result == {'responseContent': 'a: 123; c: 123; batch: [1, 2, 3]; b: 123'}
 
     chunks = []
-    expect_chunks = [OutputSchema(type='workflow_final', index=0,
-                                  payload={'responseContent': 'a: 123; c: 123; batch: [1, 2, 3]; b: 123'})]
+    # End 组件批输出时也会发送 end node stream，然后发送 workflow_final
+    expect_chunks = [
+        OutputSchema(type='workflow_final', index=0,
+                     payload={'responseContent': 'a: 123; c: 123; batch: [1, 2, 3]; b: 123'})
+    ]
 
-    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
         chunks.append(chunk)
@@ -156,8 +157,7 @@ async def test_batch_multi_stream_workflow():
 
 
 def create_component_stream_workflow_with_template() -> Workflow:
-    config = WorkflowConfig()
-    workflow = Workflow(config)
+    workflow = Workflow()
     workflow.set_start_comp("start", Start(), inputs_schema={"array": "${inputs}"})
     workflow.add_workflow_comp("a", Producer(), inputs_schema={"array": "${start.array}"})
     workflow.add_workflow_comp("b", Producer(), inputs_schema={"array": "${start.array}"})
@@ -181,8 +181,7 @@ def create_component_stream_workflow_with_template() -> Workflow:
 
 
 def create_component_stream_workflow_without_template() -> Workflow:
-    config = WorkflowConfig()
-    workflow = Workflow(config)
+    workflow = Workflow()
     workflow.set_start_comp("start", Start(), inputs_schema={"array": "${inputs}"})
     workflow.add_workflow_comp("a", Producer(), inputs_schema={"array": "${start.array}"})
     workflow.add_workflow_comp("b", Producer(), inputs_schema={"array": "${start.array}"})
@@ -242,7 +241,7 @@ async def test_stream_component_in_sub_workflow_with_invoke():
         OutputSchema(type='end node stream', index=0, payload={'answer': 'sub_workflow: '}),
         OutputSchema(type='end node stream', index=1, payload={'answer': [1, 2, 3]})]
 
-    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
         chunks.append(chunk)
@@ -280,7 +279,7 @@ async def test_stream_component_in_sub_workflow_with_stream():
         OutputSchema(type='end node stream', index=13, payload={'answer': 2}),
         OutputSchema(type='end node stream', index=14, payload={'answer': 3})]
 
-    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
         chunks.append(chunk)
@@ -319,7 +318,7 @@ async def test_stream_component_in_sub_workflow_with_stream_collect():
             {'answer': 2},
             {'answer': 3}]})]
 
-    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
         chunks.append(chunk)
@@ -328,7 +327,7 @@ async def test_stream_component_in_sub_workflow_with_stream_collect():
 
 # Test the ability of workflow components to stream between components
 async def test_stream_component_in_sub_workflow_with_substream():
-    wf = Workflow(workflow_config=WorkflowConfig())
+    wf = Workflow()
     wf.set_start_comp("main_start", Start(), inputs_schema={"array": "${inputs}"})
     wf.add_workflow_comp("workflow", SubWorkflowComponent(create_component_stream_workflow_without_template()),
                          inputs_schema={"inputs": "${main_start.array}"})
@@ -352,7 +351,7 @@ async def test_stream_component_in_sub_workflow_with_substream():
         {'output': {'sub_workflow': {'c': 3}}},
         {'output': {'sub_workflow': {'batch': [1, 2, 3]}}}
     ]
-    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
         chunks.append(chunk.payload)
@@ -363,7 +362,7 @@ async def test_stream_component_in_sub_workflow_with_substream():
 
 # Test the ability of workflow components to stream between components with templates
 async def test_stream_component_in_sub_workflow_with_substream_template():
-    wf = Workflow(workflow_config=WorkflowConfig())
+    wf = Workflow()
     wf.set_start_comp("main_start", Start(), inputs_schema={"array": "${inputs}"})
     wf.add_workflow_comp("workflow", SubWorkflowComponent(create_component_stream_workflow_with_template()),
                          inputs_schema={"inputs": "${main_start.array}"})
@@ -392,7 +391,7 @@ async def test_stream_component_in_sub_workflow_with_substream_template():
         OutputSchema(type='end node stream', index=12, payload={'output': {'sub_workflow': 2}}),
         OutputSchema(type='end node stream', index=13, payload={'output': {'sub_workflow': 3}})]
 
-    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in wf.stream({"inputs": [1, 2, 3]}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
         chunks.append(chunk)
@@ -401,15 +400,15 @@ async def test_stream_component_in_sub_workflow_with_substream_template():
     assert expect_chunks == chunks
 
 
-class Interaction(WorkflowComponent, ComponentExecutable):
-    async def invoke(self, inputs: Input, runtime: Runtime, context: Context) -> Output:
-        result = await runtime.interact("please enter any input")
+class Interaction(WorkflowComponent):
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        result = await session.interact("please enter any input")
         return {"output": result}
 
 
 async def test_interaction_with_stream():
     def create_workflow() -> Workflow:
-        wf = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_interaction_with_stream")))
+        wf = Workflow(card=WorkflowCard(id="test_interaction_with_stream"))
         wf.set_start_comp("start", Start(), inputs_schema={"array": "${inputs}"})
         wf.add_workflow_comp("interaction", Interaction())
         wf.add_workflow_comp("stream", Producer(), inputs_schema={"array": "${start.array}"})
@@ -429,7 +428,7 @@ async def test_interaction_with_stream():
     wf2 = create_workflow()
     chunks = []
     interaction = False
-    async for chunk in wf1.stream({"inputs": [1, 2, 3]}, WorkflowRuntime(session_id="123"),
+    async for chunk in wf1.stream({"inputs": [1, 2, 3]}, WorkflowSession(session_id="123"),
                                   stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
@@ -438,13 +437,13 @@ async def test_interaction_with_stream():
     assert interaction
 
     logger.info("human in the loop...")
-    runtime = WorkflowRuntime(session_id="123")
+    session = WorkflowSession(session_id="123")
     actual_chunks = []
     expect_chunks = [OutputSchema(type='end node stream', index=0, payload={'answer': 'a: '}),
                      OutputSchema(type='end node stream', index=1, payload={'answer': '; batch: '}),
                      OutputSchema(type='end node stream', index=2, payload={'answer': {'inputs': [1, 2, 3]}})]
 
-    async for chunk in wf2.stream(InteractiveInput({"inputs": [1, 2, 3]}), runtime,
+    async for chunk in wf2.stream(InteractiveInput({"inputs": [1, 2, 3]}), session,
                                   stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
@@ -455,8 +454,8 @@ async def test_interaction_with_stream():
 async def test_interaction_with_exception():
     run_times = 0
 
-    class ExceptionComp(WorkflowComponent, ComponentExecutable):
-        async def stream(self, inputs: Input, runtime: Runtime, context: Context) -> AsyncIterator[Output]:
+    class ExceptionComp(WorkflowComponent):
+        async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
             if run_times == 0:
                 raise Exception("first time")
             else:
@@ -464,7 +463,7 @@ async def test_interaction_with_exception():
                     yield dict(output=i)
 
     def create_workflow_with_exception() -> Workflow:
-        wf = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_interaction_with_exception")))
+        wf = Workflow(card=WorkflowCard(id="test_interaction_with_exception"))
         wf.set_start_comp("start", Start(), inputs_schema={"array": "${inputs}"})
         wf.add_workflow_comp("exception", ExceptionComp())
         end = End(EndConfig(responseTemplate="a: {{a}}; batch: {{batch}}"))
@@ -480,15 +479,15 @@ async def test_interaction_with_exception():
     wf2 = create_workflow_with_exception()
 
     try:
-        res = await wf1.invoke({"inputs": [1, 2, 3]}, WorkflowRuntime(session_id="123"))
+        res = await wf1.invoke({"inputs": [1, 2, 3]}, WorkflowSession(session_id="123"))
         logger.info(res)
     except Exception as e:
         logger.error(e)
     run_times += 1
     logger.info("human in the loop...")
-    runtime = WorkflowRuntime(session_id="123")
-    runtime.config().set_envs({END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY: 1})
-    res = await wf2.invoke(InteractiveInput({"inputs": [1, 2, 3]}), runtime)
+    session = WorkflowSession(session_id="123")
+    session.config().set_envs({END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY: 1})
+    res = await wf2.invoke(InteractiveInput({"inputs": [1, 2, 3]}), session)
 
     expect_result = [
         OutputSchema(type='end node stream', index=0, payload={'answer': 'a: '}),
@@ -508,17 +507,17 @@ async def test_interaction_with_exception():
     assert res.result == expect_result
 
 
-class StreamNodeWithException(WorkflowComponent, ComponentExecutable):
+class StreamNodeWithException(WorkflowComponent):
     def __init__(self):
         super().__init__()
         self._raise_error: bool = True
 
-    async def stream(self, inputs: Input, runtime: Runtime, context: Context) -> AsyncIterator[Output]:
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         array = inputs.get("array")
         for item in array:
             yield {"array": item}
 
-    async def transform(self, inputs: Input, runtime: Runtime, context: Context) -> AsyncIterator[Output]:
+    async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         iter = inputs.get("array")
         i = 0
         async for item in iter:
@@ -529,7 +528,7 @@ class StreamNodeWithException(WorkflowComponent, ComponentExecutable):
                     self._raise_error = False
                     raise JiuWenBaseException(-1, "mock error")
 
-    async def collect(self, inputs: Input, runtime: Runtime, context: Context) -> Output:
+    async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         iter = inputs.get("array")
         results = []
         async for item in iter:
@@ -552,13 +551,13 @@ async def test_workflow_stream_with_exception():
     workflow.add_connection("collect_comp", "end_comp")
     with pytest.raises(JiuWenBaseException) as e:
         await workflow.invoke(inputs={"user_inputs": {"array": [1, 2, 3, 4, 5, 6, 7]}},
-                              runtime=WorkflowRuntime())
+                              session=WorkflowSession())
     assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
     assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="transform_comp",
                                                                                ability="transform",
                                                                                error="mock error")
     logger.info("after exception, execution again")
-    result = await workflow.invoke(inputs={"user_inputs": {"array": [1, 2, 3, 4, 5, 6, 7]}}, runtime=WorkflowRuntime())
+    result = await workflow.invoke(inputs={"user_inputs": {"array": [1, 2, 3, 4, 5, 6, 7]}}, session=WorkflowSession())
     assert result.result == {'output': {'result': [1, 2, 3, 4, 5, 6, 7]}}
 
 
@@ -630,7 +629,7 @@ async def test_node_with_dual_stream_abilities_transform_and_stream():
     user_inputs = {'user_inputs': {'a': 1, 'b': 2}}
     stream_chunks = []
 
-    async for chunk in flow.stream(user_inputs, runtime=WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in flow.stream(user_inputs, session=WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
         stream_chunks.append(chunk)
 
     # Verify results
@@ -727,7 +726,7 @@ async def test_dual_ability_node_with_stream_error():
     user_inputs = {'user_inputs': {'a': 1, 'b': 2}}
 
     with pytest.raises(JiuWenBaseException) as exc_info:
-        async for _ in flow.stream(user_inputs, runtime=WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+        async for _ in flow.stream(user_inputs, session=WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
             pass
 
     # Verify the exception is properly wrapped
@@ -782,7 +781,7 @@ async def test_dual_ability_node_with_transform_error():
     user_inputs = {'user_inputs': {'a': 1, 'b': 2}}
 
     with pytest.raises(JiuWenBaseException) as exc_info:
-        async for _ in flow.stream(user_inputs, runtime=WorkflowRuntime(), stream_modes=[BaseStreamMode.OUTPUT]):
+        async for _ in flow.stream(user_inputs, session=WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
             pass
 
     # Verify the exception is properly wrapped
@@ -791,12 +790,12 @@ async def test_dual_ability_node_with_transform_error():
     assert "transform" in exc_info.value.message.lower()  # Ability name should be in the message
 
 
-class StreamNode(SimpleComponent):
+class StreamNode(WorkflowComponent):
 
     def __init__(self, delay: float = 0.0):
         self.delay = delay
 
-    async def stream(self, inputs: Input, runtime: Runtime, context: Context) -> AsyncIterator[Output]:
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         await asyncio.sleep(self.delay)
         for i in range(0, 10):
             await asyncio.sleep(0.01)
@@ -813,14 +812,12 @@ async def test_stream_trigger_consumer_twice():
             "query": {
                 "type": "string",
                 "description": "用户输入信息",
-                "required": True
             }
         }
     }
-    workflow_inputs_schema = WorkflowInputsSchema(**inputs_schem_dict)
-    workflow_config = WorkflowConfig(metadata=WorkflowMetadata(name=name, id=wf_id, version=version, ),
-                                     workflow_inputs_schema=workflow_inputs_schema)
-    flow = Workflow(workflow_config=workflow_config)
+    workflow_inputs_schema = inputs_schem_dict
+    workflow_card = WorkflowCard(name=name, id=wf_id, version=version, inputs_schema=workflow_inputs_schema)
+    flow = Workflow(card=workflow_card)
 
     start_component = Start(
         {
@@ -843,7 +840,7 @@ async def test_stream_trigger_consumer_twice():
     flow.add_stream_connection("llm", "e")
     flow.add_stream_connection("llm2", "e")
 
-    async for chunk in flow.stream({"query": "请介绍一下你自己！"}, WorkflowRuntime()):
+    async for chunk in flow.stream({"query": "请介绍一下你自己！"}, WorkflowSession()):
         logger.info(chunk)
 
 
@@ -857,14 +854,12 @@ async def test_stream_trigger_consumer():
             "query": {
                 "type": "string",
                 "description": "用户输入信息",
-                "required": True
             }
         }
     }
-    workflow_inputs_schema = WorkflowInputsSchema(**inputs_schem_dict)
-    workflow_config = WorkflowConfig(metadata=WorkflowMetadata(name=name, id=wf_id, version=version, ),
-                                     workflow_inputs_schema=workflow_inputs_schema)
-    flow = Workflow(workflow_config=workflow_config)
+    workflow_inputs_schema = inputs_schem_dict
+    workflow_card = WorkflowCard(name=name, id=wf_id, version=version, inputs_schema=workflow_inputs_schema)
+    flow = Workflow(card=workflow_card)
 
     start_component = Start(
         {
@@ -884,5 +879,5 @@ async def test_stream_trigger_consumer():
     flow.add_connection("s", "llm")
     flow.add_stream_connection("llm", "e")
 
-    async for chunk in flow.stream({"query": "请介绍一下你自己！"}, WorkflowRuntime()):
+    async for chunk in flow.stream({"query": "请介绍一下你自己！"}, WorkflowSession()):
         logger.info(chunk)

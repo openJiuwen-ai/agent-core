@@ -4,32 +4,30 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from openjiuwen.agent.common.schema import PluginSchema
-from openjiuwen.agent.llm_agent.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from openjiuwen.core.single_agent import PluginSchema, WorkflowSchema
+from openjiuwen.core.application.agents_for_studio.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.workflow import End, WorkflowCard
+from openjiuwen.core.workflow import IntentDetectionComponent, IntentDetectionCompConfig
+from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.memory.config.config import MemoryEngineConfig
 from openjiuwen.core.memory.embed_models import APIEmbedModel
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.utils.tool.function.function import LocalFunction
-from openjiuwen.core.utils.tool.param import Param
-from openjiuwen.core.utils.tool.service_api.restful_api import RestfulApi
-from openjiuwen.core.utils.tool.tool import tool
-from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata, WorkflowInputsSchema
-from openjiuwen.agent.common.schema import WorkflowSchema
-from openjiuwen.core.component.intent_detection_comp import IntentDetectionComponent, IntentDetectionCompConfig
-from openjiuwen.core.component.llm_comp import LLMComponent, LLMCompConfig
-from openjiuwen.core.memory.config.config import SysMemConfig
-from openjiuwen.core.memory.engine.memory_engine import MemoryEngine
+from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.memory.store.impl.dbm_kv_store import DbmKVStore
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
-from sqlalchemy.ext.asyncio import create_async_engine
 from openjiuwen.core.memory.store.impl.milvus_semantic_store import MilvusSemanticStore
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.foundation.tool import LocalFunction
+from openjiuwen.core.foundation.tool import RestfulApi, ToolCard, RestfulApiCard
+from openjiuwen.core.foundation.tool import tool
+from openjiuwen.core.workflow import Workflow
 
-API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
-API_KEY = os.getenv("API_KEY", "sk-fake")
+API_BASE = os.getenv("API_BASE", "")
+API_KEY = os.getenv("API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
@@ -61,40 +59,57 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _create_tool():
         weather_plugin = RestfulApi(
-            name="WeatherReporter",
-            description="天气查询插件",
-            params=[
-                Param(name="location", description="天气查询的地点，必须为英文", type="string", required=True),
-                Param(name="date", description="天气查询的时间，格式为YYYY-MM-DD", type="string", required=True),
-            ],
-            path="http://127.0.0.1:8000/weather",
-            headers={},
-            method="GET",
-            response=[],
+            card=RestfulApiCard(
+                name="WeatherReporter",
+                description="天气查询插件",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "location": {"description": "天气查询的地点，必须为英文", "type": "string"},
+                        "date": {"description": "天气查询的时间，格式为YYYY-MM-DD", "type": "string"},
+                    },
+                    "required": ["location", "date"],
+                },
+                path="http://127.0.0.1:8000/weather",
+                headers={},
+                method="GET",
+            ),
         )
         return weather_plugin
 
     @staticmethod
     def _create_function_tool():
         weather_plugin = LocalFunction(
-            name="add",
-            description="加法",
-            params=[
-                Param(name="a", description="加数", type="number", required=True),
-                Param(name="b", description="被加数", type="number", required=True),
-            ],
-            func=lambda a, b: a + b
+            card=ToolCard(
+                name="add",
+                description="加法",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "a": {"description": "加数", "type": "number"},
+                        "b": {"description": "被加数", "type": "number"},
+                    },
+                    "required": ["a", "b"],
+                },
+            ),
+            func=lambda a, b: a + b,
         )
         return weather_plugin
 
     @staticmethod
     @tool(
-        name="add",
-        description="加法",
-        params=[
-            Param(name="a", description="加数", type="number", required=True),
-            Param(name="b", description="被加数", type="number", required=True),
-        ],
+        card=ToolCard(
+            name="add",
+            description="加法",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "a": {"description": "加数", "type": "number"},
+                    "b": {"description": "被加数", "type": "number"},
+                },
+                "required": ["a", "b"],
+            },
+        )
     )
     def add_function(a, b):
         """加法函数，使用tool注解装饰"""
@@ -233,14 +248,12 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         id = "weather_generation_text_workflow"
         version = "1.0"
         name = "weather_generation_text"
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        card = WorkflowCard(
                 name=name,
                 id=id,
                 version=version,
-                description="根据天气生成对应文本"
-            ),
-            workflow_inputs_schema=WorkflowInputsSchema(
+                description="根据天气生成对应文本",
+                inputs_schema=dict(
                 type="object",
                 properties={
                     "query": {
@@ -252,7 +265,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
                 required=['query']
             )
         )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=card)
         flow.set_start_comp("start", start, inputs_schema={"query": "${query}"})
         flow.add_workflow_comp("intent", intent, inputs_schema={"query": "${start.query}"})
         flow.add_workflow_comp("llm_1", llm_1, inputs_schema={"query": "${start.query}"})
@@ -303,9 +316,8 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             base_url=os.getenv("EMBED_API_BASE"),
             model_name=os.getenv("EMBED_MODEL_NAME"),
             api_key=os.getenv("EMBED_API_KEY"),
-            timeout=os.getenv("EMBED_TIMEOUT"),
-            max_retries=os.getenv("EMBED_MAX_RETRIES"),
-            max_batch_size=os.getenv("EMBED_MAX_BATCH_SIZE", 4),
+            timeout=int(os.getenv("EMBED_TIMEOUT", 60)),
+            max_retries=int(os.getenv("EMBED_MAX_RETRIES", 3)),
         )
         semantic_store = MilvusSemanticStore(
             milvus_host=os.getenv("MILVUS_HOST"),
@@ -323,8 +335,8 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         db_store = DefaultDbStore(create_async_engine(
             f"mysql+aiomysql://{db_user}:{db_passport}@{db_host}:{db_port}/{agent_db_name}?charset=utf8mb4"
         ))
-        MemoryEngine.register_store(kv_store=DbmKVStore(kv_db_path), db_store=db_store, semantic_store=semantic_store)
-        await MemoryEngine.create_mem_engine_instance(SysMemConfig())
+        LongTermMemory.register_store(kv_store=DbmKVStore(kv_db_path), db_store=db_store, semantic_store=semantic_store)
+        await LongTermMemory.create_mem_engine_instance(MemoryEngineConfig())
         print("✅ Memory engine created")
 
     @unittest.skip("require network")
@@ -460,6 +472,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         llm_agent_config = create_llm_agent_config(
             agent_id="react_agent_123",
             agent_version="0.0.1",
+
             description="AI助手",
             plugins=[],
             workflows=[self._create_workflow_schema()],
@@ -513,7 +526,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         group_id = "react_agent_123"
         model_config = self._create_model_config()
         prompt_template = self._create_prompt_template()
-        memory_engine = MemoryEngine.get_mem_engine_instance()
+        memory_engine = LongTermMemory.get_mem_engine_instance()
         memory_engine.set_group_llm_config(group_id=group_id, llm_config=model_config)
         llm_agent_config = create_llm_agent_config(
             agent_id="react_agent_123",
@@ -555,7 +568,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         group_id = "react_agent_123"
         model_config = self._create_model_config()
         prompt_template = self._create_prompt_template()
-        memory_engine = MemoryEngine.get_mem_engine_instance()
+        memory_engine = LongTermMemory.get_mem_engine_instance()
         memory_engine.set_group_llm_config(group_id=group_id, llm_config=model_config)
         llm_agent_config = create_llm_agent_config(
             agent_id="react_agent_123",

@@ -34,17 +34,16 @@ pip install -U openjiuwen
 ```python
 import os
 import asyncio
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.llm_comp import LLMComponent, LLMCompConfig
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata, WorkflowInputsSchema
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.agent.workflow_agent.workflow_agent import WorkflowAgent
-from openjiuwen.agent.config.workflow_config import WorkflowAgentConfig
-from openjiuwen.agent.common.schema import WorkflowSchema
+from openjiuwen.core.workflow import WorkflowConfig, WorkflowMetadata, WorkflowInputsSchema
+from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+from openjiuwen.core.single_agent.config import WorkflowAgentConfig
+from openjiuwen.core.single_agent.schema.schema import WorkflowSchema
 
 # TODO：请提供用户的大模型配置信息
 os.environ.setdefault("API_BASE", "your_api_base")
@@ -64,22 +63,21 @@ model_config = ModelConfig(
 )
 
 # 创建工作流配置
-workflow_config = WorkflowConfig(
-    metadata=WorkflowMetadata(
+workflow_card = WorkflowCard(
         id="generate_text_workflow",
         name="generate_text",
         version="1.0",
         description="根据用户输入生成文本"
     ),
-    workflow_inputs_schema=WorkflowInputsSchema(
+    inputs_schema=WorkflowInputsSchema(
         type="object",
         properties={"query": {"type": "string", "description": "用户输入", "required": True}},
         required=['query']
     )
-)
+
 
 # 初始化工作流
-flow = Workflow(workflow_config=workflow_config)
+flow = Workflow(card=workflow_card)
 
 # 创建组件
 start = Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
@@ -103,9 +101,9 @@ flow.add_connection("llm", "end")
 
 # 创建并绑定Agent
 schema = WorkflowSchema(
-    id=flow.config().metadata.id,
-    name=flow.config().metadata.name,
-    version=flow.config().metadata.version,
+    id=flow.card.id,
+    name=flow.card.name,
+    version=flow.card.version,
     description="第一个工作流",
     inputs={"query": {"type": "string"}},
 )
@@ -118,11 +116,13 @@ agent_config = WorkflowAgentConfig(
 workflow_agent = WorkflowAgent(agent_config)
 workflow_agent.bind_workflows([flow])
 
+
 # 运行Agent
 async def main():
     invoke_result = await Runner.run_agent(workflow_agent, {"query": "你好,请生成一则笑话,不要超过20个字"})
     output_result = invoke_result.get("output").result
     print(f"WorkflowAgent output result >>> {output_result.get('responseContent')}")
+
 
 asyncio.run(main())
 ```

@@ -10,6 +10,8 @@ from typing import Any, List, Optional, Dict
 import chromadb
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.common.config import IndexConfig
 from openjiuwen.core.retrieval.common.document import TextChunk
@@ -43,7 +45,10 @@ class ChromaIndexer(Indexer):
             doc_id_field: Document ID field name
         """
         if not chroma_path or not chroma_path.strip():
-            raise ValueError("chroma_path is required and cannot be empty")
+            raise JiuWenBaseException(
+                StatusCode.INDEXING_PATH_REQUIRED_ERROR.code,
+                "chroma_path is required and cannot be empty"
+            )
         
         self.chroma_path = chroma_path
         self.text_field = text_field
@@ -74,7 +79,8 @@ class ChromaIndexer(Indexer):
             embeddings = None
             if config.index_type in ("vector", "hybrid"):
                 if not embed_model:
-                    raise ValueError(
+                    raise JiuWenBaseException(
+                        StatusCode.INDEXING_EMBED_MODEL_REQUIRED_ERROR.code,
                         "embed_model is required for vector/hybrid index type"
                     )
                 texts = [chunk.text for chunk in chunks]

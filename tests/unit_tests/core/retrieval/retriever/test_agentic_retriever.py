@@ -9,6 +9,7 @@ import pytest
 from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
 @pytest.fixture
@@ -70,13 +71,13 @@ class TestAgenticRetriever:
     @classmethod
     def test_init_without_graph_retriever(cls, mock_llm_client):
         """Test initialization without graph retriever"""
-        with pytest.raises(ValueError, match="graph_retriever is required"):
+        with pytest.raises(JiuWenBaseException, match="graph_retriever is required"):
             AgenticRetriever(graph_retriever=None, llm_client=mock_llm_client)
 
     @classmethod
     def test_init_without_llm_client(cls, mock_graph_retriever):
         """Test initialization without LLM client"""
-        with pytest.raises(ValueError, match="llm_client is required"):
+        with pytest.raises(JiuWenBaseException, match="llm_client is required"):
             AgenticRetriever(graph_retriever=mock_graph_retriever, llm_client=None)
 
     @pytest.mark.asyncio
@@ -159,7 +160,7 @@ class TestAgenticRetriever:
             llm_client=mock_llm_client,
         )
         
-        with pytest.raises(ValueError, match="top_k is required"):
+        with pytest.raises(JiuWenBaseException, match="top_k is required"):
             await retriever.retrieve("test query", top_k=None)
 
     @pytest.mark.asyncio

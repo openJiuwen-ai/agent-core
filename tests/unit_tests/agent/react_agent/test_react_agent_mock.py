@@ -2,7 +2,7 @@
 使用 Mock 大模型测试 ReAct Agent 功能（不使用 Runner）
 
 本测试用例通过模拟大模型返回来提升测试速度和稳定性。
-直接调用 agent.invoke() 方法，不依赖 Runner。
+直接调用 single_agent.invoke() 方法，不依赖 Runner。
 
 ## 测试场景
 
@@ -16,7 +16,7 @@
 - 使用 `MockLLMModel` 类继承 `BaseChatModel`，实现所有必要的方法
 - 预定义 2 次 LLM 调用的返回值（按调用顺序）
 - 通过 `patch` ModelFactory.get_model 来注入 mock 实例
-- 直接调用 agent.invoke()，不使用 Runner
+- 直接调用 single_agent.invoke()，不使用 Runner
 
 ## 优势
 
@@ -33,13 +33,12 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.agent.react_agent.react_agent import create_react_agent_config, ReActAgent
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.utils.llm.base import BaseModelInfo, BaseModelClient
-from openjiuwen.core.utils.llm.messages import AIMessage, UsageMetadata
-from openjiuwen.core.utils.tool.schema import ToolCall
-from openjiuwen.core.utils.tool.function.function import LocalFunction
-from openjiuwen.core.utils.tool.param import Param
+from openjiuwen.core.single_agent import create_react_agent_config, ReActAgent
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import BaseModelInfo, BaseModelClient
+from openjiuwen.core.foundation.llm import AIMessage, UsageMetadata
+from openjiuwen.core.foundation.tool import ToolCall
+from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
 
 class MockLLMModel(BaseModelClient):
@@ -118,7 +117,7 @@ class MockLLMModel(BaseModelClient):
 
 class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
     """测试 ReAct Agent 功能（使用 Mock LLM，不使用 Runner）"""
-    
+
     @staticmethod
     def _create_model():
         """创建模型配置"""
@@ -133,21 +132,27 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
                 timeout=30
             )
         )
-    
+
     @staticmethod
     def _create_function_tool():
         """创建 LocalFunction 工具 - 加法"""
         add_plugin = LocalFunction(
-            name="add",
-            description="加法运算",
-            params=[
-                Param(name="a", description="第一个加数", type="number", required=True),
-                Param(name="b", description="第二个加数", type="number", required=True),
-            ],
-            func=lambda a, b: a + b
+            card=ToolCard(
+                name="add",
+                description="加法运算",
+                input_params={
+                    "type": "object",
+                    "properties": {
+                        "a": {"description": "第一个加数", "type": "number"},
+                        "b": {"description": "第二个加数", "type": "number"},
+                    },
+                    "required": ["a", "b"],
+                },
+            ),
+            func=lambda a, b: a + b,
         )
         return add_plugin
-    
+
     @staticmethod
     def _create_prompt_template():
         """创建提示模板"""
@@ -155,7 +160,7 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
         return [
             dict(role="system", content=system_prompt)
         ]
-    
+
     @pytest.mark.asyncio
     async def test_react_agent_invoke_with_mock_llm(self):
         """测试 ReAct Agent 使用 Mock LLM 调用工具（不使用 Runner）
@@ -167,10 +172,10 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
         4. ReAct Agent 再次调用 LLM，返回最终答案
         """
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
-        
+
         # ==================== 准备 Mock LLM ====================
         mock_llm = MockLLMModel(api_key="mock_key", api_base="mock_url")
-        
+
         # 定义所有 LLM 调用的返回值（按调用顺序）
         all_llm_responses = [
             # 第1次调用：ReAct Agent 决定调用 add 工具
@@ -198,16 +203,16 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
                 )
             ),
         ]
-        
+
         mock_llm.set_responses(all_llm_responses)
-        
+
         # ==================== 使用 Patch Mock LLM ====================
-        with patch('openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
+        with patch('openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
             mock_get_model.return_value = mock_llm
-            
+
             # ==================== 创建工具 ====================
             add_tool = self._create_function_tool()
-            
+
             # ==================== 创建 ReAct Agent ====================
             react_agent_config = create_react_agent_config(
                 agent_id="react_agent_mock_test",
@@ -216,27 +221,27 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
                 model=self._create_model(),
                 prompt_template=self._create_prompt_template()
             )
-            
+
             react_agent: ReActAgent = ReActAgent(react_agent_config)
             react_agent.add_tools([add_tool])
-            
-            # ==================== 直接调用 agent.invoke() ====================
+
+            # ==================== 直接调用 single_agent.invoke() ====================
             result = await react_agent.invoke(
                 {"conversation_id": "test_session", "query": "计算1+2"}
             )
-            
+
             print(f"ReActAgent 输出结果：{result}")
-            
+
             # ==================== 验证结果 ====================
             self.assertIsInstance(result, dict, "应该返回字典")
             self.assertEqual(result['result_type'], 'answer', "应该返回 answer 类型")
             self.assertIn('output', result, "结果应该包含 output 字段")
             print(f"✅ 测试通过：返回最终答案：{result['output']}")
-            
+
             # 验证答案内容
             self.assertIn('3', result['output'], "答案应该包含计算结果3")
             print(f"✅ 答案内容校验通过")
-            
+
             # 验证 Mock LLM 被调用了 2 次
             self.assertEqual(mock_llm.call_count, 2, "Mock LLM 应该被调用2次")
             print(f"✅ Mock LLM 调用次数校验通过：{mock_llm.call_count} 次")
@@ -244,4 +249,3 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
-

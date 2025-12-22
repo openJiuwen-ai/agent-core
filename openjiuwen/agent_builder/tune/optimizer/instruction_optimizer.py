@@ -9,14 +9,14 @@ from typing import List, Optional, Dict
 
 from openjiuwen.agent_builder.tune.utils import TuneUtils
 from openjiuwen.core.operator.llm_call import LLMCall
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.utils.llm.model_utils.model_factory import ModelFactory
-from openjiuwen.core.utils.prompt.template.template import Template
-from openjiuwen.core.utils.prompt.assemble.assembler import Assembler
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
 from openjiuwen.agent_builder.tune.base import EvaluatedCase, TuneConstant
 from openjiuwen.agent_builder.tune.optimizer.base import BaseOptimizer, TextualParameter
 
-PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE = Template(content="""
+PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE = PromptTemplate(content="""
 你是一位提示词优化专家，你的任务是根据提供的信息对提示词进行优化。具体信息如下:
 首先，请阅读以下提示词:
 <prompt_base>
@@ -56,7 +56,7 @@ PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE = Template(content="""
 """)
 
 
-PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE = Template(content="""
+PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE = PromptTemplate(content="""
 你是一位提示词优化专家，你的任务是根据提供的信息对提示词进行优化。具体信息如下:
 首先，请阅读以下system和user提示词:
 <system_prompt_base>
@@ -103,7 +103,7 @@ PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE = Template(content="""
 """)
 
 
-CREATE_PROMPT_TEXTUAL_GRADIENT_TEMPLATE = Template(content="""
+CREATE_PROMPT_TEXTUAL_GRADIENT_TEMPLATE = PromptTemplate(content="""
 作为提示词优化专家，我的目标是帮助代理高效且成功地完成任务
 当前的system和user提示词是:
 <system_prompt_base>
@@ -131,7 +131,7 @@ CREATE_PROMPT_TEXTUAL_GRADIENT_TEMPLATE = Template(content="""
 """)
 
 
-CREATE_BAD_CASE_TEMPLATE = Template(content="""
+CREATE_BAD_CASE_TEMPLATE = PromptTemplate(content="""
 [question]: {{question}}
 [expected answer]: {{label}}
 [assistant answer]: {{answer}}
@@ -139,7 +139,7 @@ CREATE_BAD_CASE_TEMPLATE = Template(content="""
 === 
 """)
 
-PLACEHOLDER_RESTORE_TEMPLATE = Template(content="""
+PLACEHOLDER_RESTORE_TEMPLATE = PromptTemplate(content="""
 作为提示词优化专家，你的任务是根据给定信息补全提示词中的占位符
 原始提示词：
 <original_prompt>
@@ -256,7 +256,7 @@ class InstructionOptimizer(BaseOptimizer):
         return textual_gradient
 
     def _optimize_instruction(self,
-                              instruction: Template,
+                              instruction: PromptTemplate,
                               textual_gradient,
                               tools):
         """update instruction"""
@@ -271,8 +271,8 @@ class InstructionOptimizer(BaseOptimizer):
         return self._extract_optimized_prompt_from_response(response, tag="PROMPT_OPTIMIZED")
 
     def _optimize_both_instruction(self,
-                                   system_prompt: Template,
-                                   user_prompt: Template,
+                                   system_prompt: PromptTemplate,
+                                   user_prompt: PromptTemplate,
                                    textual_gradient,
                                    tools):
         """update instruction"""
@@ -335,10 +335,10 @@ class InstructionOptimizer(BaseOptimizer):
         return optimized_prompt
 
     @staticmethod
-    def _find_placeholders_from_prompt(prompt: Template | str) -> List[str]:
-        return Assembler(prompt.content).input_keys \
-            if isinstance(prompt, Template) \
-            else Assembler(prompt).input_keys
+    def _find_placeholders_from_prompt(prompt: PromptTemplate | str) -> List[str]:
+        return PromptAssembler(prompt.content).input_keys \
+            if isinstance(prompt, PromptTemplate) \
+            else PromptAssembler(prompt).input_keys
 
     @staticmethod
     def _find_missing_placeholders(ori_placeholders, opt_placeholders) -> List[str]:
@@ -358,7 +358,7 @@ class InstructionOptimizer(BaseOptimizer):
                  )
         ).to_messages()
         restored_prompt = self._model.invoke(self._model_name, messages).content
-        restored_placeholders = Assembler(restored_prompt).input_keys
+        restored_placeholders = PromptAssembler(restored_prompt).input_keys
         missing_placeholders = self._find_missing_placeholders(all_placeholders, restored_placeholders)
         if missing_placeholders:
             restored_prompt = restored_prompt + "\n" + "\n".join(f"{{{{{ph}}}}}"for ph in missing_placeholders)

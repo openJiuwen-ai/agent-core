@@ -10,10 +10,10 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.utils.llm.messages import BaseMessage
-from openjiuwen.core.utils.tool.schema import ToolInfo
+from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.operator.llm_call import LLMCall
-from openjiuwen.core.runtime.runtime import Runtime
+from openjiuwen.core.session import Session
 from openjiuwen.agent_builder.tune.utils import TuneUtils
 from openjiuwen.agent_builder.tune.base import EvaluatedCase
 
@@ -112,15 +112,15 @@ class BaseOptimizer:
                              llm_call_id: str,
                              input: Dict[str, str],
                              output: BaseMessage,
-                             runtime: Runtime
+                             session: Session
                              ):
         trace_node = TraceNode(
-            case_id=runtime.session_id(),
+            case_id=session.session_id(),
             llm_call_id=llm_call_id,
             inputs=input,
             outputs=TuneUtils.get_output_string_from_message(output)
         )
-        self._history.add_history(runtime.session_id(), trace_node)
+        self._history.add_history(session.session_id(), trace_node)
 
     def _batch_set_optimizer_callback(self, callback: Optional[Callable]) -> None:
         for _, param in self._parameters.items():

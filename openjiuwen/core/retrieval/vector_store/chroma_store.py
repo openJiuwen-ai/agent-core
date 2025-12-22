@@ -13,6 +13,8 @@ from typing import Any, List, Optional
 import chromadb
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult, RetrievalResult
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
@@ -50,7 +52,10 @@ class ChromaVectorStore(VectorStore):
         """
         # Validate chroma_path
         if not chroma_path or not chroma_path.strip():
-            raise ValueError("chroma_path is required and cannot be empty")
+            raise JiuWenBaseException(
+                StatusCode.VECTOR_STORE_PATH_REQUIRED_ERROR.code,
+                "chroma_path is required and cannot be empty"
+            )
         
         self.config = config
         self.collection_name = config.collection_name

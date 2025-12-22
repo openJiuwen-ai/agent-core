@@ -1,12 +1,10 @@
 import pytest
 
-from openjiuwen.agent.common.enum import ControllerType
-from openjiuwen.agent.common.schema import WorkflowSchema
-from openjiuwen.agent.config.workflow_config import WorkflowAgentConfig
-from openjiuwen.agent.workflow_agent.workflow_agent import WorkflowAgent
-from openjiuwen.core.runtime.config import WorkflowConfig
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowMetadata
+from openjiuwen.core.common.constants.enums import ControllerType
+from openjiuwen.core.single_agent import WorkflowAgentConfig, WorkflowSchema
+from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+from openjiuwen.core.workflow import WorkflowCard
+from openjiuwen.core.workflow import Workflow
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, Node1, MockEndNode
 
 
@@ -14,14 +12,12 @@ from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, Node1, Mock
 class TestWorkflowAgent:
     @staticmethod
     def _build_workflow(name, id, version):
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        workflow_card = WorkflowCard(
                 id=id,
                 version=version,
                 name=name,
-            )
         )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=workflow_card)
         flow.set_start_comp("start", MockStartNode("start"),
                             inputs_schema={
                                 "query": "${query}"})
@@ -61,7 +57,7 @@ class TestWorkflowAgent:
         return agent
 
     # ---------- 测试用例 ----------
-    # 等待workflowAgent合入后开启
+    # Todo: 等待workflowAgent合入后开启
     @pytest.mark.asyncio
     async def test_invoke_single(self, agent):
         inputs = {"query": "hi"}

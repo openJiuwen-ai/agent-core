@@ -1,0 +1,183 @@
+components: |
+  - **开始**("type": "Start")：工作流的起始节点，用于初始化流程。
+  - **结束**("type": "End")：工作流的结束节点。
+  - **大模型**("type": "LLM")：调用大语言模型的节点，根据入参和提示词生成回复。
+  - **意图识别**("type": "IntentDetection")：根据用户输入进行分类并控制流程走向不同分支进行处理。
+  - **提问器**("type": "Questioner")：通过与用户对话的方式完成预配置参数的提取。
+  - **代码**("type": "Code")：执行自定义python代码逻辑，无法完成主观任务。
+  - **插件**("type": "Plugin")：集成预置或自定义的第三方插件，完成特定功能。
+  - **输出**("type": "Output")：在工作流执行过程中输出指定内容，例如"正在执行中"等状态暂时或安抚语。
+  - **选择器**("type": "Branch")：根据条件判断，决定工作流的执行路径。
+start: |
+  开始节点：工作流的起始节点，支持多个输出
+  限制：outputs必须包含用户输入参数，即存在 {"name": "query", "description": "用户输入"} 元素
+  {
+    "id": "node_start",
+    "type": "Start",
+    "description": "工作流开始",
+    "parameters": {
+      "outputs": [{"name": "query", "description": "用户输入"}]
+    },
+    "next": "node_end"
+  }
+end: |
+  结束节点：配置template定义最终输出的形式，支持多个输入参数
+  限制：
+  1. 没有输出参数，禁止其他节点引用结束节点的输出
+  2. template中引用inputs的参数需要使用双括号的形式{{}}
+  {
+    "id": "node_end",
+    "type": "End",
+    "description": "工作流结束",
+    "parameters": {
+      "inputs": [{"name": "result", "value": "${node_start.query}"}],
+      "configs": {"template": "{{result}}"}
+    }
+  }
+llm: |
+  大模型节点：通过配置system_prompt和user_prompt调用大模型生成回复
+  限制：system_prompt和user_prompt中引用inputs的参数需要使用双括号的形式{{}}
+  {
+    "id": "node_llm",
+    "type": "LLM",
+    "description": "调用大模型生成回复",
+    "parameters": {
+      "inputs": [{"name": "query", "value": "${node_start.query}"}],
+      "outputs": [{"name": "output", "description": "大模型输出"}],
+      "configs": {
+        "system_prompt": "## 人设\\n你是一个xxx。\\n\\n## 任务描述\\nxxx",
+        "user_prompt": "{{query}}"
+      }
+    },
+    "next": "node_end"
+  }
+intent_detection: |
+  意图识别节点：可以自定义配置prompt进行分类
+  限制：
+  1. conditions中expression固定只能使用contain
+  2. default分支必须存在，表示其他意图。
+  3. 只包含input一个输入参数，没有输出参数。
+  4. configs中必须包含prompt，内容可自定义
+  5. 没有输出参数，禁止其他节点引用意图识别节点的输出
+  {
+    "id": "node_intent_detection",
+    "type": "IntentDetection",
+    "description": "根据输入判断意图类别",
+    "parameters": {
+      "inputs": [{"name": "input", "value": "${node_start.query}"}],
+      "configs": {"prompt": "你是一个功能分类器，可以根据用户的请求，结合相应的功能类别描述，帮助用户选择正确的分支"},
+      "conditions": [
+        {
+          "branch": "branch_1",
+          "description": "分类1",
+          "expression": "${node_intent_detection.rawOutput} contain 分类1",
+          "next": "node_llm"
+        },
+        {
+          "branch": "branch_2",
+          "description": "分类2",
+          "expression": "${node_intent_detection.rawOutput} contain 分类2",
+          "next": "node_llm_2"
+        },
+        {
+          "branch": "branch_0",
+          "description": "默认分支",
+          "expression": "default",
+          "next": "node_end"
+        }
+      ]
+    }
+  }
+questioner: |
+  提问器节点：配置prompt向用户提问，按照预配置的outputs参数从用户回复中提取内容。
+  限制：prompt中引用inputs的参数需要使用双括号的形式{{}}
+  {
+    "id": "node_questioner",
+    "type": "Questioner",
+    "description": "提问用户的出行目的和出行方式",
+    "parameters": {
+      "inputs": [{"name": "input", "value": "${node_start.query}"}],
+      "outputs": [{"name": "destination", "description": "出行目的地"}, {"name": "travel_mode", "description": "出行方式"}],
+      "configs": {"prompt": "请输入出行目的地以及出行方式"}
+    },
+    "next": "node_llm"
+  }
+code: |
+  代码节点：配置code自定义代码逻辑，保障代码正常运行，需要在代码区域使用转义字符
+  限制：inputs参数按照`name: value`的键值对放入args.params中，代码返回结果时同样需要按照`名称: 值`的形式返回字典，且名称需要和outputs配置的参数保持一致
+  {
+    "id": "node_code",
+    "type": "Code",
+    "description": "计算BMI",
+    "parameters": {
+      "inputs": [{"name": "height", "value": "${node_questioner.height}"}, {"name": "weight", "value": "${node_questioner.weight}"}],
+      "outputs": [{"name": "bmi", "description": "计算的BMI结果"}],
+      "configs": {"code": "def main(args: dict):\\n    '''运行代码会调用此函数\\n    :param args: 输入固定为args字典类型，kv为输入参数键值对在args.params中\\n    :return: 输出参数为字典类型，kv为输出参数键值对\\n    '''\\n    params = args.get('params')\\n    h = params.get('height')\\n    w = params.get('weight')\\n    bmi = w / h / h\\n    result = {'bmi': bmi}\\n    return result"}
+    },
+    "next": "node_llm"
+  }
+plugin: |
+  插件节点：通过配置tool_id选取插件
+  限制：tool_id需要从提供的工具资源列表中选取，并保持输入输出参数与对应资源的输入输出相同
+  {
+    "id": "node_plugin",
+    "type": "Plugin",
+    "description": "调用OCR",
+    "parameters": {
+      "inputs": [{"name": "image_file", "value": "${node_start.input_file}"}],
+      "outputs": [{"name": "text", "description": "文本识别结果"}],
+      "configs": {"tool_id": "mock_ocr", "tool_name": "ocr"}
+    },
+    "next": "node_llm"
+  }
+output: |
+  输出节点：配置template定义输出的内容形式，
+  限制：
+  1. template中使用双括号形式{{}}引用输入参数 
+  2. 需要使用inputs中的所有参数，不能遗漏，支持零到多个输入参数
+  3. 没有输出参数，禁止其他节点引用输出节点的输出
+  {
+    "id": "node_output",
+    "type": "Output",
+    "description": "输出大模型回答",
+    "parameters": {
+      "inputs": [{"name": "content", "value": "${node_llm.output}"}],
+      "configs": {"template": "{{content}}"}
+    },
+    "next": "node_end"
+  }
+branch: |
+  选择器节点：通过对参数进行条件判断控制分支走向
+  限制：
+  1. 当一个条件分支只有一个条件关系时使用`"expression": "条件表达式"`，存在多个条件关系时使用`"expressions": ["条件表达式1", "条件表达式2"]`
+  2. expression/expressions 中支持 eq/not_eq/contain/not_contain/longer_than/longer_than_or_eq/short_than/short_than_or_eq/is_empty/is_not_empty 十种方式条件关系
+  3. operator支持and/or两种方式，只要一个条件分支存在多个条件表达式时才被使用。
+  4. default分支必须存在。
+  {
+    "id": "node_branch",
+    "type": "Branch",
+    "description": "条件判断",
+    "parameters": {
+      "conditions": [
+        {
+          "branch": "branch_1",
+          "description": "当值大于0且小于5时",
+          "expressions": ["${node_questioner.number} longer_than 0", "${node_questioner.number} short_than 5"],
+          "operator": "and",
+          "next": "node_llm"
+        },
+        {
+          "branch": "branch_2",
+          "description": "当值为空时",
+          "expression": "${node_questioner.number} is_empty",
+          "next": "node_llm_2"
+        },
+        {
+          "branch": "branch_0",
+          "description": "默认分支",
+          "expression": "default",
+          "next": "node_end"
+        }
+      ]
+    }
+  }

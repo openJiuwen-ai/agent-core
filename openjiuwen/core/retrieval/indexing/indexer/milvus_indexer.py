@@ -11,6 +11,8 @@ from typing import Any, List, Optional, Dict
 from pymilvus import DataType, Function, FunctionType, MilvusClient, MilvusException
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.common.config import IndexConfig
 from openjiuwen.core.retrieval.common.document import TextChunk
@@ -84,7 +86,8 @@ class MilvusIndexer(Indexer):
             embeddings = None
             if config.index_type in ("vector", "hybrid"):
                 if not embed_model:
-                    raise ValueError(
+                    raise JiuWenBaseException(
+                        StatusCode.INDEXING_EMBED_MODEL_REQUIRED_ERROR.code,
                         "embed_model is required for vector/hybrid index type"
                     )
                 texts = [chunk.text for chunk in chunks]
@@ -322,7 +325,8 @@ class MilvusIndexer(Indexer):
                     dimension = None
 
             if dimension is None or dimension == 0:
-                raise ValueError(
+                raise JiuWenBaseException(
+                    StatusCode.INDEXING_DIMENSION_REQUIRED_ERROR.code,
                     "dimension is required for vector/hybrid index type"
                 )
 

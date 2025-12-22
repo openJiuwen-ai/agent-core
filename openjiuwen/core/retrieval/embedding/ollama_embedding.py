@@ -10,6 +10,8 @@ from typing import Any, List, Optional
 import requests
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
 
@@ -76,12 +78,14 @@ class OllamaEmbedding(Embedding):
             model_names = [model["name"] for model in models]
 
             if self.model_name not in model_names:
-                raise ValueError(
+                raise JiuWenBaseException(
+                    StatusCode.EMBEDDING_MODEL_NOT_FOUND_ERROR.code,
                     f"Model '{self.model_name}' not found in available models: {model_names}. "
                     f"Make sure to pull the model first: ollama pull {self.model_name}"
                 )
         except requests.exceptions.RequestException as e:
-            raise ConnectionError(
+            raise JiuWenBaseException(
+                StatusCode.EMBEDDING_CONNECTION_ERROR.code,
                 f"Could not connect to Ollama at {self.base_url}. Is Ollama running?"
             ) from e
 
@@ -111,7 +115,10 @@ class OllamaEmbedding(Embedding):
 
     async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
         if not text.strip():
-            raise ValueError("Empty text provided for embedding")
+            raise JiuWenBaseException(
+                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
+                "Empty text provided for embedding"
+            )
 
         embeddings = await self._get_ollama_embedding(text, **kwargs)
         return embeddings[0]
@@ -123,17 +130,24 @@ class OllamaEmbedding(Embedding):
         **kwargs: Any,
     ) -> List[List[float]]:
         if not texts:
-            raise ValueError("Empty texts list provided")
+            raise JiuWenBaseException(
+                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
+                "Empty texts list provided"
+            )
 
         # Filter out empty texts
         non_empty_texts = [text for text in texts if text.strip()]
         if len(non_empty_texts) != len(texts):
-            raise ValueError(
+            raise JiuWenBaseException(
+                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
                 f"{len(texts) - len(non_empty_texts)} chunks are empty while embedding"
             )
 
         if not non_empty_texts:
-            raise ValueError("All texts are empty after filtering")
+            raise JiuWenBaseException(
+                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
+                "All texts are empty after filtering"
+            )
 
         # Process in batches if batch_size is specified
         if batch_size is not None and batch_size > 0:
@@ -158,7 +172,10 @@ class OllamaEmbedding(Embedding):
         import asyncio
         
         if not text:
-            raise ValueError("Empty text or list provided for embedding")
+            raise JiuWenBaseException(
+                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
+                "Empty text or list provided for embedding"
+            )
 
         payload = {
             "model": self.model_name,
@@ -179,15 +196,22 @@ class OllamaEmbedding(Embedding):
                 response.raise_for_status()
                 result = response.json()
                 if "embeddings" not in result:
-                    raise ValueError(f"No embeddings in response: {result}")
+                    raise JiuWenBaseException(
+                        StatusCode.EMBEDDING_RESPONSE_FORMAT_ERROR.code,
+                        f"No embeddings in response: {result}"
+                    )
 
                 return result["embeddings"]
 
             except requests.exceptions.RequestException as e:
                 if attempt == self.max_retries - 1:
-                    raise RuntimeError(
+                    raise JiuWenBaseException(
+                        StatusCode.EMBEDDING_REQUEST_FAILED_ERROR.code,
                         f"Failed to get embedding after {self.max_retries} attempts"
                     ) from e
                 logger.warning(f"Attempt {attempt + 1} failed, retrying: {e}")
 
-        raise RuntimeError("This should never be reached")
+        raise JiuWenBaseException(
+            StatusCode.EMBEDDING_UNREACHABLE_ERROR.code,
+            "This should never be reached"
+        )

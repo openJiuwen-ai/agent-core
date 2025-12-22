@@ -5,19 +5,22 @@ import os
 import unittest
 import asyncio
 
-from openjiuwen.agent.chat_agent import create_chat_agent_config, create_chat_agent
-from openjiuwen.agent.config.base import LLMCallConfig
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.utils.tool.function.function import LocalFunction, Param
+from openjiuwen.agent_builder.tune import (
+    create_chat_agent_config,
+    create_chat_agent,
+    JointOptimizer,
+    DefaultEvaluator,
+    Case,
+    Trainer,
+    CaseLoader
+)
+from openjiuwen.core.single_agent import LLMCallConfig
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.foundation.tool import LocalFunction
 
-from openjiuwen.agent_builder.tune.optimizer.joint_optimizer import JointOptimizer
-from openjiuwen.agent_builder.tune.evaluator.evaluator import DefaultEvaluator
-from openjiuwen.core.utils.llm.messages import UsageMetadata
-from openjiuwen.agent_builder.tune.base import Case
-from openjiuwen.agent_builder.tune.trainer.trainer import Trainer
-from openjiuwen.agent_builder.tune.dataset.case_loader import CaseLoader
-from openjiuwen.core.utils.tool.schema import ToolCall
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
+from openjiuwen.core.foundation.llm import UsageMetadata
+from openjiuwen.core.foundation.tool import ToolCall,ToolCard
+from openjiuwen.core.foundation.llm import ModelConfig
 
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
@@ -29,25 +32,33 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 # ——————————————————————————————————————————工具信息————————————————————————————————————#
 TOOLS = [
     LocalFunction(
-        name="ac_open",
-        description="空调控制工具，根据用户指令打开空调",
-        params=[]
+        card=ToolCard(
+            name="ac_open",
+            description="空调控制工具，根据用户指令打开空调",
+        ),
     ),
     LocalFunction(
-        name="ac_close",
-        description="空调控制工具，根据用户指令打开空调",
-        params=[]
+        card=ToolCard(
+            name="ac_close",
+            description="空调控制工具，根据用户指令关闭空调",
+        )
     ),
     LocalFunction(
-        name="ac_control",
-        description="空调温度调节工具，按用户指令设置温度",
-        params=[
-            Param(name="temperature", description="需要设置的温度", param_type="int"),
-        ]
+        card=ToolCard(
+            name="ac_control",
+            description="空调温度调节工具，按用户指令设置温度",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "temperature": {"description": "需要设置的温度", "type": "integer"},
+                },
+                "required": ["temperature"],
+            },
+        )
     ),
 ]
 
-TOOL_INFOS = [tool.get_tool_info() for tool in TOOLS]
+TOOL_INFOS = [tool.card.tool_info() for tool in TOOLS]
 
 # --------------------------- 待优化提示词 --------------------------- #
 INFORMATION_EXTRACTION_TEMPLATE = """
@@ -154,7 +165,7 @@ class PromptTuneTest(unittest.IsolatedAsyncioTestCase):
                   f"answer: {eval_result.answer}, label: {eval_result.case.label}")
 
     def create_agent(self, prompt: str, tools=None):
-        # 0. define a chat agent
+        # 0. define a chat single_agent
         config = create_chat_agent_config(
             agent_id='chat_agent',
             agent_version='1.0.0',

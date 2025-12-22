@@ -3,11 +3,22 @@
 
 from typing import Optional, Any
 
+from pydantic import BaseModel, Field
+
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.user_profile_manager import UserProfileManager
 from openjiuwen.core.memory.manage.variable_manager import VariableManager
 from openjiuwen.core.memory.mem_unit.memory_unit import MemoryType
 from openjiuwen.core.memory.store.user_mem_store import UserMemStore
+
+
+class SearchParams(BaseModel):
+    user_id: str
+    group_id: str
+    query: str
+    top_k: int = Field(default=5, description="返回的最大结果数")
+    threshold: float = Field(default=0.3, description="匹配阈值")
+    search_type: Optional[str] = Field(default=None, description="搜索类型")
 
 
 class SearchManager:
@@ -22,8 +33,13 @@ class SearchManager:
         self.mem_store = user_mem_store
         self.crypto_key = crypto_key
 
-    async def search(self, user_id: str, group_id: str, query: str, top_k: int = 5, threshold: float = 0.3,
-                     search_type: Optional[str] = None, **kwargs) -> list[dict[str, Any]] | None:
+    async def search(self, params: SearchParams, **kwargs) -> list[dict[str, Any]] | None:
+        user_id = params.user_id
+        group_id = params.group_id
+        query = params.query
+        top_k = params.top_k
+        threshold = params.threshold
+        search_type = params.search_type
         # search_type is illegal
         if search_type is not None and search_type not in self.all_mem_manager_list:
             raise ValueError(f"{search_type} is not a valid search type")

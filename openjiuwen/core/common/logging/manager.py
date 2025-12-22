@@ -84,7 +84,7 @@ class LogManager:
     def _get_default_logger_class(cls) -> Type[LoggerProtocol]:
         if cls._default_logger_class is None:
             try:
-                from openjiuwen.extensions.common.log.default_impl import DefaultLogger
+                from openjiuwen.core.common.logging.default.default_impl import DefaultLogger
 
                 cls._default_logger_class = DefaultLogger
             except ImportError as e:
@@ -94,7 +94,7 @@ class LogManager:
     @classmethod
     def _get_log_config(cls) -> Optional[object]:
         try:
-            from openjiuwen.extensions.common.configs.log_config import log_config
+            from openjiuwen.core.common.logging.default.log_config import log_config
 
             return log_config
         except ImportError:

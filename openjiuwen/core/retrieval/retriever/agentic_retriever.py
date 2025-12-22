@@ -10,6 +10,8 @@ import asyncio
 from typing import Any, List, Optional, Literal
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
@@ -29,9 +31,15 @@ class AgenticRetriever(Retriever):
         agent_topk: int = 15,
     ) -> None:
         if graph_retriever is None:
-            raise ValueError("graph_retriever is required for AgenticRetriever")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVER_GRAPH_RETRIEVER_REQUIRED_ERROR.code,
+                "graph_retriever is required for AgenticRetriever"
+            )
         if llm_client is None:
-            raise ValueError("llm_client is required for AgenticRetriever")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVER_LLM_CLIENT_REQUIRED_ERROR.code,
+                "llm_client is required for AgenticRetriever"
+            )
         self.graph_retriever = graph_retriever
         self.llm = llm_client
         self.llm_model_name = llm_model_name
@@ -88,7 +96,10 @@ class AgenticRetriever(Retriever):
         **kwargs: Any,
     ) -> List[RetrievalResult]:
         if top_k is None:
-            raise ValueError("top_k is required for AgenticRetriever")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVER_TOP_K_REQUIRED_ERROR.code,
+                "top_k is required for AgenticRetriever"
+            )
         topk = top_k
         resolved_mode: Literal["vector", "sparse", "hybrid"] = (
             mode if mode is not None else self._default_mode

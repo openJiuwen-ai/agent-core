@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
 @pytest.fixture
@@ -83,14 +84,14 @@ class TestVectorRetriever:
             vector_store=mock_vector_store,
             embed_model=mock_embed_model,
         )
-        with pytest.raises(ValueError, match="only supports 'vector' mode"):
+        with pytest.raises(JiuWenBaseException, match="only supports 'vector' mode"):
             await retriever.retrieve("test query", mode="sparse")
 
     @pytest.mark.asyncio
     async def test_retrieve_without_embed_model(self, mock_vector_store):
         """Test retrieval without embedding model"""
         retriever = VectorRetriever(vector_store=mock_vector_store)
-        with pytest.raises(ValueError, match="embed_model is required"):
+        with pytest.raises(JiuWenBaseException, match="embed_model is required"):
             await retriever.retrieve("test query")
 
     @pytest.mark.asyncio

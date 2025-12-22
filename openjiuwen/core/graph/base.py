@@ -6,27 +6,27 @@ from typing import Self, Union, Any, AsyncIterator, Hashable, Callable, Awaitabl
 
 from openjiuwen.core.common.constants.constant import INPUTS_KEY, CONFIG_KEY
 from openjiuwen.core.graph.executable import Executable, Output, Input
-from openjiuwen.core.runtime.runtime import BaseRuntime
+from openjiuwen.core.session import BaseSession
 
 
 class ExecutableGraph(Executable[Input, Output]):
-    async def invoke(self, inputs: Input, runtime: BaseRuntime) -> Output:
-        return await self._invoke(inputs.get(INPUTS_KEY), runtime, inputs.get(CONFIG_KEY))
+    async def invoke(self, inputs: Input, session: BaseSession) -> Output:
+        return await self._invoke(inputs.get(INPUTS_KEY), session, inputs.get(CONFIG_KEY))
 
-    async def stream(self, inputs: Input, runtime: BaseRuntime) -> AsyncIterator[Output]:
+    async def stream(self, inputs: Input, session: BaseSession) -> AsyncIterator[Output]:
         pass
 
-    async def collect(self, inputs: AsyncIterator[Input], contex: BaseRuntime) -> Output:
+    async def collect(self, inputs: AsyncIterator[Input], contex: BaseSession) -> Output:
         pass
 
-    async def transform(self, inputs: AsyncIterator[Input], runtime: BaseRuntime) -> AsyncIterator[Output]:
+    async def transform(self, inputs: AsyncIterator[Input], session: BaseSession) -> AsyncIterator[Output]:
         pass
 
     async def interrupt(self, message: dict):
         pass
 
     @abstractmethod
-    async def _invoke(self, inputs: Input, runtime: BaseRuntime, config: Any = None) -> Output:
+    async def _invoke(self, inputs: Input, session: BaseSession, config: Any = None) -> Output:
         pass
 
 
@@ -52,7 +52,7 @@ class Graph(ABC):
     def add_conditional_edges(self, source_node_id: str, router: Any) -> Self:
         pass
 
-    def compile(self, runtime: BaseRuntime) -> ExecutableGraph:
+    def compile(self, session: BaseSession, **kwargs) -> ExecutableGraph:
         pass
 
     def get_nodes(self) -> dict:

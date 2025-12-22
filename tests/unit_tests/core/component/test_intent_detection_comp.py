@@ -6,19 +6,18 @@ import sys
 import types
 from unittest.mock import Mock, AsyncMock, patch
 
-from openjiuwen.core.component.branch_router import BranchRouter
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.intent_detection_comp import IntentDetectionExecutable, IntentDetectionCompConfig, \
+from openjiuwen.core.workflow import BranchRouter, WorkflowCard
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import IntentDetectionCompConfig, \
     IntentDetectionComponent
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.context_engine.config import ContextEngineConfig
-from openjiuwen.core.context_engine.engine import ContextEngine
-from openjiuwen.core.runtime.workflow import NodeRuntime, WorkflowRuntime
-from openjiuwen.core.runtime.wrapper import WrappedNodeRuntime, TaskRuntime
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
+from openjiuwen.core.session import NodeSession, WorkflowSession
+from openjiuwen.core.session import WrappedNodeSession, TaskSession
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.workflow.components.llm_related.intent_detection_comp import IntentDetectionExecutable
 
 fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
@@ -35,7 +34,7 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 
 @pytest.fixture
 def fake_ctx():
-    return WrappedNodeRuntime(NodeRuntime(WorkflowRuntime(), "test-id"))
+    return WrappedNodeSession(NodeSession(WorkflowSession(), "test-id"))
 
 
 @pytest.fixture
@@ -65,7 +64,7 @@ def fake_config(fake_model_config) -> IntentDetectionCompConfig:
 
 class TestIntentDetectionExecutableInvoke:
     @patch(
-        "openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model",
+        "openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model",
         autospec=True,
     )
     @pytest.mark.asyncio
@@ -95,7 +94,7 @@ class TestIntentDetectionComponent:
         id = "intent_stream"
         version = "1.0"
         name = "intent"
-        flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(name=name, id=id, version=version)))
+        flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
         start_component = Start(
             {
@@ -144,8 +143,8 @@ class TestIntentDetectionComponent:
 
         session_id = "test_intent_detection"
         config = ContextEngineConfig()
-        ce_engine = ContextEngine("123", config)
-        workflow_context = ce_engine.get_workflow_context(workflow_id="intent_detection_workflow", session_id=session_id)
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
-        async for chunk in flow.stream({"query": "我的意图是查询景点"}, workflow_runtime, workflow_context):
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="intent_detection_workflow")
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        async for chunk in flow.stream({"query": "我的意图是查询景点"}, workflow_session, workflow_context):
             print(chunk)

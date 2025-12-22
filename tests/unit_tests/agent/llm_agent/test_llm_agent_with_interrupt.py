@@ -2,28 +2,26 @@ import os
 import unittest
 from datetime import datetime
 from typing import List
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
-from openjiuwen.agent.common.enum import TaskType, ControllerType
-from openjiuwen.agent.common.schema import WorkflowSchema
-from openjiuwen.agent.config.workflow_config import WorkflowAgentConfig
-from openjiuwen.agent.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
-from openjiuwen.agent.workflow_agent.workflow_agent import WorkflowAgent
-from openjiuwen.core.agent.task import Task, TaskInput
+from openjiuwen.core.common.constants.enums import ControllerType, TaskType
+from openjiuwen.core.single_agent import WorkflowAgentConfig, WorkflowSchema
+from openjiuwen.core.application.agents_for_studio.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
+from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+from openjiuwen.core.controller import Task, TaskInput
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.questioner_comp import FieldInfo, QuestionerConfig, QuestionerComponent
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.runtime.constants import FORCE_DEL_WORKFLOW_STATE_ENV_KEY
-from openjiuwen.core.runtime.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.stream.base import OutputSchema
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.utils.llm.messages import AIMessage, UsageMetadata
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.workflow import End, WorkflowCard
+from openjiuwen.core.workflow import FieldInfo, QuestionerConfig, QuestionerComponent
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.session import FORCE_DEL_WORKFLOW_STATE_ENV_KEY
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.foundation.llm import BaseModelInfo
+from openjiuwen.core.foundation.llm import AIMessage, UsageMetadata
+from openjiuwen.core.workflow import Workflow
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
@@ -72,10 +70,10 @@ class TestReActAgentInterrupt:  # ① 关键改动
     # 临时关闭
     @unittest.skip("skip system test")
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent.llm_agent.llm_controller.LLMController._generate_plan_from_llm")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.single_agent.llm_agent.llm_controller.LLMController._generate_plan_from_llm")
+    @patch("openjiuwen.core.workflow.component.basic_components.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.component.basic_components.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
     async def test_react_agent_invoke_with_workflow_interrupt(self, mock_get_model, mock_llm_inputs,
                                                                mock_extraction, mock_generate_plan_from_llm):
         mock_get_model.return_value = MockLLMModel()
@@ -90,15 +88,13 @@ class TestReActAgentInterrupt:  # ① 关键改动
         mock_llm_inputs.return_value = mock_prompt_template
         mock_extraction.return_value = dict(location="hangzhou")
 
-        questioner_workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        questioner_workflow_card = WorkflowCard(
                 name="questioner",
                 id="questioner_workflow",
                 version="1.0",
             )
-        )
 
-        flow = Workflow(workflow_config=questioner_workflow_config)
+        flow = Workflow(card=questioner_workflow_card)
 
         key_fields = [
             FieldInfo(field_name="location", description="地点", required=True),
@@ -133,9 +129,9 @@ class TestReActAgentInterrupt:  # ① 关键改动
         flow.add_connection("questioner", "e")
 
         workflow_schema = WorkflowSchema(
-            id = flow.config().metadata.id,
-            name = flow.config().metadata.name,
-            version = flow.config().metadata.version,
+            id = flow.card.id,
+            name = flow.card.name,
+            version = flow.card.version,
             description = "追问器工作流",
             inputs = {"query": {
                 "type": "string",
@@ -188,9 +184,10 @@ class TestReActAgentInterrupt:  # ① 关键改动
             result = await react_agent.invoke({"conversation_id": "12345", "query": "查询杭州天气"})
             print(f"LLMAgent 第二次输出结果：{result}")
 
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config", return_value=MagicMock())
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
-    async def test_real_react_agent_invoke_with_workflow_interrupt(self, mock_get_model):
+    async def test_real_react_agent_invoke_with_workflow_interrupt(self, mock_set_scope, mock_get_model):
         # Mock LLM model
         mock_get_model.return_value = MockLLMModel()
         
@@ -201,15 +198,13 @@ class TestReActAgentInterrupt:  # ① 关键改动
             dict(role="user", content="你是一个AI助手")
         ]
 
-        questioner_workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        questioner_workflow_card = WorkflowCard(
                 name="questioner",
                 id="questioner_workflow",
                 version="1.0",
             )
-        )
 
-        flow = Workflow(workflow_config=questioner_workflow_config)
+        flow = Workflow(card=questioner_workflow_card)
 
         key_fields = [
             FieldInfo(field_name="location", description="地点", required=True),
@@ -253,9 +248,9 @@ class TestReActAgentInterrupt:  # ① 关键改动
         flow.add_connection("questioner", "e")
 
         workflow_schema = WorkflowSchema(
-            id=flow.config().metadata.id,
-            name=flow.config().metadata.name,
-            version=flow.config().metadata.version,
+            id=flow.card.id,
+            name=flow.card.name,
+            version=flow.card.version,
             description="追问器工作流",
             inputs={"query": {
                 "type": "string",
@@ -302,23 +297,21 @@ class TestReActAgentInterrupt:  # ① 关键改动
 
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
     async def test_real_workflow_agent_invoke_with_workflow_interrupt(self, mock_get_model, mock_extraction):
         # Mock LLM model
         mock_get_model.return_value = MockLLMModel()
         # Mock extraction to return expected fields
         mock_extraction.return_value = {"location": "hangzhou", "time": "today"}
         
-        questioner_workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        questioner_workflow_card = WorkflowCard(
                 name="questioner",
                 id="questioner_workflow",
                 version="1.0",
-            )
         )
 
-        flow = Workflow(workflow_config=questioner_workflow_config)
+        flow = Workflow(card=questioner_workflow_card)
 
         key_fields = [
             FieldInfo(field_name="location", description="地点", required=True),
@@ -364,9 +357,9 @@ class TestReActAgentInterrupt:  # ① 关键改动
         flow.add_connection("questioner", "e")
 
         workflow_schema = WorkflowSchema(
-            id=flow.config().metadata.id,
-            name=flow.config().metadata.name,
-            version=flow.config().metadata.version,
+            id=flow.card.id,
+            name=flow.card.name,
+            version=flow.card.version,
             description="追问器工作流",
             inputs={
                 "type": "object",
@@ -383,7 +376,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
         config = WorkflowAgentConfig(
             id="write_agent",
             version="0.1.0",
-            description="interrupt workflow agent",
+            description="interrupt workflow single_agent",
             workflows=[workflow_schema],
             controller_type=ControllerType.WorkflowController,
         )
@@ -401,23 +394,22 @@ class TestReActAgentInterrupt:  # ① 关键改动
             print(f"WorkflowAgent 第二次输出结果：{result}")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.component.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
     async def test_real_workflow_agent_stream_with_workflow_interrupt(self, mock_get_model, mock_extraction):
         # Mock LLM model
         mock_get_model.return_value = MockLLMModel()
         # Mock extraction to return expected fields
         mock_extraction.return_value = {"location": "hangzhou", "time": "today"}
         
-        questioner_workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        questioner_workflow_card = WorkflowCard(
                 name="questioner",
                 id="questioner_workflow",
                 version="1.0",
-            )
+
         )
 
-        flow = Workflow(workflow_config=questioner_workflow_config)
+        flow = Workflow(card=questioner_workflow_card)
 
         key_fields = [
             FieldInfo(field_name="location", description="地点", required=True),
@@ -463,9 +455,9 @@ class TestReActAgentInterrupt:  # ① 关键改动
         flow.add_connection("questioner", "e")
 
         workflow_schema = WorkflowSchema(
-            id=flow.config().metadata.id,
-            name=flow.config().metadata.name,
-            version=flow.config().metadata.version,
+            id=flow.card.id,
+            name=flow.card.name,
+            version=flow.card.version,
             description="追问器工作流",
             inputs={
                 "type": "object",
@@ -482,7 +474,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
         config = WorkflowAgentConfig(
             id="write_agent",
             version="0.1.0",
-            description="interrupt workflow agent",
+            description="interrupt workflow single_agent",
             workflows=[workflow_schema],
             controller_type=ControllerType.WorkflowController,
         )

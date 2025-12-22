@@ -3,10 +3,10 @@
 from abc import ABC, abstractmethod
 from typing import Generator, Optional
 
-from openjiuwen.core.utils.llm.base import BaseModelClient
-from openjiuwen.core.utils.prompt.template.template import Template
-from openjiuwen.core.utils.llm.model_utils.model_factory import ModelFactory
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
+from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import ModelConfig
 
 
 class BasePromptBuilder(ABC):
@@ -20,14 +20,14 @@ class BasePromptBuilder(ABC):
 
     @abstractmethod
     def build(self,
-              prompt: str | Template,
+              prompt: str | PromptTemplate,
               **kwargs
               ) -> Optional[str]:
         raise NotImplementedError()
 
     @abstractmethod
     def stream_build(self,
-                     prompt: str | Template,
+                     prompt: str | PromptTemplate,
                      **kwargs
                      ) -> Generator:
         raise NotImplementedError()

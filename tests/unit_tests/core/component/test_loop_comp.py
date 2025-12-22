@@ -1,22 +1,20 @@
 from typing import AsyncIterator
 
 import pytest
-from sphinx.addnodes import index
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.component.base import WorkflowComponent
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.loop_comp import LoopGroup, LoopComponent
-from openjiuwen.core.component.set_variable_comp import SetVariableComponent
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.context_engine.base import Context
-from openjiuwen.core.runtime.base import ComponentExecutable, Input, Output
-from openjiuwen.core.runtime.runtime import Runtime
-from openjiuwen.core.runtime.workflow import WorkflowRuntime
-from openjiuwen.core.stream.base import OutputSchema, BaseStreamMode
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import ComponentAbility, WorkflowConfig
+from openjiuwen.core.workflow import Input, Output
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import LoopGroup, LoopComponent
+from openjiuwen.core.workflow import SetVariableComponent
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.context_engine import ModelContext
+from openjiuwen.core.session import Session
+from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.session.stream import BaseStreamMode
+from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.workflow import WorkflowComponent
 from tests.unit_tests.core.workflow.mock_nodes import AddTenNode
 
 pytestmark = pytest.mark.asyncio
@@ -40,21 +38,21 @@ async def test_loop_number_exceeds_max_limit():
     flow.add_connection("loop", "end")
 
     with pytest.raises(JiuWenBaseException) as exc_info:
-        await flow.invoke(inputs={"num": 0}, runtime=WorkflowRuntime())
+        await flow.invoke(inputs={"num": 0}, session=WorkflowSession())
 
     assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
     assert "exceeds maximum limit" in exc_info.value.message
 
-class CustomStream(ComponentExecutable, WorkflowComponent):
+class CustomStream(WorkflowComponent):
     def __init__(self):
         super().__init__()
 
-    # async def invoke(self, inputs: Input, runtime: Runtime, context: Context) -> Output:
-    #     await runtime.write_stream(OutputSchema(type='第一条流式消息', index = 0, payload="output_stream"))
-    #     await runtime.write_stream(OutputSchema(type='第二条流式消息', index = 1, payload="output_stream"))
+    # async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+    #     await session.write_stream(OutputSchema(type='第一条流式消息', index = 0, payload="output_stream"))
+    #     await session.write_stream(OutputSchema(type='第二条流式消息', index = 1, payload="output_stream"))
     #     return {'custom_output': inputs}
 
-    async def stream(self, inputs: Input, runtime: Runtime, context: Context) -> AsyncIterator[Output]:
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         print(f"11111 line 32 custom stream")
         if inputs is None:
             yield 1
@@ -69,7 +67,7 @@ class CustomStream(ComponentExecutable, WorkflowComponent):
                     print(f"11111 line 39 custom stream index: {index}")
                     yield {"value": "stream_{}".format(index)}
 
-    async def collect(self, inputs: Input, runtime: Runtime, context: Context) -> Output:
+    async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         print(f"33333 line 42 custom collect")
         total_result = ""
         values = inputs.get("value")
@@ -83,7 +81,7 @@ class CustomStream(ComponentExecutable, WorkflowComponent):
             total_result = str(values)
         return {"value": total_result}
 
-    async def transform(self, inputs: Input, runtime: Runtime, context: Context) -> AsyncIterator[Output]:
+    async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         print("22222 line 49 custom transform")
         values = inputs.get("value")
         # Handle both iterable and single value inputs
@@ -123,7 +121,7 @@ async def test_loop_number():
 
     inputs = {"array": [4, 5, 6], "num": -3}
 
-    results = await flow.invoke(inputs, runtime=WorkflowRuntime())
+    results = await flow.invoke(inputs, session=WorkflowSession())
     assert results.result == {'output': {
         'end_out': {'user_num': 117, 'index': 0, 'l_out1': [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
                     'l_out2': [7, 17, 27, 37, 47, 57, 67, 77, 87, 97, 107, 117]}}}
@@ -156,7 +154,7 @@ async def test_loop_group_component_stream():
     loop_group.add_stream_connection("transformer", "consumer")
 
     # Create main workflow
-    flow = Workflow(workflow_config=WorkflowConfig())
+    flow = Workflow()
     flow.set_start_comp("start", Start(), inputs_schema={})
     
     # Create end component with proper output schema
@@ -183,7 +181,7 @@ async def test_loop_group_component_stream():
     
     # Test streaming execution
     async for chunk in flow.stream(inputs={}, 
-                                  runtime=WorkflowRuntime(), 
+                                  session=WorkflowSession(),
                                   stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         print(f"Stream chunk {stream_count}: {chunk}")

@@ -34,26 +34,26 @@
 import os
 import unittest
 from datetime import datetime
-from typing import List, Any, Union, AsyncIterator, Dict, Iterator
-from unittest.mock import patch, AsyncMock, Mock
+from typing import List, Any, AsyncIterator, Dict, Iterator
+from unittest.mock import patch, MagicMock
 
 import pytest
 
-from openjiuwen.agent.common.schema import PluginSchema, WorkflowSchema
-from openjiuwen.agent.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.runtime.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.runtime.resources_manager.workflow_manager import generate_workflow_key
-from openjiuwen.core.stream.base import OutputSchema
-from openjiuwen.core.utils.llm.base import BaseModelInfo, BaseModelClient
-from openjiuwen.core.utils.llm.messages import AIMessage, UsageMetadata
-from openjiuwen.core.utils.tool.schema import ToolCall
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata, WorkflowInputsSchema
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.component.questioner_comp import QuestionerComponent, QuestionerConfig, FieldInfo
-from openjiuwen.core.runner.runner import Runner, resource_mgr
+from openjiuwen.core.single_agent import WorkflowSchema
+from openjiuwen.core.application.agents_for_studio.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
+from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.workflow import generate_workflow_key
+from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.foundation.llm import BaseModelInfo, BaseModelClient
+from openjiuwen.core.foundation.llm import AIMessage, UsageMetadata
+from openjiuwen.core.foundation.tool import ToolCall
+from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.workflow import QuestionerComponent, QuestionerConfig, FieldInfo
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.workflow import WorkflowCard
 
 
 def build_current_date():
@@ -241,34 +241,35 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
         mock_llm.set_responses(all_llm_responses)
         
         # ==================== 使用 Patch Mock LLM（在创建组件之前开始 patch）====================
-        with patch('openjiuwen.core.utils.llm.model_utils.model_factory.ModelFactory.get_model') as mock_get_model:
-            # 所有组件共享同一个 mock LLM 实例
-            mock_get_model.return_value = mock_llm
+        with patch(
+                'openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model',
+                return_value=mock_llm
+        ), patch(
+            'openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config',
+            return_value=MagicMock()
+        ):
             
             # ==================== 构建 Workflow ====================
             react_agent_prompt_template = self._create_prompt_template()
             
-            questioner_workflow_config = WorkflowConfig(
-                metadata=WorkflowMetadata(
+            questioner_workflow_card = WorkflowCard(
                     name="questioner_weather_workflow",
                     id="questioner_weather_workflow",
                     version="1.0",
-                    description="天气查询"
-                ),
-                workflow_inputs_schema=WorkflowInputsSchema(
+                    description="天气查询",
+                    input_params=dict(
                     type="object",
                     properties={
                         "query": {
                             "type": "string",
-                            "description": "天气查询用户输入",
-                            "required": True
+                            "description": "天气查询用户输入"
                         }
                     },
                     required=['query']
                 )
             )
             
-            flow = Workflow(workflow_config=questioner_workflow_config)
+            flow = Workflow(card=questioner_workflow_card)
             
             key_fields = [
                 FieldInfo(field_name="location", description="地点", required=True),
@@ -301,9 +302,9 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
             flow.add_connection("questioner", "e")
             
             workflow_schema = WorkflowSchema(
-                id=flow.config().metadata.id,
-                name=flow.config().metadata.name,
-                version=flow.config().metadata.version,
+                id=flow.card.id,
+                name=flow.card.name,
+                version=flow.card.version,
                 description="追问器工作流",
                 inputs={
                     "type": "object",
@@ -335,8 +336,8 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
             )
             
             # 绑定 workflow
-            resource_mgr.workflow().add_workflow(
-                generate_workflow_key(flow.config().metadata.id, flow.config().metadata.version), 
+            Runner.resource_mgr.add_workflow(
+                WorkflowCard(id=generate_workflow_key(flow.card.id, flow.card.version)),
                 flow
             )
             

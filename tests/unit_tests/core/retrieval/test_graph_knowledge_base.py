@@ -14,6 +14,7 @@ from openjiuwen.core.retrieval.common.config import (
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
 from openjiuwen.core.retrieval.common.triple import Triple
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
 @pytest.fixture

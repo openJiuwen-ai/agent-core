@@ -11,6 +11,8 @@ from typing import Literal
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 
 
 class SparseRetriever(Retriever):
@@ -51,7 +53,10 @@ class SparseRetriever(Retriever):
             List of retrieval results
         """
         if mode != "sparse":
-            raise ValueError(f"SparseRetriever only supports 'sparse' mode, got {mode}")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVER_UNSUPPORTED_MODE_ERROR.code,
+                f"SparseRetriever only supports 'sparse' mode, got {mode}"
+            )
 
         # Execute sparse search
         search_results = await self.vector_store.sparse_search(

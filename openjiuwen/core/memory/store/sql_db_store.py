@@ -1,12 +1,14 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import logging
 from typing import Any, Dict, List
 
 from sqlalchemy import insert, update, select, delete, Table, MetaData, and_, or_, desc, asc
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.store import BaseDbStore
+
+logger = logging.getLogger(__name__)
 
 
 class SqlDbStore:
@@ -19,7 +21,7 @@ class SqlDbStore:
             class_=AsyncSession)
 
     async def write(self, table: str, data: dict) -> bool:
-        t = await self._get_table(table)
+        t = await self.get_table(table)
         stmt = insert(t).values(**data)
         try:
             async with self.async_session() as session:
@@ -34,7 +36,7 @@ class SqlDbStore:
         if columns is None:
             columns = []
         try:
-            t = await self._get_table(table)
+            t = await self.get_table(table)
             if columns:
                 cols = [t.c[col] for col in columns]
                 stmt = select(*cols)
@@ -53,7 +55,7 @@ class SqlDbStore:
     async def get_with_sort(self, table: str, filters: Dict[str, Any], sort_by: str = "timestamp",
                              order: str = "ASC", limit: int = 100) -> List[Dict[str, Any]]:
         try:
-            t = await self._get_table(table)
+            t = await self.get_table(table)
             if sort_by not in t.c:
                 raise ValueError(f"Sort column '{sort_by}' does not exist in table '{table}'")
             clauses = [
@@ -77,7 +79,7 @@ class SqlDbStore:
             return []
 
     async def exist(self, table: str, conditions: Dict[str, Any]) -> bool:
-        t = await self._get_table(table)
+        t = await self.get_table(table)
         clauses = [t.c[col] == val for col, val in conditions.items()]
         stmt = select(1).where(and_(*clauses))
         async with self.async_session() as session:
@@ -86,7 +88,7 @@ class SqlDbStore:
                 return execute_result.first() is not None
 
     async def batch_get(self, table: str, conditions_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        t = await self._get_table(table)
+        t = await self.get_table(table)
         clauses = [or_(*[t.c[col] == val for col, val in cond.items()]) for cond in conditions_list]
         stmt = select(t).where(or_(*clauses)) if clauses else select(t)
         async with self.async_session() as session:
@@ -99,7 +101,7 @@ class SqlDbStore:
         if columns is None:
             columns = []
         try:
-            t: Table = await self._get_table(table)
+            t: Table = await self.get_table(table)
             stmt = (
                 select(t) if not columns
                 else select(*[t.c[col] for col in columns])
@@ -121,7 +123,7 @@ class SqlDbStore:
             return None
 
     async def update(self, table: str, conditions: dict, data: dict) -> bool:
-        t = await self._get_table(table)
+        t = await self.get_table(table)
         clauses = [t.c[col].in_(vals) if isinstance(vals, list) else t.c[col] == vals
                    for col, vals in conditions.items()]
         stmt = update(t).where(and_(*clauses)).values(**data)
@@ -135,7 +137,7 @@ class SqlDbStore:
             return False
 
     async def delete(self, table: str, conditions: dict) -> bool:
-        t = await self._get_table(table)
+        t = await self.get_table(table)
         clauses = [t.c[col].in_(vals) if isinstance(vals, list) else t.c[col] == vals
                    for col, vals in conditions.items()]
         stmt = delete(t).where(and_(*clauses))
@@ -159,7 +161,7 @@ class SqlDbStore:
             logger.error("Delete table failed", exc_info=e)
             return False
 
-    async def _get_table(self, table_name: str) -> Table:
+    async def get_table(self, table_name: str) -> Table:
         if table_name in self._async_table_cache:
             return self._async_table_cache[table_name]
         metadata = MetaData()

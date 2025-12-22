@@ -13,7 +13,7 @@ def _ensure_initialized():
     global _initialized
     if not _initialized:
         try:
-            from openjiuwen.extensions.common.log.default_impl import DefaultLogger
+            from openjiuwen.core.common.logging.default.default_impl import DefaultLogger
             LogManager.set_default_logger_class(DefaultLogger)
         except ImportError:
             pass

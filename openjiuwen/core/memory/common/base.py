@@ -15,4 +15,4 @@ def parse_memory_hit_infos(hits: list[Tuple[str, float]]) -> tuple[list[str], di
         scores = {hit[0]: hit[1] for hit in hits} if hits else {}
         return ids, scores
     except Exception as e:
-        raise ValueError(f"Failed to parse memory hit infos: {e}")
+        raise ValueError(f"Failed to parse memory hit infos: {e}") from e
