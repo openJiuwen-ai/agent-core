@@ -3,6 +3,7 @@ from typing import AsyncIterator
 import pytest
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.component.base import SimpleComponent
 from openjiuwen.core.component.branch_comp import BranchComponent
@@ -1203,3 +1204,30 @@ def create_workflow2() -> Workflow:
     workflow.add_stream_connection("b", "c")
     workflow.add_connection("c", "end")
     return workflow
+
+
+async def test_illegal_nested_workflow():
+
+    class NestedFlow(SimpleComponent):
+        async def invoke(self, inputs: Input, runtime: Runtime, context: Context):
+            nested_flow = Workflow()
+            nested_flow.set_start_comp("start", Start(), inputs_schema={"out": "${inputs}"})
+            nested_flow.set_end_comp("end", End(), inputs_schema={"result": "${start.out}"})
+            nested_flow.add_connection("start", "end")
+            result = await nested_flow.sub_invoke(inputs, runtime.base())
+            return {"output": result}
+
+    workflow = Workflow()
+    workflow.set_start_comp("start", Start(), inputs_schema={"out": "${inputs}"})
+    workflow.add_workflow_comp("nested_flow", NestedFlow(), inputs_schema={"out": "${start.out"})
+    workflow.set_end_comp("end", End(), inputs_schema={"result": "${nested_flow.output}"})
+
+    workflow.add_connection("start", "nested_flow")
+    workflow.add_connection("nested_flow", "end")
+
+    with pytest.raises(JiuWenBaseException) as cm:
+        await workflow.invoke({"inputs": "hi"}, WorkflowRuntime())
+
+    assert cm.value.error_code == StatusCode.RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code
+    assert cm.value.message == StatusCode.RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg
+
