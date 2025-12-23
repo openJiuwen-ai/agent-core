@@ -283,6 +283,10 @@ class StatusCode(Enum):
                                                  "in your component class '{class_name}'.")
     RUNTIME_COMPONENT_ABILITY_NOT_SUPPORTED = (196102, "{ability} is not supported")
 
+    # Runtime - Checkpointer 197000 - 197099
+    RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR = (197000, "workflow store is None")
+    RUNTIME_CHECKPOINTER_NONE_AGENT_STORE_ERROR = (197001, "agent store is None")
+
 
     @property
     def code(self):
