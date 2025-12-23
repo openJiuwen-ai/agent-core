@@ -249,12 +249,10 @@ class Runner:
             if agent_with_runtime is None:
                 raise JiuWenBaseException(StatusCode.AGENT_NOT_FOUND.code,
                                           StatusCode.AGENT_NOT_FOUND.errmsg.format(agent))
-            task_runtime = TaskRuntime(inner=await agent_with_runtime.runtime.create_agent_runtime(session_id, inputs),
-                                       is_from_group=False)
+            task_runtime = TaskRuntime(inner=await agent_with_runtime.runtime.create_agent_runtime(session_id, inputs))
             return agent_with_runtime.agent, task_runtime
         agent_runtime = StaticAgentRuntime(agent.config(), resource_mgr=self._resource_manager)
-        task_runtime = TaskRuntime(inner=await agent_runtime.create_agent_runtime(session_id, inputs),
-                                   is_from_group=False)
+        task_runtime = TaskRuntime(inner=await agent_runtime.create_agent_runtime(session_id, inputs))
         return agent, task_runtime
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],

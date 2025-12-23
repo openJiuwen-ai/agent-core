@@ -337,13 +337,12 @@ class WrappedNodeRuntime(StateRuntime):
 
 
 class TaskRuntime(StateRuntime):
-    def __init__(self, trace_id: str = None, inner: BaseRuntime = None, is_from_group: bool = True):
+    def __init__(self, trace_id: str = None, inner: BaseRuntime = None):
         if inner is None:
             super().__init__(AgentRuntime(trace_id, Config()))
         else:
             super().__init__(inner)
         self._interaction = None
-        self._is_from_group = is_from_group
 
     async def trace(self, data: dict):
         pass
@@ -384,6 +383,3 @@ class TaskRuntime(StateRuntime):
 
     def create_workflow_runtime(self) -> WorkflowRuntime:
         return self._inner.create_workflow_runtime()
-
-    def is_from_group(self) -> bool:
-        return self._is_from_group
