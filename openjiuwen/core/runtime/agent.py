@@ -53,9 +53,8 @@ class StaticAgentRuntime(BaseRuntime):
     def context(self) -> Context:
         pass
 
-    async def create_agent_runtime(self, session_id: str, inputs=None, stream_writer_manager=None) -> BaseRuntime:
-        runtime = AgentRuntime(session_id, self._config, self._resource_manager, self._checkpointer,
-                               stream_writer_manager)
+    async def create_agent_runtime(self, session_id: str, inputs=None) -> BaseRuntime:
+        runtime = AgentRuntime(session_id, self._config, self._resource_manager, self._checkpointer)
         await self._checkpointer.pre_agent_execute(runtime, inputs)
         return runtime
 
@@ -67,15 +66,13 @@ class AgentRuntime(BaseRuntime):
             config: Config = None,
             resource_manager: ResourceManager = None,
             checkpointer: Checkpointer | None = None,
-            stream_writer_manager: StreamWriterManager = None,
             context: Context = None):
         self._session_id = session_id
         self._config = config
         self._resource_manager = resource_manager if resource_manager is not None else ResourceMgr()
         self._context = context
         self._state = StateCollection()
-        self._stream_writer_manager = stream_writer_manager if stream_writer_manager else StreamWriterManager(
-            StreamEmitter())
+        self._stream_writer_manager = StreamWriterManager(StreamEmitter())
         self._callback_manager = CallbackManager()
         tracer = Tracer()
         tracer.init(self._stream_writer_manager, self._callback_manager)

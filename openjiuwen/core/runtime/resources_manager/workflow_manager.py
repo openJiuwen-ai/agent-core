@@ -110,3 +110,16 @@ class WorkflowMgr(AbstractManager[Workflow]):
         except Exception as e:
             self._handle_exception(e, StatusCode.RUNTIME_WORKFLOW_TOOL_INFO_GET_FAILED, "get_tool_info")
             return []
+    
+    def get_all_workflows(self) -> dict[str, Union[Workflow, WorkflowProvider]]:
+        """
+        Get all registered workflows including both instances and providers.
+        
+        Returns:
+            A dictionary containing all workflow instances and providers,
+            where key is workflow_id and value is either a workflow instance or provider function.
+        """
+        result = {}
+        result.update(self._resources)
+        result.update(self._providers)
+        return result

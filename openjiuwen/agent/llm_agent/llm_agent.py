@@ -15,7 +15,6 @@ from openjiuwen.core.agent.agent import ControllerAgent
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.component.common.configs.model_config import ModelConfig
 from openjiuwen.core.runtime.runtime import Runtime
-from openjiuwen.core.runtime.wrapper import TaskRuntime
 from openjiuwen.core.stream.base import OutputSchema
 from openjiuwen.core.utils.llm.messages import HumanMessage, AIMessage
 from openjiuwen.core.utils.tool.base import Tool
@@ -169,21 +168,26 @@ class LLMAgent(ControllerAgent):
             agent_runtime = await self._runtime.pre_run(session_id=session_id)
             need_cleanup = True
             own_stream = True  # Own stream lifecycle
-        elif isinstance(runtime, TaskRuntime) and runtime.is_from_group():
-            agent_runtime = await self._runtime.pre_run(session_id=session_id,
-                                                        stream_writer_manager=runtime.base().stream_writer_manager())
-            need_cleanup = False
-            own_stream = False  # External owns stream lifecycle
         else:
             agent_runtime = runtime
             need_cleanup = False
             own_stream = False  # External owns stream lifecycle
-            
+
             # Sync agent's tools to external runtime
             # When external runtime is provided, agent's tools need to be registered
             if self._tools:
                 tools_to_add = [(tool.name, tool) for tool in self._tools]
                 agent_runtime.add_tools(tools_to_add)
+            # Sync agent's workflows to external runtime
+            # When external runtime is provided, agent's workflows need to be registered
+            try:
+                agent_workflow_mgr = self._runtime.resource_mgr().workflow()
+                # Sync workflow instances and providers
+                for workflow_id, workflow in agent_workflow_mgr.get_all_workflows().items():
+                    agent_runtime.add_workflow(workflow_id, workflow)
+                    logger.debug(f"Synced workflow {workflow_id} to external runtime")
+            except Exception as e:
+                logger.warning(f"Failed to sync workflows to external runtime: {e}")
 
         # Store final result for send_to_agent
         final_result_holder = {"result": None}
@@ -225,7 +229,6 @@ class LLMAgent(ControllerAgent):
             agent_memory_task = asyncio.create_task(self._write_messages_to_memory(inputs, result_for_memory))
             agent_memory_task.set_name("stream_add_memory_task")
             agent_memory_task.add_done_callback(_memory_log_task_exception)
-
 
     def set_prompt_template(self, prompt_template: List[Dict]):
         self.agent_config.prompt_template = prompt_template
