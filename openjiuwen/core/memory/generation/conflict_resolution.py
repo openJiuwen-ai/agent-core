@@ -69,8 +69,8 @@ class ConflictResolution:
         Returns:
             list[dict]: A list of dictionaries representing the conflict resolution results.
         """
-        if len(old_messages) == 0:
-            logger.debug("No old messages to check conflict, ADD new message.")
+        if len(old_messages) == 0 or not base_chat_model:
+            logger.debug(f"No need to check conflict, msg len {len(old_messages)}, ADD new message.")
             return [
                 {
                     "id": "0",

@@ -3,9 +3,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from abc import abstractmethod, ABC
-from typing import Any
+from typing import Any, Tuple
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.utils.llm.base import BaseModelClient
 from openjiuwen.core.memory.common.crypto import encrypt, decrypt, NONCE_LENGTH, TAG_LENGTH
 
 from openjiuwen.core.memory.mem_unit.memory_unit import BaseMemoryUnit
@@ -21,7 +22,7 @@ class BaseMemoryManager(ABC):
     TAG_HEX_LENGTH = TAG_LENGTH * 2  # hex_length = bytes_length * 2
 
     @abstractmethod
-    async def add(self, memory: BaseMemoryUnit):
+    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, BaseModelClient] | None = None):
         """add memory."""
         pass
 

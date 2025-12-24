@@ -72,8 +72,8 @@ class MessageManager:
         messages = await self.sql_db.condition_get(table=self.message_table, conditions=filters)
         if not messages:
             return None
-        base_msg = BaseMessage(**messages[0]), messages[0]['timestamp']
+        base_msg, msg_datetime = BaseMessage(**messages[0]), messages[0]['timestamp']
         base_msg.content = BaseMemoryManager.decrypt_memory_if_needed(
             key=self.crypto_key,
             ciphertext=base_msg.content)
-        return base_msg
+        return base_msg, msg_datetime

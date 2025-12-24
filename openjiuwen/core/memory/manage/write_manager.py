@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from typing import Tuple
 
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.mem_unit.memory_unit import BaseMemoryUnit
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.utils.llm.base import BaseModelClient
 from openjiuwen.core.memory.store.user_mem_store import UserMemStore
 
 
@@ -13,13 +15,24 @@ class WriteManager:
         self.managers = managers
         self.mem_store = mem_store
 
-    async def add_mem(self, mem_units: list[BaseMemoryUnit]):
+    async def add_mem(self, mem_units: list[BaseMemoryUnit], llm: Tuple[str, BaseModelClient] | None) -> None:
+        has_inner_exception = False
         for mem_unit in mem_units:
             mem_type = mem_unit.mem_type.value
             if mem_type in self.managers:
-                await self.managers[mem_type].add(mem_unit)
+                try:
+                    await self.managers[mem_type].add(mem_unit, llm)
+                except ValueError as e:
+                    logger.error(f"Failed to add {mem_type}, error: {str(e)}")
+                    has_inner_exception = True
+                except Exception as e:
+                    logger.error(f"Failed to add {mem_type}, error: {str(e)}")
+                    has_inner_exception = True
             else:
                 logger.warning(f"Unsupported memory type: {mem_type}")
+
+        if has_inner_exception:
+            raise ValueError(f"Memory engine add mem has exception")
 
     async def update_mem_by_id(self, user_id: str, group_id: str, mem_id: str, memory: str):
         mem_type = await self.__get_mem_type_from_store(user_id, group_id, mem_id)
