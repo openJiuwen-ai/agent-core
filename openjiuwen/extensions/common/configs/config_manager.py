@@ -9,6 +9,8 @@ import yaml
 
 from openjiuwen.extensions.common.configs.constant import DEFAULT_LOG_CONFIG
 from openjiuwen.core.common.security.path_checker import is_sensitive_path
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 
 CRITICAL = 50
 FATAL = CRITICAL
@@ -38,7 +40,6 @@ class ConfigManager:
         self._load_config(config_path)
 
     def reload(self, config_path: str):
-        """重新加载配置文件。"""
         self._load_config(config_path)
 
     def _load_config(self, config_path: str):
@@ -46,11 +47,26 @@ class ConfigManager:
             if config_path is None:
                 config_dict = copy.deepcopy(DEFAULT_LOG_CONFIG)
             else:
-                real_path = os.path.realpath(config_path)
+                try:
+                    real_path = os.path.realpath(config_path)
+                except OSError:
+                    real_path = os.path.abspath(os.path.expanduser(config_path))
+                
                 if is_sensitive_path(real_path):
-                    raise Exception("path is not safe")
-                with open(real_path, "r", encoding="utf-8") as f:
-                    config_dict = yaml.safe_load(f)
+                    raise JiuWenBaseException(
+                        error_code=StatusCode.LOG_PATH_SENSITIVE_ERROR.code,
+                        message=StatusCode.LOG_PATH_SENSITIVE_ERROR.errmsg.format(path=real_path)
+                    )
+                
+                try:
+                    with open(real_path, "r", encoding="utf-8") as f:
+                        config_dict = yaml.safe_load(f)
+                except OSError as e:
+                    raise JiuWenBaseException(
+                        error_code=StatusCode.LOG_CONFIG_LOAD_ERROR.code,
+                        message=StatusCode.LOG_CONFIG_LOAD_ERROR.errmsg.format(
+                            error_msg=f"Failed to read configuration file: {e}")
+                    ) from e
 
             if 'logging' in config_dict:
                 level_str = config_dict['logging'].get('level', 'WARNING').upper()
@@ -58,16 +74,26 @@ class ConfigManager:
 
             self._config = config_dict
         except FileNotFoundError:
-            # 若找不到配置文件，回退到安全的默认配置，避免在被外部项目引用时崩溃
             self._config = {
                 'logging': {
                     'level': WARNING
                 }
             }
+        except JiuWenBaseException:
+            # Re-raise JiuWenBaseException as-is
+            raise
         except yaml.YAMLError as e:
-            raise ValueError(f"YAML配置文件格式错误: {e}") from e
+            raise JiuWenBaseException(
+                error_code=StatusCode.LOG_CONFIG_LOAD_ERROR.code,
+                message=StatusCode.LOG_CONFIG_LOAD_ERROR.errmsg.format(
+                    error_msg=f"YAML configuration file format is incorrect: {e}")
+            ) from e
         except Exception as e:
-            raise Exception(f"加载配置文件失败: {e}") from e
+            raise JiuWenBaseException(
+                error_code=StatusCode.LOG_CONFIG_LOAD_ERROR.code,
+                message=StatusCode.LOG_CONFIG_LOAD_ERROR.errmsg.format(
+                    error_msg=f"Unexpected error while loading configuration file: {e}")
+            ) from e
 
     def get(self, key: str, default: Any = None) -> Any:
         keys = key.split('.')
@@ -105,7 +131,6 @@ class ConfigDict(dict):
         return self
 
     def refresh(self):
-        """在底层配置重载后刷新自身内容。"""
         self.clear()
         self.update(self._config_manager.config)
 
@@ -116,8 +141,7 @@ config = ConfigDict(config_manager)
 
 def configure(config_path: str):
     """
-    供外部项目调用，用于指定自定义的 YAML 配置路径。
-    使用后会即时生效到全局 config。
+    For external project invocation, it is used to specify a custom YAML configuration path.
     """
     config_manager.reload(config_path)
     config.refresh()

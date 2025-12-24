@@ -1,5 +1,5 @@
-# 应用配置管理
-# 日志相关配置
+# Application Configuration Management
+# Log-related configuration
 
 logging:
   level: "INFO"
