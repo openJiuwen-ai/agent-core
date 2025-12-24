@@ -3,18 +3,22 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.utils.llm.base import BaseModelClient
 from openjiuwen.core.memory.store.base_semantic_store import BaseSemanticStore
 from openjiuwen.core.memory.common.base import generate_idx_name, parse_memory_hit_infos
+from openjiuwen.core.memory.generation.conflict_resolution import ConflictResolution
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.data_id_manager import DataIdManager
 from openjiuwen.core.memory.mem_unit.memory_unit import UserProfileUnit, MemoryType, ConflictType, BaseMemoryUnit
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.store.user_mem_store import UserMemStore
 
 
 class UserProfileManager(BaseMemoryManager):
+    CHECK_CONFLICT_OLD_MEMORY_NUM = 5
+
     def __init__(self,
                  semantic_recall_instance: BaseSemanticStore,
                  user_mem_store: UserMemStore,
@@ -25,7 +29,29 @@ class UserProfileManager(BaseMemoryManager):
         self.date_user_profile_id = data_id_generator
         self.crypto_key = crypto_key
 
-    async def add(self, memory: BaseMemoryUnit):
+    @staticmethod
+    def _process_conflict_info(conflict_info: list[dict], input_memory_ids_map: dict[int, str]) -> list[dict]:
+        process_conflict_info = []
+        for conflict in conflict_info:
+            conf_id = int(conflict['id'])
+            conf_mem = conflict['text']
+            conf_event = conflict['event']
+            if conf_id == 0:
+                process_conflict_info.append({
+                    "id": '-1',
+                    "text": conf_mem,
+                    "event": conf_event
+                })
+                continue
+            map_id = input_memory_ids_map[conf_id]
+            process_conflict_info.append({
+                "id": map_id,
+                "text": conf_mem,
+                "event": conf_event
+            })
+        return process_conflict_info
+
+    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, BaseModelClient] | None = None):
         if not isinstance(memory, UserProfileUnit):
             raise ValueError('user profile add Must pass UserProfileUnit class.')
         if not memory.user_id:
@@ -36,7 +62,8 @@ class UserProfileManager(BaseMemoryManager):
             raise ValueError('user_profile_manager add operation must pass profile_mem')
         if not memory.profile_type:
             raise ValueError('user_profile_manager add operation must pass profile_type')
-        for conflict in memory.conflict_info:
+        conflict_info = await self._get_conflict_info(memory=memory, llm=llm)
+        for conflict in conflict_info:
             conf_id = conflict['id']
             conf_mem = conflict['text']
             conf_event = conflict['event']
@@ -147,6 +174,49 @@ class UserProfileManager(BaseMemoryManager):
         table_name = generate_idx_name(user_id, group_id, mem_type)
         memory_hit_info = await self.semantic_recall.search(query, table_name, top_k)
         return parse_memory_hit_infos(memory_hit_info)
+
+    async def _get_conflict_input(
+            self,
+            user_id: str,
+            group_id: str,
+            new_memory: str
+    ):
+        historical_profiles = []
+        search_results = await self.search(
+            user_id=user_id,
+            group_id=group_id,
+            query=new_memory,
+            top_k=UserProfileManager.CHECK_CONFLICT_OLD_MEMORY_NUM
+        )
+        for search_result in search_results:
+            historical_profiles.append((
+                search_result['id'],
+                search_result['mem'],
+                search_result['score']
+            ))
+        input_memory_ids_map: dict[int, str] = {}
+        input_memories: list[str] = []
+        i = 1
+        for historical in historical_profiles:
+            mem_id, mem_content, _ = historical
+            input_memories.append(mem_content)
+            input_memory_ids_map[i] = mem_id
+            i += 1
+        return input_memories, input_memory_ids_map
+
+    async def _get_conflict_info(self,
+                                 memory: UserProfileUnit,
+                                 llm: Tuple[str, BaseModelClient],
+                                 ) -> list[dict[str, Any]]:
+        input_memories, input_memory_ids_map = await self._get_conflict_input(
+            user_id=memory.user_id,
+            group_id=memory.group_id,
+            new_memory=memory.profile_mem
+        )
+        tmp_conflict_info = await ConflictResolution.check_conflict(old_messages=input_memories,
+                                                                    new_message=memory.profile_mem,
+                                                                    base_chat_model=llm)
+        return UserProfileManager._process_conflict_info(tmp_conflict_info, input_memory_ids_map)
 
     async def _add_user_profile_memory(
             self,

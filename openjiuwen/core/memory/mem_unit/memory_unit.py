@@ -33,9 +33,8 @@ class BaseMemoryUnit:
 class UserProfileUnit(BaseMemoryUnit):
     profile_type: str
     profile_mem: str
-    score: Optional[float] = None # Relevance Scoring
-    conflict_info: Optional[list[dict]] = None # Including new user profile mem
-    message_mem_id: Optional[str] = None # Corresponding Message ID
+    score: Optional[float] = None  # Relevance Scoring
+    message_mem_id: Optional[str] = None  # Corresponding Message ID
     mem_id: str = ""
     is_implicit: bool = False
     reasoning: str = ""

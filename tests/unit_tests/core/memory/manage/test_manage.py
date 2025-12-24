@@ -13,7 +13,7 @@ from openjiuwen.core.memory.manage.data_id_manager import DataIdManager
 from openjiuwen.core.memory.manage.user_profile_manager import UserProfileManager
 from openjiuwen.core.memory.manage.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.write_manager import WriteManager
-from openjiuwen.core.memory.mem_unit.memory_unit import UserProfileUnit, VariableUnit, MemoryType, ConflictType
+from openjiuwen.core.memory.mem_unit.memory_unit import UserProfileUnit, VariableUnit, MemoryType
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.store.user_mem_store import UserMemStore
 from openjiuwen.core.memory.store.base_semantic_store import BaseSemanticStore
@@ -142,9 +142,9 @@ class TestManage:
             semantic_recall_instance=mock_semantic_recall,
             user_mem_store=mock_mem_store,
             data_id_generator=data_id_generator,
-            crypto_key=""
+            crypto_key=b""
         )
-        variable_manager = VariableManager(mock_kv_store, "")
+        variable_manager = VariableManager(mock_kv_store, b"")
         managers = {"user_profile": user_profile_manager, "variable": variable_manager}
         write_manager = WriteManager(managers, mock_mem_store)
         test_all_data = [
@@ -171,13 +171,13 @@ class TestManage:
         ]
 
         for item in test_all_data:
-            conflict_info = {'id': '-1', "event": ConflictType.ADD.value, "text": item["profile_mem"]}
-            mem_unit = UserProfileUnit(mem_type=MemoryType.USER_PROFILE, conflict_info=[conflict_info], **item)
-            await write_manager.add_mem([mem_unit])
+            mem_unit = UserProfileUnit(mem_type=MemoryType.USER_PROFILE, **item)
+
+            await write_manager.add_mem([mem_unit], None)
             mem_unit = VariableUnit(mem_type=MemoryType.VARIABLE, variable_name=item['profile_type'],
                                     variable_mem=item['profile_mem'], user_id=item['user_id'],
                                     group_id=item['group_id'])
-            await write_manager.add_mem([mem_unit])
+            await write_manager.add_mem([mem_unit], None)
 
         query = "用户的职业"
         res = await variable_manager.query_variable(user_id=test_all_data[0]['user_id'],

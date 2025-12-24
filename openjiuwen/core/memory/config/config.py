@@ -8,7 +8,7 @@ from openjiuwen.core.memory.common.crypto import AES_KEY_LENGTH
 
 class SysMemConfig(BaseModel):
     record_message: bool = Field(default=True)  # record message or not
-    ai_msg_gen_max_len: int = Field(default=64)  # max length of AI message generation memory
+    ai_msg_gen_max_len: int = Field(default=256)  # max length of AI message generation memory
     history_window_size_to_gen_mem: int = Field(default=5)  # history window size to generate memory
     crypto_key: bytes = Field(default=b'')  # aes key, length must be 32, not enable encrypt memory if empty
 

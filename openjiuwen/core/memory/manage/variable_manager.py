@@ -6,6 +6,7 @@ from typing import Any, Optional, Tuple
 
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.utils.llm.base import BaseModelClient
 from openjiuwen.core.memory.mem_unit.memory_unit import VariableUnit
 from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
 
@@ -19,7 +20,7 @@ class VariableManager(BaseMemoryManager):
         self.kv_store = kv_store
         self.crypto_key = crypto_key
 
-    async def add(self, memory: VariableUnit):
+    async def add(self, memory: VariableUnit, llm: Tuple[str, BaseModelClient] | None = None):
         """add Variable memory"""
         if self.kv_store is None:
             logger.error("kv_store cannot be None")
