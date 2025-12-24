@@ -11,8 +11,13 @@ from typing import Dict, Any
 from logging.handlers import RotatingFileHandler
 
 from openjiuwen.core.common.logging.protocol import LoggerProtocol
-from openjiuwen.core.common.logging.utils import get_thread_session, get_log_max_bytes
-from openjiuwen.core.common.security.path_checker import is_sensitive_path
+from openjiuwen.core.common.logging.utils import (
+    get_thread_session,
+    get_log_max_bytes,
+    normalize_and_validate_log_path,
+)
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 
 
 _EXCLUDED_SUFFIXES = ('.pyc', '.pyo')
@@ -28,16 +33,32 @@ _EXCLUDED_KEYWORDS = (
 
 class SafeRotatingFileHandler(RotatingFileHandler):
     def __init__(self, filename, *args, log_file_pattern=None, backup_file_pattern=None, **kwargs):
-        """初始化安全轮转文件处理器"""
+        """Initialize the secure round-robin file processor"""
         if log_file_pattern:
             filename = self._format_filename(filename, log_file_pattern)
 
+        # Make sure the log file directory exists
+        log_dir = os.path.dirname(filename)
+        if log_dir:
+            try:
+                abs_log_dir = os.path.abspath(os.path.expanduser(log_dir))
+                os.makedirs(abs_log_dir, mode=0o750, exist_ok=True)
+            except OSError:
+                pass
+
         super().__init__(filename, *args, **kwargs)
         self.backup_file_pattern = backup_file_pattern or "{baseFilename}.{index}"
-        os.chmod(self.baseFilename, 0o640)
+        try:
+            os.chmod(self.baseFilename, 0o640)
+        except OSError as e:
+            raise JiuWenBaseException(
+                error_code=StatusCode.LOG_FILE_OPERATION_ERROR.code,
+                message=StatusCode.LOG_FILE_OPERATION_ERROR.errmsg.format(
+                    error_msg=f"Failed to set file permissions: {e}")
+            ) from e
 
     def _format_filename(self, base_filename: str, pattern: str) -> str:
-        """根据模式格式化文件名"""
+        """Format the file name according to the pattern"""
         dir_path = os.path.dirname(base_filename)
         file_name = os.path.basename(base_filename)
 
@@ -80,8 +101,22 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                 index=i
             )
             if os.path.exists(sfn):
-                os.chmod(sfn, 0o440)
-        os.chmod(self.baseFilename, 0o640)
+                try:
+                    os.chmod(sfn, 0o440)
+                except OSError as e:
+                    raise JiuWenBaseException(
+                        error_code=StatusCode.LOG_FILE_OPERATION_ERROR.code,
+                        message=StatusCode.LOG_FILE_OPERATION_ERROR.errmsg.format(
+                            error_msg=f"Failed to set backup file permissions: {e}")
+                    ) from e
+        try:
+            os.chmod(self.baseFilename, 0o640)
+        except OSError as e:
+            raise JiuWenBaseException(
+                error_code=StatusCode.LOG_FILE_OPERATION_ERROR.code,
+                message=StatusCode.LOG_FILE_OPERATION_ERROR.errmsg.format(
+                    error_msg=f"Failed to set log file permissions: {e}")
+            ) from e
 
 
 class ThreadContextFilter(logging.Filter):
@@ -182,8 +217,7 @@ class DefaultLogger(LoggerProtocol):
         output = self.config.get('output', ['console'])
         log_file = self.config.get('log_file', f'{self.log_type}.log')
 
-        if is_sensitive_path(log_file):
-            raise Exception("log file path is not safe")
+        normalize_and_validate_log_path(log_file)
 
         for handler in self._logger.handlers[:]:
             handler.close()
@@ -196,9 +230,21 @@ class DefaultLogger(LoggerProtocol):
             self._logger.addHandler(stream_handler)
 
         if 'file' in output:
-            log_dir = os.path.dirname(log_file)
+            try:
+                abs_log_file = os.path.abspath(os.path.expanduser(log_file))
+            except (OSError, TypeError) as e:
+                # If path normalization fails, use original path and let SafeRotatingFileHandler handle it
+                abs_log_file = log_file
+
+            log_dir = os.path.dirname(abs_log_file)
             if log_dir:
-                os.makedirs(log_dir, mode=0o750, exist_ok=True)
+                try:
+                    os.makedirs(log_dir, mode=0o750, exist_ok=True)
+                except OSError as e:
+                    raise JiuWenBaseException(
+                        error_code=StatusCode.LOG_PATH_CREATE_FAILED.code,
+                        message=StatusCode.LOG_PATH_CREATE_FAILED.errmsg.format(path=log_dir, error_msg=str(e))
+                    ) from e
 
             backup_count = self.config.get('backup_count', 20)
             max_bytes = get_log_max_bytes(self.config.get('max_bytes', 20 * 1024 * 1024))
@@ -206,7 +252,7 @@ class DefaultLogger(LoggerProtocol):
             backup_file_pattern = self.config.get('backup_file_pattern', None)
 
             file_handler = SafeRotatingFileHandler(
-                filename=log_file,
+                filename=abs_log_file,
                 maxBytes=max_bytes,
                 backupCount=backup_count,
                 encoding='utf-8',
@@ -278,10 +324,10 @@ class DefaultLogger(LoggerProtocol):
         self._logger.removeFilter(filter)
 
     def get_config(self) -> Dict[str, Any]:
-        """获取日志配置"""
+        """Obtain log configuration"""
         return self.config.copy()
 
     def reconfigure(self, config: Dict[str, Any]) -> None:
-        """重新配置日志记录器"""
+        """Reconfigure the logger"""
         self.config = config
         self._setup_logger() 
