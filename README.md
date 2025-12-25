@@ -129,7 +129,7 @@ asyncio.run(main())
 
 预期输出
 ```
-WorkflowAgent output result >>> 工作流输出文本: 鸡过马路，不会游泳也不会飞。
+WorkflowAgent output result >>> 工作流输出文本: 冰箱罢工了，因为它觉得生活太冷了。
 ```
 
 
