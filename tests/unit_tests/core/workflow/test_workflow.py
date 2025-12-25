@@ -1208,6 +1208,11 @@ def create_workflow2() -> Workflow:
 
 async def test_illegal_nested_workflow():
 
+    class InteractionNode(SimpleComponent):
+        async def invoke(self, inputs: Input, runtime: Runtime, context: Context):
+            res = await runtime.interact("value")
+            return res
+
     class NestedFlow(SimpleComponent):
         async def invoke(self, inputs: Input, runtime: Runtime, context: Context):
             nested_flow = Workflow()
@@ -1220,10 +1225,12 @@ async def test_illegal_nested_workflow():
     workflow = Workflow()
     workflow.set_start_comp("start", Start(), inputs_schema={"out": "${inputs}"})
     workflow.add_workflow_comp("nested_flow", NestedFlow(), inputs_schema={"out": "${start.out"})
+    workflow.add_workflow_comp("interaction_node", InteractionNode(), inputs_schema={"out": "${start.out}"})
     workflow.set_end_comp("end", End(), inputs_schema={"result": "${nested_flow.output}"})
 
     workflow.add_connection("start", "nested_flow")
-    workflow.add_connection("nested_flow", "end")
+    workflow.add_connection("nested_flow", "interaction_node")
+    workflow.add_connection("interaction_node", "end")
 
     with pytest.raises(JiuWenBaseException) as cm:
         await workflow.invoke({"inputs": "hi"}, WorkflowRuntime())

@@ -44,14 +44,13 @@ class InMemoryCheckpointer(Checkpointer):
 
     async def post_workflow_execute(self, runtime: BaseRuntime, result, exception):
         workflow_store = self._workflow_stores.get(runtime.session_id())
-        if workflow_store is None:
-            raise JiuWenBaseException(StatusCode.RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code,
-                                      StatusCode.RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg)
-
         workflow_ids = self._session_to_workflow_ids.get(runtime.session_id())
         if exception is not None:
             logger.info(f"exception in workflow, save checkpoint for "
                         f"workflow: {runtime.workflow_id()} in session: {runtime.session_id()}")
+            if workflow_store is None:
+                raise JiuWenBaseException(StatusCode.RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code,
+                                          StatusCode.RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg)
             workflow_store.save(runtime)
             workflow_ids.add(runtime.workflow_id())
             raise exception
@@ -59,8 +58,13 @@ class InMemoryCheckpointer(Checkpointer):
         if result.get(TASK_STATUS_INTERRUPT) is None:
             logger.info(f"clear checkpoint for workflow: {runtime.workflow_id()} in session: {runtime.session_id()}")
             await self._graph_store.delete(runtime.session_id(), runtime.workflow_id())
-            workflow_store.clear(runtime.workflow_id())
-            workflow_ids.discard(runtime.workflow_id())
+            if workflow_store is not None:
+                workflow_store.clear(runtime.workflow_id())
+                workflow_ids.discard(runtime.workflow_id())
+            else:
+                logger.warning(f"workflow_store of workflow: {runtime.workflow_id()} dose not exist in "
+                            f"session: {runtime.session_id()}")
+
             if runtime.config().get_agent_config() is None:
                 logger.info(f"clear session: {runtime.session_id()}")
                 self._workflow_stores.pop(runtime.session_id(), None)
@@ -68,6 +72,9 @@ class InMemoryCheckpointer(Checkpointer):
         else:
             logger.info(f"interaction required, save checkpoint for "
                         f"workflow: {runtime.workflow_id()} in session: {runtime.session_id()}")
+            if workflow_store is None:
+                raise JiuWenBaseException(StatusCode.RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code,
+                                          StatusCode.RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg)
             workflow_store.save(runtime)
             workflow_ids.add(runtime.workflow_id())
 
@@ -101,8 +108,8 @@ class InMemoryCheckpointer(Checkpointer):
             logger.info(f"clear checkpoint for agent: {agent_id} in session: {session_id}")
             agent_store = self._agent_stores.get(session_id)
             if agent_store is None:
-                raise JiuWenBaseException(StatusCode.RUNTIME_CHECKPOINTER_NONE_AGENT_STORE_ERROR.code,
-                                          StatusCode.RUNTIME_CHECKPOINTER_NONE_AGENT_STORE_ERROR.errmsg)
+                logger.warning(f"agent_store of agent: {agent_id} does not exist in session: {session_id}")
+                return
             agent_store.clear(agent_id)
         else:
             logger.info(f"clear session: {session_id}")
