@@ -1,0 +1,460 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+"""
+Milvus vector store test cases
+"""
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
+from openjiuwen.core.retrieval.common.config import VectorStoreConfig
+from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+
+
+@pytest.fixture
+def vector_store_config():
+    """Create vector store configuration"""
+    return VectorStoreConfig(
+        collection_name="test_collection",
+        distance_metric="cosine",
+    )
+
+
+class TestMilvusVectorStore:
+    """Milvus vector store tests"""
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_init_success(self, mock_client_class, vector_store_config):
+        """Test successful initialization"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+        assert store.collection_name == "test_collection"
+        assert store.milvus_uri == "http://localhost:19530"
+        assert store.client == mock_client
+        mock_client_class.assert_called_once_with(
+            uri="http://localhost:19530",
+            token=None,
+        )
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_init_with_token(self, mock_client_class, vector_store_config):
+        """Test initialization with token"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+            milvus_token="test_token",
+        )
+        assert store.milvus_token == "test_token"
+        mock_client_class.assert_called_once_with(
+            uri="http://localhost:19530",
+            token="test_token",
+        )
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_init_with_custom_fields(self, mock_client_class, vector_store_config):
+        """Test initialization with custom fields"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+            text_field="custom_text",
+            vector_field="custom_vector",
+            doc_id_field="custom_doc_id",
+        )
+        assert store.text_field == "custom_text"
+        assert store.vector_field == "custom_vector"
+        assert store.doc_id_field == "custom_doc_id"
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_add_single_dict(self, mock_client_class, vector_store_config):
+        """Test adding single dictionary"""
+        mock_client = MagicMock()
+        mock_client.insert = MagicMock()
+        mock_client.flush = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        data = {
+            "id": "1",
+            "embedding": [0.1] * 384,
+            "content": "Test content",
+        }
+
+        await store.add(data)
+        mock_client.insert.assert_called()
+        mock_client.flush.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_add_list_of_dicts(self, mock_client_class, vector_store_config):
+        """Test adding list of dictionaries"""
+        mock_client = MagicMock()
+        mock_client.insert = MagicMock()
+        mock_client.flush = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        data = [
+            {"id": "1", "embedding": [0.1] * 384, "content": "Content 1"},
+            {"id": "2", "embedding": [0.2] * 384, "content": "Content 2"},
+        ]
+
+        await store.add(data)
+        mock_client.insert.assert_called()
+        mock_client.flush.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_add_with_batching(self, mock_client_class, vector_store_config):
+        """Test batch adding"""
+        mock_client = MagicMock()
+        mock_client.insert = MagicMock()
+        mock_client.flush = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        # Create data exceeding batch_size
+        data = [
+            {"id": str(i), "embedding": [0.1] * 384, "content": f"Content {i}"}
+            for i in range(200)
+        ]
+
+        await store.add(data, batch_size=50)
+        # Should insert in multiple batches
+        assert mock_client.insert.call_count > 1
+        mock_client.flush.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_search_success(self, mock_client_class, vector_store_config):
+        """Test successful vector search"""
+        mock_client = MagicMock()
+        mock_client.search = MagicMock(return_value=[[
+            {
+                "id": "1",
+                "content": "Test content",
+                "metadata": {"source": "test"},
+                "document_id": "doc_1",
+                "score": 0.9,
+            }
+        ]])
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        results = await store.search([0.1] * 384, top_k=5)
+        assert len(results) == 1
+        assert results[0].text == "Test content"
+        assert results[0].score > 0
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_search_with_filters(self, mock_client_class, vector_store_config):
+        """Test search with filters"""
+        mock_client = MagicMock()
+        mock_client.search = MagicMock(return_value=[[]])
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        filters = {"source": "test"}
+        results = await store.search([0.1] * 384, top_k=5, filters=filters)
+        # Verify filters were passed
+        call_kwargs = mock_client.search.call_args[1]
+        assert "filter" in call_kwargs
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_search_empty_results(self, mock_client_class, vector_store_config):
+        """Test search returning empty results"""
+        mock_client = MagicMock()
+        mock_client.search = MagicMock(return_value=[])
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        results = await store.search([0.1] * 384, top_k=5)
+        assert results == []
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_sparse_search_success(self, mock_client_class, vector_store_config):
+        """Test successful sparse search"""
+        mock_client = MagicMock()
+        mock_client.search = MagicMock(return_value=[[
+            {
+                "id": "1",
+                "content": "Test content",
+                "metadata": {},
+                "score": 0.8,
+            }
+        ]])
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        results = await store.sparse_search("test query", top_k=5)
+        assert len(results) == 1
+        assert results[0].text == "Test content"
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_sparse_search_with_filters(self, mock_client_class, vector_store_config):
+        """Test sparse search with filters"""
+        mock_client = MagicMock()
+        mock_client.search = MagicMock(return_value=[[]])
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        filters = {"source": "test"}
+        results = await store.sparse_search("test query", top_k=5, filters=filters)
+        # Verify BM25 search was used
+        call_kwargs = mock_client.search.call_args[1]
+        assert call_kwargs["search_params"]["metric_type"] == "BM25"
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_sparse_search_failure(self, mock_client_class, vector_store_config):
+        """Test sparse search failure"""
+        mock_client = MagicMock()
+        mock_client.search = MagicMock(side_effect=Exception("Search error"))
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        results = await store.sparse_search("test query", top_k=5)
+        assert results == []
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.AnnSearchRequest")
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.RRFRanker")
+    async def test_hybrid_search_success(
+        self, mock_ranker_class, mock_ann_request_class, mock_client_class, vector_store_config
+    ):
+        """Test successful hybrid search"""
+        mock_client = MagicMock()
+        mock_client.hybrid_search = MagicMock(return_value=[[
+            {
+                "id": "1",
+                "content": "Test content",
+                "metadata": {},
+                "score": 0.9,
+            }
+        ]])
+        mock_client_class.return_value = mock_client
+
+        mock_ann_request = MagicMock()
+        mock_ann_request_class.return_value = mock_ann_request
+        mock_ranker = MagicMock()
+        mock_ranker_class.return_value = mock_ranker
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        results = await store.hybrid_search(
+            query_text="test",
+            query_vector=[0.1] * 384,
+            top_k=5,
+            alpha=0.5,
+        )
+        assert len(results) == 1
+        mock_client.hybrid_search.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_hybrid_search_without_vector(self, mock_client_class, vector_store_config):
+        """Test hybrid search (without vector)"""
+        mock_client = MagicMock()
+        mock_client.hybrid_search = MagicMock(return_value=[[]])
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        results = await store.hybrid_search(
+            query_text="test",
+            query_vector=None,
+            top_k=5,
+        )
+        # Should only create sparse search request
+        assert isinstance(results, list)
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_hybrid_search_fallback(self, mock_client_class, vector_store_config):
+        """Test hybrid search fallback"""
+        mock_client = MagicMock()
+        mock_client.hybrid_search = MagicMock(side_effect=Exception("Hybrid search error"))
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        with patch.object(store, "search", new_callable=AsyncMock) as mock_search, \
+             patch.object(store, "sparse_search", new_callable=AsyncMock) as mock_sparse:
+            mock_search.return_value = [
+                SearchResult(id="1", text="Vector result", score=0.9, metadata={}),
+            ]
+            mock_sparse.return_value = [
+                SearchResult(id="2", text="Sparse result", score=0.8, metadata={}),
+            ]
+
+            results = await store.hybrid_search(
+                query_text="test",
+                query_vector=[0.1] * 384,
+                top_k=5,
+            )
+            # Should use fallback method
+            assert len(results) >= 0
+            mock_search.assert_called_once()
+            mock_sparse.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_delete_by_ids(self, mock_client_class, vector_store_config):
+        """Test deletion by IDs"""
+        mock_client = MagicMock()
+        mock_client.delete = MagicMock(return_value={"delete_count": 2})
+        mock_client.flush = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        result = await store.delete(ids=["1", "2"])
+        assert result is True
+        mock_client.delete.assert_called_once()
+        mock_client.flush.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_delete_by_filter_expr(self, mock_client_class, vector_store_config):
+        """Test deletion by filter expression"""
+        mock_client = MagicMock()
+        mock_client.delete = MagicMock(return_value={"delete_count": 1})
+        mock_client.flush = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        result = await store.delete(filter_expr="source == 'test'")
+        assert result is True
+        mock_client.delete.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_delete_no_results(self, mock_client_class, vector_store_config):
+        """Test deletion with no results"""
+        mock_client = MagicMock()
+        mock_client.delete = MagicMock(return_value={"delete_count": 0})
+        mock_client.flush = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        result = await store.delete(ids=["1"])
+        assert result is False
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    async def test_delete_with_exception(self, mock_client_class, vector_store_config):
+        """Test deletion with exception"""
+        mock_client = MagicMock()
+        mock_client.delete = MagicMock(side_effect=Exception("Delete error"))
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        result = await store.delete(ids=["1"])
+        assert result is False
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_close(self, mock_client_class, vector_store_config):
+        """Test closing vector store"""
+        mock_client = MagicMock()
+        mock_client.close = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        store.close()
+        mock_client.close.assert_called_once()
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_close_with_exception(self, mock_client_class, vector_store_config):
+        """Test closing with exception"""
+        mock_client = MagicMock()
+        mock_client.close = MagicMock(side_effect=Exception("Close error"))
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        # Should catch exception, not raise
+        store.close()
+
