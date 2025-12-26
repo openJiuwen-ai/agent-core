@@ -1,0 +1,40 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
+import asyncio
+import json
+from typing import Any, Optional
+
+import aiofiles
+
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
+from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import register_parser
+
+
+@register_parser([".json", ".JSON"])
+class JSONParser(Parser):
+    """本地文件解析器，json格式"""
+
+    def __init__(self, **kwargs: Any):
+        pass
+
+    async def _parse(self, file_path: str) -> Optional[str]:
+        """解析 JSON 文件"""
+        try:
+            async with aiofiles.open(
+                file_path, "r", encoding="utf-8", errors="ignore"
+            ) as f:
+                raw_content = await f.read()
+
+            def _format_json() -> str:
+                try:
+                    json_data = json.loads(raw_content)
+                    return json.dumps(json_data, indent=2, ensure_ascii=False)
+                except json.JSONDecodeError:
+                    logger.error(f"JSON format error: {file_path}")
+                    return raw_content
+
+            return await asyncio.to_thread(_format_json)
+        except Exception as e:
+            logger.error(f"Failed to parse JSON {file_path}: {e}")
+            return None
