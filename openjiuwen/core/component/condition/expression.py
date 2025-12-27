@@ -128,9 +128,36 @@ class ExpressionCondition(Condition):
 
 
 def convert_condition(condition, inputs):
+    # Extract and protect string literals to prevent replacement inside strings
+    string_literals = []
+    placeholder_pattern = r'__STRING_LITERAL_{}__'
+    
+    # Pattern to match string literals (single quotes, double quotes, with escape handling)
+    # This regex matches: "..." or '...' including escaped quotes
+    string_pattern = r'("(?:[^"\\]|\\.)*")|(\'(?:[^\'\\]|\\.)*\')'
+    
+    def replace_string(match):
+        """Replace matched string literal with placeholder"""
+        string_literal = match.group(0)
+        index = len(string_literals)
+        string_literals.append(string_literal)
+        return placeholder_pattern.format(index)
+    
+    # Step 1: Extract and replace all string literals with placeholders
+    protected_condition = re.sub(string_pattern, replace_string, condition)
+    
+    # Step 2: Apply replacement rules to the protected condition
     for pattern, replacement in RULES:
-        condition = pattern.sub(replacement, condition)
-    return condition
+        protected_condition = pattern.sub(replacement, protected_condition)
+    
+    # Step 3: Restore original string literals
+    for i, original_string in enumerate(string_literals):
+        protected_condition = protected_condition.replace(
+            placeholder_pattern.format(i), 
+            original_string
+        )
+    
+    return protected_condition
 
 
 def _safe_is_empty(value):
