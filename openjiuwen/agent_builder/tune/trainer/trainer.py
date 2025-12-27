@@ -57,15 +57,15 @@ class Trainer:
         progress: Progress = self._pre_train(agent, **kwargs)
         if not val_cases:
             val_cases = train_cases
-        self._callbacks.on_train_begin(agent, progress)
-        progress.val_baseline_score, _ = self.evaluate(agent, val_cases)
-        progress.best_score = progress.val_baseline_score
+        progress.current_epoch_score, cur_epoch_evaluated_cases = self.evaluate(agent, val_cases)
+        progress.best_score = progress.current_epoch_score
+        self._callbacks.on_train_begin(agent, progress, cur_epoch_evaluated_cases)
         if progress.best_score >= self._early_stop_score:
             logger.info(f"val set score {progress.best_score} already exceed target score {self._early_stop_score}, "
                         f"skip optimization")
-            self._callbacks.on_train_end(agent, progress)
+            self._callbacks.on_train_end(agent, progress, cur_epoch_evaluated_cases)
             return agent
-        logger.info(f"val set baseline score: {progress.val_baseline_score}")
+        logger.info(f"val set baseline score: {progress.current_epoch_score}")
         parameter_searcher = ParameterSearcher(self, case_loader=val_cases)
         score = 0.0
         for _ in progress.run_epoch():
@@ -81,12 +81,13 @@ class Trainer:
                 with self._optimizer as optimizer:
                     optimizer.backward(cur_evaluated_cases)
                     optimizer.update()
-                score, cur_batch_parameters, _ = parameter_searcher.search_best(
+                score, cur_batch_parameters, cur_epoch_evaluated_cases, progress.current_epoch_score = (
+                    parameter_searcher.search_best(
                     agent=agent,
                     base_score=progress.best_score,
                     base_parameters=cur_parameters,
                     parameters=[agent.get_llm_calls()],
-                )
+                ))
                 if score > progress.best_batch_score:
                     progress.best_batch_score = score
                     best_batch_parameters = cur_batch_parameters
@@ -94,12 +95,14 @@ class Trainer:
             if progress.best_batch_score > progress.best_score:
                 progress.best_score = progress.best_batch_score
                 self._update_agent(agent, best_batch_parameters)
+                self._callbacks.on_train_epoch_end(agent, progress, cur_epoch_evaluated_cases)
             else:
+                self._callbacks.on_train_epoch_end(agent, progress, cur_epoch_evaluated_cases)
                 self._update_agent(agent, cur_parameters)
-            self._callbacks.on_train_epoch_end(agent, progress)
             if progress.best_score >= self._early_stop_score:
                 break
-        self._callbacks.on_train_end(agent, progress)
+        self._callbacks.on_train_end(agent, progress, cur_epoch_evaluated_cases)
+
         return agent
 
     def evaluate(self,
@@ -197,7 +200,9 @@ class ParameterSearcher:
                 best_score = score
                 best_parameters = candidate
                 best_cases = evaluated_cases
-        return best_score, best_parameters, best_cases
+            if best_cases is None:
+                best_cases = evaluated_cases
+        return best_score, best_parameters, best_cases, score
 
     def generate_candidates(self,
                             parameters: List[Dict[str, LLMCall]]
