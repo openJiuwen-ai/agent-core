@@ -1,8 +1,10 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-API 嵌入模型实现
+API Embedding Model Implementation
 
-通用 HTTP 嵌入客户端实现。
+Universal HTTP embedding client implementation.
 """
 from typing import Any, List, Optional
 import asyncio
@@ -106,7 +108,7 @@ class APIEmbedding(Embedding):
     async def _get_embeddings(
         self, text: str | List[str], **kwargs
     ) -> List[List[float]]:
-        """获取嵌入向量"""
+        """Get embedding vectors"""
         
         payload = {"model": self.model_name, "input": text, **kwargs}
         
@@ -141,7 +143,7 @@ class APIEmbedding(Embedding):
                 else:
                     raise ValueError(f"No embeddings in response: {result}")
                 
-                # 如果维度还未确定，从结果中获取并缓存
+                # If dimension not yet determined, get from result and cache
                 if self._dimension is None and embeddings and embeddings[0]:
                     self._dimension = len(embeddings[0])
                     logger.debug(f"Determined embedding dimension: {self._dimension}")

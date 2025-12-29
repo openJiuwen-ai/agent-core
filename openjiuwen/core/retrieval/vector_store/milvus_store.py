@@ -1,8 +1,10 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-Milvus 向量存储实现
+Milvus Vector Store Implementation
 
-支持向量搜索、稀疏搜索（BM25）和混合搜索。
+Supports vector search, sparse search (BM25), and hybrid search.
 """
 import asyncio
 from typing import Any, List, Optional
@@ -17,7 +19,7 @@ from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 
 
 class MilvusVectorStore(VectorStore):
-    """Milvus 向量存储实现"""
+    """Milvus vector store implementation"""
 
     def __init__(
         self,
@@ -32,16 +34,16 @@ class MilvusVectorStore(VectorStore):
         **kwargs: Any,
     ):
         """
-        初始化 Milvus 向量存储
+        Initialize Milvus vector store
         
         Args:
-            config: 向量存储配置
+            config: Vector store configuration
             milvus_uri: Milvus URI
-            milvus_token: Milvus Token（可选）
-            text_field: 文本字段名
-            vector_field: 向量字段名
-            sparse_vector_field: 稀疏向量字段名
-            metadata_field: 元数据字段名
+            milvus_token: Milvus Token (optional)
+            text_field: Text field name
+            vector_field: Vector field name
+            sparse_vector_field: Sparse vector field name
+            metadata_field: Metadata field name
         """
         self.config = config
         self.collection_name = config.collection_name
@@ -60,7 +62,7 @@ class MilvusVectorStore(VectorStore):
 
     @property
     def client(self) -> MilvusClient:
-        """获取 Milvus 客户端"""
+        """Get Milvus client"""
         return self._client
 
     async def add(
@@ -117,13 +119,13 @@ class MilvusVectorStore(VectorStore):
         filters: Optional[dict] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
-        """向量搜索"""
+        """Vector search"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
 
-        # 构建过滤表达式
+        # Build filter expression
         filter_expr = None
         if filters:
-            # 简单的过滤表达式构建（可以根据需要扩展）
+            # Simple filter expression builder (can be extended as needed)
             filter_parts = []
             for key, value in filters.items():
                 if isinstance(value, str):
@@ -133,7 +135,7 @@ class MilvusVectorStore(VectorStore):
             if filter_parts:
                 filter_expr = " && ".join(filter_parts)
 
-        # 执行搜索
+        # Execute search
         results = await asyncio.to_thread(
             self._client.search,
             collection_name=self.collection_name,
@@ -156,10 +158,10 @@ class MilvusVectorStore(VectorStore):
         filters: Optional[dict] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
-        """稀疏搜索（BM25）"""
+        """Sparse search (BM25)"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
 
-        # 构建过滤表达式
+        # Build filter expression
         filter_expr = None
         if filters:
             filter_parts = []
@@ -172,11 +174,11 @@ class MilvusVectorStore(VectorStore):
                 filter_expr = " && ".join(filter_parts)
 
         try:
-            # 使用原生 BM25 全文搜索
+            # Use native BM25 full-text search
             results = await asyncio.to_thread(
                 self._client.search,
                 collection_name=self.collection_name,
-                data=[query_text],  # 直接传递文本，BM25 函数会处理分词
+                data=[query_text],  # Pass text directly, BM25 function handles tokenization
                 anns_field=self.sparse_vector_field,
                 limit=top_k,
                 output_fields=output_fields,
@@ -200,10 +202,10 @@ class MilvusVectorStore(VectorStore):
         filters: Optional[dict] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
-        """混合搜索（稀疏检索 + 向量检索）"""
+        """Hybrid search (sparse retrieval + vector retrieval)"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
 
-        # 构建过滤表达式
+        # Build filter expression
         filter_expr = None
         if filters:
             filter_parts = []
@@ -216,10 +218,10 @@ class MilvusVectorStore(VectorStore):
                 filter_expr = " && ".join(filter_parts)
 
         try:
-            # 构建搜索请求
+            # Build search requests
             search_requests = []
 
-            # 密集向量搜索请求
+            # Dense vector search request
             if query_vector is not None:
                 dense_req = AnnSearchRequest(
                     data=[query_vector],
@@ -229,9 +231,9 @@ class MilvusVectorStore(VectorStore):
                 )
                 search_requests.append(dense_req)
 
-            # 稀疏 BM25 搜索请求
+            # Sparse BM25 search request
             sparse_req = AnnSearchRequest(
-                data=[query_text],  # 直接传递文本
+                data=[query_text],  # Pass text directly
                 anns_field=self.sparse_vector_field,
                 param={"metric_type": "BM25"},
                 limit=top_k,
@@ -241,7 +243,7 @@ class MilvusVectorStore(VectorStore):
             if not search_requests:
                 return []
 
-            # 使用原生混合搜索和 RRF 排序
+            # Use native hybrid search with RRF ranking
             results = await asyncio.to_thread(
                 self._client.hybrid_search,
                 collection_name=self.collection_name,
@@ -260,7 +262,7 @@ class MilvusVectorStore(VectorStore):
             logger.warning(
                 f"Hybrid search failed, falling back to separate searches: {e}"
             )
-            # 回退到分别搜索然后融合
+            # Fall back to separate searches then fusion
             return await self._hybrid_search_fallback(
                 query_text, query_vector, top_k, filters
             )
@@ -272,8 +274,8 @@ class MilvusVectorStore(VectorStore):
         top_k: int,
         filters: Optional[dict],
     ) -> List[SearchResult]:
-        """回退混合搜索：分别执行搜索然后融合"""
-        # 并发执行两个搜索
+        """Fallback hybrid search: execute searches separately then fuse"""
+        # Execute two searches concurrently
         task_vector = (
             asyncio.create_task(self.search(query_vector, top_k, None))
             if query_vector
@@ -293,7 +295,7 @@ class MilvusVectorStore(VectorStore):
         filter_expr: Optional[str] = None,
         **kwargs: Any,
     ) -> bool:
-        """删除向量"""
+        """Delete vectors"""
         try:
             result = await asyncio.to_thread(
                 self._client.delete,
@@ -303,7 +305,7 @@ class MilvusVectorStore(VectorStore):
             )
             self._client.flush(self.collection_name)
 
-            # 检查删除结果
+            # Check delete result
             if isinstance(result, dict):
                 return result.get("delete_count", 0) > 0
             return bool(result)
@@ -316,10 +318,10 @@ class MilvusVectorStore(VectorStore):
         results: List[dict],
         mode: str,
     ) -> List[SearchResult]:
-        """将 Milvus 搜索结果转换为 SearchResult 列表"""
+        """Convert Milvus search results to SearchResult list"""
         search_results = []
         for item in results:
-            # 提取字段
+            # Extract fields
             result_id = str(item.get("id", item.get("pk", "")))
             text = item.get(self.text_field, "")
             metadata = item.get(self.metadata_field, {})
@@ -331,7 +333,7 @@ class MilvusVectorStore(VectorStore):
                 except Exception:
                     metadata = {}
 
-            # 带出 chunk_id 便于上层关联
+            # Include chunk_id for upper layer association
             if item.get("chunk_id") is not None:
                 metadata.setdefault("chunk_id", item.get("chunk_id"))
 
@@ -347,7 +349,7 @@ class MilvusVectorStore(VectorStore):
             elif mode == "sparse":
                 if raw_score_val is not None:
                     final_score = raw_score_val
-            else:  # hybrid 或其他
+            else:  # hybrid or other
                 if raw_score_val is not None:
                     final_score = raw_score_val
 
@@ -366,7 +368,7 @@ class MilvusVectorStore(VectorStore):
         return search_results
 
     def close(self) -> None:
-        """关闭向量存储"""
+        """Close vector store"""
         if self._client is None:
             return
         try:

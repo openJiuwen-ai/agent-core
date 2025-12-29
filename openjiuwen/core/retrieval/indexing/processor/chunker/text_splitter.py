@@ -1,4 +1,6 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import uuid
 from abc import ABCMeta, abstractmethod
 from typing import Any, Callable, Tuple

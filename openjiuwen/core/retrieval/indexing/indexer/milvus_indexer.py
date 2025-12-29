@@ -1,8 +1,10 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-Milvus 索引管理器实现
+Milvus Index Manager Implementation
 
-负责构建、更新和删除 Milvus 索引。
+Responsible for building, updating and deleting Milvus indices.
 """
 import asyncio
 from typing import Any, List, Optional, Dict
@@ -19,7 +21,7 @@ from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 
 
 class MilvusIndexer(Indexer):
-    """Milvus 索引管理器实现"""
+    """Milvus index manager implementation"""
 
     def __init__(
         self,
@@ -33,15 +35,15 @@ class MilvusIndexer(Indexer):
         **kwargs: Any,
     ):
         """
-        初始化 Milvus 索引管理器
+        Initialize Milvus index manager
         
         Args:
             milvus_uri: Milvus URI
-            milvus_token: Milvus Token（可选）
-            text_field: 文本字段名
-            vector_field: 向量字段名
-            sparse_vector_field: 稀疏向量字段名
-            metadata_field: 元数据字段名
+            milvus_token: Milvus Token (optional)
+            text_field: Text field name
+            vector_field: Vector field name
+            sparse_vector_field: Sparse vector field name
+            metadata_field: Metadata field name
         """
         self.milvus_uri = milvus_uri
         self.milvus_token = milvus_token
@@ -58,7 +60,7 @@ class MilvusIndexer(Indexer):
 
     @property
     def client(self) -> MilvusClient:
-        """获取 Milvus 客户端"""
+        """Get Milvus client"""
         return self._client
 
     async def build_index(
@@ -68,18 +70,18 @@ class MilvusIndexer(Indexer):
         embed_model: Optional[Embedding] = None,
         **kwargs: Any,
     ) -> bool:
-        """构建索引"""
+        """Build index"""
         try:
             collection_name = config.index_name
             
-            # 确保集合存在
+            # Ensure collection exists
             await self._ensure_collection(
                 collection_name=collection_name,
                 config=config,
                 embed_model=embed_model,
             )
 
-            # 如果需要向量索引，生成嵌入
+            # If vector index is needed, generate embeddings
             embeddings = None
             if config.index_type in ("vector", "hybrid"):
                 if not embed_model:
@@ -101,7 +103,7 @@ class MilvusIndexer(Indexer):
                 milvus_token=self.milvus_token,
             )
 
-            # 将 TextChunk 转换为 Milvus 需要的字段，避免写入未在 schema 中定义的 id_ 字段
+            # Convert TextChunk to Milvus required fields, avoiding writing id_ field not defined in schema
             data = []
             for idx, chunk in enumerate(chunks):
                 meta = chunk.metadata or {}
@@ -132,12 +134,12 @@ class MilvusIndexer(Indexer):
         embed_model: Optional[Embedding] = None,
         **kwargs: Any,
     ) -> bool:
-        """更新索引"""
+        """Update index"""
         try:
-            # 先删除旧数据
+            # Delete old data first
             await self.delete_index(doc_id, config.index_name)
 
-            # 重新构建
+            # Rebuild
             return await self.build_index(chunks, config, embed_model, **kwargs)
         except Exception as e:
             logger.error(f"Failed to update index: {e}")
@@ -149,7 +151,7 @@ class MilvusIndexer(Indexer):
         index_name: str,
         **kwargs: Any,
     ) -> bool:
-        """删除索引"""
+        """Delete index"""
         try:
             filter_expr = f'{self.doc_id_field} == "{doc_id}"'
             result = await asyncio.to_thread(
@@ -176,7 +178,7 @@ class MilvusIndexer(Indexer):
         self,
         index_name: str,
     ) -> bool:
-        """检查索引是否存在"""
+        """Check if index exists"""
         try:
             return await asyncio.to_thread(
                 self._client.has_collection,
@@ -190,19 +192,19 @@ class MilvusIndexer(Indexer):
         self,
         index_name: str,
     ) -> Dict[str, Any]:
-        """获取索引信息"""
+        """Get index information"""
         try:
             if not await self.index_exists(index_name):
                 return {"exists": False}
 
-            # 优先使用 collection stats，避免 query count 触发分页错误
+            # Prefer using collection stats to avoid query count triggering pagination errors
             stats = await asyncio.to_thread(
                 self._client.get_collection_stats,
                 collection_name=index_name,
             )
             row_count = 0
             if isinstance(stats, dict):
-                # row_count 可能是字符串，或在 stats 列表里
+                # row_count may be a string, or in the stats list
                 rc = stats.get("row_count")
                 try:
                     row_count = int(rc or 0)
@@ -239,11 +241,11 @@ class MilvusIndexer(Indexer):
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
     ) -> None:
-        """确保集合存在，如果不存在则创建"""
+        """Ensure collection exists, create if not exists"""
         if await self.index_exists(collection_name):
             return
 
-        # 构建 schema
+        # Build schema
         schema = self._client.create_schema(
             auto_id=True,
             enable_dynamic_field=False,
@@ -251,7 +253,7 @@ class MilvusIndexer(Indexer):
 
         index_params = self._client.prepare_index_params()
 
-        # 文档 ID 字段
+        # Document ID field
         schema.add_field(
             field_name=self.doc_id_field,
             datatype=DataType.VARCHAR,
@@ -264,7 +266,7 @@ class MilvusIndexer(Indexer):
             index_type="INVERTED",  # Inverted index for VARCHAR
         )
 
-        # 主键字段（自动生成）
+        # Primary key field (auto-generated)
         schema.add_field(
             field_name="pk",
             datatype=DataType.INT64,
@@ -272,7 +274,7 @@ class MilvusIndexer(Indexer):
             auto_id=True,
         )
 
-        # 文本内容字段（启用分析器用于 BM25）
+        # Text content field (enable analyzer for BM25)
         enable_bm25 = config.index_type in ("bm25", "hybrid")
         schema.add_field(
             field_name=self.text_field,
@@ -304,20 +306,20 @@ class MilvusIndexer(Indexer):
                 metric_type="BM25",
             )
 
-        # 向量字段（如果需要）
+        # Vector field (if needed)
         if config.index_type in ("vector", "hybrid"):
             dimension = None
             if embed_model:
                 dimension = embed_model.dimension
             
-            # 如果维度是 0（占位值）或 None，通过实际调用获取真实维度
+            # If dimension is 0 (placeholder) or None, get actual dimension through API call
             if (dimension is None or dimension == 0) and embed_model:
                 try:
                     test_embedding = await embed_model.embed_query("X")
                     dimension = len(test_embedding)
-                    logger.debug(f"通过实际调用获取到维度: {dimension}")
+                    logger.debug(f"Got dimension through API call: {dimension}")
                 except Exception as e:
-                    logger.warning(f"无法通过实际调用获取维度: {e}")
+                    logger.warning(f"Unable to get dimension through API call: {e}")
                     dimension = None
 
             if dimension is None or dimension == 0:
@@ -339,13 +341,13 @@ class MilvusIndexer(Indexer):
                 params={"nlist": 1024},
             )
 
-        # 元数据字段
+        # Metadata field
         schema.add_field(
             field_name=self.metadata_field,
             datatype=DataType.JSON,
         )
 
-        # 创建集合
+        # Create collection
         await asyncio.to_thread(
             self._client.create_collection,
             collection_name=collection_name,
@@ -356,7 +358,7 @@ class MilvusIndexer(Indexer):
         logger.info(f"Created collection: {collection_name}")
 
     def close(self) -> None:
-        """关闭索引管理器"""
+        """Close index manager"""
         if self._client is None:
             return
         try:

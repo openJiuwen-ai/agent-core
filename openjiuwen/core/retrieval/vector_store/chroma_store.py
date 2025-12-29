@@ -1,4 +1,6 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
 ChromaDB Vector Store Implementation
 
@@ -292,7 +294,7 @@ class ChromaVectorStore(VectorStore):
                     where[key] = value
         
         try:
-            # 分别执行向量搜索和文本搜索
+            # Execute vector search and text search separately
             tasks = []
             
             if query_vector is not None:
@@ -306,7 +308,7 @@ class ChromaVectorStore(VectorStore):
             )
             tasks.append(("text", task_text))
             
-            # 等待所有任务完成
+            # Wait for all tasks to complete
             results_dict = {}
             for mode, task in tasks:
                 try:
@@ -315,22 +317,22 @@ class ChromaVectorStore(VectorStore):
                     logger.warning(f"{mode} search failed in hybrid search: {e}")
                     results_dict[mode] = []
             
-            # 融合结果
+            # Fuse results
             results_list = [r for r in results_dict.values() if r]
             if not results_list:
                 return []
             
-            # 将 SearchResult 转换为 RetrievalResult 以使用 rrf_fusion
-            # 同时保存 ID 映射以便后续恢复
+            # Convert SearchResult to RetrievalResult for rrf_fusion
+            # Save ID mapping for later recovery
             retrieval_results_list = []
-            id_mapping = {}  # text -> id 映射
+            id_mapping = {}  # text -> id mapping
             
             for search_results in results_list:
                 retrieval_results = []
                 for sr in search_results:
-                    # 保存 ID 映射
+                    # Save ID mapping
                     id_mapping[sr.text] = sr.id
-                    # 确保 ID 在元数据中
+                    # Ensure ID is in metadata
                     metadata = sr.metadata.copy()
                     metadata["id"] = sr.id
                     retrieval_results.append(
@@ -423,13 +425,13 @@ class ChromaVectorStore(VectorStore):
         distances_list = results.get("distances", [[]])[0] if results.get("distances") else []
         
         for idx, result_id in enumerate(ids_list):
-            # 提取字段
+            # Extract fields
             text = documents_list[idx] if idx < len(documents_list) else ""
             metadata = metadatas_list[idx] if idx < len(metadatas_list) else {}
             if not isinstance(metadata, dict):
                 metadata = {}
             
-            # 处理稀疏向量元数据
+            # Process sparse vector metadata
             if self.sparse_vector_field in metadata:
                 try:
                     sparse_vec = json.loads(metadata[self.sparse_vector_field])
@@ -438,38 +440,38 @@ class ChromaVectorStore(VectorStore):
                     logger.warning(f"Failed to load sparse vector: {metadata[self.sparse_vector_field]}")
                     pass
             
-            # 计算分数
+            # Calculate score
             raw_score = distances_list[idx] if idx < len(distances_list) else None
             raw_score_val = float(raw_score) if raw_score is not None else None
             raw_score_scaled: Optional[float] = None
             final_score: float = 0.0
             
             if mode == "vector":
-                # ChromaDB 返回的是距离，需要转换为相似度分数
+                # ChromaDB returns distance, need to convert to similarity score
                 if raw_score_val is not None:
-                    # 对于 cosine 距离，相似度 = 1 - 距离
-                    # 对于 L2 距离，需要归一化
+                    # For cosine distance, similarity = 1 - distance
+                    # For L2 distance, need normalization
                     if self.config.distance_metric == "cosine":
                         raw_score_scaled = 1.0 - raw_score_val
                     else:
-                        # L2 距离，简单归一化（假设最大距离为 2）
+                        # L2 distance, simple normalization (assuming max distance is 2)
                         raw_score_scaled = max(0.0, 1.0 - raw_score_val / 2.0)
                     final_score = raw_score_scaled
             elif mode == "sparse":
-                # 文本搜索的分数（ChromaDB 可能返回相似度分数或距离）
-                # 如果没有距离信息，使用默认分数
+                # Text search score (ChromaDB may return similarity score or distance)
+                # If no distance info, use default score
                 if raw_score_val is not None:
-                    # 如果是距离，转换为相似度
+                    # If it's distance, convert to similarity
                     if raw_score_val <= 1.0:
                         final_score = 1.0 - raw_score_val
                     else:
                         final_score = raw_score_val
                 else:
-                    # 没有分数信息，使用默认值
+                    # No score info, use default value
                     final_score = 0.5
-            else:  # hybrid 或其他
+            else:  # hybrid or other
                 if raw_score_val is not None:
-                    # 对于混合搜索，分数已经在融合时计算
+                    # For hybrid search, score is already calculated during fusion
                     final_score = raw_score_val
                 else:
                     final_score = 0.0

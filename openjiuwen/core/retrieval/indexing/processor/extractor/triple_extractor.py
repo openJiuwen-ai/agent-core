@@ -1,8 +1,10 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-三元组提取器实现
+Triple Extractor Implementation
 
-使用 LLM 进行三元组提取。
+Uses LLM for triple extraction.
 """
 from typing import List, Any, Optional
 import json
@@ -15,7 +17,7 @@ from openjiuwen.core.retrieval.common.triple import Triple
 
 
 class TripleExtractor(Extractor):
-    """三元组提取器实现，使用 LLM 进行 OpenIE 三元组提取"""
+    """Triple extractor implementation using LLM for OpenIE triple extraction"""
 
     def __init__(
         self,
@@ -26,13 +28,13 @@ class TripleExtractor(Extractor):
         **kwargs: Any,
     ):
         """
-        初始化三元组提取器
+        Initialize triple extractor
         
         Args:
-            llm_client: LLM 客户端实例
-            model_name: 模型名称
-            temperature: 温度参数
-            max_concurrent: 最大并发数，默认 50
+            llm_client: LLM client instance
+            model_name: Model name
+            temperature: Temperature parameter
+            max_concurrent: Maximum concurrency, defaults to 50
         """
         self.llm_client = llm_client
         self.model_name = model_name
@@ -45,31 +47,31 @@ class TripleExtractor(Extractor):
         **kwargs: Any,
     ) -> List[Triple]:
         """
-        提取三元组
+        Extract triples
         
         Args:
-            chunks: 文本块列表
-            **kwargs: 额外参数
+            chunks: List of text chunks
+            **kwargs: Additional parameters
             
         Returns:
-            三元组列表
+            List of triples
         """
         async def _extract_chunk(chunk: TextChunk) -> List[Triple]:
-            """处理单个 chunk 的三元组提取"""
+            """Process triple extraction for a single chunk"""
             async with self.limiter:
                 try:
-                    # 构建提示词
+                    # Build prompt
                     prompt = self._build_prompt(chunk.text, chunk.metadata.get("title", ""))
                     messages = [{"role": "user", "content": prompt}]
                     
-                    # 调用 LLM
+                    # Call LLM
                     completion = await self.llm_client.ainvoke(
                         model_name=self.model_name,
                         messages=messages,
                         temperature=self.temperature,
                     )
                     
-                    # 解析结果
+                    # Parse result
                     triples = self._parse_triples(completion.content, chunk.doc_id)
                     return triples
                     
@@ -77,13 +79,13 @@ class TripleExtractor(Extractor):
                     logger.error(f"Failed to extract triples from chunk {chunk.id_}: {e}")
                     return []
         
-        # 使用 create_task 创建并行任务
+        # Create parallel tasks using create_task
         tasks = [asyncio.create_task(_extract_chunk(chunk)) for chunk in chunks]
         
-        # 等待所有任务完成并收集结果
+        # Wait for all tasks to complete and collect results
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # 合并所有结果
+        # Merge all results
         all_triples = []
         for result in results:
             if isinstance(result, Exception):
@@ -94,7 +96,7 @@ class TripleExtractor(Extractor):
         return all_triples
 
     def _build_prompt(self, passage: str, title: str = "") -> str:
-        """构建提取三元组的提示词"""
+        """Build prompt for triple extraction"""
         prompt_template = """Extract entities and relationships from the following passage. 
 Return the results in JSON format with a list of triples, where each triple is represented as [subject, predicate, object].
 
@@ -109,23 +111,23 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
         return prompt_template.format(passage=passage, title=title or "Untitled")
 
     def _parse_triples(self, content: str, doc_id: str) -> List[Triple]:
-        """解析 LLM 返回的三元组"""
+        """Parse triples returned by LLM"""
         triples = []
         
         try:
-            # 尝试解析 JSON
-            # 移除可能的 markdown 代码块标记
+            # Try to parse JSON
+            # Remove possible markdown code block markers
             content = content.strip()
             if content.startswith("```"):
-                # 移除代码块标记
+                # Remove code block markers
                 lines = content.split("\n")
                 content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
             
-            # 尝试直接解析 JSON
+            # Try to parse JSON directly
             try:
                 triple_list = json.loads(content)
             except json.JSONDecodeError:
-                # 如果不是有效的 JSON，尝试提取 JSON 部分
+                # If not valid JSON, try to extract JSON portion
                 import re
                 json_match = re.search(r'\[\[.*?\]\]', content, re.DOTALL)
                 if json_match:
@@ -134,7 +136,7 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
                     logger.error(f"Failed to parse triples from content: {content[:100]}")
                     return []
             
-            # 转换为 Triple 对象
+            # Convert to Triple objects
             for triple_data in triple_list:
                 if isinstance(triple_data, list) and len(triple_data) >= 3:
                     triple = Triple(

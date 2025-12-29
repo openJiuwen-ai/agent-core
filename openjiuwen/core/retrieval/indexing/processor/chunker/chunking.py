@@ -1,4 +1,6 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import uuid
 from typing import List, Optional, Any, Dict
@@ -18,7 +20,7 @@ from openjiuwen.core.retrieval.indexing.processor.chunker.tokenizer_chunker impo
 
 
 class TextChunker(Chunker):
-    """固定大小分块器，基于字符长度进行分块"""
+    """Fixed size chunker based on character length"""
 
     def __init__(
         self,
@@ -30,11 +32,11 @@ class TextChunker(Chunker):
         **kwargs: Any,
     ):
         """
-        初始化固定大小分块器
+        Initialize fixed size chunker
         
         Args:
-            chunk_size: 分块大小（字符数）
-            chunk_overlap: 分块重叠大小（字符数）
+            chunk_size: Chunk size (number of characters)
+            chunk_overlap: Chunk overlap size (number of characters)
         """
         super().__init__(
             chunk_size=chunk_size,
@@ -94,13 +96,13 @@ class TextChunker(Chunker):
 
     def chunk_documents(self, documents: List[Document]) -> List[TextChunk]:
         """
-        分块文档列表
+        Chunk document list
         
         Args:
-            documents: 文档列表
+            documents: List of documents
             
         Returns:
-            文档块列表
+            List of document chunks
         """
         chunks = []
         for doc in documents:

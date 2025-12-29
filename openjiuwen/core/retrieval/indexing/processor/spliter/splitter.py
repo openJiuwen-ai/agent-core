@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import List, Tuple, Callable
 from pysbd import Segmenter
 
@@ -15,13 +18,13 @@ class SentenceSplitter(Splitter):
         lan: str = "zh",
     ):
         """
-        初始化句子分割器
+        Initialize sentence splitter
         
         Args:
-            tokenizer: 分词器，需要具有 encode 和 decode 方法
-            chunk_size: 分块大小（token 数）
-            chunk_overlap: 分块重叠大小（token 数）
-            lan: 语言代码，默认为 "zh"（中文）
+            tokenizer: Tokenizer, must have encode and decode methods
+            chunk_size: Chunk size (number of tokens)
+            chunk_overlap: Chunk overlap size (number of tokens)
+            lan: Language code, defaults to "zh" (Chinese)
         """
         super().__init__(
             tokenizer=tokenizer,
@@ -33,13 +36,13 @@ class SentenceSplitter(Splitter):
 
     def __call__(self, doc: str) -> List[Tuple[str, int, int]]:
         """
-        分割文档为句子级别的块
+        Split document into sentence-level chunks
         
         Args:
-            doc: 待分割的文档文本
+            doc: Document text to be split
             
         Returns:
-            分割后的块列表，每个元素为 (文本, 起始字符位置, 结束字符位置)
+            List of chunks, each element is (text, start char position, end char position)
         """
         if not doc or not doc.strip():
             return []

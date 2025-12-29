@@ -1,8 +1,10 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-文本分割器抽象基类
+Text Splitter Abstract Base Class
 
-提供文本分割的统一接口，子类需要实现具体的分割逻辑。
+Provides unified interface for text splitting, subclasses need to implement specific splitting logic.
 """
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Callable, Optional, Any
@@ -12,7 +14,7 @@ from openjiuwen.core.common.logging import logger
 
 
 class Splitter(ABC):
-    """文本分割器抽象基类"""
+    """Text splitter abstract base class"""
     
     def __init__(
         self,
@@ -22,20 +24,20 @@ class Splitter(ABC):
         **kwargs: Any,
     ):
         """
-        初始化文本分割器
+        Initialize text splitter
         
         Args:
-            tokenizer: 分词器，需要具有 encode 和 decode 方法
-            chunk_size: 分块大小（token 数或字符数）
-            chunk_overlap: 分块重叠大小
-            **kwargs: 其他参数
+            tokenizer: Tokenizer, must have encode and decode methods
+            chunk_size: Chunk size (number of tokens or characters)
+            chunk_overlap: Chunk overlap size
+            **kwargs: Other parameters
         """
         if chunk_size <= 0:
-            raise ValueError(f"chunk_size 必须大于 0，当前值: {chunk_size}")
+            raise ValueError(f"chunk_size must be greater than 0, current value: {chunk_size}")
         if chunk_overlap < 0:
-            raise ValueError(f"chunk_overlap 必须大于等于 0，当前值: {chunk_overlap}")
+            raise ValueError(f"chunk_overlap must be greater than or equal to 0, current value: {chunk_overlap}")
         if chunk_overlap >= chunk_size:
-            raise ValueError(f"chunk_overlap ({chunk_overlap}) 必须小于 chunk_size ({chunk_size})")
+            raise ValueError(f"chunk_overlap ({chunk_overlap}) must be less than chunk_size ({chunk_size})")
         
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -56,31 +58,31 @@ class Splitter(ABC):
     
     def _validate_tokenizer(self, tokenizer: Callable) -> None:
         """
-        验证分词器是否有效
+        Validate if tokenizer is valid
         
         Args:
-            tokenizer: 分词器对象
+            tokenizer: Tokenizer object
             
         Raises:
-            ValueError: 如果分词器无效
+            ValueError: If tokenizer is invalid
         """
         if tokenizer is None:
             return
         
-        # 检查是否有 encode 方法或可以直接调用
+        # Check if has encode method or is callable
         if not (hasattr(tokenizer, "encode") or callable(tokenizer)):
-            raise ValueError("Tokenizer 必须具有 encode 方法或可调用")
+            raise ValueError("Tokenizer must have encode method or be callable")
     
     @abstractmethod
     def __call__(self, doc: str) -> List[Tuple[str, int, int]]:
         """
-        分割文档，返回 (文本, 起始位置, 结束位置) 的元组列表
+        Split document, return list of (text, start position, end position) tuples
         
         Args:
-            doc: 待分割的文档文本
+            doc: Document text to be split
             
         Returns:
-            分割后的块列表，每个元素为 (文本, 起始字符位置, 结束字符位置)
+            List of chunks, each element is (text, start char position, end char position)
         """
         pass
     
@@ -88,18 +90,18 @@ class Splitter(ABC):
         self, docs: List[Document]
     ) -> List[TextChunk]:
         """
-        从文档列表中获取分割后的节点
+        Get split nodes from document list
         
         Args:
-            docs: 文档列表
+            docs: List of documents
             
         Returns:
-            分割后的文本块列表
+            List of split text chunks
         """
         returned_nodes = []
         for doc in docs:
             if not doc or not hasattr(doc, 'text') or not doc.text:
-                logger.warning(f"跳过空文档: {doc}")
+                logger.warning(f"Skipping empty document: {doc}")
                 continue
                 
             chunk_tuples = self.__call__(doc.text)
@@ -108,31 +110,31 @@ class Splitter(ABC):
                 _node = TextChunk.from_document(doc, chunk_text)
                 returned_nodes.append(_node)
         
-        logger.info(f"从 {len(docs)} 个文档中生成 {len(returned_nodes)} 个文本块")
+        logger.info(f"Generated {len(returned_nodes)} text chunks from {len(docs)} documents")
         return returned_nodes
     
     def split_text(self, text: str) -> List[str]:
         """
-        分割文本，仅返回文本列表（不包含位置信息）
+        Split text, return only text list (without position info)
         
         Args:
-            text: 待分割的文本
+            text: Text to be split
             
         Returns:
-            分割后的文本列表
+            List of split texts
         """
         chunks = self.__call__(text)
         return [chunk[0] for chunk in chunks]
     
     def _get_token_count(self, text: str) -> int:
         """
-        获取文本的 token 数量
+        Get token count of text
         
         Args:
-            text: 文本内容
+            text: Text content
             
         Returns:
-            token 数量，如果没有 tokenizer 则返回字符数
+            Token count, returns character count if no tokenizer
         """
         if self.tokenizer_enc is not None:
             tokens = self.tokenizer_enc(text)
