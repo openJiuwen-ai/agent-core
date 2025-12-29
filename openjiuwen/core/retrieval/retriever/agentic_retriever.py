@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-Agentic 检索器：在图检索基础上加入 LLM 改写/多轮融合。
+Agentic Retriever: Adds LLM query rewriting/multi-round fusion on top of graph retrieval.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
 
 
 class AgenticRetriever(Retriever):
-    """在图检索上叠加 LLM 改写、多轮融合的检索器。"""
+    """A retriever that adds LLM query rewriting and multi-round fusion on top of graph retrieval."""
 
     def __init__(
         self,
@@ -71,10 +71,11 @@ class AgenticRetriever(Retriever):
     async def _rewrite(self, query: str, passages: List[RetrievalResult]) -> Optional[str]:
         context = "\n\n".join(p.text for p in passages[:5])
         prompt = (
-            "你是检索助手，请根据已检索到的段落改写查询，使其更具体或纠错。"
-            "如果无需改写，返回原查询。输出仅包含改写后的查询。\n\n"
-            f"原查询: {query}\n"
-            f"已检索段落:\n{context}"
+            "You are a retrieval assistant. Please rewrite the query based on the retrieved passages "
+            "to make it more specific or correct errors. "
+            "If no rewriting is needed, return the original query. Output only the rewritten query.\n\n"
+            f"Original query: {query}\n"
+            f"Retrieved passages:\n{context}"
         )
         rewritten = (await self._llm_call_async(prompt)).strip()
         return rewritten or None

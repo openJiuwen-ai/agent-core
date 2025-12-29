@@ -1,8 +1,10 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-ChromaDB 索引管理器实现
+ChromaDB Index Manager Implementation
 
-负责构建、更新和删除 ChromaDB 索引。
+Responsible for building, updating and deleting ChromaDB indices.
 """
 import asyncio
 from typing import Any, List, Optional, Dict
@@ -18,7 +20,7 @@ from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 
 
 class ChromaIndexer(Indexer):
-    """ChromaDB 索引管理器实现"""
+    """ChromaDB index manager implementation"""
 
     def __init__(
         self,
@@ -31,15 +33,15 @@ class ChromaIndexer(Indexer):
         **kwargs: Any,
     ):
         """
-        初始化 ChromaDB 索引管理器
+        Initialize ChromaDB index manager
         
         Args:
-            chroma_path: ChromaDB 持久化路径
-            text_field: 文本字段名
-            vector_field: 向量字段名
-            sparse_vector_field: 稀疏向量字段名
-            metadata_field: 元数据字段名
-            doc_id_field: 文档ID字段名
+            chroma_path: ChromaDB persistence path
+            text_field: Text field name
+            vector_field: Vector field name
+            sparse_vector_field: Sparse vector field name
+            metadata_field: Metadata field name
+            doc_id_field: Document ID field name
         """
         if not chroma_path or not chroma_path.strip():
             raise ValueError("chroma_path is required and cannot be empty")
@@ -55,7 +57,7 @@ class ChromaIndexer(Indexer):
 
     @property
     def client(self) -> chromadb.PersistentClient:
-        """获取 ChromaDB 客户端"""
+        """Get ChromaDB client"""
         return self._client
 
     async def build_index(
@@ -65,11 +67,11 @@ class ChromaIndexer(Indexer):
         embed_model: Optional[Embedding] = None,
         **kwargs: Any,
     ) -> bool:
-        """构建索引"""
+        """Build index"""
         try:
             collection_name = config.index_name
             
-            # 如果需要向量索引，生成嵌入
+            # If vector index is needed, generate embeddings
             embeddings = None
             if config.index_type in ("vector", "hybrid"):
                 if not embed_model:
@@ -95,7 +97,7 @@ class ChromaIndexer(Indexer):
                 doc_id_field=self.doc_id_field,
             )
 
-            # 将 TextChunk 转换为 ChromaDB 需要的字段
+            # Convert TextChunk to ChromaDB required fields
             data = []
             for idx, chunk in enumerate(chunks):
                 meta = chunk.metadata or {}
@@ -127,12 +129,12 @@ class ChromaIndexer(Indexer):
         embed_model: Optional[Embedding] = None,
         **kwargs: Any,
     ) -> bool:
-        """更新索引"""
+        """Update index"""
         try:
-            # 先删除旧数据
+            # Delete old data first
             await self.delete_index(doc_id, config.index_name)
 
-            # 重新构建
+            # Rebuild
             return await self.build_index(chunks, config, embed_model, **kwargs)
         except Exception as e:
             logger.error(f"Failed to update index: {e}")
@@ -144,15 +146,15 @@ class ChromaIndexer(Indexer):
         index_name: str,
         **kwargs: Any,
     ) -> bool:
-        """删除索引"""
+        """Delete index"""
         try:
-            # ChromaDB 不支持复杂的 filter 表达式，需要先查询再删除
+            # ChromaDB doesn't support complex filter expressions, need to query first then delete
             collection = await asyncio.to_thread(
                 self._client.get_collection,
                 name=index_name,
             )
             
-            # 查询所有匹配 doc_id 的记录
+            # Query all records matching doc_id
             results = await asyncio.to_thread(
                 collection.get,
                 where={self.doc_id_field: doc_id},
@@ -162,7 +164,7 @@ class ChromaIndexer(Indexer):
                 logger.info(f"No entries found for doc_id={doc_id}")
                 return False
             
-            # 删除匹配的记录
+            # Delete matching records
             ids_to_delete = results["ids"]
             await asyncio.to_thread(
                 collection.delete,
@@ -180,9 +182,9 @@ class ChromaIndexer(Indexer):
         self,
         index_name: str,
     ) -> bool:
-        """检查索引是否存在"""
+        """Check if index exists"""
         try:
-            # 尝试获取集合，如果不存在会抛出异常
+            # Try to get collection, throws exception if not exists
             await asyncio.to_thread(
                 self._client.get_collection,
                 name=index_name,
@@ -195,7 +197,7 @@ class ChromaIndexer(Indexer):
         self,
         index_name: str,
     ) -> Dict[str, Any]:
-        """获取索引信息"""
+        """Get index information"""
         try:
             if not await self.index_exists(index_name):
                 return {"exists": False}
@@ -205,12 +207,12 @@ class ChromaIndexer(Indexer):
                 name=index_name,
             )
             
-            # 获取集合统计信息
+            # Get collection statistics
             count = await asyncio.to_thread(
                 collection.count,
             )
             
-            # 获取集合元数据
+            # Get collection metadata
             metadata = collection.metadata or {}
 
             return {
@@ -224,12 +226,12 @@ class ChromaIndexer(Indexer):
             return {"exists": False, "error": str(e)}
 
     def close(self) -> None:
-        """关闭索引管理器"""
-        # ChromaDB 客户端通常不需要显式关闭
-        # 但可以重置客户端引用
+        """Close index manager"""
+        # ChromaDB client usually doesn't need explicit closing
+        # But can reset client reference
         if self._client is not None:
             try:
-                # ChromaDB 客户端没有 close 方法，但可以重置
+                # ChromaDB client doesn't have close method, but can reset
                 pass
             except Exception as e:
                 logger.warning(f"Failed to close ChromaDB client: {e}")

@@ -1,4 +1,6 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import os
 import asyncio
@@ -13,13 +15,13 @@ from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import
 
 @register_parser([".docx", ".DOCX"])
 class WordParser(Parser):
-    """本地文件解析器，docx格式"""
+    """Local file parser for DOCX format"""
 
     def __init__(self, **kwargs: Any):
         pass
 
     async def _parse(self, file_path: str) -> Optional[str]:
-        """解析 DOCX 文件"""
+        """Parse DOCX file"""
         try:
             doc = await asyncio.to_thread(Document, file_path)
             content = []
@@ -35,7 +37,7 @@ class WordParser(Parser):
             return None
 
     def _parse_docx_element(self, element, doc: Document) -> str:
-        """解析 DOCX 元素（段落或表格）"""
+        """Parse DOCX element (paragraph or table)"""
         if element.tag == qn("w:p"):
             para_text = element.text.strip()
             return para_text if para_text else ""

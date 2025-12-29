@@ -1,8 +1,10 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-图检索器实现
+Graph Retriever Implementation
 
-结合块检索和图检索的图检索器，支持图扩展。
+A graph retriever combining chunk retrieval and graph retrieval with graph expansion support.
 """
 import asyncio
 import itertools
@@ -15,7 +17,7 @@ from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 
 
 class GraphRetriever(Retriever):
-    """图检索器实现，结合块检索和图检索"""
+    """Graph retriever implementation combining chunk retrieval and graph retrieval"""
 
     def __init__(
         self,
@@ -28,15 +30,17 @@ class GraphRetriever(Retriever):
         **kwargs: Any,
     ):
         """
-        初始化图检索器
+        Initialize graph retriever
         
         Args:
-            chunk_retriever: 块检索器（用于检索文档块，可选，如果不提供则根据 mode 动态创建）
-            triple_retriever: 三元组检索器（用于检索三元组，可选，如果不提供则根据 mode 动态创建）
-            vector_store: 向量存储实例（用于动态创建检索器）
-            embed_model: 嵌入模型实例（用于动态创建检索器）
-            chunk_collection: 块集合名称（用于动态创建检索器）
-            triple_collection: 三元组集合名称（用于动态创建检索器）
+            chunk_retriever: Chunk retriever (for document chunk retrieval, optional,
+                dynamically created based on mode if not provided)
+            triple_retriever: Triple retriever (for triple retrieval, optional,
+                dynamically created based on mode if not provided)
+            vector_store: Vector store instance (for dynamic retriever creation)
+            embed_model: Embedding model instance (for dynamic retriever creation)
+            chunk_collection: Chunk collection name (for dynamic retriever creation)
+            triple_collection: Triple collection name (for dynamic retriever creation)
         """
         self.chunk_retriever = chunk_retriever
         self.triple_retriever = triple_retriever
@@ -44,7 +48,7 @@ class GraphRetriever(Retriever):
         self.embed_model = embed_model
         self.chunk_collection = chunk_collection
         self.triple_collection = triple_collection
-        self.index_type: Optional[str] = None  # 将由上层（如 KnowledgeBase）自动注入
+        self.index_type: Optional[str] = None  # Will be automatically injected by upper layer (e.g. KnowledgeBase)
 
     def _allowed_modes(self) -> Dict[str, set]:
         return {
@@ -55,15 +59,15 @@ class GraphRetriever(Retriever):
 
     def _ensure_mode_allowed(self, mode: Literal["vector", "sparse", "hybrid"]) -> None:
         if self.index_type is None:
-            # 未注入 index_type 时不强制校验（由上层保证）
+            # Don't enforce validation when index_type is not injected (ensured by upper layer)
             return
         allowed = self._allowed_modes().get(self.index_type)
         if allowed is None:
             raise ValueError(f"Unsupported index_type={self.index_type}")
         if mode not in allowed:
             raise ValueError(
-                f"mode={mode} 与 index_type={self.index_type} 不兼容；"
-                f"允许的模式: {sorted(allowed)}"
+                f"mode={mode} is incompatible with index_type={self.index_type}; "
+                f"allowed modes: {sorted(allowed)}"
             )
 
     def _retriever_supports_mode(self, retriever: Retriever, mode: str) -> bool:
@@ -89,18 +93,18 @@ class GraphRetriever(Retriever):
         is_chunk: bool = True,
     ) -> Retriever:
         """
-        根据 mode 获取对应的检索器
+        Get corresponding retriever based on mode
         
         Args:
-            mode: 检索模式
-            is_chunk: 是否为块检索器（True=chunk_retriever, False=triple_retriever）
+            mode: Retrieval mode
+            is_chunk: Whether chunk retriever (True=chunk_retriever, False=triple_retriever)
             
         Returns:
-            对应的检索器实例
+            Corresponding retriever instance
         """
         self._ensure_mode_allowed(mode)
         
-        # 如果提供了固定的检索器，直接使用（但需要检查是否支持该 mode）
+        # If fixed retriever is provided, use it directly (but need to check if it supports the mode)
         fixed_retriever = self.chunk_retriever if is_chunk else self.triple_retriever
         if fixed_retriever:
             if not self._retriever_supports_mode(fixed_retriever, mode):
@@ -110,7 +114,7 @@ class GraphRetriever(Retriever):
                 )
             return fixed_retriever
         
-        # 动态创建检索器
+        # Dynamically create retriever
         if not self.vector_store:
             raise ValueError("vector_store is required for dynamic retriever creation")
 
@@ -122,7 +126,7 @@ class GraphRetriever(Retriever):
                 f"{collection_type}_collection is required for dynamic retriever creation"
             )
 
-        # 根据 mode 创建对应的检索器
+        # Create corresponding retriever based on mode
         if mode == "vector":
             from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
             if not self.embed_model:
@@ -154,30 +158,30 @@ class GraphRetriever(Retriever):
         **kwargs: Any,
     ) -> List[RetrievalResult]:
         """
-        检索文档（图检索）
+        Retrieve documents (graph retrieval)
         
         Args:
-            query: 查询字符串
-            top_k: 返回数量
-            score_threshold: 分数阈值
-            mode: 检索模式（必须与 index_type 兼容）
-            **kwargs: 额外参数（可包含 topk_triples, graph_hops 等）
+            query: Query string
+            top_k: Number of results to return
+            score_threshold: Score threshold
+            mode: Retrieval mode (must be compatible with index_type)
+            **kwargs: Additional parameters (may include topk_triples, graph_hops, etc.)
             
         Returns:
-            检索结果列表
+            List of retrieval results
         """
         self._ensure_mode_allowed(mode)
         topk_triples = kwargs.get("topk_triples", None)
         graph_hops = kwargs.get("graph_hops", 1)
-        # GraphRetriever 默认总是执行图扩展，调用方无需再传 graph_expansion 开关
+        # GraphRetriever always performs graph expansion by default, caller doesn't need to pass graph_expansion flag
         if score_threshold is not None and mode != "vector":
             raise ValueError("score_threshold is only supported when mode='vector'")
         effective_threshold = score_threshold
 
-        # 根据 mode 获取对应的检索器
+        # Get corresponding retriever based on mode
         chunk_retriever = self._get_retriever_for_mode(mode, is_chunk=True)
 
-        # 先进行块检索
+        # First perform chunk retrieval
         chunk_results = await chunk_retriever.retrieve(
             query=query,
             top_k=top_k,
@@ -214,17 +218,17 @@ class GraphRetriever(Retriever):
         **kwargs: Any,
     ) -> List[RetrievalResult]:
         """
-        图扩展：基于初始块检索结果，通过三元组扩展检索
+        Graph expansion: expand retrieval through triples based on initial chunk retrieval results
         
         Args:
-            query: 查询字符串
-            chunks: 初始块检索结果
-            topk: 最终返回数量
-            topk_triples: 三元组检索数量
-            mode: 检索模式
+            query: Query string
+            chunks: Initial chunk retrieval results
+            topk: Final return count
+            topk_triples: Triple retrieval count
+            mode: Retrieval mode
             
         Returns:
-            扩展后的检索结果列表
+            List of expanded retrieval results
         """
         self._ensure_mode_allowed(mode)
         if not chunks:
@@ -246,11 +250,11 @@ class GraphRetriever(Retriever):
         if topk_triples is None:
             topk_triples = len(chunks) * 5
 
-        # 多 hop 扩展：允许引入新 chunk_id（并集），每 hop 都可扩展
+        # Multi-hop expansion: allows introducing new chunk_ids (union), each hop can expand
         current_chunk_ids = set(chunk_ids)
         all_results = [chunks]
 
-        # 使用对应 mode 的三元组检索器
+        # Use triple retriever with corresponding mode
         triple_retriever = self._get_retriever_for_mode(mode, is_chunk=False)
         triple_results = await triple_retriever.retrieve(
             query=query,
@@ -263,7 +267,7 @@ class GraphRetriever(Retriever):
         if not target_chunk_ids and not target_doc_ids:
             return chunks[:topk] if topk else chunks
 
-        # 使用对应 mode 的块检索器
+        # Use chunk retriever with corresponding mode
         chunk_retriever = self._get_retriever_for_mode(mode, is_chunk=True)
         candidate_chunks = await chunk_retriever.retrieve(
             query=query,
@@ -292,17 +296,17 @@ class GraphRetriever(Retriever):
         top_k: int = 5,
         **kwargs: Any,
     ) -> List[List[RetrievalResult]]:
-        """批量检索"""
-        # 并发执行多个检索
+        """Batch retrieval"""
+        # Execute multiple retrievals concurrently
         tasks = [self.retrieve(query, top_k=top_k, **kwargs) for query in queries]
         results = await asyncio.gather(*tasks)
         return results
 
     async def close(self) -> None:
-        """关闭检索器"""
+        """Close retriever"""
         import inspect
 
-        # 关闭固定的检索器
+        # Close fixed retrievers
         if self.chunk_retriever:
             close_fn = getattr(self.chunk_retriever, "close", None)
             if close_fn:

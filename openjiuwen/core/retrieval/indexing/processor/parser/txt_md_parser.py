@@ -1,4 +1,6 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from typing import Any, Optional
 
@@ -12,26 +14,26 @@ from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import
 
 @register_parser([".txt", ".TXT", ".md", ".MD", ".markdown", ".MARKDOWN"])
 class TxtMdParser(Parser):
-    """本地文件解析器，txt/md格式"""
+    """Local file parser for TXT/MD format"""
 
     def __init__(self, **kwargs: Any):
         pass
 
     async def _parse(self, file_path: str) -> Optional[str]:
-        """解析 TXT/MD 文件"""
+        """Parse TXT/MD file"""
         try:
             async with aiofiles.open(file_path, "rb") as f:
                 raw_data = await f.read()
-                # 使用 charset-normalizer 检测编码
+                # Use charset-normalizer to detect encoding
                 detected = detect(raw_data)
-                # 处理不同的返回类型：CharsetMatch对象、dict或None
+                # Handle different return types: CharsetMatch object, dict, or None
                 if detected is None:
                     encoding = "utf-8"
                 elif isinstance(detected, dict):
-                    # 如果返回的是dict，尝试获取encoding字段
+                    # If dict is returned, try to get encoding field
                     encoding = detected.get("encoding", "utf-8") or "utf-8"
                 elif hasattr(detected, "encoding"):
-                    # 如果是CharsetMatch对象，获取encoding属性
+                    # If CharsetMatch object, get encoding attribute
                     encoding = detected.encoding if detected.encoding else "utf-8"
                 else:
                     encoding = "utf-8"

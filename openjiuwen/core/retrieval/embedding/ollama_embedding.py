@@ -1,8 +1,10 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-Ollama 嵌入模型实现
+Ollama Embedding Model Implementation
 
-Ollama 嵌入模型的实现。
+Implementation of Ollama embedding model.
 """
 from typing import Any, List, Optional
 
@@ -28,11 +30,11 @@ class OllamaEmbedding(Embedding):
         Initialize Ollama embedder.
 
         Args:
-            config: 嵌入模型配置
-            hf_tokenizer_name: HuggingFace tokenizer 名称（可选）
-            timeout: 请求超时时间（秒）
-            max_retries: 最大重试次数
-            extra_headers: 额外的请求头
+            config: Embedding model configuration
+            hf_tokenizer_name: HuggingFace tokenizer name (optional)
+            timeout: Request timeout in seconds
+            max_retries: Maximum retry count
+            extra_headers: Additional request headers
         """
         self.config = config
         self.model_name = config.model_name
@@ -86,14 +88,14 @@ class OllamaEmbedding(Embedding):
 
     @property
     def dimension(self) -> int:
-        """返回嵌入维度"""
+        """Return embedding dimension"""
         if self._dimension is None:
-            # 通过嵌入一个测试文本来获取维度
+            # Get dimension by embedding a test text
             try:
                 import asyncio
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    # 如果事件循环正在运行，使用默认值
+                    # If event loop is running, use default value
                     self._dimension = 768
                 else:
                     test_embedding = loop.run_until_complete(
@@ -104,7 +106,7 @@ class OllamaEmbedding(Embedding):
                     else:
                         self._dimension = 768
             except Exception:
-                # 如果获取失败，使用默认值
+                # If failed to get, use default value
                 self._dimension = 768
         return self._dimension
 

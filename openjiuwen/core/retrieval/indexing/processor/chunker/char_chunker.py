@@ -1,4 +1,6 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import uuid
 from typing import List, Any
@@ -10,7 +12,7 @@ from openjiuwen.core.retrieval.indexing.processor.chunker.text_splitter import C
 
 
 class CharChunker(Chunker):
-    """固定大小分块器，基于字符长度进行分块"""
+    """Fixed size chunker based on character length"""
 
     def __init__(
         self,
@@ -19,11 +21,11 @@ class CharChunker(Chunker):
         **kwargs: Any,
     ):
         """
-        初始化固定大小分块器
+        Initialize fixed size chunker
         
         Args:
-            chunk_size: 分块大小（字符数）
-            chunk_overlap: 分块重叠大小（字符数）
+            chunk_size: Chunk size (number of characters)
+            chunk_overlap: Chunk overlap size (number of characters)
         """
         super().__init__(
             chunk_size=chunk_size,
@@ -33,13 +35,13 @@ class CharChunker(Chunker):
 
     def chunk_text(self, text: str) -> List[str]:
         """
-        分块文本
+        Chunk text
         
         Args:
-            text: 待分块的文本
+            text: Text to be chunked
             
         Returns:
-            分块后的文本列表
+            List of chunked texts
         """
         if not text:
             return []

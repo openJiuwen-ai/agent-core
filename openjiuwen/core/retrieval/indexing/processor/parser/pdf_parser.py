@@ -1,4 +1,6 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#!/usr/bin/env python
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
 import os
@@ -13,13 +15,13 @@ from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import
 
 @register_parser([".pdf", ".PDF"])
 class PDFParser(Parser):
-    """本地文件解析器，pdf格式"""
+    """Local file parser for PDF format"""
 
     def __init__(self, **kwargs: Any):
         pass
 
     async def _parse(self, file_path: str) -> Optional[str]:
-        """解析 PDF 文件"""
+        """Parse PDF file"""
         try:
             def _sync_parse_pdf():
                 content = []
