@@ -96,18 +96,8 @@ class OpenApiClient(McpToolClient):
         return name
 
     def _get_unique_name(self, name: str) -> str:
-        """
-        Ensure the tool_name is unique
-
-        Args:
-            name: the original name
-
-        Returns:
-            str: A unique name
-        """
-        # record this tool_name
         self._used_names[name] = self._used_names.get(name, 0) + 1
-        # if tool_name is used, add number to tool_name
+
         if self._used_names.get(name, 0) == 1:
             return name
         else:
@@ -120,52 +110,42 @@ class OpenApiClient(McpToolClient):
 
     def _create_openapi_tool(
             self,
-            route: HTTPRoute,
-            name: str,
-            tags: set[str],
+            http_route: HTTPRoute,
+            original_name: str,
+            http_tags: set[str],
             timout: float,
     ):
-        """create an OpenAPITool"""
-        # Use pre-calculated schema from route
-        combined_schema = route.flat_param_schema
+        tool_instruction = format_simple_description(
+            request_body=http_route.request_body,
+            base_description=(http_route.description or
+                              http_route.summary or
+                              f"Executes {http_route.method} {http_route.path}"
+                              ),
+            parameters=http_route.parameters,
+        )
 
-        # Extract output schema from OpenAPI responses
         output_schema = extract_output_schema_from_responses(
-            route.responses,
-            route.response_schemas,
-            route.openapi_version,
+            http_route.responses,
+            http_route.response_schemas,
+            http_route.openapi_version,
         )
 
-        # Get a unique tool name
-        tool_name = self._get_unique_name(name)
+        generated_name = self._get_unique_name(original_name)
 
-        base_description = (
-                route.description
-                or route.summary
-                or f"Executes {route.method} {route.path}"
-        )
-
-        # Use simplified description formatter for tools
-        enhanced_description = format_simple_description(
-            base_description=base_description,
-            parameters=route.parameters,
-            request_body=route.request_body,
-        )
-
-        tool = OpenAPITool(
+        openapi_tool = OpenAPITool(
+            name=self._get_unique_name(original_name),
+            route=http_route,
             client=self._client,
-            route=route,
             director=self._director,
-            name=tool_name,
-            description=enhanced_description,
-            parameters=combined_schema,
+            description=tool_instruction,
+            parameters=http_route.flat_param_schema,
             output_schema=output_schema,
-            tags=set(route.tags or []) | tags,
+            tags=set(http_route.tags or []) | http_tags,
             timeout=timout,
         )
 
-        # Register the tool by directly assigning to the tools dictionary
-        self._tool_manager.tools[tool_name] = tool
+        # add tool to tool_manager
+        self._tool_manager.tools[generated_name] = openapi_tool
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         files = self._server_path.split(",")
