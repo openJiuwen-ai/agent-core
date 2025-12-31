@@ -512,7 +512,7 @@ class BaseAgent(ABC):
             max_rounds = 10  # Default value
 
         context_config = ContextEngineConfig(
-            conversation_history_length=max_rounds * 2
+            conversation_history_length=max(max_rounds, 100) * 2
         )
         return ContextEngine(
             agent_id=self.agent_config.id,
