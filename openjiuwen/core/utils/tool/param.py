@@ -26,7 +26,7 @@ class Param:
             Param.validate_default_value(self.type, default_value)
         self.required = required
         self.visible = visible
-        self.method = kwargs.get('method', "Body")
+        self.method = kwargs.get("method", "")
         self.actual_type = kwargs.get('actual_type', "")
         if level > 0:
             self.level = level

@@ -35,6 +35,7 @@ class RestfulApi(Tool):
         headers: dict,
         method: str,
         response: List[Param],
+        queries: dict = None,
         builtin_params: List[Param] = None,
     ):
         super().__init__()
@@ -46,6 +47,7 @@ class RestfulApi(Tool):
         self.method = method
         self.response: List[Param] = response
         self.builtin_params = builtin_params
+        self.queries = {} if queries is None else queries
 
     def get_tool_info(self) -> ToolInfo:
         tool_info_dict = Param.format_functions(self)
@@ -67,10 +69,20 @@ class RestfulApi(Tool):
         query_params = {}
         all_params = self.params + (self.builtin_params or [])
         for param in all_params:
-            if inputs.get(param.name) or inputs.get(param.name) is False:
+            if param.method == "Query" and inputs.get(param.name) or inputs.get(param.name) is False:
                 query_params[param.name] = str(inputs.get(param.name))
                 inputs.pop(param.name, None)
         return query_params
+
+    def get_body_params_from_input(self, inputs: dict):
+        """get query params from input"""
+        body_params = {}
+        all_params = self.params + (self.builtin_params or [])
+        for param in all_params:
+            if param.method == "Body" and inputs.get(param.name) or inputs.get(param.name) is False:
+                body_params[param.name] = str(inputs.get(param.name))
+                inputs.pop(param.name, None)
+        return body_params
 
     def parse_retrieval_inputs(self, inputs: dict):
         """parse retrieval inputs"""
@@ -170,15 +182,21 @@ class RequestParams:
         self.inputs = inputs
         self.kwargs = kwargs
 
+        self.method = restful_api.method.upper()
+        restful_api.method = self.method
+        for param in self.restful_api.params:
+            if self.method == "GET":
+                param.method = "Query" if param.method == "" else param.method
+            if self.method == "POST":
+                param.method = "Body" if param.method == "" else param.method
+
         inputs = ParamUtil.format_input_with_default_when_required(self.restful_api.params, inputs)
         if self.restful_api.builtin_params:
             inputs = ParamUtil.format_input_with_default_when_required(self.restful_api.builtin_params, inputs)
         self.header_params_in_inputs = restful_api.get_header_params_from_input(inputs)
         self.query_params_in_inputs = restful_api.get_query_params_from_input(inputs)
+        self.body_params_in_inputs = restful_api.get_body_params_from_input(inputs)
         self.inputs = restful_api.parse_retrieval_inputs(inputs)
-
-        self.method = restful_api.method.upper()
-        restful_api.method = self.method
 
         self.ip_address_url = None
         self.headers = None
@@ -187,21 +205,21 @@ class RequestParams:
     def prepare_params(self):
         """prepare params"""
         restful_api = self.restful_api
+        if restful_api.method not in ["GET", "POST"]:
+            raise JiuWenBaseException(
+                error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message="the http method is not supported"
+            )
         url = restful_api.path
         headers = restful_api.headers if isinstance(restful_api.headers, dict) else {}
         headers.update(self.header_params_in_inputs)
         request_arg = dict(json=self.inputs)
         self.ip_address_url = url
         self.headers = headers
+        queries = restful_api.queries if isinstance(restful_api.queries, dict) else {}
+        queries.update(self.query_params_in_inputs)
         self.request_arg = request_arg
-        if restful_api.method in ["GET"]:
-            self.request_arg["params"] = self.query_params_in_inputs
-        elif restful_api.method in ["POST"]:
-            self.request_arg["json"] = self.query_params_in_inputs
-        else:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message="the http method is not supported"
-            )
+        self.request_arg["params"] = queries
+        self.request_arg["json"] = self.body_params_in_inputs
 
 
 def _data_of(response):
