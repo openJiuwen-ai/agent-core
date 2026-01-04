@@ -48,6 +48,7 @@ class MCPTool(Tool):
         super().__init__()
         self.mcp_client = mcp_client
         self._tool_info = tool_info
+        self.name = f"{tool_info.server_name}.{tool_info.name}"
 
     def invoke(self, inputs: Input, **kwargs) -> Output:
         """invoke of the MCP tool"""
