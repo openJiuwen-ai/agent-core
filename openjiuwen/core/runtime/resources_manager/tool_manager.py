@@ -18,7 +18,6 @@ from openjiuwen.core.utils.tool.mcp.base import (
     PlaywrightClient,
     MCPTool
 )
-from openjiuwen.core.utils.tool.mcp.openapi_client import OpenApiClient
 from openjiuwen.core.common.logging import logger
 
 ToolProvider = Callable[[], Tool]
@@ -199,6 +198,7 @@ class ToolMgr(AbstractManager[Tool]):
         elif config.client_type == "playwright":
             return PlaywrightClient(config.server_path, config.server_name)
         elif config.client_type == "openapi":
+            from openjiuwen.core.utils.tool.mcp.openapi_client import OpenApiClient
             return OpenApiClient(config.server_path, config.server_name)
         else:
             raise ValueError(f"Unsupported MCP client type: {config.client_type}")

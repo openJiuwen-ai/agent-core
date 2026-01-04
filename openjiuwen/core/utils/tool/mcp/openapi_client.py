@@ -8,14 +8,14 @@ from typing import Union, List, Any, Dict
 import yaml
 import httpx
 import anyio
-from fastmcp.experimental.utilities.openapi.director import RequestDirector
-from fastmcp.experimental.utilities.openapi import (
+from fastmcp.utilities.openapi.director import RequestDirector
+from fastmcp.utilities.openapi import (
     HTTPRoute,
     extract_output_schema_from_responses,
     format_simple_description,
     parse_openapi_to_http_routes,
 )
-from fastmcp.experimental.server.openapi import OpenAPITool
+from fastmcp.server.openapi import OpenAPITool
 from fastmcp.tools.tool import ToolResult
 from jsonschema_path import SchemaPath
 
