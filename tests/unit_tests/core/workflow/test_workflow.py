@@ -1237,3 +1237,41 @@ async def test_illegal_nested_workflow():
 
     assert cm.value.error_code == StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code
     assert cm.value.message == StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg
+
+
+async def test_workflow_with_loop_component_multi_abilities():
+    flow = Workflow()
+    flow.set_start_comp("s", MockStartNode("s"), inputs_schema={"a": "${input_array}"})
+    flow.set_end_comp("e", MockEndNode("e"),
+                      inputs_schema={"result1": "${l.result1}", "result2": "${l.result2}"})
+
+    # create loop body:
+    # 1 --> +--> 2 - -+
+    #       |         +--> 4
+    #       +--> 3 - -+
+    loop_group = LoopGroup()
+    loop_group.add_workflow_comp("1", CommonNode("a"), inputs_schema={"result": "${l.item}"})
+    loop_group.add_workflow_comp("2", CommonNode("b"), inputs_schema={"result": "${1.result}"})
+    loop_group.add_workflow_comp("3", CollectCompNode("c"), stream_inputs_schema={"value": "${1.result}"})
+    loop_group.add_workflow_comp("4", CommonNode("4"),
+                                 inputs_schema={"result1": "${2.result}", "result2": "${3.value}"})
+    loop_group.start_comp("1")
+    loop_group.end_comp("4")
+    loop_group.add_connection("1", "2")
+    loop_group.add_stream_connection("1", "3")
+    loop_group.add_connection("2", "4")
+    loop_group.add_connection("3", "4")
+
+    loop_component = LoopComponent(loop_group, {"result1": "${4.result1}", "result2": "${4.result2}"})
+
+    flow.add_workflow_comp("l", loop_component, inputs_schema={"loop_type": "array",
+                                                               "loop_array": {"item": "${s.a}"}})
+
+    # s --> l --> e
+
+    flow.add_connection("s", "l")
+    flow.add_connection("l", "e")
+
+    result = await flow.invoke({"input_array": [1, 2, 3]}, WorkflowSession())
+    assert result == WorkflowOutput(result={"result1": [1, 2, 3], "result2": [1, 2, 3]},
+                                    state=WorkflowExecutionState.COMPLETED)
