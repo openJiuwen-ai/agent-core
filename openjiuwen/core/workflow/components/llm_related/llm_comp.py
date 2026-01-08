@@ -12,6 +12,7 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
+from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.context_engine import ModelContext
@@ -325,18 +326,18 @@ class LLMPromptFormatter:
             msg.content = content
 
     @staticmethod
-    def _find_last_user_index(history: List[Dict[str, Any]]) -> int | None:
+    def _find_last_user_index(history: List[BaseMessage]) -> int | None:
         for idx in range(len(history) - 1, -1, -1):
-            if LLMPromptFormatter._get_role(history[idx]) == "user":
+            if history[idx].role == "user":
                 return idx
         return None
 
     @staticmethod
     def format_prompt(
-            history: List[Dict[str, Any]],
+            history: List[BaseMessage],
             response_format: Dict[str, Any],
             output_config: dict,
-    ) -> List[Dict[str, Any]]:
+    ) -> List[BaseMessage]:
         res_type = response_format.get("type")
         if res_type == "text":
             return history
@@ -344,7 +345,7 @@ class LLMPromptFormatter:
         last_user_idx = LLMPromptFormatter._find_last_user_index(history)
         if last_user_idx is None:
             return history
-        query = LLMPromptFormatter._get_content(history[last_user_idx])
+        query = history[last_user_idx].content
         prompt = query
 
         if res_type == "markdown":
@@ -366,7 +367,7 @@ class LLMPromptFormatter:
                 .replace("${query}", query)
             )
 
-        LLMPromptFormatter._set_content(history[last_user_idx], prompt)
+        history[last_user_idx].content = prompt
         return history
 
 
@@ -550,10 +551,10 @@ class LLMExecutable(ComponentExecutable):
             model_config=llm1_model_config
         )
 
-    def _build_user_prompt_content(self, inputs: dict) -> list[dict]:
+    def _build_user_prompt_content(self, inputs: dict) -> list[BaseMessage]:
         template_content_list = self._config.template_content
         user_prompt = [element for element in template_content_list if element.get(_ROLE, "") == MessageRole.USER.value]
-        return PromptTemplate(content=[user_prompt[0]]).format(inputs).content
+        return PromptTemplate(content=[user_prompt[0]]).format(inputs).to_messages()
 
     def _get_model_input(self, inputs: dict):
         system_prompt = self._build_system_prompt(inputs)
@@ -565,11 +566,8 @@ class LLMExecutable(ComponentExecutable):
 
     def _insert_history_to_system_and_user_prompt(self, system_prompt: list, user_prompt: list):
         original_history = system_prompt if isinstance(system_prompt, list) else []
-        if self._context:
-            chat_history = []
-            chat_history_messages: list = self._context.get_messages()
-            if chat_history_messages and self._config.enable_history:
-                chat_history = [dict(role=message.role, content=message.content) for message in chat_history_messages]
+        if self._config.enable_history and self._context:
+            chat_history = self._context.get_messages()
             original_history.extend(chat_history)
         original_history.extend(user_prompt)
         return original_history
@@ -635,7 +633,7 @@ class LLMExecutable(ComponentExecutable):
                 system_prompt.append(element)
             else:
                 break
-        return PromptTemplate(content=system_prompt).format(inputs).content
+        return PromptTemplate(content=system_prompt).format(inputs).to_messages()
 
     def _validate_config(self, config: LLMCompConfig):
         self._validate_template_content(config.template_content)

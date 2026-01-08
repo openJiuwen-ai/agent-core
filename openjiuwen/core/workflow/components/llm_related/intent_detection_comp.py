@@ -51,7 +51,7 @@ CHAT_HISTORY_MAX_TURN = "chat_history_max_turn"
 INTENT_DETECTION_TEMPLATE = "intent_detection_template"
 ROLE = "role"
 CONTENT = "content"
-ROLE_MAP = {"user": '用户', 'assistant': '助手', 'system': '系统'}
+ROLE_MAP = {"user": '用户', 'assistant': '助手', 'system': '系统', 'tool': '工具'}
 JSON_PARSE_FAIL_REASON = "当前意图识别的输出:'{result}'格式不符合有效的JSON规范，导致解析失败，因此返回默认分类。"
 CLASS_KEY_MISSING_REASON = "当前意图识别的输出 '{result}' 缺少必要的输出'class'分类信息，因此返回默认分类。"
 VALIDATION_FAIL_REASON = "当前意图识别的输出类别 '{intent_class}' 不在预定义的分类列表: '{category_list}'中，因此系统返回默认分类。"
@@ -172,7 +172,7 @@ class IntentDetectionExecutable(ComponentExecutable):
         self._set_session(session)
         self._router.set_session(session)
         self._initialize_if_needed()
-        chat_history = self._get_chat_history_from_context(None)
+        chat_history = self._get_chat_history_from_context(context)
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
         llm_output = self._invoke_llm_and_get_result(current_inputs)
         if UserConfig.is_sensitive():
@@ -250,10 +250,10 @@ class IntentDetectionExecutable(ComponentExecutable):
     def _format_chat_history(self, chat_history):
         chat_history_str = ""
         for history in chat_history[-self._config.chat_history_max_turn:]:
-            chat_history_str += "{}: {}\n".format(
-                ROLE_MAP.get(history.role, "用户"),
-                history.content
-            )
+            if history.role in ROLE_MAP:
+                chat_history_str += "{}: {}\n".format(
+                    ROLE_MAP.get(history.role), history.content
+                )
         return chat_history_str
 
     def _pre_process(self, inputs: dict):
