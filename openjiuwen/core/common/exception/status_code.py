@@ -366,10 +366,6 @@ class StatusCode(Enum):
     SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR = (197000, "workflow store is None")
     SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR = (197001, "agent store is None")
 
-    # Runtime - Checkpointer 197000 - 197099
-    RUNTIME_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR = (197000, "workflow store is None")
-    RUNTIME_CHECKPOINTER_NONE_AGENT_STORE_ERROR = (197001, "agent store is None")
-
 
     @property
     def code(self):

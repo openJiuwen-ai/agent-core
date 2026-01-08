@@ -557,6 +557,7 @@ class TestTraceWorkflow:
         loop_index = 1
         for chunk in tracer_chunks:
             payload = chunk.payload
+            assert payload.get("startTime") is not None
             if payload.get("invokeId") == "l":
                 assert payload.get("parentInvokeId") == "a", f"l node parent_invoke_id should be a"
                 assert payload.get("parentNodeId") == "", f"a node parent_node_id should be ''"

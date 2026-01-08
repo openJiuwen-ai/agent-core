@@ -41,7 +41,6 @@ class TracerWorkflowUtils:
             "loop_node_id": loop_id,
             "loop_index": index
         })
-        session.tracer().pop_workflow_span(executable_id, session.parent_id())
         return component_metadata
 
     @staticmethod
@@ -147,6 +146,11 @@ class TracerWorkflowUtils:
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_call_done",
                              invoke_id=executable_id,
                              parent_node_id=parent_id)
+        state = session.state()
+        loop_id = state.get_global(LOOP_ID)
+        if loop_id is None:
+            return
+        session.tracer().pop_workflow_span(executable_id, session.parent_id())
 
     @staticmethod
     async def trace(session, data: dict = None):
