@@ -225,7 +225,7 @@ class BaseModelClient:
 
 
 class BaseModelInfo(BaseModel):
-    api_key: str = Field(min_length=1)
+    api_key: str = Field(default="")
     api_base: str = Field(min_length=1)
     model_name: str = Field(default="", alias="model")
     temperature: float = Field(default=0.95)
