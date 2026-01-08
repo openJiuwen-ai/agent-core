@@ -1275,3 +1275,46 @@ async def test_workflow_with_loop_component_multi_abilities():
     result = await flow.invoke({"input_array": [1, 2, 3]}, WorkflowSession())
     assert result == WorkflowOutput(result={"result1": [1, 2, 3], "result2": [1, 2, 3]},
                                     state=WorkflowExecutionState.COMPLETED)
+
+
+async def test_sub_flow_multi_stream_output():
+    class SlowInvokeNode(WorkflowComponent):
+
+        def __init__(self, node_id: str):
+            super().__init__()
+            self.node_id = node_id
+
+        async def invoke(self, inputs: Input, session: Session, context: ModelContext):
+            import asyncio
+            await asyncio.sleep(0.1)
+            return inputs
+
+    # sub_start --> +--> sub_a - -+
+    #               |             +--> sub_end
+    #               +--> sub_b - -+
+    sub_flow = Workflow()
+    sub_flow.set_start_comp("sub_start", Start(), inputs_schema={"out": "${query}"})
+    sub_flow.add_workflow_comp("sub_a", SlowInvokeNode("sub_a"), inputs_schema={"out": "${sub_start.out}"})
+    sub_flow.add_workflow_comp("sub_b", CommonNode("sub_b"), inputs_schema={"out": "${sub_start.out}"},
+                               comp_ability=[ComponentAbility.STREAM])
+    sub_flow.set_end_comp("sub_end", End(), inputs_schema={"result_a": "${sub_a.out}"},
+                          stream_inputs_schema={"result_b": "${sub_b.out}"}, response_mode="streaming")
+    sub_flow.add_connection("sub_start", "sub_a")
+    sub_flow.add_connection("sub_start", "sub_b")
+    sub_flow.add_connection("sub_a", "sub_end")
+    sub_flow.add_stream_connection("sub_b", "sub_end")
+
+    flow = Workflow()
+    flow.set_start_comp("start", Start(), inputs_schema={"out": "${query}"})
+    flow.add_workflow_comp("sub_flow", SubWorkflowComponent(sub_flow), inputs_schema={"query": "${start.out}"})
+    flow.set_end_comp("end", End(), inputs_schema={"result": "${sub_flow}"})
+    flow.add_connection("start", "sub_flow")
+    flow.add_connection("sub_flow", "end")
+
+    chunks = []
+    async for chunk in flow.stream({"query": "hello"}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert len(chunks) == 1
+    assert chunks[0].payload["output"]["result"]["stream"] == [{"output": {"result_b": "hello"}},
+                                                               {"output": {"result_a": "hello"}}]

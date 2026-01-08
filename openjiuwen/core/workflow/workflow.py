@@ -418,7 +418,10 @@ class Workflow:
             await compiled_graph.invoke({INPUTS_KEY: inputs, CONFIG_KEY: kwargs.get(CONFIG_KEY)}, session)
             if self._is_streaming:
                 messages = []
-                while True:
+                sub_end_ability = self._internal.config().spec.comp_configs.get(self._end_comp_id).abilities
+                required_abilities = [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]
+                stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
+                while stream_ability_count > 0:
                     frame = await actor_manager.sub_workflow_stream().receive(
                         session.config().get_env(WORKFLOW_EXECUTE_TIMEOUT))
                     if frame is None:
@@ -426,7 +429,8 @@ class Workflow:
                         continue
                     if frame == StreamEmitter.END_FRAME:
                         logger.info("received end frame of sub_invoke")
-                        break
+                        stream_ability_count -= 1
+                        continue
                     messages.append(frame)
                 if messages:
                     logger.debug(f"sub workflow messages: {messages}")
@@ -453,10 +457,10 @@ class Workflow:
             if self._is_streaming:
                 frame_count = 0
                 stream_timeout = session.config().get_env(WORKFLOW_EXECUTE_TIMEOUT)
-                sub_end_ability = self._internal._workflow_config.spec.comp_configs.get(self._end_comp_id).abilities
+                sub_end_ability = self._internal.config().spec.comp_configs.get(self._end_comp_id).abilities
             required_abilities = [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]
             stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
-            while True:
+            while stream_ability_count > 0:
                 logger.debug(f"waiting for frame {frame_count} with timeout {stream_timeout}")
                 frame = await actor_manager.sub_workflow_stream().receive(stream_timeout)
                 if frame is None:
@@ -465,8 +469,7 @@ class Workflow:
                 if frame == StreamEmitter.END_FRAME:
                     stream_ability_count -= 1
                     logger.debug(f"received end frame of sub_stream after {frame_count} frames")
-                    if stream_ability_count == 0:
-                        break
+                    continue
                 frame_count += 1
                 logger.debug(f"yielding frame {frame_count}: {frame}")
                 yield frame
