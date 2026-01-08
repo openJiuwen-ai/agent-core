@@ -14,9 +14,9 @@ from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.foundation.llm import ModelFactory
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.agent_builder.tune.base import Case, TuneConstant, EvaluatedCase
-from openjiuwen.agent_builder.tune.utils import TuneUtils
-from openjiuwen.agent_builder.tune.optimizer.base import BaseOptimizer
+from openjiuwen.dev_tools.tune.base import Case, TuneConstant, EvaluatedCase
+from openjiuwen.dev_tools.tune.utils import TuneUtils
+from openjiuwen.dev_tools.tune.optimizer.base import BaseOptimizer
 
 
 EXAMPLE_SELECTION_TEMPLATE = PromptTemplate(content="""作为提示词优化专家,我的任务是帮助代理高效且成功地完成任务。

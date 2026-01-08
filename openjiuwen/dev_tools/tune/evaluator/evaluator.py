@@ -12,9 +12,9 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.foundation.llm import ModelFactory
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ModelConfig
-from openjiuwen.agent_builder.tune.base import Case, EvaluatedCase, TuneConstant
-from openjiuwen.agent_builder.tune.utils import TuneUtils
-from openjiuwen.agent_builder.tune.dataset.case_loader import CaseLoader
+from openjiuwen.dev_tools.tune.base import Case, EvaluatedCase, TuneConstant
+from openjiuwen.dev_tools.tune.utils import TuneUtils
+from openjiuwen.dev_tools.tune.dataset.case_loader import CaseLoader
 
 
 class BaseEvaluator(ABC):

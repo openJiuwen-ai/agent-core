@@ -14,8 +14,8 @@ from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.session import Session
-from openjiuwen.agent_builder.tune.utils import TuneUtils
-from openjiuwen.agent_builder.tune.base import EvaluatedCase
+from openjiuwen.dev_tools.tune.utils import TuneUtils
+from openjiuwen.dev_tools.tune.base import EvaluatedCase
 
 
 class BaseOptimizer:

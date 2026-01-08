@@ -11,11 +11,11 @@ from typing import List, Dict, Optional
 
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.foundation.llm import ModelConfig
-from openjiuwen.agent_builder.tune.utils import TuneUtils
-from openjiuwen.agent_builder.tune.base import TuneConstant, EvaluatedCase
-from openjiuwen.agent_builder.tune.optimizer.base import BaseOptimizer
-from openjiuwen.agent_builder.tune.optimizer.instruction_optimizer import InstructionOptimizer
-from openjiuwen.agent_builder.tune.optimizer.example_optimizer import ExampleOptimizer
+from openjiuwen.dev_tools.tune.utils import TuneUtils
+from openjiuwen.dev_tools.tune.base import TuneConstant, EvaluatedCase
+from openjiuwen.dev_tools.tune.optimizer.base import BaseOptimizer
+from openjiuwen.dev_tools.tune.optimizer.instruction_optimizer import InstructionOptimizer
+from openjiuwen.dev_tools.tune.optimizer.example_optimizer import ExampleOptimizer
 
 
 class JointOptimizer(BaseOptimizer):

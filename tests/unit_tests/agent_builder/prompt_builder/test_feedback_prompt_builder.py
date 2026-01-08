@@ -10,8 +10,8 @@ from openjiuwen.core.foundation.llm import BaseModelClient
 from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.llm import AIMessage
 
-from openjiuwen.agent_builder.prompt_builder import FeedbackPromptBuilder
-import openjiuwen.agent_builder.prompt_builder.builder.utils as TEMPLATE
+from openjiuwen.dev_tools.prompt_builder import FeedbackPromptBuilder
+import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
 
 MOCK_INTENT = '''```json{"intent": "true",
 "optimized_feedback": "[优化后的反馈信息]",

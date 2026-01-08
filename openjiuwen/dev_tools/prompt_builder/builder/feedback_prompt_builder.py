@@ -4,8 +4,8 @@ import json
 import re
 from typing import Optional, Literal, List, Generator
 
-import openjiuwen.agent_builder.prompt_builder.builder.utils as TEMPLATE
-from openjiuwen.agent_builder.prompt_builder.base import BasePromptBuilder
+import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
+from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger

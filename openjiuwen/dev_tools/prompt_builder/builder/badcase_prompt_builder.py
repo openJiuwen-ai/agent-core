@@ -10,9 +10,9 @@ from openjiuwen.core.foundation.llm import AIMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ModelConfig
 
-from openjiuwen.agent_builder.prompt_builder.base import BasePromptBuilder
-from openjiuwen.agent_builder.tune.base import EvaluatedCase
-import openjiuwen.agent_builder.prompt_builder.builder.utils as TEMPLATE
+from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
+from openjiuwen.dev_tools.tune.base import EvaluatedCase
+import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
 
 MAX_CASES_LIMIT = 10
 

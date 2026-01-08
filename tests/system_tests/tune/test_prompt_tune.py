@@ -5,7 +5,7 @@ import os
 import unittest
 import asyncio
 
-from openjiuwen.agent_builder.tune import (
+from openjiuwen.dev_tools.tune import (
     create_chat_agent_config,
     create_chat_agent,
     JointOptimizer,
@@ -266,9 +266,9 @@ class PromptTuneTest(unittest.IsolatedAsyncioTestCase):
         trainer = self.create_trainer()
         case_loader = CaseLoader(cases=INFORMATION_EXTRACTION_CASES)
 
-        from openjiuwen.agent_builder.tune.trainer.base import Callbacks, Progress
+        from openjiuwen.dev_tools.tune.trainer.base import Callbacks, Progress
         class MyCallbacks(Callbacks):
-            def on_train_epoch_end(self, agent, progress: Progress):
+            def on_train_epoch_end(self, agent, progress: Progress, cases):
                 print(f"cur_epoch_accuracy {progress.current_epoch}, {progress.best_batch_score}")
 
         trainer.set_callbacks(MyCallbacks())

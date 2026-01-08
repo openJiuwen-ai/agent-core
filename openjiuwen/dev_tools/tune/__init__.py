@@ -2,24 +2,24 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Prompt builder module"""
 
-from openjiuwen.agent_builder.tune.base import (
+from openjiuwen.dev_tools.tune.base import (
     Case,
     EvaluatedCase
 )
-from openjiuwen.agent_builder.tune.dataset.case_loader import CaseLoader
-from openjiuwen.agent_builder.tune.optimizer.instruction_optimizer import InstructionOptimizer
-from openjiuwen.agent_builder.tune.optimizer.example_optimizer import ExampleOptimizer
-from openjiuwen.agent_builder.tune.optimizer.joint_optimizer import JointOptimizer
-from openjiuwen.agent_builder.tune.chat_agent.chat_agent import (
+from openjiuwen.dev_tools.tune.dataset.case_loader import CaseLoader
+from openjiuwen.dev_tools.tune.optimizer.instruction_optimizer import InstructionOptimizer
+from openjiuwen.dev_tools.tune.optimizer.example_optimizer import ExampleOptimizer
+from openjiuwen.dev_tools.tune.optimizer.joint_optimizer import JointOptimizer
+from openjiuwen.dev_tools.tune.chat_agent.chat_agent import (
     ChatAgent,
     ChatAgentConfig,
     create_chat_agent_config,
     create_chat_agent
 )
-from openjiuwen.agent_builder.tune.evaluator.evaluator import (
+from openjiuwen.dev_tools.tune.evaluator.evaluator import (
     DefaultEvaluator
 )
-from openjiuwen.agent_builder.tune.trainer.trainer import Trainer
+from openjiuwen.dev_tools.tune.trainer.trainer import Trainer
 
 _CASE_LOADER_CLASSES = [
     "Case",

@@ -1,12 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from openjiuwen.agent_builder.tune.chat_agent.chat_agent import (
+from openjiuwen.dev_tools.tune.chat_agent.chat_agent import (
     ChatAgent,
     create_chat_agent,
     create_chat_agent_config
 )
-from openjiuwen.agent_builder.tune.chat_agent.chat_config import ChatAgentConfig
+from openjiuwen.dev_tools.tune.chat_agent.chat_config import ChatAgentConfig
 
 __all__ = [
     "ChatAgent",

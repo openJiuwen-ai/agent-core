@@ -10,8 +10,8 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ModelConfig
 
-from openjiuwen.agent_builder.prompt_builder.base import BasePromptBuilder
-import openjiuwen.agent_builder.prompt_builder.builder.utils as TEMPLATE
+from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
+import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
 
 
 META_TEMPLATE_NAME_PREFIX: str = "META_TEMPLATE_"

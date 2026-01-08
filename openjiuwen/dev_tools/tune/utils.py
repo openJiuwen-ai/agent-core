@@ -11,7 +11,7 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import BaseMessage, AIMessage
-from openjiuwen.agent_builder.tune.base import Case, EvaluatedCase
+from openjiuwen.dev_tools.tune.base import Case, EvaluatedCase
 
 
 class TuneUtils:

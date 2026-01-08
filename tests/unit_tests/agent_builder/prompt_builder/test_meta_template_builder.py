@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
-import openjiuwen.agent_builder.prompt_builder.builder.utils as TEMPLATE
-from openjiuwen.agent_builder.prompt_builder import MetaTemplateBuilder
-from openjiuwen.agent_builder.prompt_builder.builder.meta_template_builder import META_TEMPLATE_NAME_PREFIX
+import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
+from openjiuwen.dev_tools.prompt_builder import MetaTemplateBuilder
+from openjiuwen.dev_tools.prompt_builder.builder.meta_template_builder import META_TEMPLATE_NAME_PREFIX
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.foundation.llm import ModelConfig
