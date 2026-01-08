@@ -1,6 +1,0 @@
-
-llm_model_config:
-  model_provider: ""
-  model_name: ""
-  api_base: ""
-  api_key: ""
