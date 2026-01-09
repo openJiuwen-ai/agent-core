@@ -28,10 +28,8 @@ class VariableManager(BaseMemoryManager):
             memory.user_id,
             False,
             memory.group_id,
-            memory.variable_name,
-            None,
-            memory.variable_mem,
-            None
+            var_name=memory.variable_name,
+            user_var_value=memory.variable_mem,
         )
         await self.kv_store.set(key, value)
 
@@ -104,6 +102,7 @@ class VariableManager(BaseMemoryManager):
             usr_id: str,
             for_deletion: bool,
             group_id: str,
+            *,
             var_name: Optional[str] = None,
             session_id: Optional[str] = None,
             user_var_value: Optional[str] = None,

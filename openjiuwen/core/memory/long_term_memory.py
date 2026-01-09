@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Tuple
 from pydantic import BaseModel, Field
 
@@ -27,26 +27,29 @@ from openjiuwen.core.foundation.llm1.schema.message import BaseMessage
 from openjiuwen.core.foundation.llm1.model import Model
 from openjiuwen.core.common.utils.singleton import Singleton
 
+
 class MemInfo(BaseModel):
     mem_id: str = Field(default="", description="memory id")
     content: str = Field(default="", description="memory content")
     type: MemoryType = Field(default=MemoryType.USER_PROFILE, description="memory type")
 
+
 class MemResult(BaseModel):
     mem_info: MemInfo = Field(default=None, description="memory information")
     score: float = Field(default=0.0, description="memory score of relevance")
 
+
 class LongTermMemory(metaclass=Singleton):
     """
-            Abstract base class for memory engine.
+    Abstract base class for memory engine.
 
-            Defines the core interface for memory storage and retrieval operations.
-            Provides unified memory management functionality including conversation memory,
-            user variables, semantic search, and persistence.
+    Defines the core interface for memory storage and retrieval operations.
+    Provides unified memory management functionality including conversation memory,
+    user variables, semantic search, and persistence.
 
-            Concrete implementations should handle memory operations across multiple storage
-            backends (KV store, semantic store, database store).
-        """
+    Concrete implementations should handle memory operations across multiple storage
+    backends (KV store, semantic store, database store).
+    """
     DEFAULT_VALUE: str = "__default__"
 
     def __init__(self):
@@ -153,6 +156,7 @@ class LongTermMemory(metaclass=Singleton):
     async def add_messages(
             self,
             messages: list[BaseMessage],
+            *,
             user_id: str = DEFAULT_VALUE,
             scope_id: str = DEFAULT_VALUE,
             session_id: str = DEFAULT_VALUE,
@@ -173,6 +177,8 @@ class LongTermMemory(metaclass=Singleton):
                 group_id=scope_id,
                 session_id=session_id,
                 history_window_size=gen_mem_with_history_msg_num)
+            if not timestamp:
+                timestamp = datetime.now(timezone.utc)
             # when multi messages, use last msg_id
             if gen_mem:
                 for i, msg in enumerate(messages):

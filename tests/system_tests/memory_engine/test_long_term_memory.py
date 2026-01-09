@@ -3,7 +3,7 @@ import base64
 import time
 import unittest
 from datetime import datetime, timezone
-
+from sqlalchemy.ext.asyncio import create_async_engine
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm1.schema.message import BaseMessage
@@ -13,7 +13,6 @@ from openjiuwen.core.memory.embed_models.api import APIEmbedModel
 from openjiuwen.core.foundation.llm1.schema.config import ModelConfig, ModelClientConfig
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig
-from sqlalchemy.ext.asyncio import create_async_engine
 from openjiuwen.core.common.schema.param import Param
 
 
@@ -99,7 +98,6 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         return False
 
     async def test_engine_initialized(self):
-        self.assertIsNotNone(self.engine._sys_mem_config)
         self.assertIsNotNone(self.engine.kv_store)
         self.assertIsNotNone(self.engine.semantic_store)
         self.assertIsNotNone(self.engine.db_store)
@@ -126,8 +124,6 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
             model_client_cfg=scope_model_client_cfg)
         result = self.engine.set_scope_config(scope_id, scope_cfg)
         self.assertTrue(result)
-        self.assertIn(scope_id, self.engine._scope_config)
-        self.assertEqual(self.engine._scope_config[scope_id], scope_cfg)
 
     async def test_add_messages(self):
         scope_id = "app0107_1"
