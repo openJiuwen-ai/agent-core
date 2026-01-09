@@ -5,7 +5,7 @@ from typing import Tuple
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm1.schema.config import ModelConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm1.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.memory.common.distributed_lock import DistributedLock
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig
 from openjiuwen.core.memory.generation.generation import Generator
@@ -486,7 +486,7 @@ class LongTermMemory(metaclass=Singleton):
             return True
 
     @staticmethod
-    def _get_llm_from_config(model_config: ModelConfig,
+    def _get_llm_from_config(model_config: ModelRequestConfig,
                              model_client_config: ModelClientConfig):
         return Model(model_config=model_config, model_client_config=model_client_config)
 

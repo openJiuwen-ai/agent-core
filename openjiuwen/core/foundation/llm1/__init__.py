@@ -7,7 +7,7 @@ from openjiuwen.core.foundation.llm1.model_clients.base_model_client import Base
 from openjiuwen.core.foundation.llm1.output_parsers.output_parser import BaseOutputParser
 
 # Configuration
-from openjiuwen.core.foundation.llm1.schema.config import ModelConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm1.schema.config import ModelRequestConfig, ModelClientConfig
 # Messages
 from openjiuwen.core.foundation.llm1.schema.message import (
     BaseMessage,

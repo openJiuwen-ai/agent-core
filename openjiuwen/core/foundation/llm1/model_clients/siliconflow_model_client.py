@@ -23,13 +23,13 @@ from openjiuwen.core.foundation.llm1.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm1.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm1.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm1.schema.config import ModelClientConfig, ModelConfig
+from openjiuwen.core.foundation.llm1.schema.config import ModelClientConfig, ModelRequestConfig
 
 
 class SiliconFlowModelClient(BaseModelClient):
     """SiliconFlow API client supporting GPT models and OpenAI-compatible services."""
 
-    def __init__(self, model_config: ModelConfig, model_client_config: ModelClientConfig):
+    def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
 
     def _get_client_name(self) -> str:
@@ -39,6 +39,7 @@ class SiliconFlowModelClient(BaseModelClient):
     def _build_and_sanitize_params(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
+            *,
             tools: Union[List[ToolInfo], List[dict], None] = None,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
@@ -64,8 +65,13 @@ class SiliconFlowModelClient(BaseModelClient):
         return params
 
     @asynccontextmanager
-    async def _apost(self, params: Dict[str, Any]):
-        """Create a POST request context for SiliconFlow API."""
+    async def _apost(self, params: Dict[str, Any], timeout: Optional[float] = None):
+        """Create a POST request context for SiliconFlow API.
+        
+        Args:
+            params: Request parameters
+            timeout: Optional timeout override for this specific request
+        """
         # Validate API base URL
         UrlUtils.check_url_is_valid(self.model_client_config.api_base)
 
@@ -76,7 +82,9 @@ class SiliconFlowModelClient(BaseModelClient):
         else:
             connector = aiohttp.TCPConnector(ssl=False)
 
-        timeout = aiohttp.ClientTimeout(total=self.model_client_config.timeout)
+        # Use method-level timeout if provided, otherwise use config timeout
+        final_timeout = timeout if timeout is not None else self.model_client_config.timeout
+        timeout_obj = aiohttp.ClientTimeout(total=final_timeout)
 
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.post(
@@ -88,14 +96,15 @@ class SiliconFlowModelClient(BaseModelClient):
                     },
                     json=params,
                     allow_redirects=False,
-                    timeout=timeout
+                    timeout=timeout_obj
             ) as response:
                 response.raise_for_status()
                 yield response
 
-    async def ainvoke(
+    async def invoke(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
+            *,
             tools: Union[List[ToolInfo], List[dict], None] = None,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
@@ -103,6 +112,7 @@ class SiliconFlowModelClient(BaseModelClient):
             max_tokens: Optional[int] = None,
             stop: Union[Optional[str], None] = None,
             output_parser: Optional[BaseOutputParser] = None,
+            timeout: float = None,
             **kwargs
     ) -> AssistantMessage:
         """Async invoke SiliconFlow API
@@ -116,6 +126,7 @@ class SiliconFlowModelClient(BaseModelClient):
             :param messages:
             :param top_p:
             :param max_tokens:
+            :param timeout:
             **kwargs: Additional parameters
             
         Returns:
@@ -135,7 +146,7 @@ class SiliconFlowModelClient(BaseModelClient):
         logger.info(f"Request params: {params}")
 
         try:
-            async with self._apost(params) as response:
+            async with self._apost(params, timeout=timeout) as response:
                 data = await response.json()
                 logger.info(f"SiliconFlow API response: {data}")
 
@@ -154,9 +165,10 @@ class SiliconFlowModelClient(BaseModelClient):
                 )
             ) from e
 
-    async def astream(
+    async def stream(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
+            *,
             tools: Union[List[ToolInfo], List[dict], None] = None,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
@@ -164,6 +176,7 @@ class SiliconFlowModelClient(BaseModelClient):
             max_tokens: Optional[int] = None,
             stop: Union[Optional[str], None] = None,
             output_parser: Optional[BaseOutputParser] = None,
+            timeout: float = None,
             **kwargs
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Async streaming invoke silicon flow API
@@ -177,6 +190,7 @@ class SiliconFlowModelClient(BaseModelClient):
             :param messages:
             :param top_p:
             :param max_tokens:
+            :param timeout:
             **kwargs: Additional parameters
             
         Yields:
@@ -195,7 +209,7 @@ class SiliconFlowModelClient(BaseModelClient):
         )
 
         try:
-            async with self._apost(params) as response:
+            async with self._apost(params, timeout=timeout) as response:
                 if output_parser:
                     # Use streaming parser
                     async for parsed_result in self._astream_with_parser(response, output_parser):

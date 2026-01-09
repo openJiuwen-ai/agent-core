@@ -10,7 +10,7 @@ from openjiuwen.core.foundation.llm1.schema.message import BaseMessage
 from openjiuwen.core.memory.store.impl.dbm_kv_store import DbmKVStore
 from openjiuwen.core.memory.store.impl.milvus_semantic_store import MilvusSemanticStore
 from openjiuwen.core.memory.embed_models.api import APIEmbedModel
-from openjiuwen.core.foundation.llm1.schema.config import ModelConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm1.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig
 from openjiuwen.core.common.schema.param import Param
@@ -68,10 +68,10 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         ))
 
         # ---------- Config ----------
-        default_model_cfg = ModelConfig(model="xxxx")
+        default_model_cfg = ModelRequestConfig(model="xxxx")
         default_model_client_cfg = ModelClientConfig(
             client_id="xxxx",
-            client_type="OpenAI",
+            client_provider="OpenAI",
             api_key="xxxx",
             api_base="xxxx",
             verify_ssl=False
@@ -104,10 +104,10 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
 
     async def test_set_scope_config(self):
         scope_id = "test_scope"
-        scope_model_cfg = ModelConfig(model="xxxx", temperature=0.05)
+        scope_model_cfg = ModelRequestConfig(model="xxxx", temperature=0.05)
         scope_model_client_cfg = ModelClientConfig(
             client_id="xxxx",
-            client_type="OpenAI",
+            client_provider="OpenAI",
             api_key="xxxx",
             api_base="xxxx",
             verify_ssl=False
@@ -127,10 +127,10 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
 
     async def test_add_messages(self):
         scope_id = "app0107_1"
-        scope_model_cfg = ModelConfig(model="xxxx", temperature=0.05)
+        scope_model_cfg = ModelRequestConfig(model="xxxx", temperature=0.05)
         scope_model_client_cfg = ModelClientConfig(
             client_id="xxxx",
-            client_type="OpenAI",
+            client_provider="OpenAI",
             api_key="xxxx",
             api_base="xxxx",
             verify_ssl=False

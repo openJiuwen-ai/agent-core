@@ -24,22 +24,25 @@ from openjiuwen.core.foundation.llm1.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm1.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm1.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm1.schema.config import ModelClientConfig, ModelConfig
+from openjiuwen.core.foundation.llm1.schema.config import ModelClientConfig, ModelRequestConfig
 
 
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
 
-    def __init__(self, model_config: ModelConfig, model_client_config: ModelClientConfig):
+    def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
 
     def _get_client_name(self) -> str:
         """Get client name."""
         return "OpenAI client"
 
-    def _create_async_openai_client(self) -> openai.AsyncOpenAI:
+    def _create_async_openai_client(self, timeout: Optional[float] = None) -> openai.AsyncOpenAI:
         """
         Create an OpenAI Async client with configured SSL/proxy/http client settings.
+        
+        Args:
+            timeout: Optional timeout override for this specific request
         """
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
@@ -49,17 +52,21 @@ class OpenAIModelClient(BaseModelClient):
             verify=verify
         )
 
+        # Use method-level timeout if provided, otherwise use config timeout
+        final_timeout = timeout if timeout is not None else self.model_client_config.timeout
+
         return openai.AsyncOpenAI(
             api_key=self.model_client_config.api_key,
             base_url=self.model_client_config.api_base,
             http_client=http_client,
-            timeout=self.model_client_config.timeout,
+            timeout=final_timeout,
             max_retries=self.model_client_config.max_retries
         )
 
-    async def ainvoke(
+    async def invoke(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
+            *,
             tools: Union[List[ToolInfo], List[dict], None] = None,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
@@ -67,6 +74,7 @@ class OpenAIModelClient(BaseModelClient):
             max_tokens: Optional[int] = None,
             stop: Union[Optional[str], None] = None,
             output_parser: Optional[BaseOutputParser] = None,
+            timeout: float = None,
             **kwargs
     ) -> AssistantMessage:
         """Async invoke OpenAI API
@@ -80,6 +88,7 @@ class OpenAIModelClient(BaseModelClient):
             :param messages:
             :param top_p:
             :param max_tokens:
+            :param timeout:
             **kwargs: Additional parameters
             
         Returns:
@@ -100,7 +109,7 @@ class OpenAIModelClient(BaseModelClient):
 
         async_client = None
         try:
-            async_client = self._create_async_openai_client()
+            async_client = self._create_async_openai_client(timeout=timeout)
 
             # Call API
             response = await async_client.chat.completions.create(**params)
@@ -124,9 +133,10 @@ class OpenAIModelClient(BaseModelClient):
             if async_client is not None:
                 await async_client.close()
 
-    async def astream(
+    async def stream(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
+            *,
             tools: Union[List[ToolInfo], List[dict], None] = None,
             temperature: Optional[float] = None,
             top_p: Optional[float] = None,
@@ -134,6 +144,7 @@ class OpenAIModelClient(BaseModelClient):
             max_tokens: Optional[int] = None,
             stop: Union[Optional[str], None] = None,
             output_parser: Optional[BaseOutputParser] = None,
+            timeout: float = None,
             **kwargs
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Async streaming invoke OpenAI API
@@ -147,6 +158,7 @@ class OpenAIModelClient(BaseModelClient):
             :param messages:
             :param top_p:
             :param max_tokens:
+            :param timeout:
             **kwargs: Additional parameters
             
         Yields:
@@ -167,7 +179,7 @@ class OpenAIModelClient(BaseModelClient):
 
         async_client = None
         try:
-            async_client = self._create_async_openai_client()
+            async_client = self._create_async_openai_client(timeout=timeout)
 
             # Call API with streaming
             response_stream = await async_client.chat.completions.create(**params)
@@ -177,7 +189,6 @@ class OpenAIModelClient(BaseModelClient):
                 async for parsed_result in self._astream_with_parser(response_stream, output_parser):
                     yield parsed_result
             else:
-                # Direct return without parser
                 async for chunk in response_stream:
                     parsed_chunk = self._parse_stream_chunk(chunk)
                     if parsed_chunk:
@@ -231,7 +242,6 @@ class OpenAIModelClient(BaseModelClient):
                         logger.debug(f"Stream parser attempt: {e}")
                         parser_content = None
                 
-                # Create new chunk with original content and parser_content
                 chunk_with_parser = AssistantMessageChunk(
                     content=parsed_chunk.content,  # Keep original content increment unchanged
                     reasoning_content=parsed_chunk.reasoning_content,
