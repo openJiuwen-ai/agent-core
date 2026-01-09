@@ -194,7 +194,7 @@ class StatusCode(Enum):
     CONTEXT_ENGINE_GET_CONTEXT_WINDOW_ERROR = (153004, "Message get context window error: {error_msg}")
     CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR = (153005, "Context engine message validation error: {error_msg}")
 
-    #KnowlageBase Retrieval 155000 - 159999
+    #KnowlageBase Retrieval 155000 - 157999
     #KnowlageBase Retrieval - Embedding 155000 - 155099
     EMBEDDING_EMPTY_INPUT_ERROR = (155000, "Empty text or texts list provided for embedding")
     EMBEDDING_MODEL_NOT_FOUND_ERROR = (155001, "Embedding model not found: {error_msg}")
@@ -238,6 +238,10 @@ class StatusCode(Enum):
     KB_VECTOR_STORE_REQUIRED_ERROR = (155503, "Vector store is required: {error_msg}")
     KB_BUILD_INDEX_FAILED_ERROR = (155504, "Failed to build index: {error_msg}")
     KB_BUILD_CHUNK_INDEX_FAILED_ERROR = (155505, "Failed to build chunk index: {error_msg}")
+
+    # Memory Engine 158000 - 159999
+    MEMORY_ENGINE_KV_STORE_NOT_REGISTER = (158000, "kv store is not registered in memory engine")
+    MEMORY_ENGINE_SEMANTIC_STORE_NOT_REGISTER = (158001, "semantic store is not registered in memory engine")
 
     # Development Toolchain 160000 - 169999
     # Development Toolchain - Prompt Generation 160000 - 160999
