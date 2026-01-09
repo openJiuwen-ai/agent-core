@@ -69,7 +69,7 @@ async def test_no_stream_called():
         async for chunk in flow.stream({"a": "生成markdown回复"}, session,
                                        stream_modes=[BaseStreamMode.OUTPUT]):
             logger.info(chunk)
-    assert error.value.error_code == StatusCode.WORKFLOW_STREAM_TIMEOUT.code
+    assert error.value.error_code == StatusCode.WORKFLOW_STREAM_EXECUTION_TIMEOUT.code
 
 
 class Producer(WorkflowComponent):
@@ -552,8 +552,8 @@ async def test_workflow_stream_with_exception():
     with pytest.raises(JiuWenBaseException) as e:
         await workflow.invoke(inputs={"user_inputs": {"array": [1, 2, 3, 4, 5, 6, 7]}},
                               session=WorkflowSession())
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="transform_comp",
+    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="transform_comp",
                                                                                ability="transform",
                                                                                error="mock error")
     logger.info("after exception, execution again")
@@ -686,7 +686,7 @@ async def test_dual_ability_node_with_stream_error():
 
     This test verifies error handling in dual-ability nodes:
     - When STREAM ability raises an exception, the workflow should fail
-    - The exception should be wrapped in COMPONENT_EXECUTE_ERROR
+    - The exception should be wrapped in COMPONENT_EXECUTION_RUNTIME_ERROR
     """
     flow = Workflow()
 
@@ -730,7 +730,7 @@ async def test_dual_ability_node_with_stream_error():
             pass
 
     # Verify the exception is properly wrapped
-    assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
+    assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
     assert "C" in exc_info.value.message  # Node ID should be in the message
     assert "stream" in exc_info.value.message.lower()  # Ability name should be in the message
 
@@ -741,7 +741,7 @@ async def test_dual_ability_node_with_transform_error():
 
     This test verifies:
     - When TRANSFORM ability raises an exception, the workflow should fail
-    - The exception should be wrapped in COMPONENT_EXECUTE_ERROR
+    - The exception should be wrapped in COMPONENT_EXECUTION_RUNTIME_ERROR
     """
     flow = Workflow()
 
@@ -785,7 +785,7 @@ async def test_dual_ability_node_with_transform_error():
             pass
 
     # Verify the exception is properly wrapped
-    assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
+    assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
     assert "C" in exc_info.value.message  # Node ID should be in the message
     assert "transform" in exc_info.value.message.lower()  # Ability name should be in the message
 

@@ -9,12 +9,12 @@ class TestInteractiveInput:
     def test_invalid_raw_inputs(self):
         with pytest.raises(JiuWenBaseException) as cm:
             InteractiveInput(None)
-        assert cm.value.error_code == StatusCode.INTERACTIVE_INVALID_INPUT_ERROR.code
-        assert cm.value.message == StatusCode.INTERACTIVE_INVALID_INPUT_ERROR.errmsg
+        assert cm.value.error_code == StatusCode.WORKFLOW_INPUT_INVALID.code
+        assert cm.value.message == StatusCode.WORKFLOW_INPUT_INVALID.errmsg
 
     def test_invalid_update(self):
         with pytest.raises(JiuWenBaseException) as cm:
             interactive_input = InteractiveInput()
             interactive_input.update("id", None)
-        assert cm.value.error_code == StatusCode.INTERACTIVE_INVALID_INPUT_ERROR.code
-        assert cm.value.message == StatusCode.INTERACTIVE_INVALID_INPUT_ERROR.errmsg
+        assert cm.value.error_code == StatusCode.WORKFLOW_INPUT_INVALID.code
+        assert cm.value.message == StatusCode.WORKFLOW_INPUT_INVALID.errmsg

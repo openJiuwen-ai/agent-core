@@ -36,8 +36,8 @@ class InMemoryCheckpointer(Checkpointer):
                 await self._graph_store.delete(session.session_id(), session.workflow_id())
                 workflow_store.clear(session.workflow_id())
             else:
-                raise JiuWenBaseException(StatusCode.WORKFLOW_STATE_EXISTS_ERROR.code,
-                                          StatusCode.WORKFLOW_STATE_EXISTS_ERROR.errmsg)
+                raise JiuWenBaseException(StatusCode.WORKFLOW_STATE_INVALID.code,
+                                          StatusCode.WORKFLOW_STATE_INVALID.errmsg)
 
     async def post_workflow_execute(self, session: BaseSession, result, exception):
         workflow_store = self._workflow_stores.get(session.session_id())

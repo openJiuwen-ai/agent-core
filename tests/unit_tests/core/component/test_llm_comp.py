@@ -188,7 +188,7 @@ class TestLLMExecutableInvoke:
         try:
             exe = LLMExecutable(config)
         except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.LLM_COMPONENT_RESPONSE_FORMAT_CONFIG_ERROR.code
+            assert e.error_code == StatusCode.COMPONENT_LLM_CONFIG_INVALID.code
 
     @pytest.mark.asyncio  # 新增
     async def test_llm_in_workflow(

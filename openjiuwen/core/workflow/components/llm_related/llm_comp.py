@@ -78,8 +78,8 @@ class ValidationUtils:
     @staticmethod
     def raise_invalid_params_error(error_msg: str = "") -> None:
         raise JiuWenBaseException(
-            StatusCode.PROMPT_JSON_SCHEMA_ERROR.code,
-            StatusCode.PROMPT_JSON_SCHEMA_ERROR.errmsg.format(error_msg=error_msg),
+            StatusCode.COMPONENT_CONFIG_INVALID_SCHEMA.code,
+            StatusCode.COMPONENT_CONFIG_INVALID_SCHEMA.errmsg.format(error_msg=error_msg),
         )
 
     @staticmethod
@@ -412,7 +412,7 @@ class LLMExecutable(ComponentExecutable):
                     if element.get(_ROLE, "") == "system":
                         SystemMessage.model_validate(element)
             except ValidationError as e:
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_TEMPLATE_CONFIG_ERROR,
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
                                                "system message is invalid", e)
 
             if_contain_user_message = False
@@ -422,32 +422,32 @@ class LLMExecutable(ComponentExecutable):
                     if_contain_user_message = True
                 if if_contain_user_message and element.get(_ROLE, "") == "system":
                     SystemMessage.model_validate(element)
-                    ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_TEMPLATE_CONFIG_ERROR,
+                    ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
                                             "system message must be before user message")
             if not if_contain_user_message:
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_TEMPLATE_CONFIG_ERROR,
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
                                                "user message is required")
         else:
-            ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_TEMPLATE_CONFIG_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
                                            "template content is empty")
 
     @staticmethod
     def _validate_output_config(output_config):
         if not output_config:
-            ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_OUTPUT_CONFIG_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_CONFIG_ERROR,
                                            "output config is empty")
         for param, value in output_config.items():
             if not param:
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_OUTPUT_CONFIG_ERROR,
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_CONFIG_ERROR,
                                     f"output config parameter {param} is empty")
             try:
                 OutputParamConfig.model_validate(value)
             except ValidationError as e:
                 if UserConfig.is_sensitive():
-                    ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_OUTPUT_CONFIG_ERROR,
+                    ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_CONFIG_ERROR,
                                          "output config parameter's config value is invalid")
                 else:
-                    ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_OUTPUT_CONFIG_ERROR,
+                    ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_CONFIG_ERROR,
                                          f"output config parameter's config {value} is invalid", e)
 
     @staticmethod
@@ -456,12 +456,12 @@ class LLMExecutable(ComponentExecutable):
         try:
             response_type = ResponseFormatConfig.model_validate(response_format).response_type
         except ValidationError as e:
-            ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_RESPONSE_FORMAT_CONFIG_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_CONFIG_INVALID,
                                   f"response format {response_format} is invalid", e)
 
         if response_type in ["text", "markdown"] and len(output_config) != 1:
             ExceptionUtils.raise_exception(
-                StatusCode.LLM_COMPONENT_RESPONSE_FORMAT_CONFIG_ERROR,
+                StatusCode.COMPONENT_LLM_CONFIG_INVALID,
                 "output config must contain exactly one parameter for text or markdown response type")
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
@@ -479,10 +479,10 @@ class LLMExecutable(ComponentExecutable):
             response = llm_response.content
         except Exception as e:
             if UserConfig.is_sensitive():
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_INVOKE_LLM_ERROR,
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED,
                                                "invoke llm failed", e)
             else:
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_INVOKE_LLM_ERROR, str(e), e)
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED, str(e), e)
 
         if UserConfig.is_sensitive():
             logger.info("[%s] model outputs", self._session.executable_id())
@@ -503,10 +503,10 @@ class LLMExecutable(ComponentExecutable):
                     yield out
         except Exception as e:
             if UserConfig.is_sensitive():
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_INVOKE_LLM_ERROR,
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED,
                                                "Failed to stream", e)
             else:
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_INVOKE_LLM_ERROR, str(e), e)
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED, str(e), e)
 
     def _initialize_if_needed(self):
         if not self._initialized:
@@ -514,7 +514,7 @@ class LLMExecutable(ComponentExecutable):
                 self._llm = self._create_llm_instance()
                 self._initialized = True
             except Exception as e:
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_INIT_LLM_ERROR,
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INIT_FAILED,
                                                "Failed to initialize llm if needed", e)
 
     def _create_llm_instance(self):
@@ -588,8 +588,8 @@ class LLMExecutable(ComponentExecutable):
                                                             self._config.output_config)
             return formatted_res
         except JiuWenBaseException as e:
-            if e.error_code == StatusCode.PROMPT_JSON_SCHEMA_ERROR.code:
-                ExceptionUtils.raise_exception(StatusCode.LLM_COMPONENT_JSON_SCHEMA_OUTPUT_ERROR, error_msg=e.message)
+            if e.error_code == StatusCode.COMPONENT_LLM_TEMPLATE_INVALID.code:
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_EXECUTION_PROCESS_ERROR, error_msg=e.message)
             else:
                 raise e
 

@@ -23,8 +23,8 @@ class InteractiveInput(BaseModel):
     def __init__(self, raw_inputs: Any = _sentinel):
         super().__init__(**{})
         if raw_inputs is None:
-            raise JiuWenBaseException(StatusCode.INTERACTIVE_INVALID_INPUT_ERROR.code,
-                                      StatusCode.INTERACTIVE_INVALID_INPUT_ERROR.errmsg)
+            raise JiuWenBaseException(StatusCode.WORKFLOW_INPUT_INVALID.code,
+                                      StatusCode.WORKFLOW_INPUT_INVALID.errmsg)
         if raw_inputs is _sentinel:
             self.raw_inputs = None
             return
@@ -32,9 +32,9 @@ class InteractiveInput(BaseModel):
 
     def update(self, node_id: str, value: Any):
         if self.raw_inputs is not None:
-            raise JiuWenBaseException(StatusCode.INTERACTIVE_UPDATE_FAILED.code,
-                                      StatusCode.INTERACTIVE_UPDATE_FAILED.errmsg)
+            raise JiuWenBaseException(StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.code,
+                                      StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.errmsg)
         if node_id is None or value is None:
-            raise JiuWenBaseException(StatusCode.INTERACTIVE_INVALID_INPUT_ERROR.code,
-                            StatusCode.INTERACTIVE_INVALID_INPUT_ERROR.errmsg)
+            raise JiuWenBaseException(StatusCode.WORKFLOW_INPUT_INVALID.code,
+                            StatusCode.WORKFLOW_INPUT_INVALID.errmsg)
         self.user_inputs[node_id] = value

@@ -211,7 +211,7 @@ class IntentDetectionExecutable(ComponentExecutable):
                 self._llm = self._create_llm_instance()
                 self._initialized = True
             except Exception as e:
-                ExceptionUtils.raise_exception(StatusCode.INTENT_DETECTION_COMPONENT_INIT_LLM_ERROR,
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED,
                                                "Failed to initialize llm if needed.", e)
 
     def _prepare_detection_inputs(self, inputs, chat_history):
@@ -241,7 +241,7 @@ class IntentDetectionExecutable(ComponentExecutable):
                 current_inputs.update({INPUT: intent_detection_input.query or ""})
             except ValidationError as e:
                 ExceptionUtils.raise_exception(
-                    StatusCode.INTENT_DETECTION_COMPONENT_USER_INPUT_ERROR, ExceptionUtils.format_validation_error(e))
+                    StatusCode.COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR, ExceptionUtils.format_validation_error(e))
 
         current_inputs['global_intent_map'] = global_intent_map
 
@@ -286,7 +286,7 @@ class IntentDetectionExecutable(ComponentExecutable):
             llm_output = self._llm.invoke(model_name=self._config.model.model_info.model_name, messages=llm_inputs)
             llm_output_content = llm_output.content
         except Exception as e:
-            ExceptionUtils.raise_exception(StatusCode.INTENT_DETECTION_COMPONENT_INVOKE_LLM_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED,
                                            "Failed to invoke llm and get result", e)
         if UserConfig.is_sensitive():
             logger.info("Success to invoke llm for intent detection")

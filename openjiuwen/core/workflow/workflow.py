@@ -348,7 +348,7 @@ class Workflow:
                 await session.stream_writer_manager().stream_emitter().close()
 
         task = asyncio.create_task(
-            self._execute_with_timeout(stream_process, timeout, StatusCode.WORKFLOW_STREAM_TIMEOUT))
+            self._execute_with_timeout(stream_process, timeout, StatusCode.WORKFLOW_STREAM_EXECUTION_TIMEOUT))
 
         interaction_chuck_list = []
         chunks = []
@@ -372,8 +372,11 @@ class Workflow:
         except JiuWenBaseException as e:
             raise e
         except Exception as e:
-            raise JiuWenBaseException(StatusCode.WORKFLOW_EXECUTE_INNER_ERROR.code,
-                                      StatusCode.WORKFLOW_EXECUTE_INNER_ERROR.errmsg.format(error=e))
+            raise JiuWenBaseException(
+                StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
+                StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(error=e),
+            ) from e
+
         finally:
             await session.close()
             await self._internal.reset()
@@ -490,12 +493,12 @@ class Workflow:
                 if isinstance(task.exception(), JiuWenBaseException):
                     raise task.exception()
                 else:
-                    raise JiuWenBaseException(StatusCode.WORKFLOW_EXECUTE_INNER_ERROR.code,
-                                              StatusCode.WORKFLOW_EXECUTE_INNER_ERROR.errmsg.format(
+                    raise JiuWenBaseException(StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
+                                              StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(
                                                   error=task.exception())) from e
             else:
-                raise JiuWenBaseException(StatusCode.WORKFLOW_EXECUTE_INNER_ERROR.code,
-                                          StatusCode.WORKFLOW_EXECUTE_INNER_ERROR.errmsg.format(error=e)) from e
+                raise JiuWenBaseException(StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
+                                          StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(error=e)) from e
         finally:
             if not task.done():
                 task.cancel()

@@ -247,7 +247,7 @@ class QuestionerUtils:
         try:
             return QuestionerInput.model_validate(inputs)
         except ValidationError as e:
-            ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_USER_INPUT_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INPUT_PARAM_ERROR,
                                            ExceptionUtils.format_validation_error(e))
 
     @staticmethod
@@ -317,7 +317,7 @@ class QuestionerDirectReplyHandler:
                 self._update_questioner_states_question(output.question)
             self._state = self._state.handle_event(event)
         else:
-            ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_EMPTY_QUESTION_IN_DIRECT_REPLY)
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INPUT_INVALID)
         return QuestionerUtils.format_questioner_output(output)
 
     async def _handle_user_interact_state(self, inputs, session: Session, context):
@@ -339,7 +339,7 @@ class QuestionerDirectReplyHandler:
                 self._update_questioner_states_question(output.question)
             self._state = self._state.handle_event(event)
         else:
-            ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_EMPTY_QUESTION_IN_DIRECT_REPLY)
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INPUT_INVALID)
         return QuestionerUtils.format_questioner_output(output)
 
     def _handle_end_state(self, inputs, session, context):
@@ -417,7 +417,7 @@ class QuestionerDirectReplyHandler:
             response = self._model.invoke(
                 model_name=self._config.model.model_info.model_name, messages=llm_inputs).content
         except Exception as e:
-            ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_INVOKE_LLM_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_ERROR,
                                            "Failed to invoke llm for extraction", e)
 
         if UserConfig.is_sensitive():
@@ -435,7 +435,7 @@ class QuestionerDirectReplyHandler:
             return result
 
         if not isinstance(result, dict):
-            ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_PARSE_LLM_RESPONSE_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR,
                                            "Failed to parse json from llm response")
         result = {k: v for k, v in result.items() if QuestionerUtils.is_valid_value(v)}
         return result
@@ -476,7 +476,7 @@ class QuestionerDirectReplyHandler:
                 output.question = QuestionerUtils.format_continue_ask_question(non_extracted_key_fields)
                 is_continue_ask = True
             else:
-                ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_EXCEED_MAX_RESPONSE)
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_RUNTIME_ERROR)
         if is_continue_ask:
             output.key_fields.clear()
         else:
@@ -527,24 +527,24 @@ class QuestionerExecutable(ComponentExecutable):
     @staticmethod
     def _validate_max_response_num_config(max_response_num: int):
         if max_response_num <= 0:
-            ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_CONFIG_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
                                            "max response must be greater than 0")
 
     @staticmethod
     def _validate_extract_key_fields_config(if_extract: bool, extract_key_fields: List[FieldInfo]):
         if if_extract and not extract_key_fields:
-            ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_CONFIG_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
                                            "extracted key fields cannot be empty")
         for item in extract_key_fields:
             if not item.field_name:
-                ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_CONFIG_ERROR,
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
                                            "extracted key field name cannot be empty")
 
     @staticmethod
     def _validate_response_type_config(response_type: str):
         response_type_values = [member.value for member in ResponseType]
         if response_type not in response_type_values:
-            ExceptionUtils.raise_exception(StatusCode.QUESTIONER_COMPONENT_CONFIG_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
                                            f"response type {response_type} is invalid")
 
     def state(self, state: QuestionerState):

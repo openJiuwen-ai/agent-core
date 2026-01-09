@@ -319,8 +319,8 @@ class TraceWorkflowHandler(TraceBaseHandler):
             elif isinstance(exception, GraphInterrupt):
                 return
             else:
-                span.error = {"error_code": StatusCode.WORKFLOW_EXECUTE_INNER_ERROR.code,
-                              "message": StatusCode.WORKFLOW_EXECUTE_INNER_ERROR.errmsg.format(
+                span.error = {"error_code": StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
+                              "message": StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(
                                   error=str(exception))}
             if on_invoke_data:
                 span.on_invoke_data.append(on_invoke_data)

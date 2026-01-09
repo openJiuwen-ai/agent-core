@@ -212,7 +212,7 @@ class ComponentComposable(ABC):
         if isinstance(self, Executable):
             return self
         raise JiuWenBaseException(
-            StatusCode.COMPONENT_NOT_EXECUTABLE_ERROR.code, "workflow component should implement Executable"
+            StatusCode.WORKFLOW_EXECUTION_NOT_SUPPORT.code, "workflow component should implement Executable"
         )
 
 

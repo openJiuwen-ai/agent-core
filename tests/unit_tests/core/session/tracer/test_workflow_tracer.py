@@ -601,10 +601,12 @@ class TestTraceWorkflow:
                                            stream_modes=[BaseStreamMode.TRACE]):
                 logger.info("stream chunk: {%s}", chunk)
                 results.append(chunk)
-        assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-        assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="end", ability="stream",
-                                                                                   error=RuntimeError(
-                                                                                       "mocked stream error"))
+        assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
+        assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(
+            node_id="end",
+            ability="stream",
+            error=RuntimeError("mocked stream error"),
+        )
 
         assert len(results) == 8
         # for 'a' node with stream output, tracer finish frame with empty output
@@ -615,7 +617,9 @@ class TestTraceWorkflow:
         end_error_chunk = results[6]
         assert end_error_chunk.payload["invokeId"] == 'end' and end_error_chunk.payload["status"] == 'error' and \
                end_error_chunk.payload["error"] == {
-                   'error_code': StatusCode.COMPONENT_EXECUTE_ERROR.code,
-                   'message': StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="end", ability="stream",
-                                                                               error=str(RuntimeError(
-                                                                                   "mocked stream error")))}
+                   'error_code': StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code,
+                   "message": StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                       node_id="end",
+                       ability="stream",
+                       error=str(RuntimeError("mocked stream error")),
+                   )}

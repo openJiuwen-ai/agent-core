@@ -26,7 +26,7 @@ class Executable(Generic[Input, Output]):
 
     async def interrupt(self, message: dict):
         raise InterruptException(
-            error_code=StatusCode.CONTROLLER_INTERRUPTED_ERROR.code,
+            error_code=StatusCode.CONTROLLER_EXECUTION_INTERRUPTED.code,
             message=json.dumps(message, ensure_ascii=False)
         )
 

@@ -10,62 +10,62 @@ class StatusCode(Enum):
     ERROR = (-1, "error")
 
     # Util Error
-    SCHEMA_INVALID_ERROR = (90000, "Schema validation failed: {reason}")
-    SCHEMA_FORMAT_ERROR = (90001, "Schema format failed: {reason}")
+    COMPONENT_CONFIG_INVALID = (90000, "Schema validation failed: {reason}")
+    COMPONENT_CONFIG_PARAM_ERROR = (90001, "Schema format failed: {reason}")
 
     # Workflow Component  100000 - 109999
 
     # Workflow: Interactive And Recovery 100000 - 100029
-    INTERACTIVE_INVALID_INPUT_ERROR = (100000, "value of interactive_input is invalid")
-    INTERACTIVE_UPDATE_FAILED = (100001, "raw_inputs existed, update is invalid")
-    COMPONENT_NOT_EXECUTABLE_ERROR = (100002, "workflow component should implement Executable")
-    CONTROLLER_INTERRUPTED_ERROR = (100003, "controller interrupted error")
-    INTERACTIVE_NOT_SUPPORT_STREAM_ERROR = (100004, "streaming process interface(transform or collect)"
+    WORKFLOW_INPUT_INVALID = (100000, "value of interactive_input is invalid")
+    WORKFLOW_STATE_RUNTIME_ERROR = (100001, "raw_inputs existed, update is invalid")
+    WORKFLOW_EXECUTION_NOT_SUPPORT = (100002, "workflow component should implement Executable")
+    CONTROLLER_EXECUTION_INTERRUPTED = (100003, "controller interrupted error")
+    WORKFLOW_STREAM_NOT_SUPPORT = (100004, "streaming process interface(transform or collect)"
                                             " does not support interact operations")
-    COMPONENT_EXECUTE_ERROR = (100005, "component [{node_id}] encountered an exception while executing ability [{"
-                                           "ability}], error detail: {error}")
-    WORKFLOW_STATE_EXISTS_ERROR = (100006, "workflow state exists but non-interactive input and cleanup is disabled.")
+    COMPONENT_EXECUTION_RUNTIME_ERROR = (100005, "component [{node_id}] encountered an exception "
+                                                 "while executing ability [{""ability}], error detail: {error}")
+    WORKFLOW_STATE_INVALID = (100006, "workflow state exists but non-interactive input and cleanup is disabled.")
 
     # Workflow: Execution 100100 - 100199
-    WORKFLOW_EXECUTE_INNER_ERROR = (100100, "workflow execute inner error: {error}")
+    WORKFLOW_EXECUTION_RUNTIME_ERROR = (100100, "workflow execute inner error: {error}")
     WORKFLOW_INVOKE_TIMEOUT = (100101, "workflow invoke exceeded {timeout}s")
-    WORKFLOW_STREAM_TIMEOUT = (100102, "workflow stream exceeded {timeout}s")
+    WORKFLOW_STREAM_EXECUTION_TIMEOUT = (100102, "workflow stream exceeded {timeout}s")
 
     # Workflow Component - Builtin-workflow Component 101000 - 109999
 
     ## LLMComponent  101000 - 101049
-    LLM_COMPONENT_TEMPLATE_CONFIG_ERROR = (101000, "LLM component template config error, as {error_msg}.")
-    LLM_COMPONENT_RESPONSE_FORMAT_CONFIG_ERROR = (101001, "LLM component response format config error, as {error_msg}.")
-    LLM_COMPONENT_OUTPUT_CONFIG_ERROR = (101002, "LLM component output config error, as {error_msg}.")
-    LLM_COMPONENT_INVOKE_LLM_ERROR = (101003, "LLM component invoke llm error, as {error_msg}.")
-    LLM_COMPONENT_JSON_SCHEMA_OUTPUT_ERROR = (101004, "Failed to output json schema, as {error_msg}.")
-    LLM_COMPONENT_INIT_LLM_ERROR = (101005, "Failed to init llm, as {error_msg}.")
-    LLM_COMPONENT_ASSEMBLE_TEMPLATE_ERROR = (101006, "LLM component assemble template error, as {error_msg}.")
-    PROMPT_JSON_SCHEMA_ERROR = (101007, "Invalid json schema, root cause = {error_msg}.")
+    COMPONENT_LLM_TEMPLATE_CONFIG_ERROR = (101000, "LLM component template config error, as {error_msg}.")
+    COMPONENT_LLM_CONFIG_INVALID = (101001, "LLM component response format config error, as {error_msg}.")
+    COMPONENT_LLM_CONFIG_ERROR = (101002, "LLM component output config error, as {error_msg}.")
+    COMPONENT_LLM_INVOKE_CALL_FAILED = (101003, "LLM component invoke llm error, as {error_msg}.")
+    COMPONENT_LLM_EXECUTION_PROCESS_ERROR = (101004, "Failed to output json schema, as {error_msg}.")
+    COMPONENT_LLM_INIT_FAILED = (101005, "Failed to init llm, as {error_msg}.")
+    COMPONENT_LLM_TEMPLATE_PROCESS_ERROR = (101006, "LLM component assemble template error, as {error_msg}.")
+    COMPONENT_LLM_TEMPLATE_INVALID = (101007, "Invalid json schema, root cause = {error_msg}.")
 
 
     ## LLM Service 102001 - 102999
-    LLM_SERVICE_CONFIG_ERROR = (102001, "LLM service config error, as {error_msg}.")
-    LLM_SERVICE_MODEL_CONFIG_ERROR = (102002, "LLM model config error, as {error_msg}.")
-    LLM_SERVICE_CALL_MODEL_PARAM_ERROR = (102003, "LLM model call error, as {error_msg}.")
-    LLM_SERVICE_MODEL_CLIENT_TYPE_ERROR = (102004, "LLM model client type error, as {error_msg}.")
+    MODEL_SERVICE_CONFIG_ERROR = (102001, "LLM service config error, as {error_msg}.")
+    MODEL_CONFIG_ERROR = (102002, "LLM model config error, as {error_msg}.")
+    MODEL_INVOKE_PARAM_ERROR = (102003, "LLM model call error, as {error_msg}.")
+    MODEL_CLIENT_CONFIG_INVALID = (102004, "LLM model client type error, as {error_msg}.")
 
     ## IntentDetectionComponent 101050 - 101069
-    INTENT_DETECTION_COMPONENT_USER_INPUT_ERROR = (101050,
+    COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR = (101050,
                                                    "Intent detection component user input error, as {error_msg}.")
-    INTENT_DETECTION_COMPONENT_INIT_LLM_ERROR = (101051, "Intent detection component init llm error, as {error_msg}.")
-    INTENT_DETECTION_COMPONENT_INVOKE_LLM_ERROR = (101052,
+    COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED = (101051, "Intent detection component init llm error, as {error_msg}.")
+    COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED = (101052,
                                                    "Intent detection component invoke llm error, as {error_msg}.")
 
     ## QuestionComponent 101070 - 101099
-    QUESTIONER_COMPONENT_USER_INPUT_ERROR = (101070, "Questioner component user input error, as {error_msg}.")
-    QUESTIONER_COMPONENT_CONFIG_ERROR = (101071, "Questioner component config error, as {error_msg}.")
-    QUESTIONER_COMPONENT_EMPTY_QUESTION_IN_DIRECT_REPLY = \
+    COMPONENT_QUESTIONER_INPUT_PARAM_ERROR = (101070, "Questioner component user input error, as {error_msg}.")
+    COMPONENT_QUESTIONER_CONFIG_ERROR = (101071, "Questioner component config error, as {error_msg}.")
+    COMPONENT_QUESTIONER_INPUT_INVALID = \
         (101072, "Questioner component empty question in direct reply mode.")
-    QUESTIONER_COMPONENT_INIT_STATE_ERROR = (101073, "Questioner component init state error.")
-    QUESTIONER_COMPONENT_EXCEED_MAX_RESPONSE = (101074, "Questioner component exceed max response.")
-    QUESTIONER_COMPONENT_INVOKE_LLM_ERROR = (101075, "Questioner component invoke llm error, as {error_msg}.")
-    QUESTIONER_COMPONENT_PARSE_LLM_RESPONSE_ERROR = (101076, "Questioner component parse llm response error,"
+    COMPONENT_QUESTIONER_STATE_INIT_FAILED = (101073, "Questioner component init state error.")
+    COMPONENT_QUESTIONER_RUNTIME_ERROR = (101074, "Questioner component exceed max response.")
+    COMPONENT_QUESTIONER_INVOKE_CALL_ERROR = (101075, "Questioner component invoke llm error, as {error_msg}.")
+    COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR = (101076, "Questioner component parse llm response error,"
                                                      " as {error_msg}.")
 
     ## BranchComponent  101100 - 101119

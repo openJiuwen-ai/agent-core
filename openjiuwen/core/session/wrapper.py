@@ -298,8 +298,8 @@ class WrappedNodeSession(StateSession):
     async def interact(self, value):
         if self._stream_mode:
             raise JiuWenBaseException(
-                StatusCode.INTERACTIVE_NOT_SUPPORT_STREAM_ERROR.code,
-                StatusCode.INTERACTIVE_NOT_SUPPORT_STREAM_ERROR.errmsg,
+                StatusCode.WORKFLOW_STREAM_NOT_SUPPORT.code,
+                StatusCode.WORKFLOW_STREAM_NOT_SUPPORT.errmsg,
             )
         if self._interaction is None:
             self._interaction = WorkflowInteraction(self._inner)

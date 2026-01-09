@@ -40,7 +40,7 @@ async def test_loop_number_exceeds_max_limit():
     with pytest.raises(JiuWenBaseException) as exc_info:
         await flow.invoke(inputs={"num": 0}, session=WorkflowSession())
 
-    assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
+    assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
     assert "exceeds maximum limit" in exc_info.value.message
 
 class CustomStream(WorkflowComponent):

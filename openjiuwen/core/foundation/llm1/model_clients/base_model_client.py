@@ -45,23 +45,23 @@ class BaseModelClient(ABC):
         client_name = self._get_client_name()
         
         if not self.model_client_config.api_key:
-            raise JiuWenBaseException(StatusCode.LLM_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.LLM_SERVICE_CONFIG_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
+                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
                                           error_msg=f"model client config api_key is required for {client_name}."))
         if not self.model_client_config.api_base:
-            raise JiuWenBaseException(StatusCode.LLM_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.LLM_SERVICE_CONFIG_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
+                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
                                           error_msg=f"model client config api_base is required for {client_name}."))
 
         if self.model_client_config.verify_ssl is not None and not isinstance(self.model_client_config.verify_ssl,
                                                                               bool):
-            raise JiuWenBaseException(StatusCode.LLM_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.LLM_SERVICE_CONFIG_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
+                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
                                           error_msg="model client config verify_ssl must be a boolean type."))
 
         if self.model_client_config.verify_ssl is True and self.model_client_config.ssl_cert is None:
-            raise JiuWenBaseException(StatusCode.LLM_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.LLM_SERVICE_CONFIG_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
+                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
                                           error_msg="model client config ssl_cert is required when verify_ssl is True."))
 
     def _convert_messages_to_dict(self, messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
@@ -84,8 +84,8 @@ class BaseModelClient(ABC):
         """
         # If it's a string, convert to user message
         if not messages:
-            raise JiuWenBaseException(StatusCode.LLM_SERVICE_CALL_MODEL_PARAM_ERROR.code,
-                                      StatusCode.LLM_SERVICE_CALL_MODEL_PARAM_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.MODEL_INVOKE_PARAM_ERROR.code,
+                                      StatusCode.MODEL_INVOKE_PARAM_ERROR.errmsg.format(
                                           error_msg="The message sent to the llm cannot be empty."))
         if isinstance(messages, str):
             return [{"role": "user", "content": messages}]
@@ -181,8 +181,8 @@ class BaseModelClient(ABC):
         """
         if model is None and self.model_config.model_name is None:
             raise JiuWenBaseException(
-                StatusCode.LLM_SERVICE_MODEL_CONFIG_ERROR.code,
-                StatusCode.LLM_SERVICE_MODEL_CONFIG_ERROR.errmsg.format(error_msg="The model cannot be None.")
+                StatusCode.MODEL_CONFIG_ERROR.code,
+                StatusCode.MODEL_CONFIG_ERROR.errmsg.format(error_msg="The model cannot be None.")
             )
 
         # Convert message format
