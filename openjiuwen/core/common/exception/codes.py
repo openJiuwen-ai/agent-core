@@ -132,6 +132,16 @@ class StatusCode(Enum):
     CONTROLLER_TOOL_CALL_PARSE_ERROR = (123005, "controller tool call parse error, reason: {error_msg}")
 
     # =========================
+    # Context Engine 130000–133999
+    # =========================
+    CONTEXT_ADD_MESSAGE_ERROR = (130000, "Message add message error, reason: {error_msg}")
+    CONTEXT_GET_MESSAGE_ERROR = (130001, "Message get message error, reason: {error_msg}")
+    CONTEXT_POP_MESSAGE_ERROR = (130002, "Message pop message error, reason: {error_msg}")
+    CONTEXT_GET_CONTEXT_WINDOW_ERROR = (130003, "Message get context window error, reason: {error_msg}")
+    CONTEXT_MESSAGE_VALIDATION_ERROR = (130004, "Context engine message validation error, reason: {error_msg}")
+    CONTEXT_CREATE_PROCESSOR_ERROR = (130005, "create context processor failed, reason: {error_msg}")
+
+    # =========================
     # Runner / Distributed 134000–134999
     # =========================
 
