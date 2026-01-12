@@ -6,6 +6,7 @@ from typing import Union, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.workflow.components.base import ComponentConfig
@@ -63,9 +64,13 @@ class ToolExecutable(ComponentExecutable):
             response = await self._tool.invoke(tool_inputs, skip_inputs_validate=False, skip_none_value=True)
             response = self._post_process_tool_result(response)
         except Exception as e:
-            response = {ERR_MESSAGE: "Failed to execute tool", RESTFUL_DATA: "",
-                        ERR_CODE: e.code if hasattr(e, "code") else DEFAULT_EXCEPTION_ERROR_CODE}
-
+            if isinstance(e, JiuWenBaseException):
+                err_msg = e.message
+                err_code = e.error_code
+            else:
+                err_msg = "Failed to execute tool"
+                err_code = StatusCode.PLUGIN_UNEXPECTED_ERROR.code
+            response = {ERR_MESSAGE: err_msg, ERR_CODE: err_code}
         return self._create_output(response)
 
     def set_tool(self, tool: Tool):
