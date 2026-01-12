@@ -8,9 +8,9 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable
-from openjiuwen.core.session import Session, BaseSession
-from openjiuwen.core.session import NodeSession
-from openjiuwen.core.session import WrappedNodeSession
+from openjiuwen.core.session.session import BaseSession
+from openjiuwen.core.session.internal.workflow import NodeSession
+from openjiuwen.core.session.node import Session
 
 Input = TypeVar("Input", contravariant=True)
 Output = TypeVar("Output", contravariant=True)
@@ -43,7 +43,7 @@ class ComponentExecutable(Executable):
                                       StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.errmsg.format(
                                           ability='INVOKE', method='invoke', class_name=type(self).__name__))
 
-        return await self.invoke(inputs, WrappedNodeSession(session), kwargs.get("context"))
+        return await self.invoke(inputs, Session(session, False), kwargs.get("context"))
 
     async def on_stream(self, inputs: Input, session: BaseSession, **kwargs) -> AsyncIterator[Output]:
         if not isinstance(session, NodeSession):
@@ -60,7 +60,7 @@ class ComponentExecutable(Executable):
                                       StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.errmsg.format(
                                           ability='STREAM', method='stream', class_name=type(self).__name__))
 
-        async for value in self.stream(inputs, WrappedNodeSession(session), kwargs.get("context")):
+        async for value in self.stream(inputs, Session(session, False), kwargs.get("context")):
             yield value
 
     async def on_collect(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
@@ -78,7 +78,7 @@ class ComponentExecutable(Executable):
                                       StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.errmsg.format(
                                           ability='COLLECT', method='collect', class_name=type(self).__name__))
 
-        return await self.collect(inputs, WrappedNodeSession(session, True), kwargs.get("context"))
+        return await self.collect(inputs, Session(session, True), kwargs.get("context"))
 
     async def on_transform(self, inputs: Input, session: BaseSession, **kwargs) -> AsyncIterator[Output]:
         if not isinstance(session, NodeSession):
@@ -95,7 +95,7 @@ class ComponentExecutable(Executable):
                                       StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.errmsg.format(
                                           ability='TRANSFORM', method='transform', class_name=type(self).__name__))
 
-        async for value in self.transform(inputs, WrappedNodeSession(session, True), kwargs.get("context")):
+        async for value in self.transform(inputs, Session(session, True), kwargs.get("context")):
             yield value
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:

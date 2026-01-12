@@ -10,7 +10,7 @@ from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.node import Session
 
 
 class BranchComponent(WorkflowComponent):

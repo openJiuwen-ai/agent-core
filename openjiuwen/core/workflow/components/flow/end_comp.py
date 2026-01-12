@@ -16,7 +16,7 @@ from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Input, Output
 from openjiuwen.core.session import END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY, \
     END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY, get_value_by_nested_path
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.node import Session
 from openjiuwen.core.session.stream import OutputSchema
 
 RESPONSE_TEMPLATE = "responseTemplate"

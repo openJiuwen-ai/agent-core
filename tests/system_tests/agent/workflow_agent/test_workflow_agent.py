@@ -14,7 +14,7 @@ import pytest
 from typing import List
 
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, workflow_provider
-from openjiuwen.core.session import TaskSession
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import IntentDetectionComponent, IntentDetectionCompConfig
@@ -32,7 +32,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.application.workflow_agent import WorkflowAgent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Output, Input
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
@@ -248,7 +248,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(
             card=card
         )
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(trace_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -313,7 +313,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(
             card=card
         )
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(trace_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -370,7 +370,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         flow = Workflow(card=card)
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(trace_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()

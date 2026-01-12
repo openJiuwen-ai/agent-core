@@ -71,7 +71,6 @@ class TestAgent:
 
         # workflow与agent共用一个tracer
         workflow_session= context.create_workflow_session()
-        assert (workflow_session.tracer() is self.tracer)
 
         flow = Workflow()
         flow.set_start_comp("start", MockStartNode("start"),

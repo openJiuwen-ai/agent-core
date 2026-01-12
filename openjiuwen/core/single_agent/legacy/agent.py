@@ -15,10 +15,9 @@ from openjiuwen.core.single_agent.legacy.schema import PluginSchema
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.session import StaticAgentSession
 from openjiuwen.core.session import Config
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session import (
     StaticWrappedSession,
-    TaskSession,
     WrappedSession
 )
 from openjiuwen.core.session.stream import OutputSchema, CustomSchema
@@ -54,7 +53,7 @@ class AgentSession(WrappedSession, StaticWrappedSession):
             session_id = kwargs.get("trace_id")
         inputs = kwargs.get("inputs")
         inner = await self._session.create_agent_session(session_id, inputs)
-        return TaskSession(inner=inner)
+        return Session(inner=inner)
 
     def resource_mgr(self):
         return self._inner.resource_manager()

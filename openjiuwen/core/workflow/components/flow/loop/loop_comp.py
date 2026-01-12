@@ -26,7 +26,8 @@ from openjiuwen.core.graph.base import Graph, INPUTS_KEY
 from openjiuwen.core.graph.executable import Output, Input, Executable
 from openjiuwen.core.session import LOOP_NUMBER_MAX_LIMIT_DEFAULT, LOOP_NUMBER_MAX_LIMIT_KEY, Transformer, \
     extract_origin_key, NESTED_PATH_SPLIT, is_ref_path
-from openjiuwen.core.session import BaseSession, Session
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session.node import Session
 from openjiuwen.core.session import NodeSession, SubWorkflowSession
 from openjiuwen.core.graph.stream_actor.manager import ActorManager
 from openjiuwen.core.workflow._workflow import BaseWorkflow
@@ -217,7 +218,7 @@ class LoopComponent(WorkflowComponent):
             loop_component = AdvancedLoopComponent(self._loop_group, condition, self._loop_group.break_components,
                                                    callbacks)
             return await loop_component.on_invoke({INPUTS_KEY: {}, CONFIG_KEY: inputs.get(CONFIG_KEY)},
-                                                  session.base())
+                                                  getattr(session, "_inner"))
         except GraphInterrupt:
             raise
         except JiuWenBaseException:
@@ -273,7 +274,7 @@ class LoopSetVariableComponent(WorkflowComponent):
         self._variable_mapping = variable_mapping
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        root_session = session.base().parent()
+        root_session = getattr(session, "_inner").parent()
         for left, right in self._variable_mapping.items():
             left_ref_str = extract_origin_key(left)
             keys = left_ref_str.split(NESTED_PATH_SPLIT)

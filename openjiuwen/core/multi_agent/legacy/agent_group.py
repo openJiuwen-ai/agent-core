@@ -19,12 +19,12 @@ class AgentGroupSession(AgentSession):
     """AgentGroup Session
     
     Inherits from openjiuwen.core.single_agent.single_agent.AgentSession
-    Reuses all capabilities including TaskSession from pre_run()
+    Reuses all capabilities including Session from pre_run()
     
     Why direct inheritance:
     1. AgentSession(config, resource_mgr) has simple constructor
     2. Already includes write_stream() method
-    3. TaskSession from pre_run() has stream_iterator()
+    3. Session from pre_run() has stream_iterator()
     """
 
     def __init__(self, config: Config = None, resource_mgr=None):

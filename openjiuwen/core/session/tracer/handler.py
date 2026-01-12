@@ -13,7 +13,7 @@ from dateutil.tz import tzlocal
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session.callback_manager import BaseHandler, trigger_event
+from openjiuwen.core.session.callback.base import BaseHandler, trigger_event
 from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
 from openjiuwen.core.session.tracer.span import Span, TraceAgentSpan, TraceWorkflowSpan

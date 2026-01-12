@@ -36,7 +36,7 @@ sys.modules["openjiuwen.core.common.exception.base"] = fake_exception_module
 from tests.unit_tests.core.session.tracer.mock_node_with_tracer import StreamNodeWithTracer
 from openjiuwen.core.common.logging import logger
 
-from openjiuwen.core.session.workflow import WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.session.stream import CustomSchema, OutputSchema, TraceSchema, BaseStreamMode
 
@@ -82,7 +82,7 @@ class TestTraceWorkflow:
             workflow.add_connection("start", "node")
             workflow.add_connection("node", "end")
             chunks = []
-            async for chunk in workflow.stream(inputs={"inputs": inputs}, session=WorkflowSession(),
+            async for chunk in workflow.stream(inputs={"inputs": inputs}, session=create_workflow_session(),
                                                stream_modes=[BaseStreamMode.TRACE]):
                 chunks.append(chunk)
             assert chunks[-2].payload.get("streamOutputs") == [
@@ -127,7 +127,7 @@ class TestTraceWorkflow:
                           'outputs': None, 'streamOutputs': [], 'workflowId': 'test', 'componentId': None}]
 
         chunks = []
-        async for chunk in workflow.stream(inputs={"inputs": [1, 2, 3]}, session=WorkflowSession(),
+        async for chunk in workflow.stream(inputs={"inputs": [1, 2, 3]}, session=create_workflow_session(),
                                            stream_modes=[BaseStreamMode.TRACE]):
             payload: dict = chunk.payload
             selected_keys = ["invokeId", "status", 'inputs', 'streamInputs', "outputs", "streamOutputs", "workflowId",
@@ -185,7 +185,7 @@ class TestTraceWorkflow:
         index_dict = {key: 0 for key in expected_datas_model.keys()}
 
         async for chunk in flow.stream({"a": 1, "b": "haha"},
-                                       WorkflowSession()):
+                                       create_workflow_session()):
             if isinstance(chunk, CustomSchema):
                 node_id = chunk.node_id
                 index = index_dict[node_id]
@@ -247,7 +247,7 @@ class TestTraceWorkflow:
         }
         index_dict = {key: 0 for key in expected_datas_model.keys()}
         async for chunk in flow.stream({"a": 1, "b": "haha"},
-                                       WorkflowSession()):
+                                       create_workflow_session()):
             if isinstance(chunk, CustomSchema):
                 node_id = chunk.node_id
                 index = index_dict[node_id]
@@ -311,7 +311,7 @@ class TestTraceWorkflow:
 
         index = 0
         async for chunk in main_workflow.stream({"a": 1, "b": "haha"},
-                                                WorkflowSession()):
+                                                create_workflow_session()):
             if not isinstance(chunk, (TraceSchema, OutputSchema)):
                 assert chunk == expected_datas_model[index], f"Mismatch at index {index}"
                 logger.info(f"stream chunk: {chunk}")
@@ -385,7 +385,7 @@ class TestTraceWorkflow:
         main_workflow.add_connection("b", "end")
 
         async for chunk in main_workflow.stream({"a": 1, "b": "haha"},
-                                                WorkflowSession()):
+                                                create_workflow_session()):
             if isinstance(chunk, TraceSchema):
                 print(f"stream chunk: {chunk}")
                 tracer_chunks.append(chunk)
@@ -501,7 +501,7 @@ class TestTraceWorkflow:
         main_workflow.add_connection("b", "end")
 
         async for chunk in main_workflow.stream({"a": 1, "b": "haha"},
-                                                WorkflowSession()):
+                                                create_workflow_session()):
             if isinstance(chunk, TraceSchema):
                 print(f"stream chunk: {chunk}")
                 tracer_chunks.append(chunk)
@@ -549,7 +549,7 @@ class TestTraceWorkflow:
         flow.add_connection("b", "e")
 
         async for chunk in flow.stream({"input_array": [1, 2, 3], "input_number": 1},
-                                       WorkflowSession()):
+                                       create_workflow_session()):
             if isinstance(chunk, TraceSchema):
                 print(f"stream chunk: {chunk}")
                 tracer_chunks.append(chunk)
@@ -597,7 +597,7 @@ class TestTraceWorkflow:
 
         results = []
         with pytest.raises(JiuWenBaseException) as e:
-            async for chunk in flow.stream({"a": 1, "b": "haha"}, WorkflowSession(),
+            async for chunk in flow.stream({"a": 1, "b": "haha"}, create_workflow_session(),
                                            stream_modes=[BaseStreamMode.TRACE]):
                 logger.info("stream chunk: {%s}", chunk)
                 results.append(chunk)

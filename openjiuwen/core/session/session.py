@@ -3,9 +3,9 @@
 from abc import ABC, abstractmethod
 from typing import Any, Union, Optional, List, Tuple
 
-from openjiuwen.core.session.config import Config
-from openjiuwen.core.session.callback_manager import CallbackManager
-from openjiuwen.core.session.state import State
+from openjiuwen.core.session.config.base import Config
+from openjiuwen.core.session.callback.callback_manager import CallbackManager
+from openjiuwen.core.session.state.base import State
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.stream.writer import StreamWriter

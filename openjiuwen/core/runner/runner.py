@@ -19,8 +19,10 @@ from openjiuwen.core.session import StaticAgentSession
 from openjiuwen.core.session import get_default_inmemory_checkpointer
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 from openjiuwen.core.session import Session
-from openjiuwen.core.session import WorkflowSession
-from openjiuwen.core.session import TaskSession
+from openjiuwen.core.workflow import Session as WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
+from openjiuwen.core.single_agent import Session as TaskSession
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.workflow import generate_workflow_key
 from openjiuwen.core.workflow import Workflow
@@ -312,7 +314,7 @@ class Runner:
     def _create_workflow_session(cls, session):
         # Convert workflow session
         if not session:
-            workflow_session = WorkflowSession()
+            workflow_session = create_workflow_session()
         elif isinstance(session, TaskSession):
             workflow_session = session.create_workflow_session()
         else:
@@ -331,11 +333,11 @@ class Runner:
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
                 return agent_with_session, None
-            task_session = TaskSession(
+            task_session = create_agent_session(
                 inner=(await agent_with_session.session.create_agent_session(session_id, inputs)))
             return agent_with_session.agent, task_session
         agent_session = StaticAgentSession(agent.config(), resource_mgr=self._resource_manager)
-        task_session = TaskSession(inner=await agent_session.create_agent_session(session_id, inputs))
+        task_session = create_agent_session(inner=await agent_session.create_agent_session(session_id, inputs))
         return agent, task_session
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],

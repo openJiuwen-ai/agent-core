@@ -11,7 +11,7 @@ from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
-from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowComponent
@@ -38,7 +38,7 @@ async def test_loop_number_exceeds_max_limit():
     flow.add_connection("loop", "end")
 
     with pytest.raises(JiuWenBaseException) as exc_info:
-        await flow.invoke(inputs={"num": 0}, session=WorkflowSession())
+        await flow.invoke(inputs={"num": 0}, session=create_workflow_session())
 
     assert exc_info.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
     assert "exceeds maximum limit" in exc_info.value.message
@@ -121,7 +121,7 @@ async def test_loop_number():
 
     inputs = {"array": [4, 5, 6], "num": -3}
 
-    results = await flow.invoke(inputs, session=WorkflowSession())
+    results = await flow.invoke(inputs, session=create_workflow_session())
     assert results.result == {'output': {
         'end_out': {'user_num': 117, 'index': 0, 'l_out1': [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
                     'l_out2': [7, 17, 27, 37, 47, 57, 67, 77, 87, 97, 107, 117]}}}
@@ -181,7 +181,7 @@ async def test_loop_group_component_stream():
     
     # Test streaming execution
     async for chunk in flow.stream(inputs={}, 
-                                  session=WorkflowSession(),
+                                  session=create_workflow_session(),
                                   stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         print(f"Stream chunk {stream_count}: {chunk}")

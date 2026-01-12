@@ -18,9 +18,11 @@ from openjiuwen.core.session.constants import COMP_STREAM_CALL_TIMEOUT_KEY, STRE
 
 workflow_session_vars: contextvars.ContextVar[dict] = contextvars.ContextVar("workflow_session_vars", default={})
 
+
 class MetadataLike(TypedDict):
     name: str
     event: str
+
 
 _ENV_CONFIG_KEYS = [(WORKFLOW_EXECUTE_TIMEOUT_ENV_KEY, WORKFLOW_EXECUTE_TIMEOUT),
                     (WORKFLOW_STREAM_FRAME_TIMEOUT_ENV_KEY, WORKFLOW_STREAM_FRAME_TIMEOUT),

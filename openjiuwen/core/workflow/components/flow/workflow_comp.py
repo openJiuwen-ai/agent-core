@@ -8,7 +8,7 @@ from openjiuwen.core.workflow.components.component import WorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import INPUTS_KEY, CONFIG_KEY
 from openjiuwen.core.graph.executable import Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.node import Session
 from openjiuwen.core.workflow.workflow import Workflow
 
 
@@ -25,12 +25,12 @@ class SubWorkflowComponent(WorkflowComponent):
         self._sub_workflow = sub_workflow
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        return await self._sub_workflow.invoke(inputs.get(INPUTS_KEY), session.base(), context,
+        return await self._sub_workflow.invoke(inputs.get(INPUTS_KEY), session, context,
                                                config=inputs.get(CONFIG_KEY), is_sub=True)
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         async for value in self._sub_workflow.stream(inputs.get(INPUTS_KEY),
-                                                         session.base(), config=inputs.get(CONFIG_KEY), is_sub=True):
+                                                         session, config=inputs.get(CONFIG_KEY), is_sub=True):
             yield value
 
     def graph_invoker(self) -> bool:
