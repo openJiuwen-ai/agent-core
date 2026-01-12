@@ -27,21 +27,19 @@ class SseClient(McpClient):
         self._write = None
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
-        self._auth_headers = auth_headers
-        self._auth_query_params = auth_query_params
+        if auth_headers is not None or auth_query_params is not None:
+            self._auth_provider = AuthHeaderAndQueryProvider(
+                auth_headers=auth_headers or {},
+                auth_query_params=auth_query_params or {},
+            )
+            logger.info("Using custom header and query authorization for SSE client")
+        else:
+            self._auth_provider = None
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         try:
-            if self._auth_headers or self._auth_query_params:
-                auth_provider = AuthHeaderAndQueryProvider(
-                    auth_headers=self._auth_headers,
-                    auth_query_params=self._auth_query_params
-                )
-                logger.info("Using custom header and query authorization for SSE client")
-            else:
-                auth_provider = None
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
-            self._client = sse_client(self._server_path, timeout=actual_timeout, auth=auth_provider)
+            self._client = sse_client(self._server_path, timeout=actual_timeout, auth=self._auth_provider)
             self._read, self._write = await self._exit_stack.enter_async_context(self._client)
             self._session = await self._exit_stack.enter_async_context(ClientSession(
                 self._read, self._write, sampling_callback=None
