@@ -283,10 +283,13 @@ class StatusCode(Enum):
     # Common Capabilities - Tool Definition and Execution 182000 - 182999
     PLUGIN_UNEXPECTED_ERROR = (182000, "Plugin unexpected error")
     PLUGIN_REQUEST_TIMEOUT_ERROR = (182001, "Plugin restful api request timed out")
-    PLUGIN_PROXY_CONNECT_ERROR = (182002, "Plugin restful api proxy connection error")
-    PLUGIN_RESPONSE_TOO_BIG_ERROR = (182003, "Plugin restful api  response too big")
+    PLUGIN_RESPONSE_FORMAT_ERROR = (182002, "Plugin restful api response format error")
+    PLUGIN_RESPONSE_TOO_BIG_ERROR = (182003,
+        "Plugin restful api  response too big, maxLength={max_length}, actualLength={actual_length}")
     PLUGIN_RESPONSE_HTTP_CODE_ERROR = (182004, "Plugin restful api http code error")
     PLUGIN_PARAMS_CHECK_FAILED = (182005, "Plugin params check failed")
+    PLUGIN_RESTFUL_API_METHOD_ERROR = (182006,
+        "Plugin restful api unsupported HTTP method: '{method}', only accepts: {support}")
 
     # Common Capabilities - Logger 183000 - 183999
     LOG_PATH_SENSITIVE_ERROR = (183000, "Log path is sensitive or unsafe: {path}")

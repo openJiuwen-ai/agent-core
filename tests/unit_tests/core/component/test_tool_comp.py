@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch, MagicMock, Mock
 
 import pytest
@@ -35,6 +36,7 @@ def mock_tool_input():
 
 @pytest.fixture
 def mock_tool():
+    os.environ["SSRF_PROTECT_ENABLED"] = "false"
     return RestfulApi(
         card=RestfulApiCard(
             name="test",
@@ -47,7 +49,7 @@ def mock_tool():
                 },
                 "required": ["location", "date"],
             },
-            path="http://127.0.0.1:8000",
+            url="http://127.0.0.1:8000",
             headers={},
             method="GET",
         ),

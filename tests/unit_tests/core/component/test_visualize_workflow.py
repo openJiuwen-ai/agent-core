@@ -842,7 +842,7 @@ def test_visualize_simple_workflow_intent():
         card=RestfulApiCard(
             name="WeatherReporter",
             description="天气查询插件",
-            parameters={
+            input_params={
                 "type": "object",
                 "properties": {
                     "location": {"description": "地点", "type": "string"},
@@ -850,7 +850,7 @@ def test_visualize_simple_workflow_intent():
                 },
                 "required": ["location", "date"],
             },
-            path="http://127.0.0.1:9000/weather",
+            url="http://127.0.0.1:9000/weather",
             headers={},
             method="GET",
         ),

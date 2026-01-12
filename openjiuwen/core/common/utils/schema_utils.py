@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Any, Type, Union, Dict, List
+from typing import Any, Optional, Type, Union, Dict, List, get_type_hints
 from copy import deepcopy
 from jsonschema import validate as jsonschema_validate, ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel, create_model, Field, ConfigDict
@@ -20,8 +20,11 @@ class SchemaUtils:
     """
 
     @staticmethod
-    def format_with_schema(data: Any, schema: Union[Dict[str, Any], Type[BaseModel]],
-                           skip_none_value: bool = False) -> Any:
+    def format_with_schema(data: Any,
+                           schema: Union[Dict[str, Any], Type[BaseModel]],
+                           *,
+                           skip_none_value: bool = False,
+                           skip_validate: bool = False) -> Any:
         """
         Format data according to the provided schema, filling in default values.
 
@@ -29,6 +32,7 @@ class SchemaUtils:
             data: The data to be formatted
             schema: Either a JSON Schema dictionary or a Pydantic BaseModel class
             skip_none_value: Skip none value of data
+            skip_validate: Skip validate of data
 
         Returns:
             Formatted data with default values populated
@@ -40,7 +44,8 @@ class SchemaUtils:
             new_data = SchemaUtils.remove_none_values(data) if skip_none_value else data
 
             # First validate the data
-            SchemaUtils.validate_with_schema(new_data, schema)
+            if not skip_validate:
+                SchemaUtils.validate_with_schema(new_data, schema)
 
             # Get the appropriate model
             if isinstance(schema, dict):
@@ -138,7 +143,7 @@ class SchemaUtils:
                                       StatusCode.COMPONENT_CONFIG_INVALID.errmsg.format(reason=e)) from e
 
     @staticmethod
-    def get_schema_dict(schema: Type[BaseModel]) -> Dict[str, Any]:
+    def get_schema_dict(schema: Type[BaseModel]) -> Optional[Dict[str, Any]]:
         """
         Convert a Pydantic model to a JSON Schema dictionary.
 
@@ -148,6 +153,8 @@ class SchemaUtils:
         Returns:
             JSON Schema dictionary representation of the model
         """
+        if schema is None:
+            return None
         # Get the basic JSON schema from pydantic
         schema_dict = schema.model_json_schema()
 
@@ -157,7 +164,7 @@ class SchemaUtils:
         return schema_dict
 
     @staticmethod
-    def get_schema_class(schema_dict: Dict[str, Any]) -> Type[BaseModel]:
+    def get_schema_class(schema_dict: Dict[str, Any]) -> Optional[Type[BaseModel]]:
         """
         Convert a JSON Schema dictionary to a Pydantic model.
 
@@ -167,6 +174,8 @@ class SchemaUtils:
         Returns:
             Pydantic BaseModel class generated from the schema
         """
+        if schema_dict is None:
+            return None
         return SchemaUtils._create_model_from_schema(schema_dict)
 
     @staticmethod

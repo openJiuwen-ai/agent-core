@@ -365,7 +365,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             McpToolCard(
                 name="browser_navigate",
                 description="Navigate to a URL",
-                input_schema={
+                input_params={
                     "type": "object",
                     "properties": {"url": {"type": "string", "description": "The URL to navigate to"}},
                     "required": ["url"],
@@ -374,7 +374,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             McpToolCard(
                 name="browser_extract_text",
                 description="Extract text from the current page",
-                input_schema={
+                input_params={
                     "type": "object",
                     "properties": {"selector": {"type": "string", "description": "CSS selector for the element"}},
                     "required": ["selector"],
@@ -445,7 +445,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             McpToolCard(
                 name="doubter",
                 description="Doubter tool via stdio",
-                input_schema={
+                input_params={
                     "type": "object",
                     "properties": {"history": {"type": "string", "description": "Agent action history"}},
                     "required": ["history"],
@@ -454,7 +454,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             McpToolCard(
                 name="checker",
                 description="Checker tool via stdio",
-                input_schema={
+                input_params={
                     "type": "object",
                     "properties": {"url": {"type": "string", "description": "URL to check"}},
                     "required": ["url"],
@@ -529,7 +529,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             McpToolCard(
                 name="browser_navigate",
                 description="Navigate to a URL via Playwright",
-                input_schema={
+                input_params={
                     "type": "object",
                     "properties": {"url": {"type": "string", "description": "The URL to navigate to"}},
                     "required": ["url"],
@@ -538,7 +538,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             McpToolCard(
                 name="browser_click",
                 description="Click an element via Playwright",
-                input_schema={
+                input_params={
                     "type": "object",
                     "properties": {"selector": {"type": "string", "description": "CSS selector"}},
                     "required": ["selector"],

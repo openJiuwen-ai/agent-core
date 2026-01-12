@@ -183,7 +183,7 @@ class OpenApiClient(McpClient):
             tools_info.append(McpToolCard(
                 name=tool_name,
                 description=getattr(tool, "description", ""),
-                input_schema=getattr(tool, "inputSchema", {}),
+                input_params=getattr(tool, "inputSchema", {}),
                 )
             )
         return tools_info
@@ -200,7 +200,7 @@ class OpenApiClient(McpClient):
         return McpToolCard(
             name=tool_name,
             description=getattr(tool, "description", ""),
-            input_schema=getattr(tool, "inputSchema", {}),
+            input_params=getattr(tool, "inputSchema", {}),
         )
 
 

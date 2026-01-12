@@ -121,47 +121,87 @@ class TestToolDecorator:
             name="summarize",
             description="汇总商品信息",
             parameters={
-                "$defs": {
-                    "Note": {
-                        "properties": {
-                            "key": {"title": "Key", "type": "string"},
-                            "value": {"title": "Value", "type": "integer"},
-                        },
-                        "required": ["key", "value"],
-                        "title": "Note",
-                        "type": "object",
-                    },
-                    "ProductInfo": {
-                        "properties": {
-                            "name": {"description": "商品名称", "title": "Name", "type": "string"},
-                            "sales": {"default": 0, "description": "销量", "title": "Sales", "type": "integer"},
-                            "price": {
-                                "default": 1.0,
-                                "description": "价格必须大于0",
-                                "title": "Price",
-                                "type": "number",
-                            },
-                            "is_season": {"description": "是否当季", "title": "Is Season", "type": "boolean"},
-                            "color": {
-                                "description": "颜色",
-                                "items": {"type": "string"},
-                                "title": "Color",
-                                "type": "array",
-                            },
-                            "note": {"$ref": "#/$defs/Note", "description": "备注"},
-                        },
-                        "required": ["name", "is_season", "color", "note"],
-                        "title": "ProductInfo",
-                        "type": "object",
-                    },
-                },
-                "properties": {
-                    "title": {"title": "Title", "type": "string"},
-                    "products": {"items": {"$ref": "#/$defs/ProductInfo"}, "title": "Products", "type": "array"},
-                },
-                "required": ["title", "products"],
-                "title": "summarize_tool_input",
                 "type": "object",
-            },
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "title"
+                    },
+                    "products": {
+                        "type": "array",
+                        "items": {
+                            "properties": {
+                                "name": {
+                                    "description": "商品名称",
+                                    "title": "Name",
+                                    "type": "string"
+                                },
+                                "sales": {
+                                    "default": 0,
+                                    "description": "销量",
+                                    "title": "Sales",
+                                    "type": "integer"
+                                },
+                                "price": {
+                                    "default": 1.0,
+                                    "description": "价格必须大于0",
+                                    "title": "Price",
+                                    "type": "number"
+                                },
+                                "is_season": {
+                                    "description": "是否当季",
+                                    "title": "Is Season",
+                                    "type": "boolean"
+                                },
+                                "color": {
+                                    "description": "颜色",
+                                    "items": {
+                                        "type": "string"
+                                    },
+                                    "title": "Color",
+                                    "type": "array"
+                                },
+                                "note": {
+                                    "properties": {
+                                        "key": {
+                                            "title": "Key",
+                                            "type": "string",
+                                            "description": "key"
+                                        },
+                                        "value": {
+                                            "title": "Value",
+                                            "type": "integer",
+                                            "description": "value"
+                                        }
+                                    },
+                                    "required": [
+                                        "key",
+                                        "value"
+                                    ],
+                                    "title": "Note",
+                                    "type": "object",
+                                    "description": "note"
+                                }
+                            },
+                            "required": [
+                                "name",
+                                "is_season",
+                                "color",
+                                "note"
+                            ],
+                            "title": "ProductInfo",
+                            "type": "object"
+                        },
+                        "description": "products"
+                    }
+                },
+                "additionalProperties": False,
+                "title": "summarize",
+                "required": [
+                    "title",
+                    "products"
+                ]
+            }
+
         )
         self.assertEqual(summarize_res, summarize_tool_info)

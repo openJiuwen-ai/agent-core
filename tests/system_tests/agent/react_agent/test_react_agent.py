@@ -68,7 +68,7 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
                     },
                     "required": ["location", "date"],
                 },
-                path="http://127.0.0.1:8000/weather",
+                url="http://127.0.0.1:8000/weather",
                 headers={},
                 method="GET",
             ),

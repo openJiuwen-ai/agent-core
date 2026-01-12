@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Tuple, Union
 
-from pydantic.v1 import BaseModel
+from pydantic import BaseModel
 
 from openjiuwen.core.workflow import WorkflowCard as WorkflowSchema
 from openjiuwen.core.common.logging import logger

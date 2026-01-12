@@ -16,8 +16,11 @@ class LocalFunction(Tool):
         self._func = func
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
-        if not kwargs.get("skip_inputs_validate"):
-            inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params, kwargs.get("skip_none_value", False))
+        if self.card.input_params is not None:
+            inputs = SchemaUtils.format_with_schema(inputs,
+                                                    self._card.input_params,
+                                                    skip_none_value=kwargs.get("skip_none_value", False),
+                                                    skip_validate=kwargs.get("skip_inputs_validate", False))
         if inspect.isgeneratorfunction(self._func) or inspect.isasyncgenfunction(self._func):
             raise JiuWenBaseException(
                 error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message="invoke function not support generator"
@@ -29,8 +32,10 @@ class LocalFunction(Tool):
         return res
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
-        if not kwargs.get("skip_inputs_validate"):
-            inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params, kwargs.get("skip_none_value", False))
+        if self.card.input_params is not None:
+            inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
+                                                    skip_none_value=kwargs.get("skip_none_value", False),
+                                                    skip_validate=kwargs.get("skip_inputs_validate"))
         if inspect.isasyncgenfunction(self._func):
             async for item in self._func(**inputs):
                 yield item

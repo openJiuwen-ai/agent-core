@@ -62,7 +62,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             card=RestfulApiCard(
                 name="WeatherReporter",
                 description="天气查询插件",
-                parameters={
+                input_params={
                     "type": "object",
                     "properties": {
                         "location": {"description": "天气查询的地点，必须为英文", "type": "string"},
@@ -70,7 +70,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
                     },
                     "required": ["location", "date"],
                 },
-                path="http://127.0.0.1:8000/weather",
+                url="http://127.0.0.1:8000/weather",
                 headers={},
                 method="GET",
             ),
@@ -83,7 +83,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             card=ToolCard(
                 name="add",
                 description="加法",
-                parameters={
+                input_params={
                     "type": "object",
                     "properties": {
                         "a": {"description": "加数", "type": "number"},

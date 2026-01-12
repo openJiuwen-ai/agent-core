@@ -52,6 +52,7 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 # Mock 插件返回值
 _FINAL_RESULT: str = "上海今天晴 30°C"
 
+os.environ["SSRF_PROTECT_ENABLED"] = "false"
 # Mock RESTful Api 元信息
 _MOCK_TOOL = RestfulApi(
     card=RestfulApiCard(
@@ -65,7 +66,7 @@ _MOCK_TOOL = RestfulApi(
             },
             "required": ["location", "date"],
         },
-        path="http://127.0.0.1:8000",
+        url="http://127.0.0.1:8000",
         headers={},
         method="GET",
     ),
@@ -351,5 +352,7 @@ class RealWorkflowTest(unittest.TestCase):
 
         inputs = {"query": "写一个笑话。注意：不要超过20个字！"}
         writer_chunks = []
-        self.loop.run_until_complete(self._async_stream_workflow_for_stream_writer(flow, inputs, context.create_workflow_session(), writer_chunks))
+        self.loop.run_until_complete(
+            self._async_stream_workflow_for_stream_writer(flow, inputs, context.create_workflow_session(),
+                                                          writer_chunks))
         print(writer_chunks)

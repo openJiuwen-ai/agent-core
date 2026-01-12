@@ -11,7 +11,6 @@ from openjiuwen.core.foundation.tool.constant import Input, Output
 
 
 class McpToolCard(ToolCard):
-    input_schema: dict = Field(default_factory=dict)
     server_name: str = Field(default="")
 
 

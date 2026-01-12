@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from abc import abstractmethod
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Dict, Type
 
 from pydantic import BaseModel, Field
 
@@ -11,7 +11,7 @@ from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.foundation.tool.constant import Input, Output
 
 class ToolCard(BaseCard):
-    input_params: Dict[str, Any] | BaseModel = Field(default_factory=dict)
+    input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)
 
     def tool_info(self):
         return ToolInfo(name=self.name, description=self.description, parameters=self.input_params)

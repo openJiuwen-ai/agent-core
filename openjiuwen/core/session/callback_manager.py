@@ -63,5 +63,5 @@ class CallbackManager:
             method = getattr(handler, event_name)
             await method(**kwargs)
 
-    def register_handler(self, configs: dict):
+    def register(self, configs: dict):
         self._init_handler(configs)

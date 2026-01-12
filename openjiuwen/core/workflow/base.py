@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from enum import Enum
-from typing import Any, Optional, Union
+from typing import Any, Optional, Type, Union
 
 from pydantic import BaseModel
 
@@ -19,7 +19,7 @@ class WorkflowCard(BaseCard):
     Contains descriptive information and input schema for a workflow.
     """
     version: str = ''
-    input_params: Optional[dict[str, Any] | BaseModel] = None
+    input_params: Optional[dict[str, Any] | Type[BaseModel]] = None
 
     def tool_info(self):
         return ToolInfo(

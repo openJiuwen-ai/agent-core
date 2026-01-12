@@ -6,7 +6,7 @@ from openjiuwen.core.workflow import WorkflowCard, WorkflowComponent
 
 os.environ["LLM_SSL_VERIFY"] = "false"
 os.environ["RESTFUL_SSL_VERIFY"] = "false"
-
+os.environ["SSRF_PROTECT_ENABLED"] = "false"
 import asyncio
 from datetime import datetime
 import unittest
@@ -54,7 +54,7 @@ _MOCK_TOOL = RestfulApi(
             },
             "required": ["location", "date"],
         },
-        path="http://127.0.0.1:8000",
+        url="http://127.0.0.1:8000",
         headers={},
         method="GET",
     ),
@@ -215,7 +215,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                     },
                     "required": ["location", "date"],
                 },
-                path="http://127.0.0.1:8000/weather",
+                url="http://127.0.0.1:8000/weather",
                 headers={},
                 method="GET",
             ),

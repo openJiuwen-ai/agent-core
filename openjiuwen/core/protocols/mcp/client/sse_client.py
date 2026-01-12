@@ -86,7 +86,7 @@ class SseClient(McpClient):
                 McpToolCard(
                     name=tool.name,
                     description=getattr(tool, "description", ""),
-                    input_schema=getattr(tool, "inputSchema", {}),
+                    input_params=getattr(tool, "inputSchema", {}),
                 )
                 for tool in tools_response.tools
             ]

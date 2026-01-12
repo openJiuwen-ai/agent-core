@@ -1,73 +1,205 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from inspect import getdoc
+from typing import Any, Callable, Dict, Optional, Type, Union, overload
 
-from typing import Callable, overload, get_type_hints
-from inspect import Parameter, signature
+from pydantic import BaseModel
 
-from pydantic import Field, create_model
-
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.function.function import LocalFunction, ToolCard
-
-def extract_params(func: Callable) -> dict:
-    name = func.__name__
-    description = func.__doc__ or f"Function {name} description."
-    type_hints = get_type_hints(func)
-    sig = signature(func)
-    fields = {}
-    for param_name, param in sig.parameters.items():
-        param_type = type_hints.get(param_name)
-        if not param_type:
-            continue
-
-        metadata = getattr(param_type, "__metadata__", None)
-        field_info = None
-        if metadata:
-            for metadata_item in metadata:
-                if isinstance(metadata_item, Field):
-                    field_info = metadata_item
-                    break
-
-        field_kwargs = {}
-        if field_info:
-            for k, v in field_info.kwargs.items():
-                if k == "metadata":
-                    continue
-                if v is not None:
-                    field_kwargs[k] = v
-
-        if param.default is not Parameter.empty:
-            field_kwargs["default"] = param.default
-
-        field_def = (param_type, param.default if param.default is not Parameter.empty else ...)
-        fields[param_name] = field_def
-    model_name = f"{name}_tool_input"
-    tmp_model = create_model(model_name, **fields)
-
-    parameters_schema = tmp_model.model_json_schema()
-    return {
-        "name": name,
-        "description": description,
-        "input_params": parameters_schema
-    }
+from openjiuwen.core.foundation.tool.utils.callable_schema_extractor import CallableSchemaExtractor
 
 
 @overload
 def tool(func: Callable) -> LocalFunction:
-    pass
+    ...
 
 
 @overload
-def tool(*, card: ToolCard) -> LocalFunction:
-    pass
+def tool(
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+        card: Optional[ToolCard] = None,
+        auto_extract: bool = True
+) -> Callable[[Callable], LocalFunction]:
+    ...
 
 
-def tool(func: Callable = None, *, card: ToolCard = None) -> LocalFunction:
-    if func:
-        tmp_params = extract_params(func=func)
-        return LocalFunction(card=ToolCard(**tmp_params), func=func)
+def tool(
+        func: Optional[Callable] = None,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+        card: Optional[ToolCard] = None,
+        auto_extract: bool = True
+) -> Union[Callable, LocalFunction]:
+    """
+    Universal decorator to convert functions into LocalFunction tools.
 
-    else:
-        def decorator(func):
-            return LocalFunction(card=card, func=func)
+    Comprehensive usage patterns supported:
 
-        return decorator
+    1.  Basic automatic:
+        @tool
+        @tool()
+
+    2.  Custom naming:
+        @tool(name="custom_name")
+        @tool(name="tool_v2")
+
+    3.  Custom description:
+        @tool(description="Enhanced description")
+        @tool(description="Fetches data from API")
+
+    4.  Custom schema:
+        @tool(input_params=jsonschema_dict)
+        @tool(input_params=PydanticModel)
+
+    5.  Combined customization:
+        @tool(name="search", description="Search tool", input_params={...})
+
+    6.  Pre-built ToolCard:
+        @tool(card=existing_card)
+
+    7.  Override card:
+        @tool(card=card, name="override")
+        @tool(card=card, description="new description")
+
+    8.  Disable auto-extraction:
+        @tool(auto_extract=False)
+        @tool(auto_extract=False, input_params=custom_schema)
+
+    9.  Non-decorator usage:
+        tool(existing_function)
+        tool(existing_function, name="renamed")
+
+
+    Args:
+        func: Function to decorate (for direct @tool usage)
+        name: Override function name
+        description: Override function description/docstring
+        input_params: Custom parameter schema (jsonschema dict or Pydantic model)
+        card: Pre-constructed ToolCard
+        auto_extract: Whether to auto-extract schema from signature
+
+    Returns:
+        LocalFunction instance or decorator function
+    """
+
+    def decorator(func_: Callable) -> LocalFunction:
+        if card is not None:
+            return _handle_prebuilt_card(func_,
+                                         card,
+                                         final_name=name,
+                                         description=description,
+                                         input_params=input_params)
+        final_name = name if name is not None else func_.__name__
+        return _create_new_tool_card(func_, final_name, description, input_params, auto_extract)
+
+    if func is not None:
+        return decorator(func)
+    return decorator
+
+
+def _handle_prebuilt_card(
+        func: Callable,
+        card: ToolCard,
+        final_name: str,
+        description: Optional[str],
+        input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]],
+) -> LocalFunction:
+    """Handle case where a pre-built ToolCard is provided."""
+    overrides = {}
+    if final_name is not None and final_name != card.name:
+        overrides['name'] = final_name
+        if final_name != func.__name__:
+            logger.warning(
+                f"Overriding card name '{card.name}' with '{final_name}'"
+            )
+
+    if description is not None and description != card.description:
+        overrides['description'] = description
+
+    if input_params is not None and input_params != card.input_params:
+        overrides['input_params'] = input_params
+
+    if overrides:
+        new_card = ToolCard(
+            name=overrides.get('name', card.name),
+            description=overrides.get('description', card.description),
+            input_params=overrides.get('input_params', card.input_params),
+        )
+        return LocalFunction(card=new_card, func=func)
+
+    # Use card as-is
+    return LocalFunction(card=card, func=func)
+
+
+def _create_new_tool_card(
+        func: Callable,
+        final_name: str,
+        description: Optional[str],
+        input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]],
+        auto_extract: bool
+) -> LocalFunction:
+    """Create a new ToolCard from function and configuration."""
+    final_description = _get_final_description(func, description, auto_extract)
+    final_input_params = _get_final_input_params(func, input_params, auto_extract)
+    new_card = ToolCard(
+        name=final_name,
+        description=final_description,
+        input_params=final_input_params,
+    )
+    local_func = LocalFunction(card=new_card, func=func)
+    return local_func
+
+
+def _get_final_description(
+        func: Callable,
+        description: Optional[str],
+        auto_extract: bool,
+) -> str:
+    """Get the final description for the tool."""
+    # Priority 1: Explicit description from config
+    if description is not None:
+        return description
+
+    # Priority 2: Auto-extract from function
+    if auto_extract:
+        extracted = CallableSchemaExtractor.extract_function_description(func)
+        if extracted:
+            return extracted
+
+    # Priority 3: Function docstring
+    docstring = getdoc(func)
+    if docstring:
+        return docstring
+
+    # Priority 4: Fallback
+    return f"Function {func.__name__}"
+
+
+def _get_final_input_params(
+        func: Callable,
+        input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]],
+        auto_extract: bool,
+) -> Union[Dict[str, Any], Type[BaseModel]]:
+    """Get the final input parameters schema."""
+    # Priority 1: Explicit input params from config
+    if input_params is not None:
+        return input_params
+
+    # Priority 2: Auto-extract from function signature
+    if auto_extract:
+        try:
+            return CallableSchemaExtractor.generate_schema(func)
+        except Exception as e:
+            logger.warning(
+                f"Failed to auto-extract schema for {func.__name__}: {e}. "
+                "Using empty schema."
+            )
+
+    # Priority 3: Empty schema as fallback
+    return {"type": "object", "properties": {}}

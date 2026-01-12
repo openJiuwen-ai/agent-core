@@ -1,8 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from typing import AsyncIterator, ClassVar, Dict, Any, Literal, Set
 
-from typing import AsyncIterator, Dict, Any
-from pydantic import Field
+from oauthlib.common import urlencode
+from pydantic import Field, field_validator
 import aiohttp
 import json
 import asyncio
@@ -14,14 +15,35 @@ from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
+from openjiuwen.core.foundation.tool.service_api.api_param_mapper import APIParamLocation, APIParamMapper
 
 
 class RestfulApiCard(ToolCard):
-    path: str = Field(..., description="restful api path, such as: /api/v1/users")
-    method: str = Field(default="POST", description="http method")
-    headers: Dict[str, Any] = Field(default_factory=dict, description="request headers")
-    timeout: float = Field(default=60, ge=1, le=300, description="request timeout: second")
-    response_batch_bytes_size: int = Field(default=10 * 1024 * 1024, ge=1024)
+    """RESTful API tool card with HTTP method validation."""
+    SUPPORTED_METHODS: ClassVar[Set[str]] = ["POST", "GET"]
+    url: str = Field(..., description="RESTful API path, such as: /api/v1/users")
+    method: Literal["POST", "GET"] = Field(default="POST", description="HTTP method, only POST or GET supported")
+    headers: Dict[str, Any] = Field(default_factory=dict, description="Request headers")
+    queries: Dict[str, Any] = Field(default_factory=dict, description="Request query parameters")
+    paths: Dict[str, Any] = Field(default_factory=dict, description="Path parameters for URL placeholders")
+    timeout: float = Field(default=60.0, ge=1.0, le=300.0, description="Request timeout in seconds")
+    max_response_byte_size: int = Field(default=10 * 1024 * 1024, description="Response batch size in bytes")
+
+    @field_validator('method')
+    @classmethod
+    def validate_method(cls, v: str) -> str:
+        v_upper = v.upper()
+        if v_upper not in cls.SUPPORTED_METHODS:
+            raise JiuWenBaseException(StatusCode.PLUGIN_RESTFUL_API_METHOD_ERROR.code,
+                                      StatusCode.PLUGIN_RESTFUL_API_METHOD_ERROR.errmsg.format(
+                                          method=v, support=cls.SUPPORTED_METHODS))
+        return v_upper
+
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        UrlUtils.check_url_is_valid(v)
+        return v
 
 
 class RestfulApi(Tool):
@@ -30,73 +52,73 @@ class RestfulApi(Tool):
 
     def __init__(self, card: RestfulApiCard):
         super().__init__(card)
-        self._path = card.path
+        self._url = card.url
         self._method = card.method
-        self._headers = card.headers
         self._timeout = card.timeout
-        self._response_batch_size = card.response_batch_bytes_size
+        self._max_response_byte_size = card.max_response_byte_size
+        self._api_param_mapper = APIParamMapper(self._card.input_params,
+                                                default_queries=card.queries,
+                                                default_paths=card.paths,
+                                                default_headers=card.headers)
 
-    async def _async_request(self, request_arg: dict):
-        UrlUtils.check_url_is_valid(self._path)
+    async def _async_request(self, map_results: dict, timeout: float, max_response_byte_size: int):
+        request_arg = {}
+        if self._method in ["GET"]:
+            request_arg["params"] = map_results.get(APIParamLocation.BODY)
+        else:
+            request_arg["json"] = map_results.get(APIParamLocation.BODY)
         ssl_verify, ssl_cert = SslUtils.get_ssl_config(self._RESTFUL_SSL_VERIFY, self._RESTFUL_SSL_CERT, ["false"])
         if ssl_verify:
             ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
             connector = aiohttp.TCPConnector(ssl=ssl_context)
         else:
             connector = aiohttp.TCPConnector(ssl=False)
+        url = self._url
+        path_params = {k: str(v) for k, v in map_results.get(APIParamLocation.PATH).items()}
+        if path_params:
+            url = url.format(**path_params)
+        query_params = [(k, v) for k, v in map_results.get(APIParamLocation.QUERY, {}).items()]
+        if query_params:
+            url = f'{url}?{urlencode(query_params)}'
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.request(
                     self._method,
-                    self._path,
-                    headers=self._headers,
+                    url,
+                    headers=map_results.get(APIParamLocation.HEADER),
                     allow_redirects=False,
-                    timeout=aiohttp.ClientTimeout(total=self._timeout),
+                    timeout=aiohttp.ClientTimeout(total=timeout),
                     **request_arg,
             ) as response:
-                response_data = await self._data_of_async_request(response, self._response_batch_size)
+                response.raise_for_status()
+                response_data = await self._format_response(response, max_response_byte_size)
         return response_data
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         try:
-            if not kwargs.get("skip_inputs_validate"):
+            if self._card.input_params is not None:
                 inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
-                                                        kwargs.get("skip_none_value", False))
-            request_arg = {}
-            if self._method in ["GET"]:
-                request_arg["params"] = {k: str(v) for k, v in inputs.items()}
-            elif self._method in ["POST"]:
-                request_arg["json"] = {k: str(v) for k, v in inputs.items()}
-            else:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message="the http method is not supported"
-                )
-            return await self._async_request(request_arg)
-        except (aiohttp.ClientTimeout, asyncio.TimeoutError):
+                                                        skip_none_value=kwargs.get("skip_none_value", False),
+                                                        skip_validate=kwargs.get("skip_inputs_validate", False))
+            map_results = self._api_param_mapper.map(inputs, default_location=APIParamLocation.BODY)
+            return await self._async_request(map_results,
+                                             kwargs.get("timeout", self._timeout),
+                                             kwargs.get("max_response_byte_size", self._max_response_byte_size))
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             raise JiuWenBaseException(
                 error_code=StatusCode.PLUGIN_REQUEST_TIMEOUT_ERROR.code,
                 message=StatusCode.PLUGIN_REQUEST_TIMEOUT_ERROR.errmsg,
-            )
-        except aiohttp.ClientConnectorError:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PLUGIN_PROXY_CONNECT_ERROR.code,
-                message=StatusCode.PLUGIN_PROXY_CONNECT_ERROR.errmsg,
-            )
+            ) from e
         except aiohttp.ClientResponseError as e:
             raise JiuWenBaseException(
                 error_code=StatusCode.PLUGIN_RESPONSE_HTTP_CODE_ERROR.code,
                 message=f"Plugin response code: {e.status} error.",
-            )
-        except aiohttp.ClientError:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PLUGIN_PROXY_CONNECT_ERROR.code,
-                message=StatusCode.PLUGIN_PROXY_CONNECT_ERROR.errmsg,
-            )
+            ) from e
         except JiuWenBaseException as error:
-            raise JiuWenBaseException(error_code=error.error_code, message=error.message)
-        except Exception:
+            raise error
+        except Exception as e:
             raise JiuWenBaseException(
                 error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message="plugin request unknown error"
-            )
+            ) from e
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         raise JiuWenBaseException(
@@ -105,25 +127,15 @@ class RestfulApi(Tool):
         )
 
     @staticmethod
-    async def _data_of_async_request(response: aiohttp.ClientResponse, response_batch_size):
-        if response.status == 200:
-            content = b""
-            try:
-                async for chunk in response.content.iter_chunked(1024):
-                    content += chunk
-                    if len(content) > response_batch_size:
-                        raise JiuWenBaseException(
-                            error_code=StatusCode.PLUGIN_RESPONSE_TOO_BIG_ERROR.code,
-                            message=StatusCode.PLUGIN_RESPONSE_TOO_BIG_ERROR.errmsg,
-                        )
-                res = json.loads(content.decode("utf-8"))
-                return res
-            except json.JSONDecodeError:
+    async def _format_response(response: aiohttp.ClientResponse, response_bytes_size_limit):
+        content = b""
+        async for chunk in response.content.iter_chunked(1024):
+            content += chunk
+            if len(content) > response_bytes_size_limit:
                 raise JiuWenBaseException(
-                    error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code,
-                    message=f"Plugin response decode error",
+                    error_code=StatusCode.PLUGIN_RESPONSE_TOO_BIG_ERROR.code,
+                    message=StatusCode.PLUGIN_RESPONSE_TOO_BIG_ERROR.errmsg.format(max_length=response_bytes_size_limit,
+                                                                                   actual_length=len(content)),
                 )
-        raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_RESPONSE_HTTP_CODE_ERROR.code,
-            message=f"Plugin response code: {response.status} error.",
-        )
+        res = json.loads(content.decode("utf-8"))
+        return res
