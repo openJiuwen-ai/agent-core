@@ -1,6 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Group Controller - Message routing controller for AgentGroup"""
+"""Group Controller - Message routing controller for AgentGroup
+
+.. deprecated::
+    This module is deprecated and will be removed in a future version.
+    It is only kept for backward compatibility with legacy ControllerGroup.
+"""
 
 import asyncio
 from abc import ABC, abstractmethod
@@ -12,7 +17,7 @@ from openjiuwen.core.runner.message_queue_base import InvokeQueueMessage
 from openjiuwen.core.runner.message_queue_inmemory import MessageQueueInMemory
 
 if TYPE_CHECKING:
-    from openjiuwen.core.multi_agent import BaseGroup, AgentGroupSession
+    from openjiuwen.core.multi_agent.legacy import BaseGroup, AgentGroupSession
 
 
 class BaseGroupController(ABC):
@@ -116,7 +121,9 @@ class BaseGroupController(ABC):
 
             self.msg_queue.start()
             self._msg_queue_loop = current_loop
-            logger.debug(f"Message queue started in event loop {id(current_loop)}")
+            logger.debug(
+                f"Message queue started in event loop {id(current_loop)}"
+            )
 
         # Create queue message and publish
         topic = f"group_messages_{self.agent_group.group_id}"
@@ -209,8 +216,8 @@ class BaseGroupController(ABC):
                 if agent_id in self._subscriptions[message_type]:
                     self._subscriptions[message_type].remove(agent_id)
                     logger.info(
-                        f"BaseGroupController: Agent {agent_id} unsubscribed from "
-                        f"message_type={message_type}"
+                        f"BaseGroupController: Agent {agent_id} unsubscribed "
+                        f"from message_type={message_type}"
                     )
 
     def get_subscribers(self, message_type: str) -> List[str]:
@@ -222,7 +229,7 @@ class BaseGroupController(ABC):
         Returns:
             List of subscriber Agent IDs
         """
-        return self._subscriptions.get(event_type, [])
+        return self._subscriptions.get(message_type, [])
 
     # ===== Message sending API =====
 
@@ -234,8 +241,9 @@ class BaseGroupController(ABC):
     ) -> Any:
         """Send message to specified Agent (point-to-point, streaming)
         
-        Call single_agent.stream() with shared session. Agent writes stream data
-        to session (doesn't read from stream_iterator to avoid nested deadlock).
+        Call single_agent.stream() with shared session. Agent writes stream
+        data to session (doesn't read from stream_iterator to avoid nested
+        deadlock).
         
         External ControllerGroup.stream() reads via session.stream_iterator().
         
@@ -258,7 +266,8 @@ class BaseGroupController(ABC):
             return None
 
         # Preserve InteractiveInput object if present, otherwise extract string
-        # This ensures InteractiveInput can be passed through the single_agent chain without loss
+        # This ensures InteractiveInput can be passed through the single_agent
+        # chain without loss
         if (hasattr(event.content, 'interactive_input') 
             and event.content.interactive_input is not None):
             query_value = event.content.interactive_input
@@ -272,7 +281,8 @@ class BaseGroupController(ABC):
         }
         
         logger.info(
-            f"BaseGroupController: Streaming message to single_agent {agent_id}"
+            f"BaseGroupController: Streaming message to single_agent "
+            f"{agent_id}"
         )
         
         try:
@@ -302,7 +312,8 @@ class BaseGroupController(ABC):
             return {"output": "processed"}
         except Exception as e:
             logger.error(
-                f"BaseGroupController: Failed to stream single_agent {agent_id}: {e}",
+                f"BaseGroupController: Failed to stream single_agent "
+                f"{agent_id}: {e}",
                 exc_info=True
             )
             raise
@@ -332,7 +343,7 @@ class BaseGroupController(ABC):
             )
             return []
         
-        subscribers = self._subscriptions.get(event_type, [])
+        subscribers = self._subscriptions.get(message_type, [])
 
         if not subscribers:
             logger.info(
@@ -370,11 +381,11 @@ class BaseGroupController(ABC):
 
 
 class DefaultGroupController(BaseGroupController):
-    """Default GroupController - Routes messages based on subscription relationships
+    """Default GroupController - Routes messages based on subscription
     
     Implements handle_event() with standard message routing logic:
     1. If receiver_id is specified: point-to-point sending
-    2. If receiver_id is not specified: broadcast based on subscription relationships
+    2. If receiver_id is not specified: broadcast based on subscriptions
     """
 
     async def handle_event(
@@ -382,11 +393,11 @@ class DefaultGroupController(BaseGroupController):
         event: Event,
         session: 'AgentGroupSession'
     ) -> Any:
-        """Handle message - Dispatch to corresponding Agent based on message type
+        """Handle message - Dispatch to corresponding Agent based on type
         
         Routing logic:
         1. If receiver_id is specified: point-to-point sending
-        2. If receiver_id is not specified: broadcast based on subscription relationships
+        2. If receiver_id is not specified: broadcast based on subscriptions
         
         Args:
             event: Event object
@@ -412,4 +423,3 @@ class DefaultGroupController(BaseGroupController):
             # Return single result for single subscriber
             # Return list for multiple subscribers (explicit broadcast)
             return results[0] if len(results) == 1 else results
-

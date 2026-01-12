@@ -8,11 +8,12 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, AsyncIterator
 
 from openjiuwen.core.single_agent import AgentSession, BaseAgent
-from openjiuwen.core.multi_agent.config import AgentGroupConfig
+from openjiuwen.core.multi_agent.legacy.config import AgentGroupConfig
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import Config
+
 
 class AgentGroupSession(AgentSession):
     """AgentGroup Session
@@ -25,8 +26,8 @@ class AgentGroupSession(AgentSession):
     2. Already includes write_stream() method
     3. TaskSession from pre_run() has stream_iterator()
     """
-    
-    def __init__(self, config: Config = None, resource_mgr = None):
+
+    def __init__(self, config: Config = None, resource_mgr=None):
         """Initialize AgentGroupSession
         
         Args:
@@ -40,10 +41,10 @@ class AgentGroupSession(AgentSession):
             # Create virtual AgentConfig for Group Session
             agent_config = AgentConfig(id="agent_group_session")
             config.set_agent_config(agent_config)
-        
+
         # Call parent constructor
         super().__init__(config, resource_mgr)
-    
+
     # write_stream() already implemented in parent AgentSession
     # No need to redefine
 
@@ -93,7 +94,7 @@ class BaseGroup(ABC):
                         reason="Agent count exceeds max agents")
                 )
             self.agents[agent_id] = agent
-            
+
             # Auto-inject group reference to single_agent's controller
             # Duck typing: if controller has set_group method, inject self
             if hasattr(agent, 'controller') and agent.controller is not None:
@@ -112,7 +113,7 @@ class BaseGroup(ABC):
             int: Number of agents in the group
         """
         return len(self.agents)
-    
+
     @abstractmethod
     async def invoke(self, message, session: AgentGroupSession = None) -> Any:
         """
@@ -132,7 +133,7 @@ class BaseGroup(ABC):
         raise NotImplementedError(
             f"invoke method or controller method must be implemented {self.__class__.__name__}"
         )
-    
+
     @abstractmethod
     async def stream(self, message, session: AgentGroupSession = None) -> AsyncIterator[Any]:
         """
@@ -181,7 +182,6 @@ class ControllerGroup(BaseGroup):
         self.group_controller = group_controller
 
         # Initialize session (like BaseAgent)
-        # todo: next will be replaced by self._session = AgentGroupSession() when resource_mgr supports tag feature
         from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
         self._session = AgentGroupSession(resource_mgr=ResourceMgr())
 
@@ -292,4 +292,3 @@ class ControllerGroup(BaseGroup):
 
         # Wait for background task to complete
         await task
-

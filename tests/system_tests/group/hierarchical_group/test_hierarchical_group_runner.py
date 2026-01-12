@@ -12,7 +12,7 @@ HierarchicalGroup Runner 测试
 
 import os
 
-from openjiuwen.core.multi_agent import GroupCard
+from openjiuwen.core.multi_agent.legacy import GroupCard
 
 os.environ["LLM_SSL_VERIFY"] = "false"
 os.environ["RESTFUL_SSL_VERIFY"] = "false"

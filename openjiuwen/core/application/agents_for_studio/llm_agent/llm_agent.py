@@ -178,7 +178,6 @@ class LLMAgent(ControllerAgent):
             # Sync agent's workflows to external session
             # When external session is provided, agent's workflows need to be registered
             try:
-                # todo: next line will be deleted when resource_mgr supports tag feature
                 agent_workflow_mgr = self._session.resource_mgr()._resource_registry.workflow()
                 # Sync workflow instances and providers
                 for workflow_id, workflow in agent_workflow_mgr.get_all_workflows().items():

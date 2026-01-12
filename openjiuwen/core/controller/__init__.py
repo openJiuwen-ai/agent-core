@@ -1,12 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Controller module - Agent and Group controllers"""
+"""Controller module - Agent controllers"""
 
 from openjiuwen.core.controller.controller import BaseController
-from openjiuwen.core.controller.group_controller import (
-    BaseGroupController,
-    DefaultGroupController
-)
 
 from openjiuwen.core.controller.intent_detection_controller import (
     IntentDetectionController,
@@ -45,8 +41,6 @@ from openjiuwen.core.controller.config.reasoner_config import (
 
 _CONTROLLER_CLASSES = [
     "BaseController",
-    "BaseGroupController",
-    "DefaultGroupController",
 ]
 
 _INTENT_CLASSES = [
