@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from dataclasses import dataclass
-from typing import Union, List, Any
+from typing import Union, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -13,10 +13,7 @@ from openjiuwen.core.workflow.components.component import ComponentComposable, C
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable, Input, Output
 from openjiuwen.core.session import Session
-from openjiuwen.core.foundation.tool import constant
 from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.foundation.tool import LocalFunction
-
 
 DEFAULT_EXCEPTION_ERROR_CODE = -1
 
@@ -27,13 +24,19 @@ class ToolComponentConfig(ComponentConfig):
 
 
 class ToolComponentInput(BaseModel):
-    model_config = ConfigDict(extra='allow')   # Allow any extra fields
+    model_config = ConfigDict(extra='allow')  # Allow any extra fields
+
+
+# RestFul Res
+ERR_CODE = "errCode"
+ERR_MESSAGE = "errMessage"
+RESTFUL_DATA = "data"
 
 
 class ToolComponentOutput(BaseModel):
-    error_code: int = Field(default=0, alias=constant.ERR_CODE)
-    error_message: str = Field(default="", alias=constant.ERR_MESSAGE)
-    data: Any = Field(default="", alias=constant.RESTFUL_DATA)
+    error_code: int = Field(default=0, alias=ERR_CODE)
+    error_message: str = Field(default="", alias=ERR_MESSAGE)
+    data: Any = Field(default="", alias=RESTFUL_DATA)
 
 
 class ToolExecutable(ComponentExecutable):
@@ -51,7 +54,6 @@ class ToolExecutable(ComponentExecutable):
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INPUT_PARAM_ERROR,
                                            ExceptionUtils.format_validation_error(e))
 
-
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         if self._tool is None:
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_EXECUTION_ERROR)
@@ -61,8 +63,8 @@ class ToolExecutable(ComponentExecutable):
             response = await self._tool.invoke(tool_inputs, skip_inputs_validate=False, skip_none_value=True)
             response = self._post_process_tool_result(response)
         except Exception as e:
-            response = {constant.ERR_MESSAGE: "Failed to execute tool", constant.RESTFUL_DATA: "",
-                        constant.ERR_CODE: e.code if hasattr(e, "code") else DEFAULT_EXCEPTION_ERROR_CODE}
+            response = {ERR_MESSAGE: "Failed to execute tool", RESTFUL_DATA: "",
+                        ERR_CODE: e.code if hasattr(e, "code") else DEFAULT_EXCEPTION_ERROR_CODE}
 
         return self._create_output(response)
 
@@ -75,10 +77,7 @@ class ToolExecutable(ComponentExecutable):
 
     def _post_process_tool_result(self, tool_result):
         result = dict()
-        if isinstance(self._tool, LocalFunction):
-            result[constant.RESTFUL_DATA] = tool_result
-        else:
-            result.update(tool_result)
+        result[RESTFUL_DATA] = tool_result
         return result
 
 

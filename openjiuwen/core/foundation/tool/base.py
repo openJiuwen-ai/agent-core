@@ -3,12 +3,15 @@
 
 from abc import abstractmethod
 from typing import Any, AsyncIterator, Dict, Type
-
+from typing import TypeVar
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.foundation.tool.schema import ToolInfo
-from openjiuwen.core.foundation.tool.constant import Input, Output
+
+Input = TypeVar('Input', contravariant=True)
+Output = TypeVar('Output', contravariant=True)
+
 
 class ToolCard(BaseCard):
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)

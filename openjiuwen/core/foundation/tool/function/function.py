@@ -4,8 +4,7 @@ import inspect
 from typing import Callable, AsyncIterator
 
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
-from openjiuwen.core.foundation.tool.base import Tool, ToolCard
-from openjiuwen.core.foundation.tool.constant import Input, Output
+from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 

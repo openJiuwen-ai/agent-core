@@ -27,7 +27,7 @@ class RestfulApiCard(ToolCard):
     queries: Dict[str, Any] = Field(default_factory=dict, description="Request query parameters")
     paths: Dict[str, Any] = Field(default_factory=dict, description="Path parameters for URL placeholders")
     timeout: float = Field(default=60.0, ge=1.0, le=300.0, description="Request timeout in seconds")
-    max_response_byte_size: int = Field(default=10 * 1024 * 1024, description="Response batch size in bytes")
+    max_response_byte_size: int = Field(default=10 * 1024 * 1024, description="Response max size in bytes")
 
     @field_validator('method')
     @classmethod

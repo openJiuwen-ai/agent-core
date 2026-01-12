@@ -13,9 +13,7 @@ from openjiuwen.core.session.tracer import decorate_tool_with_trace, decorate_wo
     decorate_model_with_trace
 from openjiuwen.core.foundation.llm import BaseModelClient, BaseModelInfo
 from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.foundation.tool import ToolInfo, ToolCard
-from openjiuwen.core.foundation.tool.base import Tool
-from openjiuwen.core.foundation.tool.constant import Input, Output
+from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard, Input, Output
 from openjiuwen.core.workflow.components.llm_related.llm_comp import LLMExecutable
 
 pytestmark = pytest.mark.asyncio

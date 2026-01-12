@@ -6,8 +6,7 @@ from pydantic import Field
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.foundation.tool.base import Tool, ToolCard
-from openjiuwen.core.foundation.tool.constant import Input, Output
+from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
 
 
 class McpToolCard(ToolCard):
