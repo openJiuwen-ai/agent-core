@@ -45,6 +45,6 @@ class BranchComponent(WorkflowComponent):
         if not param_value:
             error_msg = f"{param_value} is invalid , can not be None or empty"
             raise JiuWenBaseException(
-                StatusCode.BRANCH_COMPONENT_ADD_BRANCH_ERROR.code,
-                StatusCode.BRANCH_COMPONENT_ADD_BRANCH_ERROR.errmsg.format(error_msg=error_msg),
+                StatusCode.COMPONENT_BRANCH_INIT_FAILED.code,
+                StatusCode.COMPONENT_BRANCH_INIT_FAILED.errmsg.format(error_msg=error_msg),
             )

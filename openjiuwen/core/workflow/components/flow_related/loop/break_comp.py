@@ -29,7 +29,7 @@ class BreakComponent(ComponentComposable, Executable):
 
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if self._loop_controller is None:
-            raise JiuWenBaseException(StatusCode.BREAK_COMPONENT_INIT_ERROR.code,
-                                      StatusCode.BREAK_COMPONENT_INIT_ERROR.errmsg)
+            raise JiuWenBaseException(StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.code,
+                                      StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.errmsg)
         self._loop_controller.break_loop()
         return {}

@@ -16,8 +16,8 @@ class SetVariableComponent(WorkflowComponent):
     def __init__(self, variable_mapping: dict[str, Any]):
         super().__init__()
         if not variable_mapping:
-            raise JiuWenBaseException(StatusCode.SET_VAR_COMPONENT_VAR_MAPPING_ERROR.code,
-                                      StatusCode.SET_VAR_COMPONENT_VAR_MAPPING_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.code,
+                                      StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.errmsg.format(
                                           error_msg=f'variable_mapping is None or empty'))
         self._variable_mapping = variable_mapping
 
@@ -28,8 +28,8 @@ class SetVariableComponent(WorkflowComponent):
             keys = left_ref_str.split(NESTED_PATH_SPLIT)
 
             if len(keys) == 0:
-                raise JiuWenBaseException(StatusCode.SET_VAR_COMPONENT_VAR_MAPPING_ERROR.code,
-                                          StatusCode.SET_VAR_COMPONENT_VAR_MAPPING_ERROR.errmsg.format(
+                raise JiuWenBaseException(StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.code,
+                                          StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.errmsg.format(
                                               error_msg=f'key[{left}] not supported format'))
 
             node_id = keys[0]

@@ -27,8 +27,8 @@ class Branch:
         elif isinstance(condition, Callable):
             self._condition = FuncCondition(condition)
         else:
-            raise JiuWenBaseException(StatusCode.BRANCH_COMPONENT_BRANCH_CONDITION_TYPE_ERROR.code,
-                                      StatusCode.BRANCH_COMPONENT_BRANCH_CONDITION_TYPE_ERROR.errmsg)
+            raise JiuWenBaseException(StatusCode.COMPONENT_BRANCH_CONFIG_ERROR.code,
+                                      StatusCode.COMPONENT_BRANCH_CONFIG_ERROR.errmsg)
         self.target = target
 
     def evaluate(self, session: BaseSession) -> bool:
@@ -51,8 +51,8 @@ class BranchRouter:
     def add_branch(self, condition: Union[str, Callable[[], bool], Condition], target: Union[str, list[str]],
                    branch_id: str = None):
         if condition is None or target is None:
-            raise JiuWenBaseException(StatusCode.BRANCH_COMPONENT_ADD_BRANCH_ERROR.code,
-                                      StatusCode.BRANCH_COMPONENT_ADD_BRANCH_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.COMPONENT_BRANCH_INIT_FAILED.code,
+                                      StatusCode.COMPONENT_BRANCH_INIT_FAILED.errmsg.format(
                                           error_msg="condition is None or target is None"))
         target = [target] if isinstance(target, str) else target
         if self._drawable_branch_router:
@@ -75,8 +75,8 @@ class BranchRouter:
             self._session = session
             return
         raise JiuWenBaseException(
-            StatusCode.BRANCH_COMPONENT_ADD_BRANCH_ERROR.code,
-            StatusCode.BRANCH_COMPONENT_ADD_BRANCH_ERROR.errmsg.format(error_msg="session type is wrong"),
+            StatusCode.COMPONENT_BRANCH_INIT_FAILED.code,
+            StatusCode.COMPONENT_BRANCH_INIT_FAILED.errmsg.format(error_msg="session type is wrong"),
         )
 
     async def __call__(self, *args, **kwargs) -> list[str]:
@@ -95,5 +95,5 @@ class BranchRouter:
                     await TracerWorkflowUtils.trace_component_outputs(session, {"branch_id": branch.branch_id})
                     await TracerWorkflowUtils.trace_component_done(session)
                 return branch.target
-        raise JiuWenBaseException(StatusCode.BRANCH_COMPONENT_BRANCH_NOT_FOUND_ERROR.code,
-                                  StatusCode.BRANCH_COMPONENT_BRANCH_NOT_FOUND_ERROR.errmsg)
+        raise JiuWenBaseException(StatusCode.COMPONENT_BRANCH_NOT_FOUND.code,
+                                  StatusCode.COMPONENT_BRANCH_NOT_FOUND.errmsg)

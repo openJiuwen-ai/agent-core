@@ -69,43 +69,38 @@ class StatusCode(Enum):
                                                      " as {error_msg}.")
 
     ## BranchComponent  101100 - 101119
-    BRANCH_COMPONENT_ADD_BRANCH_ERROR = (101100, "Branch adding error, as {error_msg}.")
-    BRANCH_COMPONENT_BRANCH_CONDITION_TYPE_ERROR = (101101, "Branch condition type does not meet the requirements.")
-    BRANCH_COMPONENT_BRANCH_NOT_FOUND_ERROR = (101102, "Branch meeting the condition was not found.")
+    COMPONENT_BRANCH_INIT_FAILED = (101100, "Branch adding error, as {error_msg}.")
+    COMPONENT_BRANCH_CONFIG_ERROR = (101101, "Branch condition type does not meet the requirements.")
+    COMPONENT_BRANCH_NOT_FOUND = (101102, "Branch meeting the condition was not found.")
 
     ## SetVariableComponent  101120 - 101139
-    SET_VAR_COMPONENT_VAR_MAPPING_ERROR = (101120, "Set variable component mapping error, as {error_msg}.")
+    COMPONENT_SET_VAR_INPUT_PARAM_ERROR = (101120, "Set variable component mapping error, as {error_msg}.")
 
     ## SubWorkflowComponent  101140 - 101149
-    SUB_WORKFLOW_COMPONENT_INIT_ERROR = (101140, "Sub workflow component init error, as {error_msg}.")
-    SUB_WORKFLOW_COMPONENT_RUNNING_ERROR = (101141, "Sub workflow component running error, detail: {detail}")
+    COMPONENT_SUB_WORKFLOW_INIT_FAILED = (101140, "Sub workflow component init error, as {error_msg}.")
+    COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR = (101141, "Sub workflow component running error, detail: {detail}")
 
     ## LoopComponent  101150 - 101159
-    LOOP_COMPONENT_NESTED_LOOP_ERROR = (101150, "Nested loops are not supported."
+    COMPONENT_LOOP_NOT_SUPPORT = (101150, "Nested loops are not supported."
                                         " Cannot add LoopComponent to a LoopGroup")
-    LOOP_COMPONENT_EXECUTION_ERROR = (101151, "Loop execution error: {error_msg}")
-    LOOP_COMPONENT_EMPTY_GROUP_ERROR = (101152, "Loop group is empty, no components to execute")
-    LOOP_COMPONENT_INPUT_TYPE_ERROR = (101153, "Inputs must be a dictionary, got {type}")
-    LOOP_COMPONENT_MISSING_INPUT_KEY_ERROR = (101154, "Invalid inputs: missing required key {key}")
-    LOOP_COMPONENT_INVALID_LOOP_TYPE_ERROR = (101155, "Invalid loop type '{loop_type}' for LoopComponent")
-    LOOP_COMPONENT_MISSING_START_NODES_ERROR = (101156, "LoopGroup must have start_nodes configured")
-    LOOP_COMPONENT_MISSING_END_NODES_ERROR = (101157, "LoopGroup must have end_nodes configured")
+    COMPONENT_LOOP_EXECUTION_ERROR = (101151, "Loop execution error: {error_msg}")
+    COMPONENT_LOOP_INPUT_INVALID = (101152, "Invalid inputs: {reason}")
+    COMPONENT_LOOP_CONFIG_NOT_FOUND = (101153, "LoopGroup config error, as {error_msg}.")
 
     ## BreakComponent  101180 - 101189
-    BREAK_COMPONENT_INIT_ERROR = (101180, "Failed to initialize loop controller")
+    COMPONENT_BREAK_EXECUTION_ERROR = (101180, "Failed to initialize loop controller")
 
     ## ToolComponent  102000 - 102019
-    TOOL_COMPONENT_BIND_TOOL_FAILED = (102000, "Tool component failed to bind a valid tool.")
-    TOOL_COMPONENT_INPUTS_ERROR = (102001, "Tool component inputs error, as {error_msg}.")
-    TOOL_COMPONENT_CHECK_PARAM_ERROR = (102002, "Tool component check parameter error, as {error_msg}.")
+    COMPONENT_TOOL_EXECUTION_ERROR = (102000, "Tool component failed to bind a valid tool.")
+    COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "Tool component inputs error, as {error_msg}.")
 
     ## StartComponent  102100 - 102119
-    WORKFLOW_START_MISSING_GLOBAL_VARIABLE_VALUE = (102100, "start component: global variable(s)"
+    COMPONENT_START_INPUT_INVALID = (102100, "start component: global variable(s)"
                                                     " defined with no value assigned:  {variable_name}")
-    WORKFLOW_START_CREATE_VALUE = (102101, "start component create error:  {reason}")
+    COMPONENT_START_INIT_FAILED = (102101, "start component create error:  {reason}")
 
     ## EndComponent  102120 - 102149
-    WORKFLOW_END_CREATE_VALUE = (102120, "end component create error: {reason}")
+    COMPONENT_END_INIT_FAILED = (102120, "end component create error: {reason}")
 
     # Workflow 110000 - 119999
     # Workflow - Orchestration And Execution 110000 - 110999

@@ -48,13 +48,13 @@ class ToolExecutable(ComponentExecutable):
         try:
             return ToolComponentInput(**inputs).model_dump()
         except ValidationError as e:
-            ExceptionUtils.raise_exception(StatusCode.TOOL_COMPONENT_INPUTS_ERROR,
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INPUT_PARAM_ERROR,
                                            ExceptionUtils.format_validation_error(e))
 
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         if self._tool is None:
-            ExceptionUtils.raise_exception(StatusCode.TOOL_COMPONENT_BIND_TOOL_FAILED)
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_EXECUTION_ERROR)
         tool_inputs = self._validate_inputs(inputs)
 
         try:

@@ -25,18 +25,18 @@ class Start(WorkflowComponent):
 
         defined_variables = config.get("inputs", {})
         if not isinstance(defined_variables, list):
-            raise JiuWenBaseException(error_code=StatusCode.WORKFLOW_START_CREATE_VALUE.code,
-                                      message=StatusCode.WORKFLOW_START_CREATE_VALUE.errmsg.format(
+            raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_INIT_FAILED.code,
+                                      message=StatusCode.COMPONENT_START_INIT_FAILED.errmsg.format(
                                           reason="conf 'inputs' is not list"))
         for var in defined_variables:
             if not isinstance(var, dict):
-                raise JiuWenBaseException(error_code=StatusCode.WORKFLOW_START_CREATE_VALUE.code,
-                                      message=StatusCode.WORKFLOW_START_CREATE_VALUE.errmsg.format(
+                raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_INIT_FAILED.code,
+                                          message=StatusCode.COMPONENT_START_INIT_FAILED.errmsg.format(
                                           reason="conf 'inputs' list item must be dict"))
             var_name = var.get("id")
             if not var_name:
-                raise JiuWenBaseException(error_code=StatusCode.WORKFLOW_START_CREATE_VALUE.code,
-                                          message=StatusCode.WORKFLOW_START_CREATE_VALUE.errmsg.format(
+                raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_INIT_FAILED.code,
+                                          message=StatusCode.COMPONENT_START_INIT_FAILED.errmsg.format(
                                               reason="conf 'inputs' list item not contain `id`"))
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
@@ -72,8 +72,8 @@ class Start(WorkflowComponent):
                 continue
             variables_not_given.append(variable_name)
         if len(variables_not_given) > 0:
-            raise JiuWenBaseException(error_code=StatusCode.WORKFLOW_START_MISSING_GLOBAL_VARIABLE_VALUE.code,
-                                      message=StatusCode.WORKFLOW_START_MISSING_GLOBAL_VARIABLE_VALUE.errmsg.format(
+            raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_INPUT_INVALID.code,
+                                      message=StatusCode.COMPONENT_START_INPUT_INVALID.errmsg.format(
                                           variable_name=variables_not_given))
 
 

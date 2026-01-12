@@ -130,7 +130,7 @@ class TestBranchComponent:
         with pytest.raises(JiuWenBaseException) as error:
             await self.run_with_expression("is_not_empty(${start.input})", None)
         print(error.value)
-        assert error.value.error_code == StatusCode.BRANCH_COMPONENT_BRANCH_NOT_FOUND_ERROR.code
+        assert error.value.error_code == StatusCode.COMPONENT_BRANCH_NOT_FOUND.code
 
         with pytest.raises(JiuWenBaseException) as error:
             await self.run_with_expression("is_not_empty(${start.input})", 1.2)

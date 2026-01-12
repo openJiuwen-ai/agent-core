@@ -211,13 +211,13 @@ class BaseWorkflow:
             main_workflow_config = session.config().get_workflow_config(
                 session.main_workflow_id())
             if main_workflow_config is None:
-                raise JiuWenBaseException(StatusCode.SUB_WORKFLOW_COMPONENT_RUNNING_ERROR.code,
-                                          StatusCode.SUB_WORKFLOW_COMPONENT_RUNNING_ERROR.errmsg.format(
+                raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.code,
+                                          StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
                                               detail=f"main workflow config is not exit,"
                                                      f" main workflow_id={session.main_workflow_id()}"))
             if session.workflow_nesting_depth() > main_workflow_config.workflow_max_nesting_depth:
-                raise JiuWenBaseException(StatusCode.SUB_WORKFLOW_COMPONENT_RUNNING_ERROR.code,
-                                          StatusCode.SUB_WORKFLOW_COMPONENT_RUNNING_ERROR.errmsg.format(
+                raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.code,
+                                          StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
                                               detail=f"workflow nesting hierarchy is too big, must <= "
                                                      f"{main_workflow_config.workflow_max_nesting_depth}"))
         self._session.set_session(session)

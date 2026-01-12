@@ -19,8 +19,8 @@ class SubWorkflowComponent(WorkflowComponent):
     def __init__(self, sub_workflow: Workflow):
         super().__init__()
         if sub_workflow is None:
-            raise JiuWenBaseException(StatusCode.SUB_WORKFLOW_COMPONENT_INIT_ERROR.code,
-                                      StatusCode.SUB_WORKFLOW_COMPONENT_INIT_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_INIT_FAILED.code,
+                                      StatusCode.COMPONENT_SUB_WORKFLOW_INIT_FAILED.errmsg.format(
                                           error_msg="sub_workflow is None"))
         self._sub_workflow = sub_workflow
 
