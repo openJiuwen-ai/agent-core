@@ -36,10 +36,9 @@ class BaseError(Exception):
         msg: Optional[str] = None,
         details: Optional[Any] = None,
         cause: Optional[BaseException] = None,
-        **kwargs,
+        **kwargs: dict[str, Any],
     ):
-        if status is not None:
-            self.status = status
+        self.status = status
         self.code = self.status.code
         self.params = kwargs
         self.details = details
@@ -230,7 +229,7 @@ def build_error(
     Useful for deferred throw or wrapping.
     """
     exc_cls = STATUS_TO_EXCEPTION.get(status, FrameworkError)
-    return exc_cls(status, message=msg, details=details, cause=cause, **kwargs)
+    return exc_cls(status, msg=msg, details=details, cause=cause, **kwargs)
 
 
 def raise_error(

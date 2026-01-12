@@ -9,37 +9,33 @@ from typing import (
 )
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import (
-    AgentError,
-    BaseError,
-    ExecutionError,
-    FrameworkError,
-    GraphError,
-    SessionError,
-    Termination,
-    ToolError,
-    ValidationError,
-    WorkflowError,
-    ToolchainError,
-    ContextError,
-    RunnerError,
-)
 
-_EXCEPTION_CLASS_REGISTRY: Dict[str, Type[BaseError]] = {
-    "BaseError": BaseError,
-    "FrameworkError": FrameworkError,
-    "ExecutionError": ExecutionError,
-    "ValidationError": ValidationError,
-    "Termination": Termination,
-    "WorkflowError": WorkflowError,
-    "AgentError": AgentError,
-    "ToolError": ToolError,
-    "GraphError": GraphError,
-    "SessionError": SessionError,
-    "ToolchainError": ToolchainError,
-    "ContextError": ContextError,
-    "RunnerError": RunnerError,
-}
+
+def _get_exception_class_registry() -> Dict[str, Type]:
+    # Note: BaseError is imported lazily inside the function to avoid circular imports.
+    """
+    Lazily import and return the registry mapping exception class names to actual classes.
+
+    This avoids a circular import between `status_mapping` and `errors` at module import time.
+    """
+    from openjiuwen.core.common.exception import errors as _errors
+
+    return {
+        "BaseError": _errors.BaseError,
+        "FrameworkError": _errors.FrameworkError,
+        "ExecutionError": _errors.ExecutionError,
+        "ValidationError": _errors.ValidationError,
+        "Termination": _errors.Termination,
+        "WorkflowError": _errors.WorkflowError,
+        "AgentError": _errors.AgentError,
+        "ToolError": _errors.ToolError,
+        "GraphError": _errors.GraphError,
+        "SessionError": _errors.SessionError,
+        "ToolchainError": _errors.ToolchainError,
+        "ContextError": _errors.ContextError,
+        "RunnerError": _errors.RunnerError,
+    }
+
 
 KEYWORD_RULES = [
     (("INVALID", "NOT_SUPPORTED", "PARAM", "MISSING", "DUPLICATED"), "ValidationError"),
@@ -62,12 +58,19 @@ RANGE_RULES = [
     ((190000, 199999), "SessionError"),
 ]
 
-MANUAL_OVERRIDES = {
-    StatusCode.CONTROLLER_INVOKE_LLM_FAILED: "FrameworkError",
-    StatusCode.TOOL_EXECUTION_ERROR: "ToolError",
-    StatusCode.TOOL_NOT_FOUND_ERROR: "ValidationError",
-    StatusCode.AGENT_GROUP_EXECUTION_ERROR: "AgentError",
+# Manual overrides expressed as names to avoid failing import when some legacy names are absent.
+_MANUAL_OVERRIDES_RAW = {
+    "CONTROLLER_INVOKE_LLM_FAILED": "FrameworkError",
+    "TOOL_EXECUTION_ERROR": "ToolError",
+    "TOOL_NOT_FOUND_ERROR": "ValidationError",
+    "AGENT_GROUP_EXECUTION_ERROR": "AgentError",
 }
+
+# Build the actual mapping only for StatusCode members that exist in the current enum.
+MANUAL_OVERRIDES: Dict[StatusCode, str] = {}
+for _name, _exc in _MANUAL_OVERRIDES_RAW.items():
+    if hasattr(StatusCode, _name):
+        MANUAL_OVERRIDES[getattr(StatusCode, _name)] = _exc
 
 
 def _match_keyword(name: str) -> str | None:
@@ -84,10 +87,13 @@ def _match_range(code: int) -> str | None:
     return None
 
 
-def resolve_exception_class(status: StatusCode) -> Type[BaseError]:
+def resolve_exception_class(status: StatusCode) -> Type:
+    # Defer obtaining the actual exception classes to avoid circular import
+    registry = _get_exception_class_registry()
+
     # 1. Manual override
     if status in MANUAL_OVERRIDES:
-        return _EXCEPTION_CLASS_REGISTRY[MANUAL_OVERRIDES[status]]
+        return registry[MANUAL_OVERRIDES[status]]
 
     name = status.name
     code = status.code
@@ -95,22 +101,22 @@ def resolve_exception_class(status: StatusCode) -> Type[BaseError]:
     # 2. Keyword rule
     exc_name = _match_keyword(name)
     if exc_name:
-        return _EXCEPTION_CLASS_REGISTRY[exc_name]
+        return registry[exc_name]
 
     # 3. Range fallback
     exc_name = _match_range(code)
     if exc_name:
-        return _EXCEPTION_CLASS_REGISTRY[exc_name]
+        return registry[exc_name]
 
     # 4. Absolute fallback
-    return ExecutionError
+    return registry["ExecutionError"]
 
 
-def build_status_exception_map() -> Dict[StatusCode, Type[BaseError]]:
+def build_status_exception_map() -> Dict[StatusCode, Type]:
     """
     Generate full StatusCode -> ExceptionClass mapping.
     """
-    mapping: Dict[StatusCode, Type[BaseError]] = {}
+    mapping: Dict[StatusCode, Type] = {}
     for status in StatusCode:
         mapping[status] = resolve_exception_class(status)
     return mapping
