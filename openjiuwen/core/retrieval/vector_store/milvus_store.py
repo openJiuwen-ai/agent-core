@@ -5,6 +5,7 @@ Milvus Vector Store Implementation
 
 Supports vector search, sparse search (BM25), and hybrid search.
 """
+
 import asyncio
 from typing import Any, List, Optional
 
@@ -34,7 +35,7 @@ class MilvusVectorStore(VectorStore):
     ):
         """
         Initialize Milvus vector store
-        
+
         Args:
             config: Vector store configuration
             milvus_uri: Milvus URI
@@ -53,7 +54,7 @@ class MilvusVectorStore(VectorStore):
         self.sparse_vector_field = sparse_vector_field
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
-        
+
         self._client = MilvusClient(
             uri=self.milvus_uri,
             token=self.milvus_token,
@@ -258,13 +259,9 @@ class MilvusVectorStore(VectorStore):
                 return self._milvus_result_to_search_results(result_list, mode="hybrid")
             return []
         except Exception as e:
-            logger.warning(
-                f"Hybrid search failed, falling back to separate searches: {e}"
-            )
+            logger.warning(f"Hybrid search failed, falling back to separate searches: {e}")
             # Fall back to separate searches then fusion
-            return await self._hybrid_search_fallback(
-                query_text, query_vector, top_k, filters
-            )
+            return await self._hybrid_search_fallback(query_text, query_vector, top_k, filters)
 
     async def _hybrid_search_fallback(
         self,
@@ -331,6 +328,10 @@ class MilvusVectorStore(VectorStore):
                     metadata = json.loads(metadata)
                 except Exception:
                     metadata = {}
+
+            # Ensure doc_id is returned in metadata dict
+            if "doc_id" not in metadata:
+                metadata["doc_id"] = metadata.pop(self.doc_id_field, None)
 
             # Include chunk_id for upper layer association
             if item.get("chunk_id") is not None:
