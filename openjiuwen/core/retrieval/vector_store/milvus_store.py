@@ -54,9 +54,12 @@ class MilvusVectorStore(VectorStore):
         self.sparse_vector_field = sparse_vector_field
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
+        self.database_name = self.config.database_name
 
-        self._client = MilvusClient(
-            uri=self.milvus_uri,
+        # Initialize Milvus client & database
+        self._client = self.create_client(
+            database_name=self.config.database_name,
+            path_or_uri=self.milvus_uri,
             token=self.milvus_token,
         )
 
@@ -64,6 +67,16 @@ class MilvusVectorStore(VectorStore):
     def client(self) -> MilvusClient:
         """Get Milvus client"""
         return self._client
+
+    @staticmethod
+    def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> MilvusClient:
+        """Create Milvus client and ensure database exists"""
+        client = MilvusClient(uri=path_or_uri, token=token)
+        if database_name and database_name != "default":
+            if database_name not in client.list_databases():
+                client.create_database(database_name)
+            client.use_database(database_name)
+        return client
 
     async def add(
         self,

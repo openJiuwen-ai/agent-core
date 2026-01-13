@@ -5,9 +5,12 @@ Knowledge Base Abstract Base Class
 
 Provides a unified interface for knowledge bases as the top-level entry point.
 """
+
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Dict
 
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
@@ -22,7 +25,7 @@ from openjiuwen.core.common.logging import logger
 
 class KnowledgeBase(ABC):
     """Knowledge Base Abstract Base Class"""
-    
+
     def __init__(
         self,
         config: KnowledgeBaseConfig,
@@ -43,7 +46,17 @@ class KnowledgeBase(ABC):
         self.extractor = extractor
         self.index_manager = index_manager
         self.llm_client = llm_client
-    
+        if vector_store and index_manager:
+            vector_store_db = getattr(vector_store, "database_name", None)
+            index_manager_db = getattr(index_manager, "database_name", None)
+            if vector_store_db != index_manager_db:
+                raise JiuWenBaseException(
+                    error_code=StatusCode.KB_VECTORSTORE_AND_INDEXER_DATABASE_MISMATCH_ERROR,
+                    message="Database name mismatch between vector_store and index_manager:\n"
+                    f'- Vector Store ({type(vector_store).__name__}) is using "{vector_store_db}".\n'
+                    f'- Index manager ({type(index_manager).__name__}) is using "{index_manager_db}"',
+                )
+
     @abstractmethod
     async def parse_files(
         self,
@@ -52,16 +65,16 @@ class KnowledgeBase(ABC):
     ) -> List[Document]:
         """
         Parse files from file paths into a list of Document objects
-        
+
         Args:
             file_paths: List of file paths
             **kwargs: Additional parameters
-            
+
         Returns:
             List of Document objects
         """
         pass
-    
+
     @abstractmethod
     async def add_documents(
         self,
@@ -70,7 +83,7 @@ class KnowledgeBase(ABC):
     ) -> List[str]:
         """Add documents to the knowledge base"""
         pass
-    
+
     @abstractmethod
     async def retrieve(
         self,
@@ -80,7 +93,7 @@ class KnowledgeBase(ABC):
     ) -> List[RetrievalResult]:
         """Retrieve relevant documents"""
         pass
-    
+
     @abstractmethod
     async def delete_documents(
         self,
@@ -89,7 +102,7 @@ class KnowledgeBase(ABC):
     ) -> bool:
         """Delete documents"""
         pass
-    
+
     @abstractmethod
     async def update_documents(
         self,
@@ -98,12 +111,12 @@ class KnowledgeBase(ABC):
     ) -> List[str]:
         """Update documents"""
         pass
-    
+
     @abstractmethod
     async def get_statistics(self) -> Dict[str, Any]:
         """Get knowledge base statistics"""
         pass
-    
+
     async def close(self) -> None:
         """Close the knowledge base and release resources"""
         import inspect

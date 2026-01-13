@@ -33,7 +33,7 @@ class TestChromaIndexer:
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
         assert indexer.chroma_path == "/tmp/test_chroma"
         assert indexer.client == mock_client
-        mock_client_class.assert_called_once_with(path="/tmp/test_chroma")
+        mock_client_class.assert_called_once_with(path="/tmp/test_chroma", database="default_database")
 
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
     def test_init_with_empty_path(self, mock_client_class):

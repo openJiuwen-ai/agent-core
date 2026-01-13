@@ -9,6 +9,7 @@ import pytest
 from openjiuwen.core.retrieval.indexing.indexer.milvus_indexer import MilvusIndexer
 from openjiuwen.core.retrieval.common.config import IndexConfig
 from openjiuwen.core.retrieval.common.document import TextChunk
+from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
 
 
 @pytest.fixture
@@ -23,21 +24,22 @@ def mock_embed_model():
 class TestMilvusIndexer:
     """Milvus index manager tests"""
 
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     def test_init_success(self, mock_client_class):
         """Test successful initialization"""
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
-        indexer = MilvusIndexer(milvus_uri="http://localhost:19530")
+        indexer = MilvusIndexer(milvus_uri="http://localhost:19530", database_name="name")
         assert indexer.milvus_uri == "http://localhost:19530"
         assert indexer.client == mock_client
         mock_client_class.assert_called_once_with(
-            uri="http://localhost:19530",
+            database_name="name",
+            path_or_uri="http://localhost:19530",
             token=None,
         )
 
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     def test_init_with_token(self, mock_client_class):
         """Test initialization with token"""
         mock_client = MagicMock()
@@ -46,14 +48,17 @@ class TestMilvusIndexer:
         indexer = MilvusIndexer(
             milvus_uri="http://localhost:19530",
             milvus_token="test_token",
+            database_name="name",
         )
         assert indexer.milvus_token == "test_token"
+
         mock_client_class.assert_called_once_with(
-            uri="http://localhost:19530",
+            database_name="name",
+            path_or_uri="http://localhost:19530",
             token="test_token",
         )
 
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     def test_init_with_custom_fields(self, mock_client_class):
         """Test initialization with custom fields"""
         mock_client = MagicMock()
@@ -70,7 +75,7 @@ class TestMilvusIndexer:
         assert indexer.doc_id_field == "custom_doc_id"
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore")
     async def test_build_index_vector_type(self, mock_store_class, mock_client_class, mock_embed_model):
         """Test building vector index"""
@@ -96,7 +101,7 @@ class TestMilvusIndexer:
             mock_store.add.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore")
     async def test_build_index_bm25_type(self, mock_store_class, mock_client_class):
         """Test building BM25 index"""
@@ -118,7 +123,7 @@ class TestMilvusIndexer:
             mock_store.add.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_build_index_vector_type_without_embed_model(self, mock_client_class):
         """Test vector index but without embedding model"""
         mock_client = MagicMock()
@@ -134,7 +139,7 @@ class TestMilvusIndexer:
             assert result is False  # Should fail
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_update_index(self, mock_client_class, mock_embed_model):
         """Test updating index"""
         mock_client = MagicMock()
@@ -155,7 +160,7 @@ class TestMilvusIndexer:
             mock_build.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_delete_index_success(self, mock_client_class):
         """Test deleting index successfully"""
         mock_client = MagicMock()
@@ -167,7 +172,7 @@ class TestMilvusIndexer:
         assert result is True
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_delete_index_not_found(self, mock_client_class):
         """Test deleting non-existent index"""
         mock_client = MagicMock()
@@ -179,7 +184,7 @@ class TestMilvusIndexer:
         assert result is False
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_index_exists_true(self, mock_client_class):
         """Test index exists"""
         mock_client = MagicMock()
@@ -191,7 +196,7 @@ class TestMilvusIndexer:
         assert result is True
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_index_exists_false(self, mock_client_class):
         """Test index does not exist"""
         mock_client = MagicMock()
@@ -203,7 +208,7 @@ class TestMilvusIndexer:
         assert result is False
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_get_index_info_exists(self, mock_client_class):
         """Test getting existing index information"""
         mock_client = MagicMock()
@@ -218,7 +223,7 @@ class TestMilvusIndexer:
         assert "count" in info
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     async def test_get_index_info_not_exists(self, mock_client_class):
         """Test getting non-existent index information"""
         mock_client = MagicMock()
@@ -229,7 +234,7 @@ class TestMilvusIndexer:
         info = await indexer.get_index_info("nonexistent_index")
         assert info["exists"] is False
 
-    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusClient")
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
     def test_close(self, mock_client_class):
         """Test closing index manager"""
         mock_client = MagicMock()

@@ -13,6 +13,10 @@ from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 class ConcreteVectorStore(VectorStore):
     """Concrete vector store implementation for testing abstract base class"""
 
+    @staticmethod
+    def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> None:
+        pass
+
     async def add(self, data, batch_size=None, **kwargs):
         pass
 

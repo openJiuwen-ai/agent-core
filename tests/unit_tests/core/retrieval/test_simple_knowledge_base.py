@@ -118,6 +118,22 @@ class TestSimpleKnowledgeBase:
         assert len(documents) == 0
 
     @pytest.mark.asyncio
+    async def test_database_name_mismatch(
+        self, mock_config, mock_chunker, mock_vector_store, mock_index_manager, mock_embed_model
+    ):
+        """Test different database_name in vector store and index manager raises expected error"""
+        setattr(mock_index_manager, "database_name", "different_name")
+        with pytest.raises(JiuWenBaseException, match="Database name mismatch between vector_store and index_manager"):
+            kb = SimpleKnowledgeBase(
+                config=mock_config,
+                vector_store=mock_vector_store,
+                chunker=mock_chunker,
+                index_manager=mock_index_manager,
+                embed_model=mock_embed_model,
+            )
+            del kb
+
+    @pytest.mark.asyncio
     async def test_add_documents_success(
         self, mock_config, mock_chunker, mock_index_manager, mock_embed_model
     ):

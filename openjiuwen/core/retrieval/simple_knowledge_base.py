@@ -5,6 +5,7 @@ Simple Knowledge Base Implementation
 
 Provides complete knowledge base functionality including document parsing, chunking, index building, and retrieval.
 """
+
 from typing import Any, List, Optional, Dict
 import uuid
 
@@ -43,7 +44,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ):
         """
         Initialize the knowledge base
-        
+
         Args:
             config: Knowledge base configuration
             vector_store: Vector store instance
@@ -75,17 +76,14 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> List[Document]:
         """Parse files from file paths into a list of Document objects"""
         if not self.parser:
-            raise JiuWenBaseException(
-                StatusCode.KB_PARSER_REQUIRED_ERROR.code,
-                "parser is required for parse_files"
-            )
+            raise JiuWenBaseException(StatusCode.KB_PARSER_REQUIRED_ERROR.code, "parser is required for parse_files")
 
         all_documents = []
         for file_path in file_paths:
             try:
                 file_name = kwargs.get("file_name", file_path.split("/")[-1])
                 file_id = kwargs.get("file_id", str(uuid.uuid4()))
-                
+
                 documents = await self.parser.parse(
                     file_path,
                     file_name=file_name,
@@ -106,13 +104,11 @@ class SimpleKnowledgeBase(KnowledgeBase):
         """Add documents to the knowledge base"""
         if not self.chunker:
             raise JiuWenBaseException(
-                StatusCode.KB_CHUNKER_REQUIRED_ERROR.code,
-                "chunker is required for add_documents"
+                StatusCode.KB_CHUNKER_REQUIRED_ERROR.code, "chunker is required for add_documents"
             )
         if not self.index_manager:
             raise JiuWenBaseException(
-                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code,
-                "index_manager is required for add_documents"
+                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code, "index_manager is required for add_documents"
             )
 
         # Chunk documents
@@ -126,17 +122,18 @@ class SimpleKnowledgeBase(KnowledgeBase):
             index_type=self.config.index_type,
         )
 
+        database_name = getattr(getattr(self.vector_store, "config", None), "database_name", "")
+        if not isinstance(database_name, str):
+            database_name = ""
         success = await self.index_manager.build_index(
             chunks=chunks,
             config=index_config,
             embed_model=self.embed_model,
+            database_name=database_name,
         )
 
         if not success:
-            raise JiuWenBaseException(
-                StatusCode.KB_BUILD_INDEX_FAILED_ERROR.code,
-                "Failed to build index"
-            )
+            raise JiuWenBaseException(StatusCode.KB_BUILD_INDEX_FAILED_ERROR.code, "Failed to build index")
 
         # Return document ID list
         doc_ids = [doc.id_ for doc in documents]
@@ -154,24 +151,26 @@ class SimpleKnowledgeBase(KnowledgeBase):
             # Auto-create retriever
             if not self.vector_store:
                 raise JiuWenBaseException(
-                    StatusCode.KB_VECTOR_STORE_REQUIRED_ERROR.code,
-                    "vector_store or retriever is required for retrieve"
+                    StatusCode.KB_VECTOR_STORE_REQUIRED_ERROR.code, "vector_store or retriever is required for retrieve"
                 )
-            
+
             # Select appropriate retriever based on index_type
             if self.config.index_type == "vector":
                 from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
+
                 self.retriever = VectorRetriever(
                     vector_store=self.vector_store,
                     embed_model=self.embed_model,
                 )
             elif self.config.index_type == "bm25":
                 from openjiuwen.core.retrieval.retriever.sparse_retriever import SparseRetriever
+
                 self.retriever = SparseRetriever(
                     vector_store=self.vector_store,
                 )
             else:  # hybrid or others
                 from openjiuwen.core.retrieval.retriever.hybrid_retriever import HybridRetriever
+
                 self.retriever = HybridRetriever(
                     vector_store=self.vector_store,
                     embed_model=self.embed_model,
@@ -179,7 +178,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
 
         # Use config or default values
         retrieval_config = config or RetrievalConfig()
-        
+
         # Determine retrieval mode
         mode = "hybrid"
         if self.config.index_type == "vector":
@@ -187,9 +186,13 @@ class SimpleKnowledgeBase(KnowledgeBase):
         elif self.config.index_type == "bm25":
             mode = "sparse"
 
-        results = await self.retriever.retrieve(query=query, top_k=retrieval_config.top_k,
-                                                score_threshold=retrieval_config.score_threshold,
-                                                filters=retrieval_config.filters, mode=mode, )
+        results = await self.retriever.retrieve(
+            query=query,
+            top_k=retrieval_config.top_k,
+            score_threshold=retrieval_config.score_threshold,
+            filters=retrieval_config.filters,
+            mode=mode,
+        )
 
         return results
 
@@ -201,8 +204,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
         """Delete documents"""
         if not self.index_manager:
             raise JiuWenBaseException(
-                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code,
-                "index_manager is required for delete_documents"
+                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code, "index_manager is required for delete_documents"
             )
 
         index_name = f"kb_{self.config.kb_id}_chunks"
@@ -226,13 +228,11 @@ class SimpleKnowledgeBase(KnowledgeBase):
         """Update documents"""
         if not self.chunker:
             raise JiuWenBaseException(
-                StatusCode.KB_CHUNKER_REQUIRED_ERROR.code,
-                "chunker is required for update_documents"
+                StatusCode.KB_CHUNKER_REQUIRED_ERROR.code, "chunker is required for update_documents"
             )
         if not self.index_manager:
             raise JiuWenBaseException(
-                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code,
-                "index_manager is required for update_documents"
+                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code, "index_manager is required for update_documents"
             )
 
         # Chunk documents
@@ -262,7 +262,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     async def get_statistics(self) -> Dict[str, Any]:
         """Get knowledge base statistics"""
         index_name = f"kb_{self.config.kb_id}_chunks"
-        
+
         if not self.index_manager:
             return {
                 "kb_id": self.config.kb_id,
@@ -270,7 +270,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
             }
 
         index_info = await self.index_manager.get_index_info(index_name)
-        
+
         return {
             "kb_id": self.config.kb_id,
             "index_type": self.config.index_type,
@@ -335,9 +335,7 @@ async def retrieve_multi_kb_with_source(
         try:
             return await kb.retrieve(query, config)
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "retrieve_multi_kb_with_source: kb_id=%s failed: %s", getattr(kb.config, "kb_id", None), e
-            )
+            logger.warning("retrieve_multi_kb_with_source: kb_id=%s failed: %s", getattr(kb.config, "kb_id", None), e)
             return []
 
     import asyncio
@@ -366,9 +364,7 @@ async def retrieve_multi_kb_with_source(
                 merged[text]["raw_score"] = max(prev, raw_score) if prev is not None else raw_score
             if raw_score_scaled is not None:
                 prev = merged[text].get("raw_score_scaled")
-                merged[text]["raw_score_scaled"] = (
-                    max(prev, raw_score_scaled) if prev is not None else raw_score_scaled
-                )
+                merged[text]["raw_score_scaled"] = max(prev, raw_score_scaled) if prev is not None else raw_score_scaled
             merged[text]["kb_ids"].add(kb_id)
 
     ranked = sorted(

@@ -189,15 +189,15 @@ class StatusCode(Enum):
     CONTEXT_ENGINE_GET_CONTEXT_WINDOW_ERROR = (153004, "Message get context window error: {error_msg}")
     CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR = (153005, "Context engine message validation error: {error_msg}")
 
-    #KnowlageBase Retrieval 155000 - 157999
-    #KnowlageBase Retrieval - Embedding 155000 - 155099
+    # KnowledgeBase Retrieval 155000 - 157999
+    # KnowledgeBase Retrieval - Embedding 155000 - 155099
     EMBEDDING_EMPTY_INPUT_ERROR = (155000, "Empty text or texts list provided for embedding")
     EMBEDDING_MODEL_NOT_FOUND_ERROR = (155001, "Embedding model not found: {error_msg}")
     EMBEDDING_CONNECTION_ERROR = (155002, "Failed to connect to embedding service: {error_msg}")
     EMBEDDING_RESPONSE_FORMAT_ERROR = (155003, "Invalid embedding response format: {error_msg}")
     EMBEDDING_REQUEST_FAILED_ERROR = (155004, "Failed to get embedding after {max_retries} attempts: {error_msg}")
     EMBEDDING_UNREACHABLE_ERROR = (155005, "Unreachable code in embedding: {error_msg}")
-    # KnowlageBase Retrieval - Indexing 155100 - 155199
+    # KnowledgeBase Retrieval - Indexing 155100 - 155199
     INDEXING_CHUNK_SIZE_ERROR = (155100, "Invalid chunk size: {error_msg}")
     INDEXING_CHUNK_OVERLAP_ERROR = (155101, "Invalid chunk overlap: {error_msg}")
     INDEXING_TOKENIZER_ERROR = (155102, "Tokenizer error: {error_msg}")
@@ -206,7 +206,7 @@ class StatusCode(Enum):
     INDEXING_EMBED_MODEL_REQUIRED_ERROR = (155105, "Embed model is required: {error_msg}")
     INDEXING_DIMENSION_REQUIRED_ERROR = (155106, "Dimension is required: {error_msg}")
     INDEXING_PATH_REQUIRED_ERROR = (155107, "Path is required and cannot be empty: {error_msg}")
-    # KnowlageBase Retrieval - Retriever 155200 - 155299
+    # KnowledgeBase Retrieval - Retriever 155200 - 155299
     RETRIEVER_UNSUPPORTED_MODE_ERROR = (155200, "Unsupported retrieval mode: {error_msg}")
     RETRIEVER_SCORE_THRESHOLD_ERROR = (155201, "Score threshold is only supported when mode='vector': {error_msg}")
     RETRIEVER_EMBED_MODEL_REQUIRED_ERROR = (155202, "Embed model is required: {error_msg}")
@@ -218,21 +218,25 @@ class StatusCode(Enum):
     RETRIEVER_GRAPH_RETRIEVER_REQUIRED_ERROR = (155208, "Graph retriever is required: {error_msg}")
     RETRIEVER_LLM_CLIENT_REQUIRED_ERROR = (155209, "LLM client is required: {error_msg}")
     RETRIEVER_TOP_K_REQUIRED_ERROR = (155210, "top_k is required: {error_msg}")
-    # KnowlageBase Retrieval - Utils 155300 - 155399
+    # KnowledgeBase Retrieval - Utils 155300 - 155399
     UTILS_CONFIG_FILE_NOT_FOUND_ERROR = (155300, "Configuration file not found: {error_msg}")
     UTILS_PYYAML_REQUIRED_ERROR = (155301, "PyYAML is required: {error_msg}")
     UTILS_UNSUPPORTED_CONFIG_FORMAT_ERROR = (155302, "Unsupported configuration file format: {error_msg}")
     UTILS_NO_CONFIG_TO_SAVE_ERROR = (155303, "No configuration to save: {error_msg}")
     UTILS_CONFIG_NOT_LOADED_ERROR = (155304, "Configuration not loaded: {error_msg}")
-    # KnowlageBase Retrieval - Vector Store 155400 - 155499
+    # KnowledgeBase Retrieval - Vector Store 155400 - 155499
     VECTOR_STORE_PATH_REQUIRED_ERROR = (155400, "Path is required and cannot be empty: {error_msg}")
-    # KnowlageBase Retrieval - Knowledge Base 155500 - 155599
+    # KnowledgeBase Retrieval - Knowledge Base 155500 - 155599
     KB_PARSER_REQUIRED_ERROR = (155500, "Parser is required: {error_msg}")
     KB_CHUNKER_REQUIRED_ERROR = (155501, "Chunker is required: {error_msg}")
     KB_INDEX_MANAGER_REQUIRED_ERROR = (155502, "Index manager is required: {error_msg}")
     KB_VECTOR_STORE_REQUIRED_ERROR = (155503, "Vector store is required: {error_msg}")
     KB_BUILD_INDEX_FAILED_ERROR = (155504, "Failed to build index: {error_msg}")
     KB_BUILD_CHUNK_INDEX_FAILED_ERROR = (155505, "Failed to build chunk index: {error_msg}")
+    KB_VECTORSTORE_AND_INDEXER_DATABASE_MISMATCH_ERROR = (
+        155506,
+        "Vector store and index manager uses different database names: {error_msg}",
+    )
 
     # Memory Engine 158000 - 159999
     MEMORY_ENGINE_KV_STORE_NOT_REGISTER = (158000, "kv store is not registered in memory engine")

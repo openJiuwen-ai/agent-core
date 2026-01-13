@@ -60,6 +60,8 @@ class TestKnowledgeBase:
         mock_extractor = MagicMock()
         mock_index_manager = MagicMock()
         mock_llm_client = MagicMock()
+        mock_vector_store.database_name = "database_name"
+        mock_index_manager.database_name = "database_name"
 
         kb = ConcreteKnowledgeBase(
             config=config,
@@ -87,6 +89,8 @@ class TestKnowledgeBase:
         mock_vector_store.close = AsyncMock()
         mock_index_manager = AsyncMock()
         mock_index_manager.close = AsyncMock()
+        mock_vector_store.database_name = "database_name"
+        mock_index_manager.database_name = "database_name"
 
         kb = ConcreteKnowledgeBase(
             config=config,
@@ -105,6 +109,8 @@ class TestKnowledgeBase:
         mock_vector_store.close = MagicMock()
         mock_index_manager = MagicMock()
         mock_index_manager.close = MagicMock()
+        mock_vector_store.database_name = "database_name"
+        mock_index_manager.database_name = "database_name"
 
         kb = ConcreteKnowledgeBase(
             config=config,
