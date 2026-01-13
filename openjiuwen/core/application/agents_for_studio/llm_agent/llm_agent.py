@@ -112,8 +112,7 @@ class LLMAgent(ControllerAgent):
         super().__init__(agent_config, controller=None)
 
         self._init_memory_config(agent_config.memory_config)
-        self._enable_memory = (agent_config.memory_config.enable_long_term_mem or
-                               len(agent_config.memory_config.mem_variables) > 0)
+        self._enable_memory = False
 
         self.controller = LLMController(
             config=agent_config,

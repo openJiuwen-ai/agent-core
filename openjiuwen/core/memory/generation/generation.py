@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from typing import Tuple
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.memory.config.config import MemoryScopeConfig
+from openjiuwen.core.memory.config.config import MemoryAgentConfig
 from openjiuwen.core.memory.generation.categorizer import Categorizer
 from openjiuwen.core.memory.generation.memory_info import ExtractedData
 from openjiuwen.core.memory.generation.user_profile_extractor import UserProfileExtractor
@@ -21,14 +21,14 @@ category_to_class = {
 @dataclass
 class ExtractMemoryParams:
     user_id: str
-    group_id: str
+    scope_id: str
     messages: list[BaseMessage]
     history_messages: list[BaseMessage]
     base_chat_model: Tuple[str, Model]
 
 
 async def _generate_extract(
-        config: MemoryScopeConfig,
+        config: MemoryAgentConfig,
         history_messages: list[BaseMessage],
         messages: list[BaseMessage],
         base_chat_model: Tuple[str, Model]
@@ -51,15 +51,16 @@ class Generator:
         config = kwargs.get("config")
         model = kwargs.get("base_chat_model")
         user_id = kwargs.get("user_id")
-        group_id = kwargs.get("group_id")
+        scope_id = kwargs.get("scope_id")
         history_messages = kwargs.get("history_messages")
         message_mem_id = kwargs.get("message_mem_id")
-        if not all([messages, config, user_id, group_id, model]):
-            logger.error("messages, config, user_id, group_id, model are required parameters")
+        if not all([messages, config, user_id, scope_id, model]):
+            logger.error("messages, config, user_id, scope_id, model are required parameters")
+            return []
 
         extract_memory_params = ExtractMemoryParams(
             user_id=user_id,
-            group_id=group_id,
+            scope_id=scope_id,
             messages=messages,
             history_messages=history_messages,
             base_chat_model=model
@@ -102,7 +103,7 @@ class Generator:
     async def gen_extracted_data(
             self,
             extract_memory_paras: ExtractMemoryParams,
-            config: MemoryScopeConfig,
+            config: MemoryAgentConfig,
     ) -> list[VariableUnit]:
         """Generate extracted variable memory units based on input"""
         extracted_data = await _generate_extract(
@@ -115,7 +116,7 @@ class Generator:
         for tmp_data in extracted_data:
             variable_units.append(VariableUnit(
                 user_id=extract_memory_paras.user_id,
-                group_id=extract_memory_paras.group_id,
+                scope_id=extract_memory_paras.scope_id,
                 mem_type=MemoryType.VARIABLE,
                 variable_name=tmp_data.key,
                 variable_mem=tmp_data.value
@@ -130,9 +131,9 @@ class Generator:
     ) -> list[UserProfileUnit]:
         """Generate user profile memory unit based on input"""
         user_profile_memory = await UserProfileExtractor.get_user_profile(
-            extract_memory_paras.history_messages,
-            extract_memory_paras.messages,
-            extract_memory_paras.base_chat_model,
+            messages=extract_memory_paras.messages,
+            history_messages=extract_memory_paras.history_messages,
+            base_chat_model=extract_memory_paras.base_chat_model,
             user_define=user_define)
         user_profile_data = []
         for profile_type, profile_list in user_profile_memory.items():
@@ -142,7 +143,7 @@ class Generator:
             for profile in profile_list:
                 user_profile_data.append(UserProfileUnit(
                     user_id=extract_memory_paras.user_id,
-                    group_id=extract_memory_paras.group_id,
+                    scope_id=extract_memory_paras.scope_id,
                     profile_type=profile_type,
                     profile_mem=profile,
                     mem_type=MemoryType.USER_PROFILE,

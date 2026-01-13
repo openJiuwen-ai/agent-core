@@ -34,7 +34,7 @@ CONTEXT_CONFIG = {
         'message_id': ContextStoreColumnType.TEXT,
         'user_id': ContextStoreColumnType.TEXT,
         'session_id': ContextStoreColumnType.TEXT,
-        'group_id': ContextStoreColumnType.TEXT,
+        'scope_id': ContextStoreColumnType.TEXT,
         'role': ContextStoreColumnType.TEXT,
         'content': ContextStoreColumnType.TEXT,
         'timestamp': ContextStoreColumnType.TEXT,
@@ -71,7 +71,7 @@ class MockSemanticStore(BaseSemanticStore):
         self.config = config
         self.model_config = model_config
 
-    async def add_docs(self, docs: List[Tuple[str, str]], table_name: str) -> bool:
+    async def add_docs(self, docs: List[Tuple[str, str]], table_name: str, **kwargs) -> bool:
         """模拟添加记忆"""
         if table_name not in self.memory_store:
             self.memory_store[table_name] = {}
@@ -145,25 +145,25 @@ class TestManage:
         managers = {"user_profile": user_profile_manager, "variable": variable_manager}
         write_manager = WriteManager(managers, mock_mem_store)
         test_all_data = [
-            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
+            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
              "profile_mem": "用户非常喜欢川菜，尤其是水煮鱼和麻婆豆腐"},
-            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "personal_information",
+            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "personal_information",
              "profile_mem": "用户的职业是软件工程师，居住在北京市"},
-            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "personal_information",
+            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "personal_information",
              "profile_mem": "用户的副业是抖音直播"},
-            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "assert_information",
+            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "assert_information",
              "profile_mem": "用户的银行账户余额为10000元"},
-            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "social_information",
+            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "social_information",
              "profile_mem": "用户的朋友圈中有50个好友"},
-            {"user_id": "usrZH2025", "group_id": "fitnesstrackerv3", "profile_type": "other_information",
+            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "other_information",
              "profile_mem": "用户的宠物是一只金毛犬"},
-            {"user_id": "usrZH2026", "group_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
+            {"user_id": "usrZH2026", "scope_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
              "profile_mem": "用户喜欢打篮球和阅读历史小说"},
-            {"user_id": "usrZH2026", "group_id": "fitnesstrackerv3", "profile_type": "personal_information",
+            {"user_id": "usrZH2026", "scope_id": "fitnesstrackerv3", "profile_type": "personal_information",
              "profile_mem": "用户的生日是1990年1月1日"},
-            {"user_id": "usrZH2026", "group_id": "fitnesstrackerv3", "profile_type": "assert_information",
+            {"user_id": "usrZH2026", "scope_id": "fitnesstrackerv3", "profile_type": "assert_information",
              "profile_mem": "用户的汽车型号是特斯拉Model 3"},
-            {"user_id": "usrZH2026", "group_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
+            {"user_id": "usrZH2026", "scope_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
              "profile_mem": "用户在Twitter上有200个关注者"},
         ]
 
@@ -173,19 +173,19 @@ class TestManage:
             await write_manager.add_mem([mem_unit], None)
             mem_unit = VariableUnit(mem_type=MemoryType.VARIABLE, variable_name=item['profile_type'],
                                     variable_mem=item['profile_mem'], user_id=item['user_id'],
-                                    group_id=item['group_id'])
+                                    scope_id=item['scope_id'])
             await write_manager.add_mem([mem_unit], None)
 
         query = "用户的职业"
         res = await variable_manager.query_variable(user_id=test_all_data[0]['user_id'],
-                                                    group_id=test_all_data[0]['group_id'])
+                                                    scope_id=test_all_data[0]['scope_id'])
         res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5)
         assert len(res) == 5
         # message_by_id = message_manager.get_by_id("15")
 
-        await user_profile_manager.update(res[0]['user_id'], res[0]['group_id'], res[0]['id'],
+        await user_profile_manager.update(res[0]['user_id'], res[0]['scope_id'], res[0]['id'],
                                           "用户不是软件工程师，是系统")
-        ret = await user_profile_manager.get(res[0]['user_id'], res[0]['group_id'], res[0]['id'])
+        ret = await user_profile_manager.get(res[0]['user_id'], res[0]['scope_id'], res[0]['id'])
         assert ret['mem'] == "用户不是软件工程师，是系统"
 
         res = await user_profile_manager.list_user_profile("usrZH2025", "fitnesstrackerv3")
@@ -194,7 +194,7 @@ class TestManage:
         res = await user_profile_manager.list_user_profile("usrZH2025", "fitnesstrackerv3", "personal_information")
         assert len(res) == 2
         for rr in res:
-            await write_manager.delete_mem_by_id(rr["user_id"], rr["group_id"], rr["id"])
+            await write_manager.delete_mem_by_id(rr["user_id"], rr["scope_id"], rr["id"])
 
         res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5)
         assert len(res) == 4

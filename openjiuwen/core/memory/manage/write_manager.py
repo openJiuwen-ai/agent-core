@@ -33,41 +33,48 @@ class WriteManager:
         if has_inner_exception:
             raise ValueError(f"Memory engine add mem has exception")
 
-    async def update_mem_by_id(self, user_id: str, group_id: str, mem_id: str, memory: str):
-        mem_type = await self.__get_mem_type_from_store(user_id, group_id, mem_id)
+    async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str):
+        mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)
         if mem_type is None:
             logger.warning(f"Skipping this update due to failure in getting memory type, mem_id:{mem_id}, "
-                           f"user_id:{user_id}, group_id:{group_id}")
+                           f"user_id:{user_id}, scope_id:{scope_id}")
             return
-        await self.managers[mem_type].update(user_id, group_id, mem_id, memory)
+        await self.managers[mem_type].update(user_id, scope_id, mem_id, memory)
 
-    async def delete_mem_by_id(self, user_id: str, group_id: str, mem_id: str):
-        mem_type = await self.__get_mem_type_from_store(user_id, group_id, mem_id)
+    async def delete_mem_by_id(self, user_id: str, scope_id: str, mem_id: str):
+        mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)
         if mem_type is None:
             logger.warning(f"Skipping this deletion due to failure in getting memory type, mem_id:{mem_id}, "
-                           f"user_id:{user_id}, group_id:{group_id}")
+                           f"user_id:{user_id}, scope_id:{scope_id}")
             return
-        await self.managers[mem_type].delete(user_id, group_id, mem_id)
+        await self.managers[mem_type].delete(user_id, scope_id, mem_id)
 
-    async def delete_mem_by_user_id(self, user_id: str, group_id: str):
+    async def delete_mem_by_user_id(self, user_id: str, scope_id: str):
         for manager in self.managers:
-            await self.managers[manager].delete_by_user_id(user_id=user_id, group_id=group_id)
+            await self.managers[manager].delete_by_user_id(user_id=user_id, scope_id=scope_id)
 
-    async def __get_mem_type_from_store(self, user_id: str, group_id: str, mem_id: str) -> str | None:
+    async def delete_mem_by_scope_id(self, scope_id: str):
+        for manager in self.managers:
+            if hasattr(self.managers[manager], 'delete_by_scope_id'):
+                await self.managers[manager].delete_by_scope_id(scope_id=scope_id)
+            else:
+                logger.warning(f"Manager {manager} does not support delete_by_scope_id method")
+
+    async def __get_mem_type_from_store(self, user_id: str, scope_id: str, mem_id: str) -> str | None:
         data = None
         try:
-            data = await self.mem_store.get(user_id=user_id, group_id=group_id, mem_id=mem_id)
+            data = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
         except Exception as e:
             logger.error(f"Failed to get memory: {e}")
             return None
         if data is None:
-            logger.warning(f"Nonexistent memory, mem_id:{mem_id}, user_id:{user_id}, group_id:{group_id}")
+            logger.warning(f"Nonexistent memory, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
             return None
         if "mem_type" not in data:
-            logger.warning(f"The mem_type field doesn't exist, mem_id:{mem_id}, user_id:{user_id}, group_id:{group_id}")
+            logger.warning(f"The mem_type field doesn't exist, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
             return None
         mem_type = data['mem_type']
         if mem_type not in self.managers:
-            logger.warning(f"Unsupported mem_type:{mem_type}, mem_id:{mem_id}, user_id:{user_id}, group_id:{group_id}")
+            logger.warning(f"Unsupported mem_type:{mem_type}, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
             return None
         return mem_type

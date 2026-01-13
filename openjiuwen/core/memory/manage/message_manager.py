@@ -14,7 +14,7 @@ from openjiuwen.core.foundation.llm import BaseMessage
 
 class MessageAddRequest(BaseModel):
     user_id: Optional[str] = None
-    group_id: Optional[str] = None
+    scope_id: Optional[str] = None
     content: Optional[str] = None
     role: Optional[str] = None
     session_id: Optional[str] = None
@@ -36,8 +36,8 @@ class MessageManager:
     async def add(self, req: MessageAddRequest) -> str:
         if req.user_id is None:
             raise ValueError('Must provide user_id')
-        if req.group_id is None:
-            raise ValueError('Must provide group_id')
+        if req.scope_id is None:
+            raise ValueError('Must provide scope_id')
         if req.content is None:
             raise ValueError('Must provide content')
         message_id = str(await self.data_id.generate_next_id(user_id=req.user_id))
@@ -47,7 +47,7 @@ class MessageManager:
             'message_id': message_id,
             'user_id': req.user_id or '',
             'session_id': req.session_id or '',
-            'group_id': req.group_id or '',
+            'scope_id': req.scope_id or '',
             'role': req.role or '',
             'content': req.content,
             'timestamp': time
@@ -55,13 +55,13 @@ class MessageManager:
         await self.sql_db.write(self.message_table, data)
         return message_id
 
-    async def get(self, user_id: str = None, group_id: str = None, session_id: str = None,
+    async def get(self, user_id: str = None, scope_id: str = None, session_id: str = None,
                   message_len: int = 10) -> list[Tuple[BaseMessage, datetime]]:
         filters: Dict[str, Any] = {}
         if user_id is not None:
             filters['user_id'] = user_id
-        if group_id is not None:
-            filters['group_id'] = group_id
+        if scope_id is not None:
+            filters['scope_id'] = scope_id
         if session_id is not None:
             filters['session_id'] = session_id
         if message_len <= 0:

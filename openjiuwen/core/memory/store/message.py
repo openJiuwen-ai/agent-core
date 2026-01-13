@@ -12,7 +12,7 @@ Base = declarative_base()
 class MessageMixin:
     message_id = Column(String(64), primary_key=True)
     user_id = Column(String(64), nullable=False)
-    group_id = Column(String(64), nullable=False)
+    scope_id = Column(String(64), nullable=False)
     content = Column(String(4096), nullable=False)
     session_id = Column(String(64), nullable=True)
     role = Column(String(32), nullable=True)

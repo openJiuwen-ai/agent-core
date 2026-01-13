@@ -12,7 +12,7 @@ from openjiuwen.core.memory.generation.conflict_resolution import ConflictResolu
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.data_id_manager import DataIdManager
 from openjiuwen.core.memory.mem_unit.memory_unit import UserProfileUnit, MemoryType, ConflictType, BaseMemoryUnit
-from openjiuwen.core.memory.store.base_semantic_store import BaseSemanticStore
+from openjiuwen.core.memory.store.semantic_store import SemanticStore
 from openjiuwen.core.memory.store.user_mem_store import UserMemStore
 
 
@@ -20,7 +20,7 @@ class UserProfileSearchParams(BaseModel):
     is_implicit: bool = False
     mem_type: str = Field(default=MemoryType.USER_PROFILE.value)
     user_id: Optional[str] = None
-    group_id: Optional[str] = None
+    scope_id: Optional[str] = None
     profile_type: Optional[str] = None
     profile_mem: Optional[str] = None
     source_id: Optional[str] = None
@@ -32,7 +32,7 @@ class UserProfileManager(BaseMemoryManager):
     CHECK_CONFLICT_OLD_MEMORY_NUM = 5
 
     def __init__(self,
-                 semantic_recall_instance: BaseSemanticStore,
+                 semantic_recall_instance: SemanticStore,
                  user_mem_store: UserMemStore,
                  data_id_generator: DataIdManager,
                  crypto_key: bytes):
@@ -68,8 +68,8 @@ class UserProfileManager(BaseMemoryManager):
             raise ValueError('user profile add Must pass UserProfileUnit class.')
         if not memory.user_id:
             raise ValueError('user_profile_manager add operation must pass user_id')
-        if not memory.group_id:
-            raise ValueError('user_profile_manager add operation must pass group_id')
+        if not memory.scope_id:
+            raise ValueError('user_profile_manager add operation must pass scope_id')
         if not memory.profile_mem:
             raise ValueError('user_profile_manager add operation must pass profile_mem')
         if not memory.profile_type:
@@ -85,42 +85,42 @@ class UserProfileManager(BaseMemoryManager):
                 logger.debug(f"add conflict info: {conflict}")
                 user_profile_search_param = UserProfileSearchParams(
                     user_id=memory.user_id,
-                    group_id=memory.group_id,
+                    scope_id=memory.scope_id,
                     profile_type=memory.profile_type,
                     profile_mem=conf_mem,
                     source_id=memory.message_mem_id
                 )
                 mem_id = await self._add_user_profile_memory(user_profile_search_param)
                 await self._add_vector_user_profile_memory(user_id=memory.user_id,
-                                                           group_id=memory.group_id,
+                                                           scope_id=memory.scope_id,
                                                            memory_id=mem_id,
                                                            mem=conf_mem)
             elif conf_event == ConflictType.NONE.value:
                 logger.debug(f"none conflict info: {conflict}, new_profile: {memory.profile_mem}")
             elif conf_event == ConflictType.UPDATE.value:
                 logger.debug(f"update conflict info: {conflict}, update_profile: {memory.profile_mem}")
-                await self.update(memory.user_id, memory.group_id, conf_id, memory.profile_mem)
+                await self.update(memory.user_id, memory.scope_id, conf_id, memory.profile_mem)
             elif conf_event == ConflictType.DELETE.value:
                 logger.debug(f"delete conflict info: {conflict}, new_profile: {memory.profile_mem}")
-                await self.delete(memory.user_id, memory.group_id, conf_id)
+                await self.delete(memory.user_id, memory.scope_id, conf_id)
             else:
                 logger.debug(f"unknown conflict event: {conflict}")
 
-    async def update(self, user_id: str, group_id: str, mem_id: str, new_memory: str, **kwargs) -> bool:
+    async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs) -> bool:
         time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         encrypt_new_memory = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key, plaintext=new_memory)
         new_data = {'mem': encrypt_new_memory, 'time': time}
-        await self.mem_store.update(mem_id=mem_id, user_id=user_id, group_id=group_id, data=new_data)
-        table_name = generate_idx_name(user_id, group_id, MemoryType.USER_PROFILE.value)
+        await self.mem_store.update(mem_id=mem_id, user_id=user_id, scope_id=scope_id, data=new_data)
+        table_name = generate_idx_name(user_id, scope_id, MemoryType.USER_PROFILE.value)
         await self.semantic_recall.delete_docs([mem_id], table_name)
         # semantic memory embedding must not encrypt
-        await self.semantic_recall.add_docs([(mem_id, new_memory)], table_name)
+        await self.semantic_recall.add_docs([(mem_id, new_memory)], table_name, scope_id=scope_id)
         return True
 
-    async def search(self, user_id: str, group_id: str, query: str, top_k: int, **kwargs):
+    async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
         mem_type = kwargs.get("mem_type", MemoryType.USER_PROFILE.value)
-        mem_ids, scores = await self._recall_by_vector(query, user_id, group_id, top_k, mem_type)
-        retrieve_res = await self.mem_store.batch_get(user_id=user_id, group_id=group_id, mem_ids=mem_ids)
+        mem_ids, scores = await self._recall_by_vector(query, user_id, scope_id, top_k, mem_type)
+        retrieve_res = await self.mem_store.batch_get(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
         if retrieve_res is None:
             return None
         for item in retrieve_res:
@@ -131,8 +131,8 @@ class UserProfileManager(BaseMemoryManager):
         retrieve_res.sort(key=lambda x: scores.get(x["id"], 0), reverse=True)
         return retrieve_res
 
-    async def get(self, user_id: str, group_id: str, mem_id: str) -> dict[str, Any] | None:
-        retrieve_res = await self.mem_store.get(user_id=user_id, group_id=group_id, mem_id=mem_id)
+    async def get(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
+        retrieve_res = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
         retrieve_res["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key,
                                                                          ciphertext=retrieve_res["mem"])
         retrieve_res["context_summary"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key,
@@ -140,34 +140,52 @@ class UserProfileManager(BaseMemoryManager):
                                                                                          "context_summary"])
         return retrieve_res
 
-    async def delete(self, user_id: str, group_id: str, mem_id: str, **kwargs):
-        data = await self.mem_store.get(user_id=user_id, group_id=group_id, mem_id=mem_id)
+    async def delete(self, user_id: str, scope_id: str, mem_id: str, **kwargs):
+        data = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
         if data is None:
             logger.error(f"Delete user_profile in store failed, the mem of mem_id({mem_id}) is not exist.")
             return False
         mem_type = kwargs.get("mem_type", MemoryType.USER_PROFILE.value)
-        await self.mem_store.delete(mem_id=mem_id, user_id=user_id, group_id=group_id)
+        await self.mem_store.delete(mem_id=mem_id, user_id=user_id, scope_id=scope_id)
         await self._delete_vector_user_profile_memory(memory_id=[mem_id], user_id=user_id,
-                                                      group_id=group_id, mem_type=mem_type)
+                                                      scope_id=scope_id, mem_type=mem_type)
         return True
 
-    async def delete_by_user_id(self, user_id: str, group_id: str):
-        data = await self.mem_store.get_all(user_id=user_id, group_id=group_id, mem_type=MemoryType.USER_PROFILE.value)
+    async def delete_by_user_id(self, user_id: str, scope_id: str):
+        data = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id, mem_type=MemoryType.USER_PROFILE.value)
         if data is None:
             logger.error(f"Delete user_profile in store failed, the mem of user_id({user_id}) is not exist.")
             return False
         mem_ids = [item['id'] for item in data]
-        await self.mem_store.batch_delete(user_id=user_id, group_id=group_id, mem_ids=mem_ids)
+        await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
         await self._delete_vector_user_profile_memory(memory_id=mem_ids, user_id=user_id,
-                                                      group_id=group_id, mem_type=MemoryType.USER_PROFILE.value)
+                                                      scope_id=scope_id, mem_type=MemoryType.USER_PROFILE.value)
         return True
 
-    async def list_user_profile(self, user_id: str, group_id: str, profile_type: Optional[str] = None,
+    async def delete_by_scope_id(self, scope_id: str):
+        all_keys = await self.mem_store.kv_store.get_by_prefix("UMD/")
+        user_ids = set()
+        for key in all_keys:
+            parts = key.split("/")
+            if len(parts) >= 4 and parts[2] == scope_id and parts[3] == MemoryType.USER_PROFILE.value:
+                user_ids.add(parts[1])
+
+        for user_id in user_ids:
+            data = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id,
+                                                mem_type=MemoryType.USER_PROFILE.value)
+            if data is not None:
+                mem_ids = [item['id'] for item in data]
+                await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
+                await self._delete_vector_user_profile_memory(memory_id=mem_ids, user_id=user_id,
+                                                              scope_id=scope_id, mem_type=MemoryType.USER_PROFILE.value)
+        return True
+
+    async def list_user_profile(self, user_id: str, scope_id: str, profile_type: Optional[str] = None,
                                 mem_type=MemoryType.USER_PROFILE) -> list[dict[str, Any]]:
-        datas = await self.mem_store.get_all(user_id=user_id, group_id=group_id, mem_type=mem_type.value)
+        datas = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id, mem_type=mem_type.value)
         if not datas:
             logger.debug(f"End to get user profile, result is None, "
-                         f"params user_id:{user_id}, group_id:{group_id}, mem_type:{mem_type}")
+                         f"params user_id:{user_id}, scope_id:{scope_id}, mem_type:{mem_type}")
             return []
         new_datas = []
         if profile_type is not None:
@@ -184,22 +202,22 @@ class UserProfileManager(BaseMemoryManager):
         new_datas.sort(key=lambda x: (x['mem'], x['timestamp']), reverse=True)
         return new_datas
 
-    async def _recall_by_vector(self, query: str, user_id: str, group_id: str, top_k: int = 5,
+    async def _recall_by_vector(self, query: str, user_id: str, scope_id: str, top_k: int = 5,
                                 mem_type=MemoryType.USER_PROFILE.value) -> tuple[List[str], dict[str, float]]:
-        table_name = generate_idx_name(user_id, group_id, mem_type)
-        memory_hit_info = await self.semantic_recall.search(query, table_name, top_k)
+        table_name = generate_idx_name(user_id, scope_id, mem_type)
+        memory_hit_info = await self.semantic_recall.search(query=query, table_name=table_name, top_k=top_k)
         return parse_memory_hit_infos(memory_hit_info)
 
     async def _get_conflict_input(
             self,
             user_id: str,
-            group_id: str,
+            scope_id: str,
             new_memory: str
     ):
         historical_profiles = []
         search_results = await self.search(
             user_id=user_id,
-            group_id=group_id,
+            scope_id=scope_id,
             query=new_memory,
             top_k=UserProfileManager.CHECK_CONFLICT_OLD_MEMORY_NUM
         )
@@ -221,11 +239,11 @@ class UserProfileManager(BaseMemoryManager):
 
     async def _get_conflict_info(self,
                                  memory: UserProfileUnit,
-                                 llm: Tuple[str, Model],
+                                 llm: Tuple[str, Model] | None,
                                  ) -> list[dict[str, Any]]:
         input_memories, input_memory_ids_map = await self._get_conflict_input(
             user_id=memory.user_id,
-            group_id=memory.group_id,
+            scope_id=memory.scope_id,
             new_memory=memory.profile_mem
         )
         tmp_conflict_info = await ConflictResolution.check_conflict(old_messages=input_memories,
@@ -245,7 +263,7 @@ class UserProfileManager(BaseMemoryManager):
         data = {
             'id': mem_id,
             'user_id': req.user_id or '',
-            'group_id': req.group_id or '',
+            'scope_id': req.scope_id or '',
             'is_implicit': req.is_implicit,
             'profile_type': req.profile_type,
             'mem': profile_mem,
@@ -255,23 +273,23 @@ class UserProfileManager(BaseMemoryManager):
             'mem_type': req.mem_type,
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
         }
-        await self.mem_store.write(user_id=req.user_id, group_id=req.group_id, mem_id=mem_id, data=data)
+        await self.mem_store.write(user_id=req.user_id, scope_id=req.scope_id, mem_id=mem_id, data=data)
         return mem_id
 
     async def _add_vector_user_profile_memory(
-            self, user_id: str, group_id: str, memory_id: str,
+            self, user_id: str, scope_id: str, memory_id: str,
             mem: str, mem_type: str = MemoryType.USER_PROFILE.value):
         if self.semantic_recall:
-            table_name = generate_idx_name(user_id, group_id, mem_type)
-            await self.semantic_recall.add_docs([(memory_id, mem)], table_name)
+            table_name = generate_idx_name(user_id, scope_id, mem_type)
+            await self.semantic_recall.add_docs([(memory_id, mem)], table_name, scope_id=scope_id)
         else:
             raise ValueError('vector store must not be None')
 
     async def _delete_vector_user_profile_memory(
-            self, user_id: str, group_id: str,
+            self, user_id: str, scope_id: str,
             memory_id: List[str], mem_type: str = MemoryType.USER_PROFILE.value):
         if self.semantic_recall:
-            table_name = generate_idx_name(user_id, group_id, mem_type)
+            table_name = generate_idx_name(user_id, scope_id, mem_type)
             await self.semantic_recall.delete_docs(memory_id, table_name)
         else:
             raise ValueError('vector store must not be None')

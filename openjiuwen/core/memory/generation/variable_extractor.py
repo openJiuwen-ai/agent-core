@@ -3,7 +3,7 @@
 from typing import Any, Tuple
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.memory.config.config import MemoryScopeConfig
+from openjiuwen.core.memory.config.config import MemoryAgentConfig
 from openjiuwen.core.memory.generation.common import build_model_input
 from openjiuwen.core.memory.generation.memory_info import (
     ExtractedData,
@@ -22,7 +22,7 @@ class ComprehensionExtractor:
             messages: list[BaseMessage],
             history_summary: BaseMessage,
             base_chat_model: Tuple[str, Model],
-            config: MemoryScopeConfig
+            config: MemoryAgentConfig
     ) -> list[ExtractedData]:
         """Extract variables from the given messages using LLM.
 

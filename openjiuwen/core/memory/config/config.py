@@ -4,8 +4,8 @@
 from pydantic import BaseModel, Field, field_validator
 from openjiuwen.core.common.schema.param import Param
 from openjiuwen.core.memory.common.crypto import AES_KEY_LENGTH
-from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.retrieval.common.config import EmbeddingConfig
 
 
 class MemoryEngineConfig(BaseModel):
@@ -27,7 +27,11 @@ class MemoryEngineConfig(BaseModel):
 
 
 class MemoryScopeConfig(BaseModel):
-    mem_variables: list[Param] = Field(default_factory=list)  # memory variables config
-    enable_long_term_mem: bool = Field(default=True)  # enable long term memory or not
     model_cfg: ModelRequestConfig = Field(default=None)
     model_client_cfg: ModelClientConfig = Field(default=None)
+    embedding_cfg: EmbeddingConfig = Field(default=None)
+
+
+class MemoryAgentConfig(BaseModel):
+    mem_variables: list[Param] = Field(default_factory=list)  # memory variables config
+    enable_long_term_mem: bool = Field(default=True)  # enable long term memory or not

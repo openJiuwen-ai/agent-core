@@ -26,27 +26,27 @@ class BaseMemoryManager(ABC):
         pass
 
     @abstractmethod
-    async def update(self, user_id: str, group_id: str, mem_id: str, new_memory: str, **kwargs):
+    async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         """update memory by its id."""
         pass
 
     @abstractmethod
-    async def delete(self, user_id: str, group_id: str, mem_id: str, **kwargs):
+    async def delete(self, user_id: str, scope_id: str, mem_id: str, **kwargs):
         """delete memory by its id."""
         pass
 
     @abstractmethod
-    async def delete_by_user_id(self, user_id: str, group_id: str):
+    async def delete_by_user_id(self, user_id: str, scope_id: str):
         """delete memory by user id and app id."""
         pass
 
     @abstractmethod
-    async def get(self, user_id: str, group_id: str, mem_id: str) -> dict[str, Any] | None:
+    async def get(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
         """get memory by its id."""
         pass
 
     @abstractmethod
-    async def search(self, user_id: str, group_id: str, query: str, top_k: int, **kwargs):
+    async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
         """query memory, return top k results"""
         pass
 
