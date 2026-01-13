@@ -18,7 +18,7 @@ from openjiuwen.core.memory.embed_models import APIEmbedModel
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.memory.store.impl.dbm_kv_store import DbmKVStore
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
-from openjiuwen.core.memory.store.impl.milvus_semantic_store import MilvusSemanticStore
+from openjiuwen.core.memory.store.impl.milvus_vector_store import MilvusVectorStore
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.tool import LocalFunction
