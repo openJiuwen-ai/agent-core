@@ -3,7 +3,7 @@
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import SystemMessage, HumanMessage, BaseMessage
+from openjiuwen.core.foundation.llm import SystemMessage, UserMessage, BaseMessage
 
 PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE = PromptTemplate(content=[SystemMessage(content="""
 以下是markdown的元模板：
@@ -35,7 +35,7 @@ PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE = PromptTemplate(content=[SystemMessag
 4. 不对占位符本身进行增加、删除或修改，占位符以双花括弧的形式展现。
 """)])
 
-PROMPT_BUILD_GENERAL_META_USER_TEMPLATE = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_BUILD_GENERAL_META_USER_TEMPLATE = PromptTemplate(content=[UserMessage(content="""
 用户的具体要求如下：
 {{instruction}}
 """)])
@@ -73,14 +73,14 @@ PROMPT_BUILD_PLAN_META_SYSTEM_TEMPLATE = PromptTemplate(content=[SystemMessage(c
 4. 不对占位符本身进行增加、删除或修改，占位符以双花括弧的形式展现。
 """)])
 
-PROMPT_BUILD_PLAN_META_USER_TEMPLATE = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_BUILD_PLAN_META_USER_TEMPLATE = PromptTemplate(content=[UserMessage(content="""
 用户的要求：{{instruction}}
 
 可以调用的工具：
 {{tools}}
 """)])
 
-PROMPT_FEEDBACK_INTENT_TEMPLATE = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_FEEDBACK_INTENT_TEMPLATE = PromptTemplate(content=[UserMessage(content="""
 ## 人设
 你是一个高效且精准的Prompt优化助手。用户将提供一个原始Prompt和用户的反馈信息。根据用户的反馈，判断该反馈是否有价值，能否进入后续的Prompt修改流程，并优化反馈信息的表达，使其更加清晰。同时，根据用户反馈，联想可能的其他优化方向，并提供相关的建议。
 
@@ -121,7 +121,7 @@ PROMPT_FEEDBACK_INTENT_TEMPLATE = PromptTemplate(content=[HumanMessage(content="
 - "optimization_directions"：根据用户反馈信息联想其他可能的优化方向，并为用户提供有价值的优化反馈信息。例如，提示用户可以思考其他细节或目标，进一步提升Prompt质量。
 """)])
 
-PROMPT_FEEDBACK_GENERAL_TEMPLATE = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_FEEDBACK_GENERAL_TEMPLATE = PromptTemplate(content=[UserMessage(content="""
 ## 人设
 你是一个资深的Prompt工程师，擅长对Prompt进行修改、优化和润色。
 
@@ -141,7 +141,7 @@ PROMPT_FEEDBACK_GENERAL_TEMPLATE = PromptTemplate(content=[HumanMessage(content=
 请直接返回修改后的Prompt，不要输出任何多余内容。
 """)])
 
-PROMPT_FEEDBACK_SELECT_TEMPLATE = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_FEEDBACK_SELECT_TEMPLATE = PromptTemplate(content=[UserMessage(content="""
 ## 人设
 你是一个高效且精准的Prompt优化助手。用户将提供原始的prompt、以及原始prompt中用户需要修改的部分片段，并附上用户的反馈信息。根据用户的反馈，修改该内容，并反馈优化后的完整内容结果。
 
@@ -179,7 +179,7 @@ PROMPT_FEEDBACK_SELECT_TEMPLATE = PromptTemplate(content=[HumanMessage(content="
 4.不要输出上面的`##人设`以及`##注意事项`。
 """)])
 
-PROMPT_FEEDBACK_INSERT_TEMPLATE = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_FEEDBACK_INSERT_TEMPLATE = PromptTemplate(content=[UserMessage(content="""
 ## 角色
 你是一个严格遵守指令的Prompt内容生成器，专门负责根据用户反馈生成需要插入到指定位置的独立内容片段。
 
@@ -226,7 +226,7 @@ PROMPT_FEEDBACK_INSERT_TEMPLATE = PromptTemplate(content=[HumanMessage(content="
 现在请严格按照要求，只生成需要插入到标记位置的纯内容
 """)])
 
-PROMPT_BAD_CASE_ANALYZE_TEMPLATE = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_BAD_CASE_ANALYZE_TEMPLATE = PromptTemplate(content=[UserMessage(content="""
 ## 人设
 你是一名专业的提示词工程师。你的任务是基于提供的反例分析一个提示词的失败模式，并生成可执行的改进反馈。
 
@@ -260,7 +260,7 @@ PROMPT_BAD_CASE_ANALYZE_TEMPLATE = PromptTemplate(content=[HumanMessage(content=
 4. **创建反馈的简洁总结**：在分析所有反例后，提供关键问题和建议改进的总结。将总结包含在 `<summary>` 和 `</summary>` 标签内。总结应将各个反馈综合成改进提示词的总体建议。重点关注方法论，而不是具体细节，并尽量保持简洁。
 """)])
 
-PROMPT_BAD_CASE_OPTIMIZE_TEMPLATE = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_BAD_CASE_OPTIMIZE_TEMPLATE = PromptTemplate(content=[UserMessage(content="""
 ## 人设
 你是一名专业的提示词工程师。你的任务是根据在特定案例应用后收到的反馈，改进大型语言模型的提示词。
 

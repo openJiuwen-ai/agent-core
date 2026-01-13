@@ -6,7 +6,7 @@ from datetime import datetime
 from openjiuwen.core.single_agent import WorkflowSchema
 from openjiuwen.core.application.agents_for_studio.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
 from openjiuwen.core.workflow import WorkflowComponent, WorkflowCard
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import QuestionerComponent, QuestionerConfig, FieldInfo
 from openjiuwen.core.workflow import Start
@@ -16,7 +16,6 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session import Session
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.tool import RestfulApi, RestfulApiCard
 from openjiuwen.core.workflow import Workflow
 

@@ -3,9 +3,9 @@ import pytest
 from openjiuwen.core.foundation.llm import (
     MarkdownOutputParser
 )
-from openjiuwen.core.foundation.llm import AIMessage
-from openjiuwen.core.foundation.llm import AIMessageChunk
-from openjiuwen.core.foundation.llm.output_parser.markdown_output_parser import MarkdownContent, MarkdownElementType
+from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.output_parsers.markdown_output_parser import MarkdownContent, MarkdownElementType
 
 pytestmark = pytest.mark.asyncio
 
@@ -55,8 +55,8 @@ And a link: [OpenAI](https://openai.com)
         self.assertEqual(result.links[0]["url"], "https://openai.com")
 
     async def test_parse_aimessage_markdown(self):
-        """测试解析AIMessage对象中的Markdown"""
-        ai_message = AIMessage(content="""## Analysis Results
+        """测试解析AssistantMessage对象中的Markdown"""
+        ai_message = AssistantMessage(content="""## Analysis Results
 
 The data shows:
 - Item 1: Important finding
@@ -253,12 +253,12 @@ Here are some images:
         self.assertEqual(len(final_result.links), 1)
 
     async def test_stream_parse_aimessage_chunks(self):
-        """测试流式解析AIMessageChunk"""
+        """测试流式解析AssistantMessageChunk"""
         chunks = [
-            AIMessageChunk(content="# Report\n\n"),
-            AIMessageChunk(content="## Summary\n"),
-            AIMessageChunk(content="The analysis shows:\n"),
-            AIMessageChunk(content="- Result 1\n- Result 2\n")
+            AssistantMessageChunk(content="# Report\n\n"),
+            AssistantMessageChunk(content="## Summary\n"),
+            AssistantMessageChunk(content="The analysis shows:\n"),
+            AssistantMessageChunk(content="- Result 1\n- Result 2\n")
         ]
 
         parsed_objects = []

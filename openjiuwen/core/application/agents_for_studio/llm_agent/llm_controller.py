@@ -20,13 +20,12 @@ from openjiuwen.core.common.security.json_utils import JsonUtils
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.common.utils.hash_util import generate_key
-from openjiuwen.core.foundation.llm import ModelFactory
 from openjiuwen.core.common.constants import constant as const
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.workflow import WorkflowExecutionState, WorkflowOutput
-from openjiuwen.core.foundation.llm import AIMessage, ToolMessage
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, AssistantMessage, ToolMessage, Model
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.foundation.tool import ToolCall
 
@@ -40,7 +39,7 @@ class TaskInterruptionState:
     """
     task: Task
     session: Session
-    ai_message: AIMessage
+    ai_message: AssistantMessage
     remaining_tasks: list[Task]
     interaction_data: Optional[list] = None
     current_iteration: Optional[int] = None
@@ -299,7 +298,7 @@ class LLMController(BaseController):
             task: Task,
             execution_result: TaskResult,
             session: Session
-    ) -> tuple[Optional[Dict], list[Task], Optional[AIMessage]]:
+    ) -> tuple[Optional[Dict], list[Task], Optional[AssistantMessage]]:
         """Handle task completion - generate next plan, check if done
 
         Args:
@@ -401,7 +400,7 @@ class LLMController(BaseController):
 
     async def _execute_react_loop(self, tasks: list[Task], session: Session,
                                   initial_iteration: int = 1,
-                                  ai_message: Optional[AIMessage] = None) -> Optional[Dict]:
+                                  ai_message: Optional[AssistantMessage] = None) -> Optional[Dict]:
         """Execute ReAct loop with explicit iteration - NO RECURSION
 
         Main loop:
@@ -694,7 +693,7 @@ class LLMController(BaseController):
             llm_inputs: Any,
             tools: List[Any],
             session: Session
-    ) -> AIMessage:
+    ) -> AssistantMessage:
         """ Stream LLM invocation and output chunks in real-time
 
         Args:
@@ -714,7 +713,7 @@ class LLMController(BaseController):
         stream_index = 0
 
         try:
-            async for chunk in model.astream(model_name, llm_inputs, tools):
+            async for chunk in model.stream(llm_inputs, tools=tools, model=model_name):
                 # Accumulate chunks using AIMessageChunk's __add__ method
                 if accumulated_chunk is None:
                     accumulated_chunk = chunk
@@ -722,12 +721,12 @@ class LLMController(BaseController):
                     accumulated_chunk = accumulated_chunk + chunk
 
                 # Stream output for reasoning content
-                if chunk.reason_content:
+                if chunk.reasoning_content:
                     stream_output = OutputSchema(
                         type="llm_reasoning",
                         index=stream_index,
                         payload={
-                            "output": chunk.reason_content,
+                            "output": chunk.reasoning_content,
                             "result_type": "answer"
                         }
                     )
@@ -753,14 +752,14 @@ class LLMController(BaseController):
                                                "LLM returned empty response")
 
             # Convert accumulated chunk to AIMessage
-            return AIMessage(
+            return AssistantMessage(
                 role=accumulated_chunk.role or "assistant",
                 content=accumulated_chunk.content or "",
                 tool_calls=accumulated_chunk.tool_calls or [],
                 usage_metadata=accumulated_chunk.usage_metadata,
-                raw_content=accumulated_chunk.raw_content,
-                reason_content=accumulated_chunk.reason_content,
-                name=accumulated_chunk.name
+                finish_reason=accumulated_chunk.finish_reason,
+                parser_content=accumulated_chunk.parser_content,
+                reasoning_content=accumulated_chunk.reasoning_content,
             )
 
         except Exception as e:
@@ -778,15 +777,21 @@ class LLMController(BaseController):
         model = session.get_model(model_id=model_id)
 
         if model is None:
-            model = ModelFactory().get_model(
-                model_provider=self.config.model.model_provider,
-                api_base=self.config.model.model_info.api_base,
+            model_client_config = ModelClientConfig(
+                client_id=model_id,
+                client_provider=self.config.model.model_provider,
                 api_key=self.config.model.model_info.api_key,
+                api_base=self.config.model.model_info.api_base,
                 timeout=self.config.model.model_info.timeout,
+                verify_ssl=False,
+                ssl_cert=None,
+            )
+            model_request_config = ModelRequestConfig(
+                model=self.config.model.model_info.model_name,
                 temperature=self.config.model.model_info.temperature,
                 top_p=self.config.model.model_info.top_p,
-                **self.config.model.model_info.model_extra
             )
+            model = Model(model_client_config=model_client_config, model_config=model_request_config)
             session.add_model(model_id=model_id, model=model)
 
         return session.get_model(model_id=model_id)
@@ -874,7 +879,7 @@ class LLMController(BaseController):
             task_info = interrupted_tasks[state_key]
 
             # Restore complete information
-            ai_message = AIMessage.model_validate(task_info["ai_message"])
+            ai_message = AssistantMessage.model_validate(task_info["ai_message"])
             remaining_tasks = [Task.model_validate(t) for t in task_info["remaining_tasks"]]
             saved_iteration = task_info["iteration"]
             component_ids = task_info.get("component_ids", [])
@@ -1384,7 +1389,7 @@ class LLMController(BaseController):
                     ]
 
                 # Restore complete information
-                ai_message = AIMessage.model_validate(ai_message_data)
+                ai_message = AssistantMessage.model_validate(ai_message_data)
                 remaining_tasks = [Task.model_validate(t) for t in task_info["remaining_tasks"]]
                 saved_iteration = task_info["iteration"]
 

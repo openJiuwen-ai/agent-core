@@ -6,4 +6,4 @@ from openjiuwen.core.single_agent import AgentConfig, LLMCallConfig
 
 
 class ChatAgentConfig(AgentConfig):
-    model: LLMCallConfig = Field(default=LLMCallConfig())
+    model: LLMCallConfig = Field(...)

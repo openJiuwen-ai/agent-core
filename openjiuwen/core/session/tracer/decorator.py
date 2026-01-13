@@ -27,17 +27,11 @@ def decorate_model_with_trace(model, agent_session):
         model_name = type(model).__name__
     instance_info = {"class_name": model_name, "type": "llm"}
     wrapped_model.invoke = MethodType(
-        trace(wrapped_model.invoke, agent_session, InvokeType.LLM, instance_info,
-              index=2, inputs_field_name="messages"), wrapped_model)
-    wrapped_model.ainvoke = MethodType(
-        async_trace(wrapped_model.ainvoke, agent_session, InvokeType.LLM, instance_info,
+        async_trace(wrapped_model.invoke, agent_session, InvokeType.LLM, instance_info,
                     index=2, inputs_field_name="messages"), wrapped_model)
     wrapped_model.stream = MethodType(
-        trace_stream(wrapped_model.stream, agent_session, InvokeType.LLM, instance_info,
-                     index=2, inputs_field_name="messages"), wrapped_model)
-    wrapped_model.astream = MethodType(
-        async_trace_stream(wrapped_model.astream, agent_session, InvokeType.LLM, instance_info, index=2,
-                           inputs_field_name="messages"), wrapped_model)
+        async_trace_stream(wrapped_model.stream, agent_session, InvokeType.LLM, instance_info,
+                           index=2, inputs_field_name="messages"), wrapped_model)
     return wrapped_model
 
 

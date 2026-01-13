@@ -6,9 +6,9 @@ from typing import Any, Iterator, Optional, Union, Dict, List
 from dataclasses import dataclass
 
 from openjiuwen.core.common.security.user_config import UserConfig
-from openjiuwen.core.foundation.llm.output_parser.base import BaseOutputParser
-from openjiuwen.core.foundation.llm.messages import AIMessage
-from openjiuwen.core.foundation.llm.schema.messages_chunk import AIMessageChunk
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.common.logging import logger
 
 
@@ -65,9 +65,9 @@ class MarkdownContent:
 
 class MarkdownOutputParser(BaseOutputParser):
 
-    async def parse(self, llm_output: Union[str, AIMessage]) -> Optional[MarkdownContent]:
+    async def parse(self, llm_output: Union[str, AssistantMessage]) -> Optional[MarkdownContent]:
 
-        if isinstance(llm_output, AIMessage):
+        if isinstance(llm_output, AssistantMessage):
             text = llm_output.content
         elif isinstance(llm_output, str):
             text = llm_output
@@ -97,14 +97,14 @@ class MarkdownOutputParser(BaseOutputParser):
                 logger.error(f"An unexpected error occurred during Markdown parsing: {e}\nContent: {text}")
             return None
 
-    async def stream_parse(self, streaming_inputs: Iterator[Union[str, AIMessageChunk]]) -> Iterator[
+    async def stream_parse(self, streaming_inputs: Iterator[Union[str, AssistantMessageChunk]]) -> Iterator[
         Optional[MarkdownContent]]:
         buffer = ""
         last_parsed_length = 0
 
         for chunk in streaming_inputs:
 
-            if isinstance(chunk, AIMessageChunk):
+            if isinstance(chunk, AssistantMessageChunk):
                 if chunk.content:
                     buffer += chunk.content
             elif isinstance(chunk, str):

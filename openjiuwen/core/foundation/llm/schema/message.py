@@ -4,7 +4,7 @@
 from typing import Union, List, Optional, Any
 from pydantic import BaseModel, model_validator
 
-from openjiuwen.core.foundation.llm1.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 
 class UsageMetadata(BaseModel):
@@ -25,6 +25,7 @@ class UsageMetadata(BaseModel):
 class BaseMessage(BaseModel):
     role: str
     content: Union[str, List[Union[str, dict]]] = ""
+    name: Optional[str] = None
 
 
 class AssistantMessage(BaseMessage):
@@ -70,8 +71,6 @@ class AssistantMessage(BaseMessage):
             "role": self.role,
             "content": self.content,
         }
-        if self.name:
-            result["name"] = self.name
         if self.tool_calls:
             tool_calls = []
             for call in self.tool_calls:

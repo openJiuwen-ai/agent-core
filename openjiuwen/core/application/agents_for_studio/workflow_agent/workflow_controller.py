@@ -25,7 +25,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import InteractionOutput
 from openjiuwen.core.session import Session
 from openjiuwen.core.session.stream import CustomSchema, OutputSchema
-from openjiuwen.core.foundation.llm import AIMessage
+from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
 
 
@@ -323,7 +323,8 @@ class WorkflowController(IntentDetectionController):
                                 # Keep interaction interrupt output content
                                 content_parts.append(str(chunk.payload.value) if chunk.payload.value else "")
                     workflow_content = "".join(content_parts)
-                    MessageUtils.add_ai_message(AIMessage(content=workflow_content), self._context_engine, session)
+                    MessageUtils.add_ai_message(AssistantMessage(content=workflow_content),
+                                                self._context_engine, session)
 
                 # Construct WorkflowOutput
                 if has_interaction:

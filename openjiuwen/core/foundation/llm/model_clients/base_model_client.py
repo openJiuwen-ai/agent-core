@@ -9,10 +9,10 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm1.schema.config import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.foundation.llm1.schema.message import BaseMessage, AssistantMessage, ToolMessage
-from openjiuwen.core.foundation.llm1.schema.message_chunk import AssistantMessageChunk
-from openjiuwen.core.foundation.llm1.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, ToolMessage
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 
 
 class BaseModelClient(ABC):

@@ -1,14 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import re
-from typing import Optional, List, Generator
+from typing import Optional, List, AsyncGenerator
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import AIMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, AssistantMessage
 
 from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
 from openjiuwen.dev_tools.tune.base import EvaluatedCase
@@ -18,33 +17,33 @@ MAX_CASES_LIMIT = 10
 
 
 class BadCasePromptBuilder(BasePromptBuilder):
-    def __init__(self, model_config: ModelConfig):
-        super().__init__(model_config)
+    def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
+        super().__init__(model_config, model_client_config)
 
-    def build(self,
-              prompt: str | PromptTemplate,
-              cases: List[EvaluatedCase],
-              ) -> Optional[str]:
+    async def build(self,
+                    prompt: str | PromptTemplate,
+                    cases: List[EvaluatedCase],
+                    ) -> Optional[str]:
         prompt = TEMPLATE.get_string_prompt(prompt)
-        messages = self._format_bad_case_template(prompt, cases)
-        response = self._model.invoke(self._model_name, messages)
+        messages = await self._format_bad_case_template(prompt, cases)
+        response = await self._model.invoke(messages)
         return response.content
 
-    def stream_build(self,
-                     prompt: str | PromptTemplate,
-                     cases: List[EvaluatedCase],
-                     ) -> Generator:
+    async def stream_build(self,
+                           prompt: str | PromptTemplate,
+                           cases: List[EvaluatedCase],
+                           ) -> AsyncGenerator:
         prompt = TEMPLATE.get_string_prompt(prompt)
-        messages = self._format_bad_case_template(prompt, cases)
-        chunks = self._model.stream(self._model_name, messages)
+        messages = await self._format_bad_case_template(prompt, cases)
+        chunks = await self._model.stream(messages)
         for chunk in chunks:
             yield chunk.content
 
-    def _format_bad_case_template(self,
-                                 prompt: str,
-                                 cases: List[EvaluatedCase],
-                                 ) -> str:
-        feedback = self._get_feedback_from_bad_case(prompt, cases)
+    async def _format_bad_case_template(self,
+                                        prompt: str,
+                                        cases: List[EvaluatedCase],
+                                        ) -> str:
+        feedback = await self._get_feedback_from_bad_case(prompt, cases)
         bad_case_optimize_template = TEMPLATE.PROMPT_BAD_CASE_OPTIMIZE_TEMPLATE
         messages = bad_case_optimize_template.format(
             dict(original_prompt=prompt,
@@ -53,7 +52,7 @@ class BadCasePromptBuilder(BasePromptBuilder):
         ).to_messages()
         return messages
 
-    def _get_feedback_from_bad_case(self, prompt: str, cases: List[EvaluatedCase]) -> Optional[str]:
+    async def _get_feedback_from_bad_case(self, prompt: str, cases: List[EvaluatedCase]) -> Optional[str]:
         self._validate_input(prompt, cases)
         bad_case_string = self._build_bad_case_string(cases)
         analyze_template = TEMPLATE.PROMPT_BAD_CASE_ANALYZE_TEMPLATE
@@ -62,11 +61,11 @@ class BadCasePromptBuilder(BasePromptBuilder):
                  bad_cases=bad_case_string
                  )
         ).to_messages()
-        response = self._model.invoke(self._model_name, messages)
+        response = await self._model.invoke(messages)
         feedback_summary = self._parse_feedback_summary(response)
         return feedback_summary
 
-    def _parse_feedback_summary(self, response: AIMessage) -> Optional[str]:
+    def _parse_feedback_summary(self, response: AssistantMessage) -> Optional[str]:
         intent = re.findall(r"<intent>((?:(?!<intent>).)*?)</intent>", response.content, re.DOTALL)
         intent = [intent_text.strip() for intent_text in intent]
         if "false" in intent:

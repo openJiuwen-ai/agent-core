@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -15,13 +16,12 @@ from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
-from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable, Input, Output
 from openjiuwen.core.session import Session
-from openjiuwen.core.foundation.llm import BaseModelClient, BaseModelInfo
-from openjiuwen.core.foundation.llm import BaseMessage, HumanMessage, SystemMessage
-from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import (
+    BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
+)
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
 START_STR = "start"
@@ -64,7 +64,7 @@ QUESTIONER_USER_TEMPLATE = """\
 def questioner_default_template():
     return [
         SystemMessage(content=QUESTIONER_SYSTEM_TEMPLATE),
-        HumanMessage(content=QUESTIONER_USER_TEMPLATE),
+        UserMessage(content=QUESTIONER_USER_TEMPLATE),
     ]
 
 
@@ -94,7 +94,7 @@ class FieldInfo(BaseModel):
 
 @dataclass
 class QuestionerConfig(ComponentConfig):
-    model: Optional[ModelConfig] = field(default=None)
+    model: 'ModelConfig' = None
     response_type: str = field(default=ResponseType.ReplyDirectly.value)
     question_content: str = field(default="")
     extract_fields_from_response: bool = field(default=True)
@@ -274,7 +274,7 @@ class QuestionerDirectReplyHandler:
         self._config = config
         return self
 
-    def model(self, model: BaseModelClient):
+    def model(self, model: Model):
         self._model = model
         return self
 
@@ -291,14 +291,14 @@ class QuestionerDirectReplyHandler:
 
     async def handle(self, inputs: Input, session: Session, context):
         if self._state.status == ExecutionStatus.START:
-            return self._handle_start_state(inputs, session, context)
+            return await self._handle_start_state(inputs, session, context)
         if self._state.status == ExecutionStatus.USER_INTERACT:
             return await self._handle_user_interact_state(inputs, session, context)
         if self._state.status == ExecutionStatus.END:
             return self._handle_end_state(inputs, session, context)
         return dict()
 
-    def _handle_start_state(self, inputs, session, context):
+    async def _handle_start_state(self, inputs, session, context):
         questioner_input = QuestionerUtils.validate_inputs(inputs)
         output = OutputCache()
         self._query = questioner_input.query or ""
@@ -311,7 +311,7 @@ class QuestionerDirectReplyHandler:
             return QuestionerUtils.format_questioner_output(output)
 
         if self._need_extract_fields():
-            is_continue_ask = self._initial_extract_from_chat_history(chat_history, output)
+            is_continue_ask = await self._initial_extract_from_chat_history(chat_history, output)
             event = QuestionerEvent.USER_INTERACT_EVENT if is_continue_ask else QuestionerEvent.END_EVENT
             if is_continue_ask:
                 self._update_questioner_states_question(output.question)
@@ -333,7 +333,7 @@ class QuestionerDirectReplyHandler:
             return QuestionerUtils.format_questioner_output(output)
 
         if self._need_extract_fields():
-            is_continue_ask = self._repeat_extract_from_chat_history(chat_history, output)
+            is_continue_ask = await self._repeat_extract_from_chat_history(chat_history, output)
             event = QuestionerEvent.USER_INTERACT_EVENT if is_continue_ask else QuestionerEvent.END_EVENT
             if is_continue_ask:
                 self._update_questioner_states_question(output.question)
@@ -355,16 +355,16 @@ class QuestionerDirectReplyHandler:
         return (self._config.extract_fields_from_response and
                 len(self._config.field_names) > len(self._state.extracted_key_fields))
 
-    def _initial_extract_from_chat_history(self, chat_history, output: OutputCache) -> bool:
-        self._invoke_llm_and_parse_result(chat_history, output)
+    async def _initial_extract_from_chat_history(self, chat_history, output: OutputCache) -> bool:
+        await self._invoke_llm_and_parse_result(chat_history, output)
 
         self._update_param_default_value(output)
         self._update_state_of_key_fields(output.key_fields)
 
         return self._check_if_continue_ask(output)
 
-    def _repeat_extract_from_chat_history(self, chat_history, output: OutputCache) -> bool:
-        self._invoke_llm_and_parse_result(chat_history, output)
+    async def _repeat_extract_from_chat_history(self, chat_history, output: OutputCache) -> bool:
+        await self._invoke_llm_and_parse_result(chat_history, output)
 
         self._update_param_default_value(output)
         self._update_state_of_key_fields(output.key_fields)
@@ -383,7 +383,7 @@ class QuestionerDirectReplyHandler:
             content = self._query
             if isinstance(content, dict):
                 content = [content]  # wrap dict in list
-            result.append(HumanMessage(role="user", content=content))
+            result.append(UserMessage(role="user", content=content))
         return result
 
     def _build_llm_inputs(self, chat_history: list = None) -> List[BaseMessage]:
@@ -405,7 +405,7 @@ class QuestionerDirectReplyHandler:
                     extra_info=self._config.extra_prompt_for_fields_extraction, example=self._config.example_content,
                     dialogue_history=dialogue_history_str)
 
-    def _invoke_llm_for_extraction(self, llm_inputs: List[BaseMessage]):
+    async def _invoke_llm_for_extraction(self, llm_inputs: List[BaseMessage]):
         response = ""
 
         if UserConfig.is_sensitive():
@@ -414,8 +414,8 @@ class QuestionerDirectReplyHandler:
             logger.info(f"Invoke llm for extraction, inputs = {llm_inputs}")
 
         try:
-            response = self._model.invoke(
-                model_name=self._config.model.model_info.model_name, messages=llm_inputs).content
+            response = (await self._model.invoke(
+                model=self._config.model.model_info.model_name, messages=llm_inputs)).content
         except Exception as e:
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_ERROR,
                                            "Failed to invoke llm for extraction", e)
@@ -483,9 +483,9 @@ class QuestionerDirectReplyHandler:
             output.key_fields.update(self._state.extracted_key_fields)
         return is_continue_ask
 
-    def _invoke_llm_and_parse_result(self, chat_history, output):
+    async def _invoke_llm_and_parse_result(self, chat_history, output):
         llm_inputs = self._build_llm_inputs(chat_history=chat_history)
-        extracted_key_fields = self._invoke_llm_for_extraction(llm_inputs)
+        extracted_key_fields = await self._invoke_llm_for_extraction(llm_inputs)
         for k, v in extracted_key_fields.items():
             if v:
                 output.key_fields.update({k: v})
@@ -575,14 +575,29 @@ class QuestionerExecutable(ComponentExecutable):
 
         return invoke_result
 
-    def _create_llm_instance(self) -> BaseModelClient:
-        if isinstance(self._config.model.model_info, BaseModelInfo):
-            kwargs = self._config.model.model_info.model_dump(exclude={'model_name', 'streaming'})
-            return ModelFactory().get_model(model_provider=self._config.model.model_provider, **kwargs)
-        else:
-            return ModelFactory().get_model(model_provider=self._config.model.model_provider,
-                                            api_base=self._config.model.model_info.api_base,
-                                            api_key=self._config.model.model_info.api_key)
+    def _create_llm_instance(self) -> Model:
+        model_info = self._config.model.model_info
+        provider = self._config.model.model_provider
+
+        model_client_config = ModelClientConfig(
+            client_provider=provider,
+            api_key=model_info.api_key,
+            api_base=model_info.api_base,
+            timeout=getattr(model_info, 'timeout', 60),
+            max_retries=3,
+            verify_ssl=os.getenv("LLM_SSL_VERIFY", "").strip().lower() == "true",
+            ssl_cert=os.getenv("LLM_SSL_CERT")
+        )
+
+        llm_model_config = ModelRequestConfig(
+            model_name=model_info.model_name if hasattr(model_info, 'model_name') else "",
+            temperature=getattr(model_info, 'temperature', 0.95),
+            top_p=getattr(model_info, 'top_p', 0.1),
+            max_tokens=getattr(model_info, 'max_tokens', None),
+            stop=getattr(model_info, 'stop', None)
+        )
+
+        return Model(model_client_config=model_client_config, model_config=llm_model_config)
 
     def _init_prompt(self) -> PromptTemplate:
         return PromptTemplate(content=self._default_config.prompt_template)

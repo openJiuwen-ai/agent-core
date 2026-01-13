@@ -45,14 +45,12 @@ from openjiuwen.core.application.agents_for_studio.llm_agent import (
     create_llm_agent,
     LLMAgent,
 )
-from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.workflow import generate_workflow_key
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.foundation.llm import BaseModelInfo, AIMessage, UsageMetadata
-from openjiuwen.core.foundation.tool import ToolCall
+from openjiuwen.core.foundation.llm import BaseModelInfo, AssistantMessage, UsageMetadata, ModelConfig, ToolCall
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import (
     QuestionerComponent,
@@ -86,7 +84,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
     def _create_model():
         """创建模型配置"""
         return ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 model="gpt-3.5-turbo",
                 api_base="https://api.openai.com",
@@ -129,7 +127,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
         # 注意：恢复 workflow 时直接使用 InteractiveInput，不会再次调用 ReAct Agent 的 LLM
         all_llm_responses = [
             # 第1次调用：ReAct Agent 决定调用 workflow
-            AIMessage(
+            AssistantMessage(
                 content='',
                 tool_calls=[
                     ToolCall(
@@ -147,7 +145,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
                 )
             ),
             # 第2次调用：Questioner 组件提取字段，location为null，触发交互
-            AIMessage(
+            AssistantMessage(
                 content='{\n  "location": null,\n  "time": "today"\n}',
                 usage_metadata=UsageMetadata(
                     model_name='gpt-3.5-turbo',
@@ -156,7 +154,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
             ),
             # 第3次调用：Questioner 组件恢复时，从"上海"中提取地点
             # （恢复 workflow 时直接使用 InteractiveInput，跳过 ReAct Agent 的 LLM 调用）
-            AIMessage(
+            AssistantMessage(
                 content='{\n  "location": "上海",\n  "time": "today"\n}',
                 usage_metadata=UsageMetadata(
                     model_name='gpt-3.5-turbo',
@@ -164,7 +162,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
                 )
             ),
             # 第4次调用：ReAct Agent workflow 完成后，返回最终答案
-            AIMessage(
+            AssistantMessage(
                 content='我已经为您查询了上海的天气信息。根据返回的结果：上海 | today，这表明查询已成功完成。如果需要更详细的天气数据，请告诉我。',
                 usage_metadata=UsageMetadata(
                     model_name='gpt-3.5-turbo',
@@ -177,8 +175,11 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
         
         # ==================== 使用 Patch Mock LLM（在创建组件之前开始 patch）====================
         with patch(
-                'openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model',
-                return_value=mock_llm
+                'openjiuwen.core.foundation.llm.model.Model.invoke',
+                side_effect=mock_llm.invoke
+        ), patch(
+                'openjiuwen.core.foundation.llm.model.Model.stream',
+                side_effect=mock_llm.stream
         ), patch(
             'openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config',
             return_value=MagicMock()
@@ -289,7 +290,8 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(len(result), 0, "交互请求列表不应为空")
             self.assertEqual(result[0].type, '__interaction__', "应该返回交互类型")
             self.assertEqual(result[0].payload.id, 'questioner', "交互请求应该来自 questioner 组件")
-            print(f"✅ 第一次调用校验通过：返回交互请求，提示：{result[0].payload.value}")
+            print(f"[PASS] di yi ci diao yong jiao yan tong guo: fan hui jiao hu qing qiu, ti shi:"
+                  f" {result[0].payload.value}")
             
             # ==================== 第二次调用：恢复并完成 ====================
             if isinstance(result, List) and isinstance(result[0], OutputSchema) and result[0].type == '__interaction__':
@@ -301,17 +303,17 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
                     {"conversation_id": "12345", "query": interactive_input}
                 )
                 
-                print(f"LLMAgent 第二次输出结果：{result}")
+                print(f"LLMAgent di er ci shu chu jie guo: {result}")
                 
                 # 验证第二次调用返回最终答案
                 self.assertIsInstance(result, dict, "第二次调用应该返回字典")
                 self.assertEqual(result['result_type'], 'answer', "应该返回 answer 类型")
                 self.assertIn('output', result, "结果应该包含 output 字段")
-                print(f"✅ 第二次调用校验通过：工作流完成，返回最终答案：{result['output']}")
+                print(f"[PASS] di er ci diao yong jiao yan tong guo: gong zuo liu wan cheng")
                 
                 # 验证答案内容
                 self.assertIn('上海', result['output'], "答案应该包含地点信息")
-                print(f"✅ 答案内容校验通过")
+                print(f"[PASS] da an nei rong jiao yan tong guo")
 
 
 if __name__ == "__main__":

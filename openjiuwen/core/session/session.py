@@ -9,7 +9,7 @@ from openjiuwen.core.session.state import State
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.stream.writer import StreamWriter
-from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -128,19 +128,19 @@ class Session(ABC):
         pass
 
     @abstractmethod
-    def add_model(self, model_id: str, model: BaseModelClient):
+    def add_model(self, model_id: str, model: Model):
         pass
 
     @abstractmethod
-    def add_models(self, models: List[Tuple[str, BaseModelClient]]):
+    def add_models(self, models: List[Tuple[str, Model]]):
         pass
 
     @abstractmethod
-    def remove_model(self, model_id: str) -> Optional[BaseModelClient]:
+    def remove_model(self, model_id: str) -> Optional[Model]:
         pass
 
     @abstractmethod
-    def get_model(self, model_id: str) -> Optional[BaseModelClient]:
+    def get_model(self, model_id: str) -> Optional[Model]:
         pass
 
     @abstractmethod

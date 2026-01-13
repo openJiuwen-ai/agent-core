@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.foundation.llm import SystemMessage, HumanMessage
+from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
 DEFAULT_SYSTEM_PROMPT = """你是一个意图分类助手，擅长判断用户的输入属于哪个分类。
@@ -29,7 +29,7 @@ def get_default_template():
     return PromptTemplate(
                 content=[
                     SystemMessage(content=DEFAULT_SYSTEM_PROMPT),
-                    HumanMessage(content=DEFAULT_USER_PROMPT),
+                    UserMessage(content=DEFAULT_USER_PROMPT),
                 ]
             )
 

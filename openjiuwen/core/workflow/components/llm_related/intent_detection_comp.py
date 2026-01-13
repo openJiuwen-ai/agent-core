@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import ast
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional, Union, Callable, List
@@ -14,15 +15,14 @@ from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.workflow.components.branch_router import BranchRouter
-from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Output, Input
 from openjiuwen.core.session import Session
-from openjiuwen.core.foundation.llm import BaseModelClient, BaseModelInfo
-from openjiuwen.core.foundation.llm import BaseMessage, HumanMessage, SystemMessage
-from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import (
+    BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
+)
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.common.security.user_config import UserConfig
 
@@ -74,6 +74,11 @@ KG_FILTER_KEY = "filter_string"
 KG_FILTER_PREFIX = "category:"
 KG_SCOPE = "scope"
 
+_PROVIDER_NAME_MAP = {
+    "openai": "OpenAI",
+    "siliconflow": "SiliconFlow",
+}
+
 DEFAULT_SYSTEM_PROMPT = "你是一个识别用户输入意图的AI助手。"
 
 DEFAULT_USER_PROMPT = """
@@ -102,7 +107,7 @@ def get_default_template():
     return PromptTemplate(
                 content=[
                     SystemMessage(content=DEFAULT_SYSTEM_PROMPT),
-                    HumanMessage(content=DEFAULT_USER_PROMPT),
+                    UserMessage(content=DEFAULT_USER_PROMPT),
                 ]
             )
 
@@ -141,7 +146,7 @@ class IntentDetectionExecutable(ComponentExecutable):
     def __init__(self, component_config: IntentDetectionCompConfig):
         super().__init__()
         self._session: Union[Session, None] = None
-        self._llm: Union[BaseModelClient, None] = None
+        self._llm: Union[Model, None] = None
         self._initialized: bool = False
         self._config = component_config
         self._init_default_config_category_list(component_config)
@@ -174,7 +179,7 @@ class IntentDetectionExecutable(ComponentExecutable):
         self._initialize_if_needed()
         chat_history = self._get_chat_history_from_context(context)
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
-        llm_output = self._invoke_llm_and_get_result(current_inputs)
+        llm_output = await self._invoke_llm_and_get_result(current_inputs)
         if UserConfig.is_sensitive():
             logger.info(f"[%s] intent detection", self._session.executable_id())
         else:
@@ -196,14 +201,30 @@ class IntentDetectionExecutable(ComponentExecutable):
     def _set_session(self, session: Session):
         self._session = session
 
-    def _create_llm_instance(self):
-        if isinstance(self._config.model.model_info, BaseModelInfo):
-            kwargs = self._config.model.model_info.model_dump(exclude={'model_name', 'streaming'})
-            return ModelFactory().get_model(model_provider=self._config.model.model_provider, **kwargs)
-        else:
-            return ModelFactory().get_model(model_provider=self._config.model.model_provider,
-                                            api_base=self._config.model.model_info.api_base,
-                                            api_key=self._config.model.model_info.api_key)
+    def _create_llm_instance(self) -> Model:
+        model_info = self._config.model.model_info
+        provider = self._config.model.model_provider
+        provider_type = _PROVIDER_NAME_MAP.get(provider.lower(), provider)
+
+        model_client_config = ModelClientConfig(
+            client_provider=provider_type,
+            api_key=model_info.api_key,
+            api_base=model_info.api_base,
+            timeout=getattr(model_info, 'timeout', 60),
+            max_retries=3,
+            verify_ssl=os.getenv("LLM_SSL_VERIFY").strip().lower() == "true",
+            ssl_cert=os.getenv("LLM_SSL_CERT")
+        )
+
+        llm_model_config = ModelRequestConfig(
+            model_name=model_info.model_name if hasattr(model_info, 'model_name') else "",
+            temperature=getattr(model_info, 'temperature', 0.95),
+            top_p=getattr(model_info, 'top_p', 0.1),
+            max_tokens=getattr(model_info, 'max_tokens', None),
+            stop=getattr(model_info, 'stop', None)
+        )
+
+        return Model(model_client_config=model_client_config, model_config=llm_model_config)
 
     def _initialize_if_needed(self):
         if not self._initialized:
@@ -268,7 +289,7 @@ class IntentDetectionExecutable(ComponentExecutable):
                                      category_name=intent_id_and_name.get(CLASSIFICATION_NAME, "")
                                      ).model_dump(exclude_defaults=True)
 
-    def _invoke_llm_and_get_result(self, current_inputs):
+    async def _invoke_llm_and_get_result(self, current_inputs):
         """invoke llm and get result"""
         llm_inputs = self._default_config.intent_detection_template.format(current_inputs).to_messages()
         if UserConfig.is_sensitive():
@@ -283,7 +304,7 @@ class IntentDetectionExecutable(ComponentExecutable):
             logger.info(f"Invoke llm for intent detection, inputs = {llm_inputs}")
 
         try:
-            llm_output = self._llm.invoke(model_name=self._config.model.model_info.model_name, messages=llm_inputs)
+            llm_output = await self._llm.invoke(model=self._config.model.model_info.model_name, messages=llm_inputs)
             llm_output_content = llm_output.content
         except Exception as e:
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED,

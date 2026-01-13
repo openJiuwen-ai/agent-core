@@ -15,7 +15,7 @@ from typing import List
 
 from openjiuwen.core.single_agent import WorkflowAgentConfig, workflow_provider
 from openjiuwen.core.session import TaskSession
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import IntentDetectionComponent, IntentDetectionCompConfig
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
@@ -23,7 +23,6 @@ from openjiuwen.core.workflow import QuestionerComponent, QuestionerConfig, Fiel
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow import ToolComponent, ToolComponentConfig
 from openjiuwen.core.session import BaseSession
-from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.tool import RestfulApi, RestfulApiCard
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.session import InteractiveInput

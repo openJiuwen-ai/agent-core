@@ -15,6 +15,7 @@ from typing import Dict, Any, AsyncIterator, List
 
 from pydantic import ValidationError
 
+from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.single_agent.legacy.agent import BaseAgent
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
@@ -26,8 +27,8 @@ from openjiuwen.core.single_agent.legacy.config import (
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.session import Session
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.foundation.llm import AIMessage, ToolMessage, ModelConfig
-from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, ModelConfig, ModelClientConfig, \
+    ModelRequestConfig, Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool
 
@@ -64,10 +65,25 @@ class LegacyReActAgent(BaseAgent):
     def _get_llm(self):
         """Get LLM instance"""
         if self._llm is None:
-            self._llm = ModelFactory().get_model(
-                model_provider=self.agent_config.model.model_provider,
-                **self.agent_config.model.model_info.model_dump(exclude=['model_name', 'streaming'])
+            model_id = generate_key(
+                self.agent_config.model.model_info.api_key,
+                self.agent_config.model.model_info.api_base,
+                self.agent_config.model.model_provider
             )
+
+            model_client_config = ModelClientConfig(
+                client_id=model_id,
+                client_provider=self.agent_config.model.model_provider,
+                api_key=self.agent_config.model.model_info.api_key,
+                api_base=self.agent_config.model.model_info.api_base,
+                verify_ssl=False,
+                ssl_cert=None,
+            )
+            model_request_config = ModelRequestConfig(
+                model=self.agent_config.model.model_info.model_name,
+            )
+            self._llm = Model(model_client_config=model_client_config, model_config=model_request_config)
+
         return self._llm
 
     async def call_model(self, user_input: str, session: Session, is_first_call: bool = False):
@@ -98,13 +114,13 @@ class LegacyReActAgent(BaseAgent):
 
         tools = session.get_tool_info()
         llm = self._get_llm()
-        llm_output = await llm.ainvoke(
-            self.agent_config.model.model_info.model_name,
+        llm_output = await llm.invoke(
             messages,
-            tools
+            tools=tools,
+            model=self.agent_config.model.model_info.model_name
         )
 
-        ai_message = AIMessage(
+        ai_message = AssistantMessage(
             content=llm_output.content,
             tool_calls=llm_output.tool_calls
         )

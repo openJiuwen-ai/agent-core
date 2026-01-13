@@ -15,7 +15,7 @@ from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.session.stream.writer import StreamWriter
 from openjiuwen.core.session.tracer.tracer import Tracer
 from openjiuwen.core.session.tracer.workflow_tracer import TracerWorkflowUtils
-from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -80,16 +80,16 @@ class WrappedSession(Session, ABC):
     def get_prompt(self, template_id: str) -> PromptTemplate:
         return self._inner.resource_manager()._resource_registry.prompt().get_prompt(template_id)
 
-    def add_model(self, model_id: str, model: BaseModelClient):
+    def add_model(self, model_id: str, model: Model):
         self._inner.resource_manager()._resource_registry.model().add_model(model_id, model)
 
-    def add_models(self, models: List[Tuple[str, BaseModelClient]]):
+    def add_models(self, models: List[Tuple[str, Model]]):
         self._inner.resource_manager()._resource_registry.model().add_models(models)
 
     def remove_model(self, model_id: str):
         self._inner.resource_manager()._resource_registry.model().remove_model(model_id)
 
-    def get_model(self, model_id: str) -> BaseModelClient:
+    def get_model(self, model_id: str) -> Model:
         return self._inner.resource_manager()._resource_registry.model().get_model(model_id, self._inner)
 
     def add_workflow(self, workflow_id: str, workflow: "Workflow"):
@@ -227,16 +227,16 @@ class RouterSession(StateSession):
     def get_prompt(self, template_id: str) -> PromptTemplate:
         pass
 
-    def add_model(self, model_id: str, model: BaseModelClient):
+    def add_model(self, model_id: str, model: Model):
         pass
 
-    def add_models(self, models: List[Tuple[str, BaseModelClient]]):
+    def add_models(self, models: List[Tuple[str, Model]]):
         pass
 
     def remove_model(self, model_id: str):
         pass
 
-    def get_model(self, model_id: str) -> BaseModelClient:
+    def get_model(self, model_id: str) -> Model:
         pass
 
     def add_workflow(self, workflow_id: str, workflow: "Workflow"):
@@ -309,7 +309,7 @@ class WrappedNodeSession(StateSession):
     def get_prompt(self, template_id: str) -> PromptTemplate:
         return self._inner.resource_manager()._resource_registry.prompt().get_prompt(template_id)
 
-    def get_model(self, model_id: str) -> BaseModelClient:
+    def get_model(self, model_id: str) -> Model:
         return self._inner.resource_manager()._resource_registry.model().get_model(model_id)
 
     async def get_workflow(self, workflow_id: str) -> "Workflow":
@@ -360,7 +360,7 @@ class TaskSession(StateSession):
     def get_prompt(self, template_id: str) -> PromptTemplate:
         return self._inner.resource_manager()._resource_registry.prompt().get_prompt(template_id)
 
-    def get_model(self, model_id: str) -> BaseModelClient:
+    def get_model(self, model_id: str) -> Model:
         return self._inner.resource_manager()._resource_registry.model().get_model(model_id, session=self._inner)
 
     async def get_workflow(self, workflow_id: str) -> "Workflow":

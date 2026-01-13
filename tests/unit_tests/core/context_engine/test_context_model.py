@@ -10,7 +10,7 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ModelContext
 from openjiuwen.core.foundation.llm import (
-    BaseMessage,SystemMessage, HumanMessage, AIMessage, ToolMessage
+    BaseMessage, SystemMessage, UserMessage, AssistantMessage, ToolMessage
 )
 
 
@@ -25,10 +25,10 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_model_context_add_one_messages(self):
         context = await self.create_context()
-        message = await context.add_messages(HumanMessage(content="test"))
-        assert message == [HumanMessage(content="test")]
-        assert context.get_messages() == [HumanMessage(content="test")]
-        assert context.get_messages(with_history=True) == [HumanMessage(content="test")]
+        message = await context.add_messages(UserMessage(content="test"))
+        assert message == [UserMessage(content="test")]
+        assert context.get_messages() == [UserMessage(content="test")]
+        assert context.get_messages(with_history=True) == [UserMessage(content="test")]
         assert len(context) == 1
         context.pop_messages()
 
@@ -41,7 +41,7 @@ class TestModelContext:
             assert e.error_code == StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code
 
         try:
-            invalid_messages = [HumanMessage(content="test"), {"role": "user", "content": "test"}]
+            invalid_messages = [UserMessage(content="test"), {"role": "user", "content": "test"}]
             await context.add_messages(invalid_messages)
         except JiuWenBaseException as e:
             assert e.error_code == StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code
@@ -49,7 +49,7 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_model_context_add_batch_messages(self):
         context = await self.create_context()
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         message = await context.add_messages(message_list)
         assert message == message_list
         assert context.get_messages() == message_list
@@ -59,19 +59,19 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_add_one_messages_with_history(self):
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
         context = await self.create_context(history_list)
-        message = await context.add_messages(HumanMessage(content="test"))
-        assert message == [HumanMessage(content="test")]
-        assert context.get_messages() == history_list + [HumanMessage(content="test")]
-        assert context.get_messages(with_history=False) == [HumanMessage(content="test")]
+        message = await context.add_messages(UserMessage(content="test"))
+        assert message == [UserMessage(content="test")]
+        assert context.get_messages() == history_list + [UserMessage(content="test")]
+        assert context.get_messages(with_history=False) == [UserMessage(content="test")]
         assert len(context) == len(history_list) + 1
         context.pop_messages()
 
     @pytest.mark.asyncio
     async def test_model_context_add_batch_messages_with_history(self):
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         message = await context.add_messages(message_list)
         assert message == message_list
@@ -103,7 +103,7 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_get_empty_messages_with_history(self):
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         assert len(context) == 100
         messages = context.get_messages(with_history=True)
@@ -126,7 +126,7 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_model_context_get_messages(self):
         context = await self.create_context()
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         await context.add_messages(message_list)
         assert len(context) == 100
         messages = context.get_messages(with_history=True)
@@ -153,9 +153,9 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_get_messages_with_history(self):
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
         context = await self.create_context(history_list)
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         await context.add_messages(message_list)
         assert len(context) == 200
         messages = context.get_messages(with_history=True)
@@ -203,19 +203,19 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_pop_empty_messages_with_history(self):
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         messages = context.pop_messages(len(context))
         assert len(context) == 0
         assert messages == history_list
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         messages = context.pop_messages(len(context), with_history=False)
         assert len(context) == 100
         assert messages == []
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         messages = context.pop_messages(0)
         assert len(context) == 100
@@ -228,7 +228,7 @@ class TestModelContext:
         assert len(context) == 0
         assert messages == []
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         messages = context.pop_messages(10)
         assert len(context) == 90
@@ -239,21 +239,21 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_pop_messages(self):
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context()
         await context.add_messages(message_list)
         messages = context.pop_messages(len(context))
         assert len(context) == 0
         assert messages == message_list
 
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context()
         await context.add_messages(message_list)
         messages = context.pop_messages(len(context), with_history=False)
         assert len(context) == 0
         assert messages == message_list
 
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context()
         await context.add_messages(message_list)
         messages = context.pop_messages(0)
@@ -267,7 +267,7 @@ class TestModelContext:
         assert len(context) == 0
         assert messages == []
 
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context()
         await context.add_messages(message_list)
         messages = context.pop_messages(10)
@@ -287,24 +287,24 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_pop_messages_with_history(self):
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         await context.add_messages(message_list)
         messages = context.pop_messages(len(context))
         assert len(context) == 0
         assert messages == history_list + message_list
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         await context.add_messages(message_list)
         messages = context.pop_messages(len(context), with_history=False)
         assert len(context) == 100
         assert messages == message_list
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         await context.add_messages(message_list)
         messages = context.pop_messages(0)
@@ -322,8 +322,8 @@ class TestModelContext:
         assert len(context) == 0
         assert messages == []
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         await context.add_messages(message_list)
         messages = context.pop_messages(10)
@@ -341,29 +341,29 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_set_messages(self):
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context()
         context.set_messages(message_list)
         assert len(context) == 100
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         context.set_messages(message_list)
         assert len(context) == 100
         messages = context.get_messages()
         assert messages == message_list
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         context.set_messages(message_list, with_history=False)
         assert len(context) == 200
         messages = context.get_messages()
         assert messages == history_list + message_list
 
-        history_list = [HumanMessage(content=f"history-{i}") for i in range(100)]
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        history_list = [UserMessage(content=f"history-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         context = await self.create_context(history_list)
         context.pop_messages(50)
         context.set_messages(message_list, with_history=False)
@@ -380,7 +380,7 @@ class TestModelContext:
             assert e.error_code == StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code
 
         try:
-            invalid_messages = [HumanMessage(content="test"), {"role": "user", "content": "test"}]
+            invalid_messages = [UserMessage(content="test"), {"role": "user", "content": "test"}]
             await context.set_messages(invalid_messages)
         except JiuWenBaseException as e:
             assert e.error_code == StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code
@@ -412,7 +412,7 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_set_context_window_with_context_messages(self):
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         system_messages = [SystemMessage(content="system message")]
         context = await self.create_context(context_message_limit=10)
         await context.add_messages(message_list)
@@ -423,7 +423,7 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_model_context_set_context_window_with_limited_size(self):
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         system_messages = [SystemMessage(content="system message")]
         context = await self.create_context(context_message_limit=1)
         await context.add_messages(message_list)
@@ -432,7 +432,7 @@ class TestModelContext:
         assert window.system_messages == system_messages
         assert window.tools == []
 
-        message_list = [HumanMessage(content=f"test-{i}") for i in range(100)]
+        message_list = [UserMessage(content=f"test-{i}") for i in range(100)]
         system_messages = [
             SystemMessage(content="system message-1"),
             SystemMessage(content="system message-2")
@@ -448,11 +448,11 @@ class TestModelContext:
     async def test_model_context_statistic(self):
         def generate_message(idx: int):
             if idx % 4 == 0:
-                return HumanMessage(content=f"use message-{idx}")
+                return UserMessage(content=f"use message-{idx}")
             if idx % 4 == 1:
                 return SystemMessage(content=f"system message-{idx}")
             if idx % 4 == 2:
-                return AIMessage(content=f"ai message-{idx}")
+                return AssistantMessage(content=f"ai message-{idx}")
             if idx % 4 == 3:
                 return ToolMessage(content=f"tool message-{idx}", tool_call_id="")
             return None
@@ -484,7 +484,7 @@ class TestModelContext:
             ToolMessage(content='tool-1', tool_call_id='tc-1'),
             ToolMessage(content='tool-2', tool_call_id='tc-2'),
         ]
-        message_list = tool_msgs + [HumanMessage(content=f"human-{i}") for i in range(10)]
+        message_list = tool_msgs + [UserMessage(content=f"human-{i}") for i in range(10)]
         context = await self.create_context(context_message_limit=20)
         await context.add_messages(message_list)
 

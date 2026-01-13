@@ -15,7 +15,7 @@ Usage:
     )
 
     # Create mock LLM with predefined responses
-    mock_llm = MockLLMModel(api_key="mock", api_base="mock")
+    mock_llm = MockLLMModel()
     mock_llm.set_responses([
         create_text_response("Hello!"),
         create_tool_call_response("add", '{"a": 1, "b": 2}'),
@@ -27,15 +27,21 @@ Usage:
         # Your test code here
 """
 from contextlib import contextmanager
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
 from unittest.mock import patch, MagicMock
 
 from openjiuwen.core.foundation.llm import (
-    AIMessage,
+    AssistantMessage,
     BaseModelClient,
+    ModelClientConfig,
+    ModelRequestConfig,
     UsageMetadata,
 )
-from openjiuwen.core.foundation.tool import ToolCall
+from openjiuwen.core.foundation.llm.schema.message import BaseMessage
+from openjiuwen.core.foundation.llm import ToolCall
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.tool import ToolInfo
 
 
 class MockLLMModel(BaseModelClient):
@@ -50,30 +56,45 @@ class MockLLMModel(BaseModelClient):
         call_history: List of messages received in each call.
     """
 
-    def __init__(self, api_key: str = "mock", api_base: str = "mock", **kwargs):
+    def __init__(self, **kwargs):
         """Initialize MockLLMModel.
 
         Args:
-            api_key: Mock API key (not used).
-            api_base: Mock API base URL (not used).
-            **kwargs: Additional arguments (ignored).
+            **kwargs: Optional overrides for configs.
+                - model_config: ModelRequestConfig
+                - model_client_config: ModelClientConfig
         """
-        super().__init__(api_key=api_key, api_base=api_base)
+        # BaseModelClient.__init__ performs config validation, so we provide minimal
+        # valid defaults suitable for unit tests.
+        model_config = kwargs.pop(
+            "model_config",
+            ModelRequestConfig(model_name="mock-model"),
+        )
+        model_client_config = kwargs.pop(
+            "model_client_config",
+            ModelClientConfig(
+                client_provider="OpenAI",
+                api_key="mock-api-key",
+                api_base="http://mock-api-base",
+                verify_ssl=False,
+            ),
+        )
+        super().__init__(model_config=model_config, model_client_config=model_client_config)
         self.call_count = 0
-        self.responses: List[AIMessage] = []
+        self.responses: List[AssistantMessage] = []
         self.call_history: List[List[Dict]] = []
 
-    def set_responses(self, responses: List[AIMessage]) -> None:
+    def set_responses(self, responses: List[AssistantMessage]) -> None:
         """Set predefined responses for the mock model.
 
         Args:
-            responses: List of AIMessage objects to return in order.
+            responses: List of AssistantMessage objects to return in order.
         """
         self.responses = responses
         self.call_count = 0
         self.call_history = []
 
-    def _get_next_response(self) -> AIMessage:
+    def _get_next_response(self) -> AssistantMessage:
         """Get the next response from the predefined list.
 
         Returns:
@@ -85,116 +106,89 @@ class MockLLMModel(BaseModelClient):
             self.call_count += 1
             return response
         else:
-            return AIMessage(content="Default mock response")
+            return AssistantMessage(content="Default mock response")
 
-    def _invoke(
+    async def invoke(
         self,
-        model_name: str,
-        messages: List[Dict],
-        tools: Optional[List[Dict]] = None,
-        temperature: Optional[float] = 0.1,
-        top_p: Optional[float] = 0.1,
-        **kwargs: Any
-    ) -> AIMessage:
-        """Synchronous invocation.
+        messages: Union[str, List[BaseMessage], List[dict]],
+        *,
+        tools: Union[List[ToolInfo], List[dict], None] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        model: str = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+        output_parser: Optional[BaseOutputParser] = None,
+        timeout: float = None,
+        **kwargs
+    ) -> AssistantMessage:
+        """Asynchronously invoke LLM.
 
         Args:
-            model_name: Model name (ignored).
             messages: Input messages.
             tools: Available tools (ignored).
             temperature: Temperature parameter (ignored).
             top_p: Top-p parameter (ignored).
+            model: Model name (ignored).
+            max_tokens: Max tokens (ignored).
+            stop: Stop sequence (ignored).
+            output_parser: Output parser (ignored).
+            timeout: Timeout (ignored).
             **kwargs: Additional arguments (ignored).
 
         Returns:
-            The next predefined AIMessage response.
+            The next predefined AssistantMessage response.
         """
-        self.call_history.append(messages)
+        self.call_history.append(messages if isinstance(messages, list) else [messages])
         return self._get_next_response()
 
-    async def _ainvoke(
+    async def stream(
         self,
-        model_name: str,
-        messages: List[Dict],
-        tools: Optional[List[Dict]] = None,
-        temperature: Optional[float] = 0.1,
-        top_p: Optional[float] = 0.1,
-        **kwargs: Any
-    ) -> AIMessage:
-        """Asynchronous invocation.
+        messages: Union[str, List[BaseMessage], List[dict]],
+        *,
+        tools: Union[List[ToolInfo], List[dict], None] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        model: str = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+        output_parser: Optional[BaseOutputParser] = None,
+        timeout: float = None,
+        **kwargs
+    ) -> AsyncIterator[AssistantMessageChunk]:
+        """Asynchronously stream invoke LLM.
 
         Args:
-            model_name: Model name (ignored).
             messages: Input messages.
             tools: Available tools (ignored).
             temperature: Temperature parameter (ignored).
             top_p: Top-p parameter (ignored).
-            **kwargs: Additional arguments (ignored).
-
-        Returns:
-            The next predefined AIMessage response.
-        """
-        self.call_history.append(messages)
-        return self._get_next_response()
-
-    def _stream(
-        self,
-        model_name: str,
-        messages: List[Dict],
-        tools: Optional[List[Dict]] = None,
-        temperature: Optional[float] = 0.1,
-        top_p: Optional[float] = 0.1,
-        **kwargs: Any
-    ) -> Iterator[Any]:
-        """Synchronous streaming.
-
-        Args:
-            model_name: Model name (ignored).
-            messages: Input messages.
-            tools: Available tools (ignored).
-            temperature: Temperature parameter (ignored).
-            top_p: Top-p parameter (ignored).
+            model: Model name (ignored).
+            max_tokens: Max tokens (ignored).
+            stop: Stop sequence (ignored).
+            output_parser: Output parser (ignored).
+            timeout: Timeout (ignored).
             **kwargs: Additional arguments (ignored).
 
         Yields:
-            The next predefined AIMessage response.
+            AssistantMessageChunk: Streaming response chunk.
         """
-        self.call_history.append(messages)
+        self.call_history.append(messages if isinstance(messages, list) else [messages])
         result = self._get_next_response()
-        yield result
-
-    async def _astream(
-        self,
-        model_name: str,
-        messages: List[Dict],
-        tools: Optional[List[Dict]] = None,
-        temperature: Optional[float] = 0.1,
-        top_p: Optional[float] = 0.1,
-        **kwargs: Any
-    ) -> AsyncIterator[Any]:
-        """Asynchronous streaming.
-
-        Args:
-            model_name: Model name (ignored).
-            messages: Input messages.
-            tools: Available tools (ignored).
-            temperature: Temperature parameter (ignored).
-            top_p: Top-p parameter (ignored).
-            **kwargs: Additional arguments (ignored).
-
-        Yields:
-            The next predefined AIMessage response.
-        """
-        self.call_history.append(messages)
-        result = self._get_next_response()
-        yield result
+        # Convert AssistantMessage to AssistantMessageChunk for streaming
+        chunk = AssistantMessageChunk(
+            content=result.content,
+            tool_calls=result.tool_calls,
+            usage_metadata=result.usage_metadata
+        )
+        yield chunk
 
 
 def create_text_response(
     content: str,
     model_name: str = "mock-model",
     finish_reason: str = "stop"
-) -> AIMessage:
+) -> AssistantMessage:
     """Create a text response AIMessage.
 
     Args:
@@ -205,11 +199,10 @@ def create_text_response(
     Returns:
         AIMessage with the specified text content.
     """
-    return AIMessage(
+    return AssistantMessage(
         content=content,
         usage_metadata=UsageMetadata(
             model_name=model_name,
-            finish_reason=finish_reason
         )
     )
 
@@ -219,7 +212,7 @@ def create_tool_call_response(
     arguments: str,
     tool_call_id: Optional[str] = None,
     model_name: str = "mock-model"
-) -> AIMessage:
+) -> AssistantMessage:
     """Create a tool call response AIMessage.
 
     Args:
@@ -234,7 +227,7 @@ def create_tool_call_response(
     if tool_call_id is None:
         tool_call_id = f"mock_call_{tool_name}"
 
-    return AIMessage(
+    return AssistantMessage(
         content="",
         tool_calls=[
             ToolCall(
@@ -254,7 +247,7 @@ def create_tool_call_response(
 def create_json_response(
     data: Dict[str, Any],
     model_name: str = "mock-model"
-) -> AIMessage:
+) -> AssistantMessage:
     """Create a JSON response AIMessage.
 
     This is useful for mocking responses from components like Questioner
@@ -268,7 +261,7 @@ def create_json_response(
         AIMessage with JSON-formatted content.
     """
     import json
-    return AIMessage(
+    return AssistantMessage(
         content=json.dumps(data, ensure_ascii=False),
         usage_metadata=UsageMetadata(
             model_name=model_name,
@@ -303,9 +296,12 @@ def mock_llm_context(
 
     patches = [
         patch(
-            "openjiuwen.core.foundation.llm.model_utils.model_factory."
-            "ModelFactory.get_model",
-            return_value=mock_llm
+            'openjiuwen.core.foundation.llm.model.Model.invoke',
+            side_effect=mock_llm.invoke
+        ),
+        patch(
+            'openjiuwen.core.foundation.llm.model.Model.stream',
+            side_effect=mock_llm.stream
         )
     ]
 
@@ -318,9 +314,8 @@ def mock_llm_context(
             )
         )
 
-    with patches[0]:
-        if len(patches) > 1:
-            with patches[1]:
-                yield mock_llm
-        else:
-            yield mock_llm
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        yield mock_llm

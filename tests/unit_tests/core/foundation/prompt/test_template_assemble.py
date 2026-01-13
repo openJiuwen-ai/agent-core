@@ -1,8 +1,7 @@
 import pytest
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.foundation.llm import HumanMessage, AIMessage, ToolMessage
-from openjiuwen.core.foundation.tool.schema import ToolCall
+from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage, ToolCall
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
 from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variable
@@ -174,8 +173,8 @@ class TestPromptAssemble:
 
         # 3. Test BaseMessage type template content
         template = PromptTemplate(content=[
-            HumanMessage(content="Hi, {{user_inputs}}"),
-            AIMessage(
+            UserMessage(content="Hi, {{user_inputs}}"),
+            AssistantMessage(
                 content="",
                 tool_calls=[
                     ToolCall(type="test", name="func", arguments="x", id="test")
@@ -191,14 +190,13 @@ class TestPromptAssemble:
         assembled_template = asm3.prompt_assemble()
 
         self.assertEqual(len(assembled_template), len(template.content))
-        self.assertEqual(HumanMessage(content="Hi, 张三"), assembled_template[0])
+        self.assertEqual(UserMessage(content="Hi, 张三"), assembled_template[0])
         self.assertEqual(template.content[1], assembled_template[1])
         self.assertEqual(template.content[2], assembled_template[2])
 
     def test_template_format(self):
         # 1. Test string template format (complete variable filling)
         template = PromptTemplate(
-            card=None,
             content="`#system#`你是一个精通{{domain}}领域的问答助手`#user#`{{memory}}"
         )
         formatted_template = template.format({"memory": [{"role": "user", "content": "你是谁"}], "domain": "数学"})
@@ -206,13 +204,12 @@ class TestPromptAssemble:
 
         self.assertEqual(
             messages,
-            [HumanMessage(
+            [UserMessage(
                 content="`#system#`你是一个精通数学领域的问答助手`#user#`[{'role': 'user', 'content': '你是谁'}]")]
         )
 
         # 2. Test partial variable filling (only pass memory, retain domain placeholder)
         template2 = PromptTemplate(
-            card=None,
             content="`#system#`你是一个精通{{domain}}领域的问答助手`#user#`{{memory}}"
         )
         template2 = template2.format({"memory": [{"role": "user", "content": "你是谁"}]})
@@ -230,18 +227,17 @@ class TestPromptAssemble:
 
         # 4. Test template with BaseMessage list format (multiple messages + multiple variables)
         template3 = PromptTemplate(
-            card=None,
             content=[
-                HumanMessage(content="Hello {{name}}!"),
-                AIMessage(content="I'm your assistant for {{domain}}.")
+                UserMessage(content="Hello {{name}}!"),
+                AssistantMessage(content="I'm your assistant for {{domain}}.")
             ]
         )
         formatted3 = template3.format({"name": "Alice", "domain": "AI"})
         messages3 = formatted3.to_messages()
 
         self.assertEqual(2, len(messages3))
-        self.assertEqual(HumanMessage(content="Hello Alice!"), messages3[0])
-        self.assertEqual(AIMessage(content="I'm your assistant for AI."), messages3[1])
+        self.assertEqual(UserMessage(content="Hello Alice!"), messages3[0])
+        self.assertEqual(AssistantMessage(content="I'm your assistant for AI."), messages3[1])
 
         # Test keywords as None/empty dictionary (return deep copy of original template)
         template4 = PromptTemplate(card=None, content="Hello {{name}}")

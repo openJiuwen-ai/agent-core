@@ -8,7 +8,7 @@ from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, AIMessage, HumanMessage, ToolMessage
+    BaseMessage, AssistantMessage, UserMessage, ToolMessage
 )
 from openjiuwen.core.single_agent.legacy.config import AgentConfig
 
@@ -64,7 +64,7 @@ class MessageUtils:
         """
         if MessageUtils.should_add_user_message(query, context_engine, session):
             agent_context = context_engine.get_context(session_id=session.session_id())
-            user_message = HumanMessage(content=query)
+            user_message = UserMessage(content=query)
             await agent_context.add_messages(user_message)
             if UserConfig.is_sensitive():
                 logger.info("Added user message")
@@ -73,14 +73,14 @@ class MessageUtils:
 
     @staticmethod
     async def add_ai_message(
-        ai_message: AIMessage,
+        ai_message: AssistantMessage,
         context_engine: ContextEngine,
         session: Session
     ):
-        """Add AI message to chat history
+        """Add Assistant message to chat history
         
         Args:
-            ai_message: AI message object
+            ai_message: Assistant message object
             context_engine: Context engine
             session: Session instance
         """

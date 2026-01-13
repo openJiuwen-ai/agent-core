@@ -6,14 +6,14 @@ from openjiuwen.core.common.exception.status_code import StatusCode
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
-from openjiuwen.core.foundation.llm1.schema.message import BaseMessage, AssistantMessage
-from openjiuwen.core.foundation.llm1.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm1.schema.config import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.foundation.llm1.output_parsers.output_parser import BaseOutputParser
-from openjiuwen.core.foundation.llm1.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm1.model_clients.openai_model_client import OpenAIModelClient
-from openjiuwen.core.foundation.llm1.model_clients.siliconflow_model_client import SiliconFlowModelClient
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
 
 _CLIENT_TYPE_REGISTRY: Dict[str, Type[BaseModelClient]] = {
     "OpenAI": OpenAIModelClient,

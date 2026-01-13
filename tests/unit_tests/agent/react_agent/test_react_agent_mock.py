@@ -49,7 +49,7 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
     def _create_model():
         """创建模型配置"""
         return ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 model="gpt-3.5-turbo",
                 api_base="mock_url",
@@ -126,36 +126,31 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
             create_text_response("根据计算结果，1+2=3"),
         ])
 
-        with patch(
-            "openjiuwen.core.foundation.llm.model_utils.model_factory."
-            "ModelFactory.get_model"
-        ) as mock_get_model:
-            mock_get_model.return_value = mock_llm
+        add_tool = self._create_add_tool()
 
-            add_tool = self._create_add_tool()
+        react_agent_config = create_react_agent_config(
+            agent_id="react_agent_mock_test",
+            agent_version="0.0.1",
+            description="数学计算助手",
+            model=self._create_model(),
+            prompt_template=self._create_prompt_template()
+        )
 
-            react_agent_config = create_react_agent_config(
-                agent_id="react_agent_mock_test",
-                agent_version="0.0.1",
-                description="数学计算助手",
-                model=self._create_model(),
-                prompt_template=self._create_prompt_template()
-            )
+        react_agent = ReActAgent(react_agent_config)
+        react_agent.add_tools([add_tool])
 
-            react_agent = ReActAgent(react_agent_config)
-            react_agent.add_tools([add_tool])
-
+        with patch.object(react_agent, "_get_llm", return_value=mock_llm):
             result = await react_agent.invoke(
                 {"conversation_id": "test_session", "query": "计算1+2"}
             )
 
-            self.assertIsInstance(result, dict, "应该返回字典")
-            self.assertEqual(
-                result['result_type'], 'answer', "应该返回 answer 类型"
-            )
-            self.assertIn('output', result, "结果应该包含 output 字段")
-            self.assertIn('3', result['output'], "答案应该包含计算结果3")
-            self.assertEqual(mock_llm.call_count, 2, "Mock LLM 应该被调用2次")
+        self.assertIsInstance(result, dict, "应该返回字典")
+        self.assertEqual(
+            result['result_type'], 'answer', "应该返回 answer 类型"
+        )
+        self.assertIn('output', result, "结果应该包含 output 字段")
+        self.assertIn('3', result['output'], "答案应该包含计算结果3")
+        self.assertEqual(mock_llm.call_count, 2, "Mock LLM 应该被调用2次")
 
     @pytest.mark.asyncio
     async def test_react_agent_multi_turn_tool_calls(self):
@@ -176,36 +171,31 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
             create_text_response("计算结果：(1+2) * 3 = 9"),
         ])
 
-        with patch(
-            "openjiuwen.core.foundation.llm.model_utils.model_factory."
-            "ModelFactory.get_model"
-        ) as mock_get_model:
-            mock_get_model.return_value = mock_llm
+        add_tool = self._create_add_tool()
+        multiply_tool = self._create_multiply_tool()
 
-            add_tool = self._create_add_tool()
-            multiply_tool = self._create_multiply_tool()
+        react_agent_config = create_react_agent_config(
+            agent_id="react_agent_multi_turn",
+            agent_version="0.0.1",
+            description="数学计算助手",
+            model=self._create_model(),
+            prompt_template=self._create_prompt_template()
+        )
 
-            react_agent_config = create_react_agent_config(
-                agent_id="react_agent_multi_turn",
-                agent_version="0.0.1",
-                description="数学计算助手",
-                model=self._create_model(),
-                prompt_template=self._create_prompt_template()
-            )
+        react_agent = ReActAgent(react_agent_config)
+        react_agent.add_tools([add_tool, multiply_tool])
 
-            react_agent = ReActAgent(react_agent_config)
-            react_agent.add_tools([add_tool, multiply_tool])
-
+        with patch.object(react_agent, "_get_llm", return_value=mock_llm):
             result = await react_agent.invoke(
                 {"conversation_id": "test_multi_turn", "query": "计算 (1+2) * 3"}
             )
 
-            self.assertIsInstance(result, dict, "应该返回字典")
-            self.assertEqual(
-                result['result_type'], 'answer', "应该返回 answer 类型"
-            )
-            self.assertIn('9', result['output'], "答案应该包含计算结果9")
-            self.assertEqual(mock_llm.call_count, 3, "Mock LLM 应该被调用3次")
+        self.assertIsInstance(result, dict, "应该返回字典")
+        self.assertEqual(
+            result['result_type'], 'answer', "应该返回 answer 类型"
+        )
+        self.assertIn('9', result['output'], "答案应该包含计算结果9")
+        self.assertEqual(mock_llm.call_count, 3, "Mock LLM 应该被调用3次")
 
     @pytest.mark.asyncio
     async def test_react_agent_pure_conversation(self):
@@ -222,35 +212,30 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
             create_text_response("你好！我是数学计算助手，有什么可以帮助你的吗？"),
         ])
 
-        with patch(
-            "openjiuwen.core.foundation.llm.model_utils.model_factory."
-            "ModelFactory.get_model"
-        ) as mock_get_model:
-            mock_get_model.return_value = mock_llm
+        add_tool = self._create_add_tool()
 
-            add_tool = self._create_add_tool()
+        react_agent_config = create_react_agent_config(
+            agent_id="react_agent_conversation",
+            agent_version="0.0.1",
+            description="数学计算助手",
+            model=self._create_model(),
+            prompt_template=self._create_prompt_template()
+        )
 
-            react_agent_config = create_react_agent_config(
-                agent_id="react_agent_conversation",
-                agent_version="0.0.1",
-                description="数学计算助手",
-                model=self._create_model(),
-                prompt_template=self._create_prompt_template()
-            )
+        react_agent = ReActAgent(react_agent_config)
+        react_agent.add_tools([add_tool])
 
-            react_agent = ReActAgent(react_agent_config)
-            react_agent.add_tools([add_tool])
-
+        with patch.object(react_agent, "_get_llm", return_value=mock_llm):
             result = await react_agent.invoke(
                 {"conversation_id": "test_conversation", "query": "你好"}
             )
 
-            self.assertIsInstance(result, dict, "应该返回字典")
-            self.assertEqual(
-                result['result_type'], 'answer', "应该返回 answer 类型"
-            )
-            self.assertIn('你好', result['output'], "答案应该包含问候语")
-            self.assertEqual(mock_llm.call_count, 1, "Mock LLM 应该只被调用1次")
+        self.assertIsInstance(result, dict, "应该返回字典")
+        self.assertEqual(
+            result['result_type'], 'answer', "应该返回 answer 类型"
+        )
+        self.assertIn('你好', result['output'], "答案应该包含问候语")
+        self.assertEqual(mock_llm.call_count, 1, "Mock LLM 应该只被调用1次")
 
 
 if __name__ == "__main__":

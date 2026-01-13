@@ -14,9 +14,9 @@ from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.workflow import ComponentAbility, End, WorkflowCard
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
-from openjiuwen.core.foundation.llm1.schema.message import AssistantMessage, BaseMessage
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm1.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow.components.llm_related.llm_comp import LLMExecutable
 
@@ -38,11 +38,11 @@ from openjiuwen.core.workflow import LLMCompConfig, LLMComponent
 from openjiuwen.core.session import WorkflowSession, NodeSession
 from openjiuwen.core.session import WrappedNodeSession, TaskSession
 from openjiuwen.core.foundation.llm import BaseModelInfo
-from openjiuwen.core.foundation.llm1.model import Model
-from openjiuwen.core.foundation.llm1.schema.config import ModelRequestConfig as LLM1ModelConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig as LLM1ModelConfig, ModelClientConfig
 
 USER_FIELDS = "userFields"
-
+os.environ["LLM_SSL_VERIFY"] = "false"
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
 MODEL_NAME = os.getenv("MODEL_NAME", "")

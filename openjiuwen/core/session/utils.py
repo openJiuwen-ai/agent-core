@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import inspect
 import re
 from dataclasses import dataclass
 from typing import Optional, Any, Union
@@ -16,21 +17,42 @@ def create_wrapper_class(original_obj, wrapper_name="WrappedObject"):
         def __init__(self, wrapped_obj):
             self._wrapped = wrapped_obj
 
+        def get_wrapped(self):
+            """Return the wrapped object."""
+            return self._wrapped
+
         def __getattr__(self, name):
-            return getattr(self._wrapped, name)
+            return getattr(self.get_wrapped(), name)
 
     for attr_name in dir(original_obj):
         if not attr_name.startswith('_'):
             attr_value = getattr(original_obj, attr_name)
             if callable(attr_value):
-                def create_method(method_name):
-                    def wrapped_method(self, *args, **kwargs):
-                        method = getattr(self._wrapped, method_name)
-                        return method(*args, **kwargs)
-
-                    return wrapped_method
-
-                setattr(WrapperClass, attr_name, create_method(attr_name))
+                # Check if the method is an async generator function
+                if inspect.isasyncgenfunction(attr_value):
+                    def create_async_gen_method(method_name):
+                        async def wrapped_method(self, *args, **kwargs):
+                            method = getattr(self.get_wrapped(), method_name)
+                            async for item in method(*args, **kwargs):
+                                yield item
+                        return wrapped_method
+                    setattr(WrapperClass, attr_name, create_async_gen_method(attr_name))
+                # Check if the method is a coroutine function (async but not generator)
+                elif inspect.iscoroutinefunction(attr_value):
+                    def create_async_method(method_name):
+                        async def wrapped_method(self, *args, **kwargs):
+                            method = getattr(self.get_wrapped(), method_name)
+                            return await method(*args, **kwargs)
+                        return wrapped_method
+                    setattr(WrapperClass, attr_name, create_async_method(attr_name))
+                # Regular synchronous method
+                else:
+                    def create_method(method_name):
+                        def wrapped_method(self, *args, **kwargs):
+                            method = getattr(self.get_wrapped(), method_name)
+                            return method(*args, **kwargs)
+                        return wrapped_method
+                    setattr(WrapperClass, attr_name, create_method(attr_name))
     WrapperClass.__name__ = wrapper_name
     WrapperClass.__qualname__ = wrapper_name
 

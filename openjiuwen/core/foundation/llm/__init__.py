@@ -1,56 +1,91 @@
-# coding: utf-8
+# -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from openjiuwen.core.foundation.llm.base import BaseModelClient, BaseModelInfo
-from openjiuwen.core.foundation.llm.model_utils.default_model import RequestChatModel, OpenAIChatModel
-from openjiuwen.core.foundation.llm.model_utils.model_factory import ModelFactory
-from openjiuwen.core.foundation.llm.output_parser.base import BaseOutputParser
-from openjiuwen.core.foundation.llm.output_parser.json_output_parser import JsonOutputParser
-from openjiuwen.core.foundation.llm.output_parser.markdown_output_parser import MarkdownOutputParser
-from openjiuwen.core.foundation.llm.messages import BaseMessage, AIMessage, ToolMessage, UsageMetadata, \
-    SystemMessage, HumanMessage
-from openjiuwen.core.foundation.llm.schema.messages_chunk import BaseMessageChunk, AIMessageChunk
-from openjiuwen.core.foundation.llm.schema.model_config import ModelConfig
 
-_MODEL_SCHEMA_CLASSES = [
-    "ModelConfig",
-    "BaseModelInfo"
-]
+# Core classes
+from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 
-_MODEL_CLIENT_CLASSES = [
+# Configuration
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo, ModelConfig
+# Messages
+from openjiuwen.core.foundation.llm.schema.message import (
+    BaseMessage,
+    AssistantMessage,
+    UserMessage,
+    SystemMessage,
+    ToolMessage,
+    UsageMetadata
+)
+from openjiuwen.core.foundation.llm.schema.message_chunk import (
+    AssistantMessageChunk,
+)
+
+# Tools
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+
+# Built-in implementations
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+from openjiuwen.core.foundation.llm.output_parsers.json_output_parser import JsonOutputParser
+from openjiuwen.core.foundation.llm.output_parsers.markdown_output_parser import MarkdownOutputParser
+
+
+# ============ Public API exports ============
+
+# Core classes
+_CORE_CLASSES = [
+    "Model",
     "BaseModelClient",
-    "RequestChatModel", 
-    "OpenAIChatModel",
-]
-
-_OUTPUT_PARSER_CLASSES = [
     "BaseOutputParser",
-    "JsonOutputParser",
-    "MarkdownOutputParser"
 ]
 
+# Configuration classes
+_CONFIG_CLASSES = [
+    "ModelRequestConfig",
+    "ModelClientConfig",
+    "BaseModelInfo",
+    "ModelConfig"
+]
+
+# Message classes
 _MESSAGE_CLASSES = [
     "BaseMessage",
-    "AIMessage",
+    "AssistantMessage",
+    "UserMessage",
+    "SystemMessage",
     "ToolMessage",
     "UsageMetadata",
-    "SystemMessage",
-    "HumanMessage"
 ]
 
+# Streaming message classes
 _MESSAGE_CHUNK_CLASSES = [
-    "BaseMessageChunk",
-    "AIMessageChunk"
+    "AssistantMessageChunk",
 ]
 
-_MODEL_FACTORY_CLASSES = [
-    "ModelFactory"
+# Tool-related classes
+_TOOL_CLASSES = [
+    "ToolCall",
 ]
 
+# Built-in ModelClient implementations
+_PREBUILT_MODEL_CLIENTS = [
+    "OpenAIModelClient",
+]
+
+# Built-in OutputParser implementations
+_PREBUILT_OUTPUT_PARSERS = [
+    "JsonOutputParser",
+    "MarkdownOutputParser",
+]
+
+# Combine all public APIs
 __all__ = (
-    _MODEL_SCHEMA_CLASSES +
-    _MODEL_CLIENT_CLASSES +
-    _OUTPUT_PARSER_CLASSES +
-    _MESSAGE_CLASSES +
-    _MESSAGE_CHUNK_CLASSES +
-    _MODEL_FACTORY_CLASSES
+    _CORE_CLASSES
+    + _CONFIG_CLASSES
+    + _MESSAGE_CLASSES
+    + _MESSAGE_CHUNK_CLASSES
+    + _TOOL_CLASSES
+    + _PREBUILT_MODEL_CLIENTS
+    + _PREBUILT_OUTPUT_PARSERS
 )

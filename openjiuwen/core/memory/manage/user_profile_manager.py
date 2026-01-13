@@ -6,7 +6,7 @@ from typing import Any, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.common.base import generate_idx_name, parse_memory_hit_infos
 from openjiuwen.core.memory.generation.conflict_resolution import ConflictResolution
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
@@ -63,7 +63,7 @@ class UserProfileManager(BaseMemoryManager):
             })
         return process_conflict_info
 
-    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, BaseModelClient] | None = None):
+    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, Model] | None = None):
         if not isinstance(memory, UserProfileUnit):
             raise ValueError('user profile add Must pass UserProfileUnit class.')
         if not memory.user_id:
@@ -221,7 +221,7 @@ class UserProfileManager(BaseMemoryManager):
 
     async def _get_conflict_info(self,
                                  memory: UserProfileUnit,
-                                 llm: Tuple[str, BaseModelClient],
+                                 llm: Tuple[str, Model],
                                  ) -> list[dict[str, Any]]:
         input_memories, input_memory_ids_map = await self._get_conflict_input(
             user_id=memory.user_id,

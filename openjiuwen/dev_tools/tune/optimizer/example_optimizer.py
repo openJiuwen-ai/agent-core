@@ -6,12 +6,13 @@ prompt optimization evaluators
 import random
 from typing import List, Optional, Dict
 
+import asyncio
+
 from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.foundation.llm import ModelConfig
-from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.dev_tools.tune.base import Case, TuneConstant, EvaluatedCase
@@ -44,17 +45,13 @@ EXAMPLE_SELECTION_TEMPLATE = PromptTemplate(content="""作为提示词优化专�
 
 class ExampleOptimizer(BaseOptimizer):
     def __init__(self,
-                 model_config: ModelConfig,
+                 model_config: ModelRequestConfig,
+                 model_client_config: ModelClientConfig,
                  parameters: Optional[Dict[str, LLMCall]] = None,
                  num_examples: int = TuneConstant.DEFAULT_EXAMPLE_NUM,
                  ):
         super().__init__(parameters)
-        self._model = ModelFactory().get_model(
-            model_provider=model_config.model_provider,
-            api_key=model_config.model_info.api_key,
-            api_base=model_config.model_info.api_base
-        )
-        self._model_name = model_config.model_info.model_name
+        self._model = Model(model_client_config, model_config)
         if num_examples < TuneConstant.MIN_EXAMPLE_NUM or num_examples > TuneConstant.MAX_EXAMPLE_NUM:
             raise JiuWenBaseException(
                 StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.code,
@@ -179,7 +176,7 @@ class ExampleOptimizer(BaseOptimizer):
         ).to_messages()
 
         try:
-            response = self._model.invoke(self._model_name, messages).content
+            response = asyncio.run(self._model.invoke(messages)).content
             selected_examples = self._extract_selected_examples_from_response(response, pre_selected_examples)
             if len(selected_examples) < self._num_examples:
                 selected_examples = self._fill_missing_example(

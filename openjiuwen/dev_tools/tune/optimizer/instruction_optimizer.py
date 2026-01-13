@@ -7,10 +7,11 @@ import random
 import re
 from typing import List, Optional, Dict
 
+import asyncio
+
 from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.core.operator.llm_call import LLMCall
-from openjiuwen.core.foundation.llm import ModelConfig
-from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
 from openjiuwen.dev_tools.tune.base import EvaluatedCase, TuneConstant
@@ -171,16 +172,12 @@ PLACEHOLDER_RESTORE_TEMPLATE = PromptTemplate(content="""
 
 class InstructionOptimizer(BaseOptimizer):
     def __init__(self,
-                 model_config: ModelConfig,
+                 model_config: ModelRequestConfig,
+                 model_client_config: ModelClientConfig,
                  parameters: Optional[Dict[str, LLMCall]] = None,
                  **kwargs):
         super().__init__(parameters)
-        self._model = ModelFactory().get_model(
-            model_provider=model_config.model_provider,
-            api_key=model_config.model_info.api_key,
-            api_base=model_config.model_info.api_base
-        )
-        self._model_name = model_config.model_info.model_name
+        self._model = Model(model_client_config, model_config)
 
     def _backward(self,
                  evaluated_cases: List[EvaluatedCase],
@@ -252,7 +249,8 @@ class InstructionOptimizer(BaseOptimizer):
                  tools_description=str(tools),
                  )
         ).to_messages()
-        textual_gradient = self._model.invoke(self._model_name, messages).content
+
+        textual_gradient = asyncio.run(self._model.invoke(messages)).content
         return textual_gradient
 
     def _optimize_instruction(self,
@@ -267,7 +265,7 @@ class InstructionOptimizer(BaseOptimizer):
                  tools_description=str(tools) if tools else "None"
                  )
         ).to_messages()
-        response = self._model.invoke(self._model_name, messages).content
+        response = asyncio.run(self._model.invoke(messages)).content
         return self._extract_optimized_prompt_from_response(response, tag="PROMPT_OPTIMIZED")
 
     def _optimize_both_instruction(self,
@@ -284,7 +282,7 @@ class InstructionOptimizer(BaseOptimizer):
                  tools_description=str(tools) if tools else "None"
                  )
         ).to_messages()
-        response = self._model.invoke(self._model_name, messages).content
+        response = asyncio.run(self._model.invoke(messages)).content
         system_prompt = self._extract_optimized_prompt_from_response(response, tag="SYSTEM_PROMPT_OPTIMIZED")
         user_prompt = self._extract_optimized_prompt_from_response(response, tag="USER_PROMPT_OPTIMIZED")
         return system_prompt, user_prompt
@@ -357,7 +355,7 @@ class InstructionOptimizer(BaseOptimizer):
                  missing_placeholders=str(missing_placeholders)
                  )
         ).to_messages()
-        restored_prompt = self._model.invoke(self._model_name, messages).content
+        restored_prompt = asyncio.run(self._model.invoke(messages)).content
         restored_placeholders = PromptAssembler(restored_prompt).input_keys
         missing_placeholders = self._find_missing_placeholders(all_placeholders, restored_placeholders)
         if missing_placeholders:

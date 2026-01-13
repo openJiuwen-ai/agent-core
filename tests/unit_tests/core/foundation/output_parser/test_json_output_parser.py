@@ -1,8 +1,8 @@
 import pytest
 
 from openjiuwen.core.foundation.llm import JsonOutputParser
-from openjiuwen.core.foundation.llm import AIMessage
-from openjiuwen.core.foundation.llm import AIMessageChunk
+from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm import AssistantMessageChunk
 
 pytestmark = pytest.mark.asyncio
 
@@ -10,6 +10,11 @@ class TestJsonOutputParser:
     @pytest.fixture(autouse=True)
     def setUp(self):
         self.parser = JsonOutputParser()
+
+    async def _async_iter(self, items):
+        """Helper to convert list to async iterator"""
+        for item in items:
+            yield item
 
     async def test_parse_valid_json_string(self):
         """测试解析有效的JSON字符串"""
@@ -25,7 +30,7 @@ class TestJsonOutputParser:
 
     async def test_parse_valid_json_in_aimessage(self):
         """测试解析AIMessage对象中的JSON"""
-        ai_message = AIMessage(content="```json\n{\"status\": \"success\", \"code\": 200}\n```")
+        ai_message = AssistantMessage(content="```json\n{\"status\": \"success\", \"code\": 200}\n```")
         result = await self.parser.parse(ai_message)
         assert (result == {"status": "success", "code": 200})
 
@@ -89,7 +94,7 @@ class TestJsonOutputParser:
         expected_result = {"data": "value"}
 
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 1)
@@ -110,7 +115,7 @@ class TestJsonOutputParser:
         expected_result = {"id": 1, "name": "Fragmented Item"}
 
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 1)
@@ -126,7 +131,7 @@ class TestJsonOutputParser:
         expected_results = [{"a": 1}, {"b": 2}]
 
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 2)
@@ -141,7 +146,7 @@ class TestJsonOutputParser:
             "```"
         ]
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 0)  # Should not yield anything if invalid
@@ -157,22 +162,22 @@ class TestJsonOutputParser:
         expected_result = {"key": "value"}
 
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 1)
         assert (parsed_objects[0] == expected_result)
 
     async def test_stream_parse_aimessage_chunks(self):
-        """测试流式解析AIMessageChunk"""
+        """测试流式解析AssistantMessageChunk"""
         chunks = [
-            AIMessageChunk(content="```json\n{\"status\":"),
-            AIMessageChunk(content="\"ok\"}\n```")
+            AssistantMessageChunk(content="```json\n{\"status\":"),
+            AssistantMessageChunk(content="\"ok\"}\n```")
         ]
         expected_result = {"status": "ok"}
 
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 1)
@@ -187,7 +192,7 @@ class TestJsonOutputParser:
         expected_result = {"direct": "json"}
 
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 1)
@@ -198,7 +203,7 @@ class TestJsonOutputParser:
         chunks = ["", None, ""]
 
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 0)
@@ -222,8 +227,8 @@ class TestJsonOutputParser:
         }
 
         parsed_objects = []
-        async for obj in self.parser.stream_parse(iter(chunks)):
+        async for obj in self.parser.stream_parse(self._async_iter(chunks)):
             parsed_objects.append(obj)
 
         assert (len(parsed_objects) == 1)
-        assert (parsed_objects[0], expected_result)
+        assert (parsed_objects[0] == expected_result)

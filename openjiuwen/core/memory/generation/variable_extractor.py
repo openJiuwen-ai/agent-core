@@ -10,9 +10,7 @@ from openjiuwen.core.memory.generation.memory_info import (
     ExtractedDataType
 )
 from openjiuwen.core.memory.prompt.variable_extractor import EXTRACT_VARIABLES_PROMPT
-from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.foundation.llm import JsonOutputParser
-from openjiuwen.core.foundation.llm1.model import Model
+from openjiuwen.core.foundation.llm import BaseMessage, JsonOutputParser, Model
 
 
 class ComprehensionExtractor:
@@ -70,7 +68,7 @@ class ComprehensionExtractor:
         )
         logger.debug(f"Start to extract variables, input: {model_input}")
         model_name, model_client = base_chat_model
-        response = await model_client.ainvoke(
+        response = await model_client.invoke(
             model=model_name,
             messages=model_input
         )

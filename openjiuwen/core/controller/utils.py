@@ -15,13 +15,12 @@ from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.common.security.json_utils import JsonUtils
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.common.utils.hash_util import generate_key
-from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import OutputSchema
-from openjiuwen.core.foundation.llm import BaseMessage, AIMessage, HumanMessage, ToolMessage
-from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import ModelConfig, BaseMessage, AssistantMessage, UserMessage, ToolMessage, \
+    ModelClientConfig, ModelRequestConfig, Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import ToolCall
 from openjiuwen.core.workflow import WorkflowOutput
@@ -197,7 +196,7 @@ class MessageHandlerUtils:
     async def add_user_message(query: Any, context_engine: ContextEngine, session: Session):
         if MessageHandlerUtils.should_add_user_message(query, context_engine, session):
             agent_context = context_engine.get_context(session_id=session.session_id())
-            user_message = HumanMessage(content=query)
+            user_message = UserMessage(content=query)
             await agent_context.add_messages(user_message)
             if UserConfig.is_sensitive():
                 logger.info(f"Added user message")
@@ -205,7 +204,7 @@ class MessageHandlerUtils:
                 logger.info(f"Added user message: {query}")
 
     @staticmethod
-    async def add_ai_message(ai_message: AIMessage, context_engine: ContextEngine, session: Session):
+    async def add_ai_message(ai_message: AssistantMessage, context_engine: ContextEngine, session: Session):
         if ai_message:
             agent_context = context_engine.get_context(session_id=session.session_id())
             await agent_context.add_messages(ai_message)
@@ -286,10 +285,21 @@ class ReasonerUtils:
         model = session.get_model(model_id=model_id)
 
         if model is None:
-            model = ModelFactory().get_model(
-                model_provider=model_config.model_provider,
-                **model_config.model_info.model_dump(exclude=['model_name', 'streaming'])
+            model_client_config = ModelClientConfig(
+                client_id=model_id,
+                client_provider=model_config.model_provider,
+                api_key=model_config.model_info.api_key,
+                api_base=model_config.model_info.api_base,
+                timeout=model_config.model_info.timeout,
+                verify_ssl=False,
+                ssl_cert=None,
             )
+            model_request_config = ModelRequestConfig(
+                model=model_config.model_info.model,
+                temperature=model_config.model_info.temperature,
+                top_p=model_config.model_info.top_p,
+            )
+            model = Model(model_client_config=model_client_config, model_config=model_request_config)
             session.add_model(model_id=model_id, model=model)
 
         return model

@@ -2,16 +2,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
 import re
-from typing import Optional, Literal, List, Generator
+from typing import Optional, Literal, List, AsyncGenerator
 
 import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
 from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import ModelConfig
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, BaseMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
+
 
 INSERT_STR: str = "[用户要插入的位置]"
 MODE_GENERAL: str = "general"
@@ -21,50 +21,50 @@ JSON_STRING_MAX_LENGTH: int = 10000
 
 
 class FeedbackPromptBuilder(BasePromptBuilder):
-    def __init__(self, model_config: ModelConfig):
-        super().__init__(model_config)
+    def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
+        super().__init__(model_config, model_client_config)
 
-    def build(self,
-              prompt: str | PromptTemplate,
-              feedback: str,
-              mode: Literal[MODE_GENERAL, MODE_INSERT, MODE_SELECT] = MODE_GENERAL,
-              start_pos: Optional[int] = None,
-              end_pos: Optional[int] = None,
-              ) -> Optional[str]:
+    async def build(self,
+                    prompt: str | PromptTemplate,
+                    feedback: str,
+                    mode: Literal[MODE_GENERAL, MODE_INSERT, MODE_SELECT] = MODE_GENERAL,
+                    start_pos: Optional[int] = None,
+                    end_pos: Optional[int] = None,
+                    ) -> Optional[str]:
         prompt = TEMPLATE.get_string_prompt(prompt)
         self._is_valid_prompt(prompt, feedback)
-        messages = self._format_feedback_template(prompt, feedback, mode, start_pos, end_pos)
-        response = self._model.invoke(self._model_name, messages)
+        messages = await self._format_feedback_template(prompt, feedback, mode, start_pos, end_pos)
+        response = await self._model.invoke(messages)
         if response is None:
             return None
         return response.content
 
-    def stream_build(self,
-                     prompt: str | PromptTemplate,
-                     feedback: str,
-                     mode: Literal[MODE_GENERAL, MODE_INSERT, MODE_SELECT] = MODE_GENERAL,
-                     start_pos: Optional[int] = None,
-                     end_pos: Optional[int] = None,
-                     ) -> Generator:
+    async def stream_build(self,
+                           prompt: str | PromptTemplate,
+                           feedback: str,
+                           mode: Literal[MODE_GENERAL, MODE_INSERT, MODE_SELECT] = MODE_GENERAL,
+                           start_pos: Optional[int] = None,
+                           end_pos: Optional[int] = None,
+                           ) -> AsyncGenerator:
         prompt = TEMPLATE.get_string_prompt(prompt)
         self._is_valid_prompt(prompt, feedback)
-        messages = self._format_feedback_template(prompt, feedback, mode, start_pos, end_pos)
-        chunks = self._model.stream(self._model_name, messages)
-        for chunk in chunks:
+        messages = await self._format_feedback_template(prompt, feedback, mode, start_pos, end_pos)
+        chunks = await self._model.stream(messages)
+        async for chunk in chunks:
             yield chunk.content
 
-    def _format_feedback_template(self,
-                              prompt: str,
-                              feedback: str,
-                              mode: Literal[MODE_GENERAL, MODE_INSERT, MODE_SELECT] = MODE_GENERAL,
-                              start_pos: Optional[int] = None,
-                              end_pos: Optional[int] = None,
-                              ) -> List[BaseMessage]:
+    async def _format_feedback_template(self,
+                                        prompt: str,
+                                        feedback: str,
+                                        mode: Literal[MODE_GENERAL, MODE_INSERT, MODE_SELECT] = MODE_GENERAL,
+                                        start_pos: Optional[int] = None,
+                                        end_pos: Optional[int] = None,
+                                        ) -> List[BaseMessage]:
 
         if mode == MODE_INSERT:
-            return self._format_feedback_template_insert(prompt, feedback, start_pos)
+            return await self._format_feedback_template_insert(prompt, feedback, start_pos)
         elif mode == MODE_SELECT:
-            return self._format_feedback_template_select(prompt, feedback, start_pos, end_pos)
+            return await self._format_feedback_template_select(prompt, feedback, start_pos, end_pos)
         else:
             if mode != MODE_GENERAL:
                 logger.warning(f"Invalid mode: {mode}, using `general` instead")
@@ -82,13 +82,13 @@ class FeedbackPromptBuilder(BasePromptBuilder):
         ).to_messages()
         return messages
 
-    def _format_feedback_template_insert(self,
-                                         prompt: str,
-                                         feedback: str,
-                                         start_pos: Optional[int] = None,
-                                         ) -> List[BaseMessage]:
+    async def _format_feedback_template_insert(self,
+                                               prompt: str,
+                                               feedback: str,
+                                               start_pos: Optional[int] = None,
+                                               ) -> List[BaseMessage]:
         self._is_index_within_bounds(prompt, MODE_INSERT, start_pos)
-        optimized_feedback = self._is_feedback_valid(prompt, feedback)
+        optimized_feedback = await self._is_feedback_valid(prompt, feedback)
         tagged_prompt = self._insert_sting(prompt, start_pos)
         feedback_insert_template = TEMPLATE.PROMPT_FEEDBACK_INSERT_TEMPLATE
         messages = feedback_insert_template.format(
@@ -98,14 +98,14 @@ class FeedbackPromptBuilder(BasePromptBuilder):
         ).to_messages()
         return messages
 
-    def _format_feedback_template_select(self,
+    async def _format_feedback_template_select(self,
                                          prompt: str,
                                          feedback: str,
                                          start_pos: Optional[int] = None,
                                          end_pos: Optional[int] = None,
                                          ) -> List[BaseMessage]:
         self._is_index_within_bounds(prompt, MODE_SELECT, start_pos, end_pos)
-        optimized_feedback = self._is_feedback_valid(prompt, feedback)
+        optimized_feedback = await self._is_feedback_valid(prompt, feedback)
         prompt_to_modify = prompt[start_pos:end_pos]
         feedback_select_template = TEMPLATE.PROMPT_FEEDBACK_SELECT_TEMPLATE
         messages = feedback_select_template.format(
@@ -122,17 +122,17 @@ class FeedbackPromptBuilder(BasePromptBuilder):
                       ) -> Optional[str]:
         return prompt[:insert] + INSERT_STR + prompt[insert:]
 
-    def _is_feedback_valid(self,
-                           prompt: str,
-                           feedback: str
-                           ) -> str:
+    async def _is_feedback_valid(self,
+                                 prompt: str,
+                                 feedback: str
+                                 ) -> str:
         feedback_intent_template = TEMPLATE.PROMPT_FEEDBACK_INTENT_TEMPLATE
         messages = feedback_intent_template.format(
             dict(original_prompt=prompt,
                  feedbacks=feedback
                  )
         ).to_messages()
-        feedback_message = self._model.invoke(self._model_name, messages)
+        feedback_message = await self._model.invoke(messages)
         try:
             intent, optimized_feedback = self._extract_intent_from_respones(feedback_message.content)
         except JiuWenBaseException:

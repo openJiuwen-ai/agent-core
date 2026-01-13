@@ -5,13 +5,13 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
+import asyncio
 from tqdm import tqdm
 
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.dev_tools.tune.base import Case, EvaluatedCase, TuneConstant
 from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.dev_tools.tune.dataset.case_loader import CaseLoader
@@ -114,16 +114,12 @@ LLM_METRIC_RETRY_TEMPLATE = PromptTemplate(content="""
 
 class DefaultEvaluator(BaseEvaluator):
     def __init__(self,
-                 model_config: ModelConfig,
+                 model_config: ModelRequestConfig,
+                 model_client_config: ModelClientConfig,
                  metric: str = "",
                  ):
         super().__init__()
-        self._model = ModelFactory().get_model(
-            model_provider=model_config.model_provider,
-            api_key=model_config.model_info.api_key,
-            api_base=model_config.model_info.api_base
-        )
-        self._model_name = model_config.model_info.model_name
+        self._model = Model(model_client_config, model_config)
         self._metric_template = LLM_METRIC_TEMPLATE.format(
             dict(user_metrics=metric)
         )
@@ -141,7 +137,7 @@ class DefaultEvaluator(BaseEvaluator):
         ).to_messages()
         evaluated_case = EvaluatedCase(case=case, answer=predict)
         try:
-            response = self._model.invoke(self._model_name, messages).content
+            response = asyncio.run(self._model.invoke(messages)).content
         except Exception:
             evaluated_case.reason = "Failed to evaluate case due to model error"
             return evaluated_case
@@ -170,7 +166,7 @@ class DefaultEvaluator(BaseEvaluator):
             ),
         ).to_messages()
         try:
-            response = self._model.invoke(self._model_name, messages).content
+            response = asyncio.run(self._model.invoke(messages)).content
         except Exception:
             return None
         return TuneUtils.parse_json_from_llm_response(response)

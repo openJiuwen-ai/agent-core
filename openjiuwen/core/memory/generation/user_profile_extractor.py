@@ -6,9 +6,7 @@ from typing import List, Dict, Tuple, Any
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.generation.common import build_model_input
 from openjiuwen.core.memory.prompt.user_profile_extractor import USER_PROFILE_EXTRACTOR_PROMPT
-from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.foundation.llm import JsonOutputParser
-from openjiuwen.core.foundation.llm1.model import Model
+from openjiuwen.core.foundation.llm import BaseMessage, JsonOutputParser, Model
 
 
 def _get_message(user_define: Dict[str, str] = None) -> str:
@@ -54,7 +52,7 @@ class UserProfileExtractor:
         parser = JsonOutputParser()
         for attempt in range(retries):
             try:
-                response = await model_client.ainvoke(model=model_name, messages=model_input)
+                response = await model_client.invoke(model=model_name, messages=model_input)
                 result = await parser.parse(response.content)
                 logger.debug(f"Succeed to get user profile, result: {result}")
                 if isinstance(result, dict):

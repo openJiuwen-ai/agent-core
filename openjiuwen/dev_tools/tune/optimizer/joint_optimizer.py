@@ -10,7 +10,7 @@ import copy
 from typing import List, Dict, Optional
 
 from openjiuwen.core.operator.llm_call import LLMCall
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.dev_tools.tune.base import TuneConstant, EvaluatedCase
 from openjiuwen.dev_tools.tune.optimizer.base import BaseOptimizer
@@ -21,15 +21,16 @@ from openjiuwen.dev_tools.tune.optimizer.example_optimizer import ExampleOptimiz
 class JointOptimizer(BaseOptimizer):
     def __init__(
             self,
-            model_config: ModelConfig,
+            model_config: ModelRequestConfig,
+            model_client_config: ModelClientConfig,
             parameters: Optional[Dict[str, LLMCall]] = None,
             num_examples: int = TuneConstant.DEFAULT_EXAMPLE_NUM,
             ):
         self._instruction_optimizer = InstructionOptimizer(
-            model_config, copy.deepcopy(parameters)
+            model_config, model_client_config, copy.deepcopy(parameters)
         )
         self._example_optimizer = ExampleOptimizer(
-            model_config, copy.deepcopy(parameters), num_examples
+            model_config, model_client_config, copy.deepcopy(parameters), num_examples
         )
         super().__init__(parameters)
         self._is_optimize_instruction: bool = True

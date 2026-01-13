@@ -12,16 +12,15 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
-from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Input, Output
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.security.user_config import UserConfig
-from openjiuwen.core.foundation.llm1.schema.message import SystemMessage, UserMessage
-from openjiuwen.core.foundation.llm1.schema.config import ModelRequestConfig as LLMModelConfig, ModelClientConfig
-from openjiuwen.core.foundation.llm1.model import Model
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, UserMessage
+from openjiuwen.core.foundation.llm import ModelRequestConfig as LLMModelConfig, ModelClientConfig
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
 WORKFLOW_CHAT_HISTORY = "workflow_chat_history"

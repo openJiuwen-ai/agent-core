@@ -3,12 +3,12 @@
 
 import json
 import re
-from typing import Any, Iterator, Optional, Union, Dict
+from typing import Any, AsyncIterator, Optional, Union, Dict
 
 from openjiuwen.core.common.security.user_config import UserConfig
-from openjiuwen.core.foundation.llm.output_parser.base import BaseOutputParser
-from openjiuwen.core.foundation.llm.messages import AIMessage
-from openjiuwen.core.foundation.llm.schema.messages_chunk import AIMessageChunk
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.common.logging import logger
 
 
@@ -17,11 +17,11 @@ class JsonOutputParser(BaseOutputParser):
     JsonOutputParser
     """
 
-    async def parse(self, llm_output: Union[str, AIMessage]) -> Any:
+    async def parse(self, llm_output: Union[str, AssistantMessage]) -> Any:
         """
         parse
         """
-        if isinstance(llm_output, AIMessage):
+        if isinstance(llm_output, AssistantMessage):
             text = llm_output.content
         elif isinstance(llm_output, str):
             text = llm_output
@@ -57,14 +57,14 @@ class JsonOutputParser(BaseOutputParser):
                 logger.error(f"An unexpected error occurred during JSON parsing: {e}\nContent: {json_str}")
             return None
 
-    async def stream_parse(self, streaming_inputs: Iterator[Union[str, AIMessageChunk]]) -> Iterator[
+    async def stream_parse(self, streaming_inputs: AsyncIterator[Union[str, AssistantMessageChunk]]) -> AsyncIterator[
         Optional[Dict[str, Any]]]:
         """
         stream_parse json
         """
         buffer = ""
-        for chunk in streaming_inputs:
-            if isinstance(chunk, AIMessageChunk):
+        async for chunk in streaming_inputs:
+            if isinstance(chunk, AssistantMessageChunk):
                 if chunk.content:
                     buffer += chunk.content
             elif isinstance(chunk, str):

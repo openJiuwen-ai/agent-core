@@ -16,24 +16,8 @@ from pydantic import Field, BaseModel
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-# foundation.llm types for context_engine compatibility (to be removed after
-# context_engine adapts to llm1)
-from openjiuwen.core.foundation.llm import (
-    BaseMessage as LegacyBaseMessage,
-    HumanMessage as LegacyHumanMessage,
-    AIMessage as LegacyAIMessage,
-    ToolMessage as LegacyToolMessage,
-)
-# llm1 types (new interface)
-from openjiuwen.core.foundation.llm1 import (
-    Model,
-    BaseMessage,
-    AssistantMessage,
-)
-from openjiuwen.core.foundation.llm1.schema.config import (
-    ModelConfig,
-    ModelClientConfig
-)
+from openjiuwen.core.foundation.llm import AssistantMessage, Model, UserMessage, \
+    SystemMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
 from openjiuwen.core.session.session import Session
@@ -50,59 +34,49 @@ class ReActAgentConfig(BaseModel):
         max_iterations: Maximum number of ReAct loop iterations
     """
     mem_scope_id: str = Field(default="", description="Memory scope ID")
-    # New LLM configuration using llm1 interfaces
-    model_config_obj: Optional[ModelConfig] = Field(
-        default=None,
-        description="Model configuration"
-    )
-    model_client_config: Optional[ModelClientConfig] = Field(
-        default=None,
-        description="Model client configuration"
-    )
-    prompt_template_name: str = Field(
-        default="",
-        description="Prompt template name"
-    )
-    prompt_template: List[BaseMessage] = Field(
+    model_name: str = Field(default="", description="Model name")
+    model_provider: str = Field(default="openai", description="Model provider")
+    api_key: str = Field(default="", description="API key")
+    api_base: str = Field(default="", description="API base URL")
+    prompt_template_name: str = Field(default="", description="Prompt template name")
+    prompt_template: List[Dict] = Field(
         default_factory=list,
-        description="Prompt template messages"
+        description="Prompt template list"
     )
-    context_window_limit: int = Field(
-        default=20,
-        description="Context window limit"
-    )
+    context_window_limit: int = Field(default=20, description="Context window limit")
     max_iterations: int = Field(default=5, description="Maximum iterations")
 
-    model_config = {"extra": "allow"}
-
-    def configure_model(
-            self,
-            model_config: ModelConfig
-    ) -> 'ReActAgentConfig':
-        """Configure model parameters
+    def configure_model(self, model_name: str) -> 'ReActAgentConfig':
+        """Configure model name
 
         Args:
-            model_config: Model configuration object
+            model_name: Model name
 
         Returns:
             self (supports chaining)
         """
-        self.model_config_obj = model_config
+        self.model_name = model_name
         return self
 
-    def configure_model_client(
+    def configure_model_provider(
             self,
-            model_client_config: ModelClientConfig
+            provider: str,
+            api_key: str,
+            api_base: str
     ) -> 'ReActAgentConfig':
-        """Configure model client
+        """Configure model provider details
 
         Args:
-            model_client_config: Model client configuration object
+            provider: Model provider name (e.g., "openai")
+            api_key: API key
+            api_base: API base URL
 
         Returns:
             self (supports chaining)
         """
-        self.model_client_config = model_client_config
+        self.model_provider = provider
+        self.api_key = api_key
+        self.api_base = api_base
         return self
 
     def configure_prompt(self, prompt_name: str) -> 'ReActAgentConfig':
@@ -119,12 +93,13 @@ class ReActAgentConfig(BaseModel):
 
     def configure_prompt_template(
             self,
-            prompt_template: List[BaseMessage]
+            prompt_template: List[Dict]
     ) -> 'ReActAgentConfig':
         """Configure prompt template directly
 
         Args:
-            prompt_template: Prompt template messages (List[BaseMessage])
+            prompt_template: Prompt template list, format like
+                [{"role": "system", "content": "..."}]
 
         Returns:
             self (supports chaining)
@@ -229,8 +204,9 @@ class ReActAgent(BaseAgent):
         self.config = config
 
         # Reset LLM if model config changed
-        if (old_config.model_client_config != config.model_client_config or
-                old_config.model_config_obj != config.model_config_obj):
+        if (old_config.model_provider != config.model_provider or
+                old_config.api_key != config.api_key or
+                old_config.api_base != config.api_base):
             self._llm = None
 
         # Update context_engine if context window limit changed
@@ -283,7 +259,8 @@ class ReActAgent(BaseAgent):
             AssistantMessage from LLM
         """
         llm = self._get_llm()
-        return await llm.ainvoke(
+        return await llm.invoke(
+            model_name=self.config.model_name,
             messages=messages,
             tools=tools
         )
@@ -323,12 +300,12 @@ class ReActAgent(BaseAgent):
         context = await self.context_engine.create_context(session=session)
 
         # Add user message to context (convert to legacy type for context_engine)
-        await context.add_messages(LegacyHumanMessage(content=user_input))
+        await context.add_messages(UserMessage(content=user_input))
 
         # Build system messages from prompt template
         # Convert to legacy type for context_engine compatibility
         system_messages = [
-            LegacyBaseMessage(role=msg.role, content=msg.content)
+            SystemMessage(role=msg.role, content=msg.content)
             for msg in self.config.prompt_template
             if msg.role == "system"
         ]
@@ -356,8 +333,8 @@ class ReActAgent(BaseAgent):
             )
 
             # Convert AssistantMessage to legacy AIMessage for context storage
-            # (to be removed after context_engine adapts to llm1)
-            ai_msg_for_context = LegacyAIMessage(
+            # (to be removed after context_engine adapts to llm)
+            ai_msg_for_context = AssistantMessage(
                 content=ai_message.content,
                 tool_calls=ai_message.tool_calls
             )
@@ -373,7 +350,7 @@ class ReActAgent(BaseAgent):
                     )
 
                 # Execute tools using _execute_ability (supports parallel)
-                # llm1.ToolCall is duck-type compatible with foundation.tool.ToolCall
+                # llm.ToolCall is duck-type compatible with foundation.tool.ToolCall
                 results = await self._execute_ability(
                     ai_message.tool_calls, session
                 )

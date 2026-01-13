@@ -28,13 +28,12 @@ from openjiuwen.core.single_agent import (
     DefaultResponse
 )
 from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
 from openjiuwen.core.workflow import QuestionerComponent, QuestionerConfig, FieldInfo
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput

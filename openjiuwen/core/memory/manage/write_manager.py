@@ -5,7 +5,7 @@ from typing import Tuple
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.mem_unit.memory_unit import BaseMemoryUnit
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.store.user_mem_store import UserMemStore
 
 
@@ -14,7 +14,7 @@ class WriteManager:
         self.managers = managers
         self.mem_store = mem_store
 
-    async def add_mem(self, mem_units: list[BaseMemoryUnit], llm: Tuple[str, BaseModelClient] | None) -> None:
+    async def add_mem(self, mem_units: list[BaseMemoryUnit], llm: Tuple[str, Model] | None) -> None:
         has_inner_exception = False
         for mem_unit in mem_units:
             mem_type = mem_unit.mem_type.value

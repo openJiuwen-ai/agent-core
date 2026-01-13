@@ -10,7 +10,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import BaseMessage, AIMessage
+from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.dev_tools.tune.base import Case, EvaluatedCase
 
 
@@ -29,7 +29,7 @@ class TuneUtils:
     def get_input_string_from_case(case: Case):
         messages_content = []
         for message in case.messages:
-            if isinstance(message, AIMessage) and message.tool_calls:
+            if isinstance(message, AssistantMessage) and message.tool_calls:
                 content = "".join(json.dumps(tool_call.model_dump()) for tool_call in message.tool_calls)
             else:
                 content = message.content
@@ -41,7 +41,7 @@ class TuneUtils:
 
     @staticmethod
     def get_output_string_from_message(message: BaseMessage):
-        if isinstance(message, AIMessage) and message.tool_calls:
+        if isinstance(message, AssistantMessage) and message.tool_calls:
             return "".join("".join(json.dumps(tool_call.model_dump(include={"name", "arguments"}))
                                    for tool_call in message.tool_calls))
         return message.content

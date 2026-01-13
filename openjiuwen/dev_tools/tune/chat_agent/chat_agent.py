@@ -11,19 +11,19 @@ from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.session import Session
-from openjiuwen.core.foundation.llm import ModelFactory
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.tool import Tool
 
 
 def create_chat_agent_config(agent_id: str,
                              agent_version: str,
                              description: str,
-                             model: LLMCallConfig
+                             model: LLMCallConfig,
                              ):
     config = ChatAgentConfig(id=agent_id,
                              version=agent_version,
                              description=description,
-                             model=model
+                             model=model,
                              )
     return config
 
@@ -43,33 +43,20 @@ class ChatAgent(BaseAgent):
         # Initialize LLM Call
         llm_config = agent_config.model
         self._llm_call = LLMCall(
-            llm_config.model.model_info.model_name,
-            self._init_model(llm_config.model),
+            llm_config.model.model_name,
+            self._init_model(llm_config.model, llm_config.model_client),
             llm_config.system_prompt,
             llm_config.user_prompt,
             llm_config.freeze_system_prompt,
             llm_config.freeze_user_prompt
         )
 
-    def _init_model(self, model_config):
+    def _init_model(self, model_config, model_client_config):
         """Initialize model"""
-        model_id = generate_key(
-            model_config.model_info.api_key,
-            model_config.model_info.api_base,
-            model_config.model_provider
+        return Model(
+            model_client_config,
+            model_config
         )
-
-        model = self._session.get_model(model_id=model_id)
-
-        if model is None:
-            model = ModelFactory().get_model(
-                model_provider=model_config.model_provider,
-                api_base=model_config.model_info.api_base,
-                api_key=model_config.model_info.api_key
-            )
-            self._session.add_model(model_id=model_id, model=model)
-
-        return self._session.get_model(model_id=model_id)
 
     def _create_context_engine(self) -> ContextEngine:
         """ChatAgent uses default configured ContextEngine"""

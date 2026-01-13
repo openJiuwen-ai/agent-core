@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.foundation.llm import BaseMessage,HumanMessage
+from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
 
 
@@ -44,7 +44,7 @@ class PromptTemplate(BaseModel):
             return []
 
         if isinstance(self.content, str):
-            return [HumanMessage(content=self.content)]
+            return [UserMessage(content=self.content)]
 
         if not all(isinstance(msg, BaseMessage) for msg in self.content):
             raise JiuWenBaseException(

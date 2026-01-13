@@ -19,9 +19,11 @@ from openjiuwen.core.workflow import Start
 from openjiuwen.core.session import FORCE_DEL_WORKFLOW_STATE_ENV_KEY
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.foundation.llm import BaseModelInfo
-from openjiuwen.core.foundation.llm import AIMessage, UsageMetadata
+from openjiuwen.core.foundation.llm import BaseModelInfo, Model
+from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata
 from openjiuwen.core.workflow import Workflow
+
+os.environ["LLM_SSL_VERIFY"] = "false"
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
@@ -39,7 +41,7 @@ class MockLLMModel:
     def invoke(self, model_name, messages, tools=None):
         """Mock invoke method for Questioner component"""
         # Return a mock response with extracted fields
-        return AIMessage(
+        return AssistantMessage(
             content='{"location": "hangzhou", "time": "today"}',
             tool_calls=[],
             usage_metadata=UsageMetadata(input_tokens=10, output_tokens=20, total_tokens=30)
@@ -73,7 +75,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
     @patch("openjiuwen.single_agent.llm_agent.llm_controller.LLMController._generate_plan_from_llm")
     @patch("openjiuwen.core.workflow.component.basic_components.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.component.basic_components.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_react_agent_invoke_with_workflow_interrupt(self, mock_get_model, mock_llm_inputs,
                                                                mock_extraction, mock_generate_plan_from_llm):
         mock_get_model.return_value = MockLLMModel()
@@ -168,7 +170,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
         # 返回格式改为元组: (tasks, llm_output)
         mock_generate_plan_from_llm.return_value = (
             [task],
-            AIMessage(content="This is first mock LLM output"),
+            AssistantMessage(content="This is first mock LLM output"),
         )
 
         result = await react_agent.invoke({"conversation_id": "12345", "query": "查询杭州的天气"})
@@ -178,13 +180,13 @@ class TestReActAgentInterrupt:  # ① 关键改动
         # 返回格式改为元组: (tasks, llm_output)
         mock_generate_plan_from_llm.return_value = (
             [],
-            AIMessage(content="This is second mock LLM output"),
+            AssistantMessage(content="This is second mock LLM output"),
         )
         if result.get("result_type") == 'question':
             result = await react_agent.invoke({"conversation_id": "12345", "query": "查询杭州天气"})
             print(f"LLMAgent 第二次输出结果：{result}")
 
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     @patch("openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config", return_value=MagicMock())
     @pytest.mark.asyncio
     async def test_real_react_agent_invoke_with_workflow_interrupt(self, mock_set_scope, mock_get_model):
@@ -220,7 +222,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
         )
         end_component = End({"responseTemplate": "{{output}}"})
 
-        model_config = ModelConfig(model_provider="openai",
+        model_config = ModelConfig(model_provider="OpenAI",
                                    model_info=BaseModelInfo(
                                        model="gpt-4",
                                        api_base="mock-url",
@@ -298,7 +300,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_real_workflow_agent_invoke_with_workflow_interrupt(self, mock_get_model, mock_extraction):
         # Mock LLM model
         mock_get_model.return_value = MockLLMModel()
@@ -328,7 +330,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
 
-        model_config = ModelConfig(model_provider="openai",
+        model_config = ModelConfig(model_provider="OpenAI",
                                    model_info=BaseModelInfo(
                                        model="gpt-4",
                                        api_base="mock-url",
@@ -395,7 +397,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_real_workflow_agent_stream_with_workflow_interrupt(self, mock_get_model, mock_extraction):
         # Mock LLM model
         mock_get_model.return_value = MockLLMModel()
@@ -426,7 +428,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
 
-        model_config = ModelConfig(model_provider="openai",
+        model_config = ModelConfig(model_provider="OpenAI",
                                    model_info=BaseModelInfo(
                                        model="gpt-4",
                                        api_base="mock-url",

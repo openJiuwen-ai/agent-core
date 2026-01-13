@@ -3,7 +3,7 @@
 
 from typing import Any
 
-from openjiuwen.core.foundation.llm1.schema.message import BaseMessage, AssistantMessage, ToolMessage
+from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, ToolMessage
 
 
 def merge_parser_content(left: Any, right: Any) -> Any:

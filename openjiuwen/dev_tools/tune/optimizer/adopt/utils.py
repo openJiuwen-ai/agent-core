@@ -4,7 +4,7 @@
 import json
 from typing import List, Dict, Any
 
-from openjiuwen.core.foundation.llm import SystemMessage, HumanMessage
+from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
 OUTPUT_CHANGE_SYSTEM_PROMPT = PromptTemplate(content=[SystemMessage(content="""
@@ -26,7 +26,7 @@ Specifications:
 """)])
 
 
-OUTPUT_CHANGE_USER_PROMPT = PromptTemplate(content=[HumanMessage(content="""
+OUTPUT_CHANGE_USER_PROMPT = PromptTemplate(content=[UserMessage(content="""
 Here is the information for your feedback task:
 
 - <WORKFLOW_DESCRIPTION> {{workflow_description}} </WORKFLOW_DESCRIPTION>
@@ -60,7 +60,7 @@ Requirements:
 """)])
 
 
-DEEP_OUTPUT_ANALYSIS_USER_PROMPT = PromptTemplate(content=[HumanMessage(content="""
+DEEP_OUTPUT_ANALYSIS_USER_PROMPT = PromptTemplate(content=[UserMessage(content="""
 Here is the information for your analysis:
 
 - <WORKFLOW_DESCRIPTION> {{workflow_description}} </WORKFLOW_DESCRIPTION>
@@ -94,7 +94,7 @@ Requirements:
 """)])
 
 
-EXPECTED_OUTPUT_USER_PROMPT = PromptTemplate(content=[HumanMessage(content="""
+EXPECTED_OUTPUT_USER_PROMPT = PromptTemplate(content=[UserMessage(content="""
 Here is the information for your task:
 
 - <DEPENDENCY> {{dependency_from_this_workflow_final_output}} </DEPENDENCY> (Dependency and job description, how this node's output affects the final output)
@@ -122,7 +122,7 @@ Requirements:
 """)])
 
 
-GRADIENT_GENERATE_USER_PROMPT = PromptTemplate(content=[HumanMessage(content="""
+GRADIENT_GENERATE_USER_PROMPT = PromptTemplate(content=[UserMessage(content="""
 Here is the information for your optimization task:
 
 - <NODE_JOB> {{node_job}} </NODE_JOB>
@@ -151,7 +151,7 @@ You task is to:
 """)])
 
 
-GRADIENT_REDUCE_USER_PROMPT = PromptTemplate(content=[HumanMessage(content="""
+GRADIENT_REDUCE_USER_PROMPT = PromptTemplate(content=[UserMessage(content="""
 Here are the accumulated reasoning outputs from individual cases:
 <REASON>
 {{all_reasons}}
@@ -183,7 +183,7 @@ You always output in Chinese.
 """)])
 
 
-PROMPT_UPDATE_USER_PROMPT = PromptTemplate(content=[HumanMessage(content="""
+PROMPT_UPDATE_USER_PROMPT = PromptTemplate(content=[UserMessage(content="""
 I'm trying to refine a prompt for a large language model.
 
 My current prompt is:

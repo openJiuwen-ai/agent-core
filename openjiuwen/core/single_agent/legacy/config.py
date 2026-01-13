@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.single_agent.legacy.schema import WorkflowSchema
 from openjiuwen.core.common.constants.enums import ControllerType
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, ModelConfig
 from openjiuwen.core.memory.config.config import MemoryScopeConfig
 
 

@@ -12,6 +12,7 @@ from openjiuwen.core.session.stream import StreamMode, BaseStreamMode
 from openjiuwen.core.session.tracer import decorate_tool_with_trace, decorate_workflow_with_trace, \
     decorate_model_with_trace
 from openjiuwen.core.foundation.llm import BaseModelClient, BaseModelInfo
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard, Input, Output
 from openjiuwen.core.workflow.components.llm_related.llm_comp import LLMExecutable
@@ -20,7 +21,7 @@ pytestmark = pytest.mark.asyncio
 
 
 def get_llm_config():
-    model_config = ModelConfig(model_provider="siliconflow",
+    model_config = ModelConfig(model_provider="SiliconFlow",
                                model_info=BaseModelInfo(
                                    model="Qwen/Qwen3-32B",
                                    api_base="sk",
@@ -86,7 +87,14 @@ class MockModel(BaseModelClient):
         self.max_retrie = 'max_retrie'
         self.timeout = 2
         self._config = get_llm_config()
-        super().__init__("api_key", "")
+        model_client_config = ModelClientConfig(
+            client_provider="SiliconFlow",
+            api_key="api_key",
+            api_base="http://api_base",
+            verify_ssl=False
+        )
+        model_request_config = ModelRequestConfig(model="Qwen/Qwen3-32B")
+        super().__init__(model_request_config, model_client_config)
 
     def _invoke(self, model_name: str, messages: Union[List[str], List[Dict], str],
                 tools: Union[List[ToolInfo], List[Dict]] = None, temperature: float = 0.1,
@@ -114,6 +122,16 @@ class MockModel(BaseModelClient):
         logger.info(messages)
         logger.info(f"begin to ainvoke , inputs={messages}")
         return messages
+
+    async def invoke(self, model_name, messages, *, tools=None, temperature=None, top_p=None,
+                     max_tokens=None, stop=None, output_parser=None, timeout=None, **kwargs):
+        logger.info(f"begin to invoke, inputs={messages}")
+        return messages
+
+    async def stream(self, model_name, messages, *, tools=None, temperature=None, top_p=None,
+                     max_tokens=None, stop=None, output_parser=None, timeout=None, **kwargs):
+        logger.info(f"begin to stream, inputs={messages}")
+        yield messages
 
 
 class MockTracer:
@@ -196,8 +214,8 @@ class TestDecator:
         type(model).config = property(lambda self: self._config, lambda self, val: setattr(self, '_config', val))
         model.llm = MockModel()
         model.config = get_llm_config()
-        model.ainvoke = model.llm.ainvoke
-        model.astream = model.llm.astream
+        model.invoke = model.llm.invoke
+        model.stream = model.llm.stream
         results = []
 
         async def mock_trigger(handler_class_name: str, event_name: str, **kwargs):
@@ -222,7 +240,7 @@ class TestDecator:
 
         mocked_model = decorate_model_with_trace(model, mock_session)
 
-        mocked_model.invoke("a", [BaseMessage(role="aa")])
+        await mocked_model.invoke("a", [BaseMessage(role="aa")])
 
         for item in results:
             print(item)
@@ -230,7 +248,7 @@ class TestDecator:
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "Qwen/Qwen3-32B"
 
         results.clear()
-        for item in mocked_model.stream("a", [BaseMessage(role="aa")]):
+        async for item in mocked_model.stream("a", [BaseMessage(role="aa")]):
             print(item)
 
         for item in results:
@@ -239,7 +257,7 @@ class TestDecator:
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "Qwen/Qwen3-32B"
 
         results.clear()
-        await mocked_model.ainvoke("a", [BaseMessage(role="aa")])
+        await mocked_model.invoke("a", [BaseMessage(role="aa")])
 
         for item in results:
             print(item)

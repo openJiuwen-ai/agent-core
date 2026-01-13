@@ -23,6 +23,7 @@ from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
 
+os.environ.setdefault("LLM_SSL_VERIFY", "false")
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
@@ -60,7 +61,7 @@ class TestQuestionComp:
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_invoke_questioner_component_in_workflow_initial_ask(self, mock_get_model, mock_init_prompt,
                                                                  mock_llm_inputs,
                                                                  mock_extraction):
@@ -91,7 +92,7 @@ class TestQuestionComp:
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         model_config = ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 api_key="sk-fake",
                 api_base="https://api.openai.com"
@@ -121,7 +122,7 @@ class TestQuestionComp:
 
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_invoke_questioner_component_in_workflow_repeat_ask(self, mock_get_model, mock_llm_inputs,
                                                                 mock_extraction):
         """
@@ -152,7 +153,7 @@ class TestQuestionComp:
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         model_config = ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 api_key="sk-fake",
                 api_base="https://api.openai.com"
@@ -195,7 +196,7 @@ class TestQuestionComp:
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_stream_questioner_component_in_workflow_initial_ask_with_tracer(self, mock_get_model, mock_init_prompt,
                                                                              mock_llm_inputs, mock_extraction):
         '''
@@ -236,7 +237,7 @@ class TestQuestionComp:
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         model_config = ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 api_key="sk-fake",
                 api_base="https://api.openai.com"
@@ -275,7 +276,7 @@ class TestQuestionerStream:
     @pytest.mark.asyncio
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_invoke_questioner_component_in_workflow_repeat_ask_with_stream_writer_and_context_engine(
             self,
             mock_get_model,
@@ -309,7 +310,7 @@ class TestQuestionerStream:
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         model_config = ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 api_key="sk-fake",
                 api_base="https://api.openai.com"
@@ -483,7 +484,7 @@ class TestQuestionerStream:
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
-    @patch("openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_questioner_state_reset_on_second_workflow_invocation(
             self, mock_get_model, mock_init_prompt, mock_llm_inputs, mock_extraction
     ):
@@ -526,7 +527,7 @@ class TestQuestionerStream:
         end_component = End({"responseTemplate": "{{name}}"})
         
         model_config = ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 api_key="sk-fake",
                 api_base="https://api.openai.com"

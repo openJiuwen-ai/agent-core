@@ -67,7 +67,7 @@ class TestWorkflowAgentMock(unittest.IsolatedAsyncioTestCase):
     def _create_model_config() -> ModelConfig:
         """创建模型配置"""
         return ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 model="gpt-3.5-turbo",
                 api_base="mock_url",
@@ -250,15 +250,16 @@ class TestWorkflowAgentMock(unittest.IsolatedAsyncioTestCase):
         ])
 
         with patch(
-            "openjiuwen.core.foundation.llm.model_utils.model_factory."
-            "ModelFactory.get_model"
-        ) as mock_get_model, patch(
+            'openjiuwen.core.foundation.llm.model.Model.invoke',
+            side_effect=mock_llm.invoke
+        ), patch(
+            'openjiuwen.core.foundation.llm.model.Model.stream',
+            side_effect=mock_llm.stream
+        ), patch(
             "openjiuwen.core.memory.long_term_memory."
             "LongTermMemory.set_scope_config",
             return_value=MagicMock()
         ):
-            mock_get_model.return_value = mock_llm
-
             # 构建 workflow
             workflow = self._build_questioner_workflow(
                 workflow_id="location_workflow",
@@ -320,15 +321,16 @@ class TestWorkflowAgentMock(unittest.IsolatedAsyncioTestCase):
         ])
 
         with patch(
-            "openjiuwen.core.foundation.llm.model_utils.model_factory."
-            "ModelFactory.get_model"
-        ) as mock_get_model, patch(
+            'openjiuwen.core.foundation.llm.model.Model.invoke',
+            side_effect=mock_llm.invoke
+        ), patch(
+            'openjiuwen.core.foundation.llm.model.Model.stream',
+            side_effect=mock_llm.stream
+        ), patch(
             "openjiuwen.core.memory.long_term_memory."
             "LongTermMemory.set_scope_config",
             return_value=MagicMock()
         ):
-            mock_get_model.return_value = mock_llm
-
             # 构建 workflow
             workflow = self._build_questioner_workflow(
                 workflow_id="location_workflow_resume",

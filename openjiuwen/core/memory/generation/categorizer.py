@@ -2,12 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
 from typing import List, Tuple
-from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.foundation.llm import JsonOutputParser
+from openjiuwen.core.foundation.llm import BaseMessage, JsonOutputParser, Model
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.generation.common import build_model_input
 from openjiuwen.core.memory.prompt.categorizer import CATEGORIZATION_PROMPT
-from openjiuwen.core.foundation.llm1.model import Model
 
 
 class Categorizer:
@@ -31,7 +29,7 @@ class Categorizer:
         parser = JsonOutputParser()
         for attempt in range(retries):
             try:
-                response = await model_client.ainvoke(model=model_name, messages=model_input)
+                response = await model_client.invoke(model=model_name, messages=model_input)
                 categories = await parser.parse(response.content)
                 logger.debug(f"Succeed to get categories, result: {categories}")
                 if isinstance(categories, dict) and "categories" in categories.keys():

@@ -105,6 +105,15 @@ _DEPRECATED_NAMES = {
 _loaded_modules = {}
 
 
+def clear_module_cache() -> None:
+    """Clear the module cache for testing purposes.
+    
+    This function is provided for testing scenarios where you need to
+    re-trigger deprecation warnings by forcing module re-imports.
+    """
+    _loaded_modules.clear()
+
+
 def _import_deprecated(name: str) -> Any:
     """Import a deprecated name and issue warning.
     

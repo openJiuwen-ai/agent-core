@@ -1,14 +1,14 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import copy
-from typing import List, Optional, Generator, Literal
+from typing import List, Optional, AsyncGenerator, Literal
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
 
 from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
 import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
@@ -18,8 +18,8 @@ META_TEMPLATE_NAME_PREFIX: str = "META_TEMPLATE_"
 
 
 class MetaTemplateBuilder(BasePromptBuilder):
-    def __init__(self, model_config: ModelConfig):
-        super().__init__(model_config)
+    def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
+        super().__init__(model_config, model_client_config)
         self._meta_template_manager = dict()
 
     def register_meta_template(self, name: str, meta_template: str | PromptTemplate):
@@ -37,31 +37,31 @@ class MetaTemplateBuilder(BasePromptBuilder):
             )
         self._meta_template_manager.update({template_name: template_to_reg})
 
-    def build(self,
-              prompt: str | PromptTemplate,
-              tools: Optional[List[ToolInfo]] = None,
-              template_type: Literal["general", "plan", "other"] = "general",
-              custom_template_name: Optional[str] = None
-              ) -> Optional[str]:
+    async def build(self,
+                    prompt: str | PromptTemplate,
+                    tools: Optional[List[ToolInfo]] = None,
+                    template_type: Literal["general", "plan", "other"] = "general",
+                    custom_template_name: Optional[str] = None
+                    ) -> Optional[str]:
         prompt = TEMPLATE.get_string_prompt(prompt)
         self._is_valid_prompt(prompt, tools)
         messages = self._format_meta_template(prompt, tools, template_type, custom_template_name)
-        response = self._model.invoke(self._model_name, messages)
+        response = await self._model.invoke(messages)
         if response is None:
             return None
         return response.content
 
-    def stream_build(self,
-                     prompt: str | PromptTemplate,
-                     tools: Optional[List[ToolInfo]] = None,
-                     template_type: Literal["general", "plan", "other"] = "general",
-                     custom_template_name: Optional[str] = None
-                     ) -> Generator:
+    async def stream_build(self,
+                           prompt: str | PromptTemplate,
+                           tools: Optional[List[ToolInfo]] = None,
+                           template_type: Literal["general", "plan", "other"] = "general",
+                           custom_template_name: Optional[str] = None
+                           ) -> AsyncGenerator:
         prompt = TEMPLATE.get_string_prompt(prompt)
         self._is_valid_prompt(prompt, tools)
         messages = self._format_meta_template(prompt, tools, template_type, custom_template_name)
-        chunks = self._model.stream(self._model_name, messages)
-        for chunk in chunks:
+        chunks = await self._model.stream(messages)
+        async for chunk in chunks:
             yield chunk.content
 
     def _format_meta_template(self,

@@ -375,10 +375,10 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         ])
 
         with patch(
-            "openjiuwen.core.foundation.llm.model_utils.model_factory."
-            "ModelFactory.get_model"
-        ) as mock_get_model:
-            mock_get_model.return_value = mock_llm
+            "openjiuwen.core.application.agents_for_studio.llm_agent."
+            "llm_controller.Model"
+        ) as mock_model_class:
+            mock_model_class.return_value = mock_llm
 
             # 创建 Group 和 Leader
             group, leader_agent, _ = self._create_hierarchical_group()
@@ -440,14 +440,14 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         ])
 
         with patch(
-            "openjiuwen.core.foundation.llm.model_utils.model_factory."
-            "ModelFactory.get_model"
-        ) as mock_get_model, patch(
+            "openjiuwen.core.workflow.components.llm_related."
+            "questioner_comp.Model"
+        ) as mock_model_class, patch(
             "openjiuwen.core.memory.long_term_memory."
             "LongTermMemory.set_scope_config",
             return_value=MagicMock()
         ):
-            mock_get_model.return_value = mock_llm
+            mock_model_class.return_value = mock_llm
 
             # 创建 Group 和 Leader
             group, leader_agent, _ = self._create_hierarchical_group()

@@ -24,7 +24,7 @@ from examples.groups.hierarchical_group.agents.main_controller import Hierarchic
 from openjiuwen.core.controller import Event
 from openjiuwen.core.common.constants import constant as const
 from openjiuwen.core.workflow import WorkflowComponent, WorkflowCard
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import (
     FieldInfo,
@@ -37,7 +37,6 @@ from openjiuwen.core.graph.executable import Output, Input
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session import Session
-from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.workflow import Workflow
 
 # 模型配置

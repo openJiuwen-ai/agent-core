@@ -10,7 +10,7 @@ from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm1.schema.message import (
+from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage,
     AssistantMessage,
     UserMessage,
@@ -18,12 +18,12 @@ from openjiuwen.core.foundation.llm1.schema.message import (
     ToolMessage,
     UsageMetadata
 )
-from openjiuwen.core.foundation.llm1.schema.message_chunk import AssistantMessageChunk
-from openjiuwen.core.foundation.llm1.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm1.output_parsers.output_parser import BaseOutputParser
-from openjiuwen.core.foundation.llm1.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm1.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
 
 class SiliconFlowModelClient(BaseModelClient):

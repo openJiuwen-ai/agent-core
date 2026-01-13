@@ -14,13 +14,9 @@ from openjiuwen.dev_tools.tune import (
     Trainer,
     CaseLoader
 )
-from openjiuwen.core.single_agent import LLMCallConfig
-from openjiuwen.core.foundation.llm import BaseModelInfo
-from openjiuwen.core.foundation.tool import LocalFunction
-
-from openjiuwen.core.foundation.llm import UsageMetadata
-from openjiuwen.core.foundation.tool import ToolCall,ToolCard
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.single_agent.legacy.config import LLMCallConfig
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, ToolCall
+from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
@@ -102,29 +98,24 @@ INFORMATION_EXTRACTION_CASES = [
 TOOL_CALL_CASES = [
     Case(inputs=dict(query="请帮我打开空调"),
         label=dict(output="", tool_calls=[
-            ToolCall(id="", type='function', name="ac_open", arguments="{}")],
-                        usage_metadata=UsageMetadata(finish_reason="tool_calls")),
+            ToolCall(id="", type='function', name="ac_open", arguments="{}")]),
     ),
     Case(inputs=dict(query="请帮我关闭空调"),
          label=dict(output="", tool_calls=[
-             ToolCall(id="", type='function', name="ac_close", arguments="{}")],
-                         usage_metadata=UsageMetadata(finish_reason="tool_calls")),
-         ),
+             ToolCall(id="", type='function', name="ac_close", arguments="{}")]),
+    ),
     Case(inputs=dict(query="天气太热了，开一下空调"),
          label=dict(output="", tool_calls=[
-             ToolCall(id="", type='function', name="ac_open", arguments="{}")],
-                         usage_metadata=UsageMetadata(finish_reason="tool_calls")),
-         ),
+             ToolCall(id="", type='function', name="ac_open", arguments="{}")]),
+    ),
     Case(inputs=dict(query="有点冷，先帮我关窗，再调整到21度"),
          label=dict(output="", tool_calls=[
-             ToolCall(id="", type='function', name="ac_control", arguments="{\"temperature\":21}")],
-                         usage_metadata=UsageMetadata(finish_reason="tool_calls")),
-         ),
+             ToolCall(id="", type='function', name="ac_control", arguments="{\"temperature\":21}")]),
+    ),
     Case(inputs=dict(query="有点热，先帮我开窗，再调整到29度"),
          label=dict(output="", tool_calls=[
-             ToolCall(id="", type='function', name="ac_control", arguments="{\"temperature\":29}")],
-                         usage_metadata=UsageMetadata(finish_reason="tool_calls")),
-         )
+             ToolCall(id="", type='function', name="ac_control", arguments="{\"temperature\":29}")]),
+    )
 ]
 
 INFORMATION_EXTRACTION_CASES_WITH_VARIABLES = [
@@ -171,13 +162,14 @@ class PromptTuneTest(unittest.IsolatedAsyncioTestCase):
             agent_version='1.0.0',
             description='<UNK>',
             model=LLMCallConfig(
-                model=ModelConfig(
-                    model_provider=MODEL_PROVIDER,
-                    model_info=BaseModelInfo(
-                        api_base=API_BASE,
-                        api_key=API_KEY,
-                        model=MODEL_NAME
-                    )
+                model=ModelRequestConfig(
+                    model=MODEL_NAME
+                ),
+                model_client=ModelClientConfig(
+                    client_provider=MODEL_PROVIDER,
+                    api_key=API_KEY,
+                    api_base=API_BASE,
+                    verify_ssl=False
                 ),
                 system_prompt=[{"role": "system", "content": prompt}],
             )
@@ -187,22 +179,27 @@ class PromptTuneTest(unittest.IsolatedAsyncioTestCase):
 
     def create_trainer(self):
         # 1. define optimizer
-        config = ModelConfig(
-            model_provider=MODEL_PROVIDER,
-            model_info=BaseModelInfo(
-                api_base=API_BASE,
-                api_key=API_KEY,
-                model=MODEL_NAME
-            )
+        model_client_config = ModelClientConfig(
+            client_provider=MODEL_PROVIDER,
+            api_key=API_KEY,
+            api_base=API_BASE,
+            verify_ssl=False
         )
+
+        model_config = ModelRequestConfig(
+            model=MODEL_NAME
+        )
+
         optimizer = JointOptimizer(
-            model_config=config,
+            model_config,
+            model_client_config,
             num_examples=0
         )
 
         # 2. define evaluator
         evaluator = DefaultEvaluator(
-            model_config=config,
+            model_config,
+            model_client_config,
             metric="1. 如果是非工具调用，两个回答需要一致，包括数量和名字。注意：但可以忽略对引号格式问题以及tool_calls字段"
                    "2. 如果是工具调用，则只需要关注tool_calls字段中插件名称和插件参数是否一致，无需关注文本内容"
         )
@@ -228,25 +225,29 @@ class PromptTuneTest(unittest.IsolatedAsyncioTestCase):
         agent = self.create_agent(INFORMATION_EXTRACTION_TEMPLATE)
 
         # 创建评估器
-        config = ModelConfig(
-            model_provider=MODEL_PROVIDER,
-            model_info=BaseModelInfo(
-                api_base=API_BASE,
-                api_key=API_KEY,
-                model=MODEL_NAME
-            )
+        model_client_config = ModelClientConfig(
+            client_provider=MODEL_PROVIDER,
+            api_key=API_KEY,
+            api_base=API_BASE,
+            verify_ssl=False
+        )
+
+        model_config = ModelRequestConfig(
+            model=MODEL_NAME
         )
 
         evaluator = DefaultEvaluator(
-            model_config=config,
+            model_config,
+            model_client_config,
             metric="1. 如果是非工具调用，两个回答需要一致，包括数量和名字。注意：但可以忽略对引号格式问题以及tool_calls字段"
                    "2. 如果是工具调用，则只需要关注tool_calls字段中插件名称和插件参数是否一致，无需关注文本内容"
         )
 
         # 创建优化器，执行优化
         with JointOptimizer(
+            model_config,
+            model_client_config,
             parameters=agent.get_llm_calls(),
-            model_config=config,
             num_examples=1
         ) as optimizer:
             predicts = asyncio.run(forward(agent, INFORMATION_EXTRACTION_CASES))

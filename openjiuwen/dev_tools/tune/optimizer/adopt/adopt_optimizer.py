@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 import copy
 import random
 import re
@@ -16,8 +17,7 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.operator.llm_call import LLMCall
-from openjiuwen.core.foundation.llm import BaseModelClient
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.llm import BaseMessage, Model
 from openjiuwen.core.foundation.tool import ToolInfo
 
 DEFAULT_BAD_CASES_SAMPLE_NUM: int = 5
@@ -27,23 +27,25 @@ DEFAULT_PARALLEL_NUM: int = 8
 
 class AdoptOptimizer(BaseOptimizer):
     def __init__(self,
-                 model: BaseModelClient,
+                 model: Model,
                  model_name: str,
                  parameters: Optional[Dict[str, LLMCall]] = None,
                  **kwargs
                  ):
         super().__init__(parameters)
         self._model_name = model_name
-        class ModelWithRetry(BaseModelClient):
-            def __init__(self, model: BaseModelClient):
+
+        class ModelWithRetry(Model):
+            def __init__(self, model: Model):
                 self._model = model
 
-            def invoke(self, model_name:str, messages: List[BaseMessage],
-                       tools: List[ToolInfo] = None, temperature:float=0.3,
-                       top_p: float = 0.7, **kwargs: Any):
+            async def invoke(self, model_name: str, messages: List[BaseMessage],
+                             tools: List[ToolInfo]= None, temperature: float= 0.3,
+                       top_p: float= 0.7, **kwargs: Any):
                 for i in range(1, DEFAULT_MODEL_RETRY_NUM + 1):
                     try:
-                        return self._model.invoke(model_name, messages, tools, temperature, top_p, **kwargs)
+                        return await self._model.invoke(messages, tools=tools, temperature=temperature,
+                                                        top_p=top_p, model=model_name, **kwargs)
                     except Exception as e:
                         logger.warning(f"Failed to invoke model while doing optimization: {str(e)}, "
                                        f"retry {i}/{DEFAULT_MODEL_RETRY_NUM}")
@@ -56,7 +58,6 @@ class AdoptOptimizer(BaseOptimizer):
                     )
                 )
         self._model = ModelWithRetry(model)
-
         self._agent_description = kwargs.get("agent_description", "No description")
         self._constrain = kwargs.get("constrain", "No constrain")
         self._external_knowledge = kwargs.get("external_knowledge", "No external knowledge")
@@ -109,7 +110,7 @@ class AdoptOptimizer(BaseOptimizer):
                      constrain=self._constrain
                      )
             ).to_messages())
-            differences = self._model.invoke(self._model_name, messages).content
+            differences = asyncio.run(self._model.invoke(self._model_name, messages)).content
             messages = ADOPT.DEEP_OUTPUT_ANALYSIS_SYSTEM_PROMPT.to_messages()
             messages.extend(ADOPT.DEEP_OUTPUT_ANALYSIS_USER_PROMPT.format(
                 dict(workflow_description=self._agent_description,
@@ -121,7 +122,7 @@ class AdoptOptimizer(BaseOptimizer):
                      constrain=self._constrain
                      )
             ).to_messages())
-            reflection = self._model.invoke(self._model_name, messages).content
+            reflection = asyncio.run(self._model.invoke(self._model_name, messages)).content
             return "\n\n".join([differences, reflection])
 
         num_workers = max(min(DEFAULT_PARALLEL_NUM, len(self._bad_cases)), 1)
@@ -242,7 +243,7 @@ class AdoptOptimizer(BaseOptimizer):
 
 class PartialOptimizer(InstructionOptimizer):
     def __init__(self,
-                 model: BaseModelClient,
+                 model: Model,
                  model_name: str,
                  parameters: Optional[Dict[str, LLMCall]] = None,
                  **kwargs):
@@ -281,7 +282,7 @@ class PartialOptimizer(InstructionOptimizer):
                      node_prompt=node_prompt,
                      )
             ).to_messages())
-            local_gradients.append(self._model.invoke(self._model_name, messages).content)
+            local_gradients.append(asyncio.run(self._model.invoke(self._model_name, messages)).content)
         return local_gradients
 
     def _reduce_textual_gradient(self, param: TextualParameter, local_gradients: List[str]):
@@ -297,5 +298,5 @@ class PartialOptimizer(InstructionOptimizer):
                 current_prompt=node_prompt
             )
         ).to_messages())
-        reduced_gradient = self._model.invoke(self._model_name, messages).content
+        reduced_gradient = asyncio.run(self._model.invoke(self._model_name, messages)).content
         return reduced_gradient

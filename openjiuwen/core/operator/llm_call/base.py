@@ -5,8 +5,7 @@ from typing import Dict, Any, Optional, List, Callable, AsyncIterator
 
 from openjiuwen.core.session import Session
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import BaseModelClient
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, Model
 from openjiuwen.core.foundation.tool import ToolInfo
 
 DEFAULT_USER_PROMPT: str = "{{query}}"
@@ -15,7 +14,7 @@ DEFAULT_USER_PROMPT: str = "{{query}}"
 class LLMCall:
     def __init__(self,
                  model_name: str,
-                 llm: BaseModelClient,
+                 llm: Model,
                  system_prompt: str | List[BaseMessage] | List[Dict],
                  user_prompt: str | List[BaseMessage] | List[Dict],
                  freeze_system_prompt: bool = False,
@@ -38,7 +37,7 @@ class LLMCall:
                      tools: Optional[List[ToolInfo]] = None,
                      ) -> BaseMessage:
         messages = self._format_llm_input(inputs, history)
-        response = await self._llm.ainvoke(self._model_name, messages, tools=tools)
+        response = await self._llm.invoke(model=self._model_name, messages=messages, tools=tools)
         if self._optimizer_callback is not None:
             await self._optimizer_callback(self._llm_call_id, inputs, response, session)
         return response
@@ -51,7 +50,7 @@ class LLMCall:
                      ) -> AsyncIterator:
         messages = self._format_llm_input(inputs, history)
         message_chunks = []
-        async for chunk in self._llm.astream(self._model_name, messages, tools=tools):
+        async for chunk in self._llm.stream(model=self._model_name, messages=messages, tools=tools):
             message_chunks.append(chunk.content if hasattr(chunk, "content") else str(chunk))
             yield chunk
         response = "".join(message_chunks)

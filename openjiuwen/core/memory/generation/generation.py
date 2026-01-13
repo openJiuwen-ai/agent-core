@@ -10,8 +10,8 @@ from openjiuwen.core.memory.generation.memory_info import ExtractedData
 from openjiuwen.core.memory.generation.user_profile_extractor import UserProfileExtractor
 from openjiuwen.core.memory.generation.variable_extractor import ComprehensionExtractor
 from openjiuwen.core.memory.mem_unit.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit, UserProfileUnit
-from openjiuwen.core.foundation.llm1.schema.message import BaseMessage
-from openjiuwen.core.foundation.llm1.model import Model
+from openjiuwen.core.foundation.llm.schema.message import BaseMessage
+from openjiuwen.core.foundation.llm.model import Model
 
 category_to_class = {
     "user_profile": MemoryType.USER_PROFILE
