@@ -20,6 +20,11 @@ class MemoryChromaVectorStore(VectorStore):
 
         self.collection_cache = {}  # Cache for collections
 
+    @staticmethod
+    def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> Any:
+        logger.error("create_client not implemented in MemoryChromaVectorStore")
+        pass
+
     async def get_collection(self, table_name: str):
         """Get or create collection by table name"""
         if table_name in self.collection_cache:

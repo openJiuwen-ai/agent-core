@@ -38,6 +38,11 @@ class MemoryMilvusVectorStore(VectorStore):
         self.timeout = 3
         self.collections = {}
 
+    @staticmethod
+    def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> Any:
+        logger.error("create_client not implemented in MemoryChromaVectorStore")
+        pass
+
     async def _ensure_connection(self):
         try:
             await asyncio.to_thread(

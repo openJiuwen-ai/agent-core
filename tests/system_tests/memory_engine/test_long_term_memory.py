@@ -7,13 +7,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
-from openjiuwen.core.memory.store.impl.dbm_kv_store import DbmKVStore
 from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore as MilvusVectorStore
 from openjiuwen.core.memory.embed_models.api import APIEmbedModel
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig
 from openjiuwen.core.common.schema.param import Param
+from tests.unit_tests.core.memory.store.mock_kv_store import MockKVStore
 
 
 @unittest.skip("skip system test")
@@ -38,11 +38,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         )
 
         # ---------- KV Store ----------
-        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        resource_dir = os.path.join(project_root, "resources")
-        os.makedirs(resource_dir, exist_ok=True)
-        kv_path = os.path.join(resource_dir, "dbmstore")
-        kv_store = DbmKVStore(kv_path)
+        kv_store = MockKVStore()
 
         # ---------- semantic_store ----------
         semantic_store = MilvusSemanticStore(

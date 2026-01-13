@@ -5,22 +5,17 @@ import shutil
 import struct
 import secrets
 import time
-import os
 from datetime import datetime, timezone
 import pytest
-from openjiuwen.core.memory.store.impl.dbm_kv_store import DbmKVStore
 from openjiuwen.core.memory.store.user_mem_store import UserMemStore
+from tests.unit_tests.core.memory.store.mock_kv_store import MockKVStore
 
 
 @pytest.fixture
 def store():
-    test_dir = "test_dbm"
-    os.makedirs(test_dir, exist_ok=True)
-    db_path = os.path.join(test_dir, "testdb")
-    kv_store = DbmKVStore(db_path)
+    kv_store = MockKVStore()
     store = UserMemStore(kv_store_instance=kv_store)
     yield store
-    shutil.rmtree(test_dir)
 
 
 class TestUserMemStore:
