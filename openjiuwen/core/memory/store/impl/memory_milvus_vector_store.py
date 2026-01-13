@@ -28,7 +28,7 @@ def convert_milvus_result(results) -> List[SearchResult]:
     return final_results
 
 
-class MilvusVectorStore(VectorStore):
+class MemoryMilvusVectorStore(VectorStore):
 
     def __init__(self, milvus_host: str, milvus_port: str, token: str | None, embedding_dims: int):
         self.embedding_dims = embedding_dims
