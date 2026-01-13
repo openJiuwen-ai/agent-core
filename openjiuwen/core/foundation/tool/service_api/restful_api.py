@@ -8,11 +8,11 @@ import aiohttp
 import json
 import asyncio
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool.base import Input, Output, ToolCard
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.tool.service_api.api_param_mapper import APIParamLocation, APIParamMapper
@@ -34,15 +34,19 @@ class RestfulApiCard(ToolCard):
     def validate_method(cls, v: str) -> str:
         v_upper = v.upper()
         if v_upper not in cls.SUPPORTED_METHODS:
-            raise JiuWenBaseException(StatusCode.PLUGIN_RESTFUL_API_METHOD_ERROR.code,
-                                      StatusCode.PLUGIN_RESTFUL_API_METHOD_ERROR.errmsg.format(
-                                          method=v, support=cls.SUPPORTED_METHODS))
+            raise build_error(StatusCode.TOOL_RESTFUL_API_CARD_CONFIG_INVALID,
+                              reason=f"support invalid method, method={v}, only accepts: {cls.SUPPORTED_METHODS}.")
         return v_upper
 
     @field_validator('url')
     @classmethod
     def validate_url(cls, v: str) -> str:
-        UrlUtils.check_url_is_valid(v)
+        try:
+            UrlUtils.check_url_is_valid(v)
+        except Exception as e:
+            raise build_error(StatusCode.TOOL_RESTFUL_API_CARD_CONFIG_INVALID, cause=e,
+                              reason=f"support invalid url, url={v}.")
+
         return v
 
 
@@ -94,48 +98,39 @@ class RestfulApi(Tool):
         return response_data
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
+        final_timeout = self._timeout
         try:
             if self._card.input_params is not None:
                 inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                         skip_none_value=kwargs.get("skip_none_value", False),
                                                         skip_validate=kwargs.get("skip_inputs_validate", False))
             map_results = self._api_param_mapper.map(inputs, default_location=APIParamLocation.BODY)
+            final_timeout = kwargs.get("timeout", self._timeout)
             return await self._async_request(map_results,
-                                             kwargs.get("timeout", self._timeout),
+                                             final_timeout,
                                              kwargs.get("max_response_byte_size", self._max_response_byte_size))
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PLUGIN_REQUEST_TIMEOUT_ERROR.code,
-                message=StatusCode.PLUGIN_REQUEST_TIMEOUT_ERROR.errmsg,
-            ) from e
+        except (aiohttp.ConnectionTimeoutError, asyncio.TimeoutError) as e:
+            raise build_error(StatusCode.TOOL_RESTFUL_API_TIMEOUT, cause=e,
+                              interface="invoke", timeout=final_timeout, card=self.card)
         except aiohttp.ClientResponseError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PLUGIN_RESPONSE_HTTP_CODE_ERROR.code,
-                message=f"Plugin response code: {e.status} error.",
-            ) from e
-        except JiuWenBaseException as error:
-            raise error
+            raise build_error(StatusCode.TOOL_RESTFUL_API_RESPONSE_ERROR, cause=e,
+                              interface="invoke", code=e.status, reason=e.message,
+                              card=self.card)
         except Exception as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message="plugin request unknown error"
-            ) from e
+            raise build_error(StatusCode.TOOL_RESTFUL_API_EXECUTION_ERROR, cause=e,
+                              interface="invoke", reason=str(e),
+                              card=self.card)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
-        raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code,
-            message=f"Restful api not support stream mode",
-        )
+        raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
 
-    @staticmethod
-    async def _format_response(response: aiohttp.ClientResponse, response_bytes_size_limit):
+    async def _format_response(self, response: aiohttp.ClientResponse, response_bytes_size_limit):
         content = b""
         async for chunk in response.content.iter_chunked(1024):
             content += chunk
             if len(content) > response_bytes_size_limit:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PLUGIN_RESPONSE_TOO_BIG_ERROR.code,
-                    message=StatusCode.PLUGIN_RESPONSE_TOO_BIG_ERROR.errmsg.format(max_length=response_bytes_size_limit,
-                                                                                   actual_length=len(content)),
-                )
+                raise build_error(StatusCode.TOOL_RESTFUL_API_RESPONSE_SIZE_EXCEED_LIMIT,
+                                  interface="invoke", max_length=response_bytes_size_limit, actual_length=len(content),
+                                  card=self._card)
         res = json.loads(content.decode("utf-8"))
         return res

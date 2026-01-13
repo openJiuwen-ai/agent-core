@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import (
     Optional,
     Any,
@@ -198,7 +199,27 @@ class ModelError(ExecutionError):
 
 
 class ToolError(ExecutionError):
-    pass
+    def __init__(
+            self,
+            status: StatusCode,
+            *,
+            msg: Optional[str] = None,
+            details: Optional[Any] = None,
+            cause: Optional[BaseException] = None,
+            card: "BaseCard" = None,
+            **kwargs: dict[str, Any],
+    ):
+        if card:
+            self._card = deepcopy(card)
+            if details is None:
+                details = {}
+            details = details.update({"card": self._card})
+        else:
+            self._card = None
+        super().__init__(status=status, msg=msg, details=details, cause=cause, card=card, **kwargs)
+
+    def card(self):
+        return self._card
 
 
 class ContextError(ExecutionError):

@@ -71,6 +71,8 @@ class APIParamMapper:
                         result.get(location, {}).update({param_name: inputs.get(param_name)})
         for location in [APIParamLocation.PATH, APIParamLocation.QUERY, APIParamLocation.HEADER]:
             # Input values override default values (dictionary unpacking order matters)
+            if location not in result:
+                result[location] = {}
             result[location] = {**self.defaults.get(location, {}), **result[location]}
 
         return result

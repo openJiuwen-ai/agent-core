@@ -35,7 +35,7 @@ def tool(
         input_params: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
         card: Optional[ToolCard] = None,
         auto_extract: bool = True
-) -> Union[Callable, LocalFunction]:
+) -> LocalFunction:
     """
     Universal decorator to convert functions into LocalFunction tools.
 

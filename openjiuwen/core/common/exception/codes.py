@@ -154,6 +154,42 @@ class StatusCode(Enum):
     NUMBER_CONDITION_ERROR = (140003, "number condition error")
 
     # =========================
+    # Foundation Tool 160000–169999
+    # =========================
+    TOOL_STREAM_NOT_SUPPORTED = (160001, "stream is not support, card={card}")
+    TOOL_INVOKE_NOT_SUPPORTED = (160002, "invoke is not support, card={card}")
+    TOOL_CARD_NOT_SUPPORTED = (160003, "card is not support")
+    TOOL_CARD_ID_NOT_SUPPORTED = (160004, "card's id is not support, card={card}")
+
+    # RestfulApi 160100-160199
+    # RestfulApiCard validate 160100-160120
+    TOOL_RESTFUL_API_CARD_CONFIG_INVALID = (160100, "config failed, {reason}")
+    # RestfulApiCard Execution 160121 - 160199
+    TOOL_RESTFUL_API_TIMEOUT = (160121,
+        "execute {interface} failed, request is timeout, timeout={timeout}s, card=[{card}]")
+    TOOL_RESTFUL_API_RESPONSE_SIZE_EXCEED_LIMIT = (160122,
+        "execute {interface} failed, response is too big,"
+        " max_size={max_length}b, actual={actual_length}b, card=[{card}]")
+    TOOL_RESTFUL_API_RESPONSE_ERROR = (160123,
+        "execute {interface} failed, response error, code={code}, reason={reason}")
+    TOOL_RESTFUL_API_EXECUTION_ERROR = (160124, "RestfulApi execute {interface} failed,"
+                                                " reason={reason}, card=[{card}]")
+
+    # LocalFunction 160200-160299
+    # LocalFunction validate 160200-160220
+    TOOL_LOCAL_FUNCTION_FUNC_NOT_SUPPORTED = (160201, "func is not supported, card={card}")
+
+    # LocalFunction execution 160221-160299
+    TOOL_LOCAL_FUNCTION_EXECUTION_ERROR = (160221, "execute {interface} failed, reason={reason}, card={card}")
+
+    # MCPTool 160300-160399
+    # MCPTool validate 160300-160320
+    TOOL_MCP_CLIENT_NOT_SUPPORTED = (160301, "mcp client is not supported, card={card}")
+
+    # MCPTool execution 160321-160399
+    TOOL_MCP_EXECUTION_ERROR = (160321, "execute {interface} failed, reason={reason}, card={card}")
+
+    # =========================
     # Common Capabilities 180000–189999
     # =========================
 
@@ -172,6 +208,9 @@ class StatusCode(Enum):
     JSON_DUMP_FAILED = (188003, "json dump failed, reason: {error_msg}")
     URL_INVALID = (188004, "url is invalid")
     SSL_CERT_INVALID = (188005, "ssl certificate is invalid")
+
+    SCHEMA_VALIDATE_INVALID = (189001, "validate data with schema failed, reason={reason}, data={data}")
+    SCHEMA_FORMAT_INVALID = (189002, "format data with schema failed, reason={reason}, data={data}")
 
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.

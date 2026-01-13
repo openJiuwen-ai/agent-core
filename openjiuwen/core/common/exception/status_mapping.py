@@ -38,13 +38,13 @@ def _get_exception_class_registry() -> Dict[str, Type]:
 
 
 KEYWORD_RULES = [
-    (("INVALID", "NOT_SUPPORTED", "PARAM", "MISSING", "DUPLICATED"), "ValidationError"),
+    (("INVALID", "VALIDATE", "NOT_SUPPORTED", "PARAM", "MISSING", "DUPLICATED"), "ValidationError"),
     (("CONFIG", "SCHEMA", "FORMAT", "TEMPLATE"), "ValidationError"),
 
     (("INIT", "CONNECT", "SERVICE", "QUEUE", "PROVIDER"), "FrameworkError"),
     (("CALL", "INVOKE_LLM", "MODEL", "REMOTE"), "FrameworkError"),
 
-    (("TIMEOUT", "EXECUTE", "EXECUTION", "RUNTIME", "PROCESS", "STREAM"), "ExecutionError"),
+    (("TIMEOUT", "EXECUTE", "EXECUTION", "RUNTIME", "PROCESS", "STREAM", "RESPONSE"), "ExecutionError"),
 ]
 
 RANGE_RULES = [

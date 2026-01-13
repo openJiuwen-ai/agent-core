@@ -1,16 +1,19 @@
 #!/usr/bin/python3.11
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved
+import asyncio
 import json
 import os
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import aiohttp
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.foundation.tool import ToolInfo, RestfulApiCard
 from openjiuwen.core.foundation.tool.service_api.restful_api import RestfulApi
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 os.environ["SSRF_PROTECT_ENABLED"] = "false"
 
@@ -68,9 +71,8 @@ class TestRestFulApi:
         )
         mock_request.return_value = dict()
         os.environ["RESTFUL_SSL_CERT"] = "temp.crt"
-        with pytest.raises(JiuWenBaseException) as e:
+        with pytest.raises(ValidationError) as e:
             await mock_data.stream({})
-        assert "[182000] Restful api not support stream mode" == str(e.value)
         del os.environ["RESTFUL_SSL_CERT"]
 
     def test_get_tool_info(self):
@@ -346,7 +348,6 @@ class TestRestfulApiInvokeWithLocation:
             assert "json" in call_args[1]
             assert call_args[1]["json"] == {"payload": {"name": "test_resource", "type": "document"}}
 
-
     async def test_invoke_with_mixed_locations(self, mock_client_session, mock_connector):
         with patch('openjiuwen.core.common.security.ssl_utils.SslUtils.get_ssl_config') as mock_get_ssl, \
                 patch(
@@ -419,7 +420,6 @@ class TestRestfulApiInvokeWithLocation:
             assert call_args[1]["headers"] == expected_headers
             assert "params" in call_args[1]
             assert call_args[1]["params"] == {"search_criteria": {"keywords": ["AI", "ML"], "date_range": "2024"}}
-
 
     async def test_invoke_with_no_location_specified(self, mock_client_session, mock_connector):
         with patch('openjiuwen.core.common.security.ssl_utils.SslUtils.get_ssl_config') as mock_get_ssl, \
@@ -506,3 +506,57 @@ class TestRestfulApiInvokeWithLocation:
             }
             assert call_args[1]["headers"] == expected_headers
 
+
+class TestRestfulApiExceptions:
+    """测试 RestfulApi 的异常场景"""
+
+    @pytest.fixture
+    def mock_card(self):
+        """创建模拟的 RestfulApiCard"""
+        card = RestfulApiCard(**dict(
+            name="demo",
+            url="https://127.0.0.1/api.example.com/users",
+            method="POST",
+            timeout=60.0,
+            max_response_byte_size=10 * 1024 * 1024,
+            headers={},
+            queries={},
+            paths={},
+            input_params={}))
+        return card
+
+    @pytest.fixture
+    def restful_api(self, mock_card):
+        """创建 RestfulApi 实例"""
+        return RestfulApi(mock_card)
+
+    @pytest.mark.asyncio
+    async def test_invoke_timeout_error(self, restful_api, mock_card):
+        """测试请求超时异常"""
+        # 模拟超时异常
+        with patch.object(restful_api, '_async_request',
+                          side_effect=asyncio.TimeoutError("Request timeout")):
+            with pytest.raises(Exception) as exc_info:
+                await restful_api.invoke({})
+
+            assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_TIMEOUT.code
+
+
+    @pytest.mark.asyncio
+    async def test_invoke_response_error(self, restful_api, mock_card):
+        """测试 HTTP 响应错误异常"""
+        # 模拟 aiohttp.ClientResponseError
+        mock_response_error = aiohttp.ClientResponseError(
+            request_info=Mock(),
+            history=(),
+            status=404,
+            message="Not Found",
+            headers={}
+        )
+
+        with patch.object(restful_api, '_async_request',
+                          side_effect=mock_response_error):
+            with pytest.raises(Exception) as exc_info:
+                await restful_api.invoke({})
+
+            assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_RESPONSE_ERROR.code

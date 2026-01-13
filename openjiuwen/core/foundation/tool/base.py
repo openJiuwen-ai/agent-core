@@ -7,6 +7,8 @@ from typing import TypeVar
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common import BaseCard
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 
 Input = TypeVar('Input', contravariant=True)
@@ -33,6 +35,10 @@ class Tool:
             The tool card is stored internally and used for validation and
             metadata purposes throughout the tool's lifecycle.
         """
+        if card is None:
+            raise build_error(StatusCode.TOOL_CARD_NOT_SUPPORTED)
+        if not card.id:
+            raise build_error(StatusCode.TOOL_CARD_ID_NOT_SUPPORTED, card=card)
         self._card = card
 
     @property

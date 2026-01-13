@@ -6,8 +6,8 @@ from jsonschema import validate as jsonschema_validate, ValidationError as JsonS
 from pydantic import BaseModel, create_model, Field, ConfigDict
 from pydantic.fields import FieldInfo
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import ValidationError, build_error
 
 
 class SchemaUtils:
@@ -38,7 +38,7 @@ class SchemaUtils:
             Formatted data with default values populated
 
         Raises:
-            JiuWenBaseException: If data cannot be formatted according to the schema
+            ValidationError: If data cannot be formatted according to the schema
         """
         try:
             new_data = SchemaUtils.remove_none_values(data) if skip_none_value else data
@@ -55,12 +55,11 @@ class SchemaUtils:
 
             # Format the data using the model
             return SchemaUtils._format_data(new_data, model)
-        except JiuWenBaseException:
-            raise
+        except ValidationError as e:
+            raise e
         except Exception as e:
             # Wrap the exception in a custom business exception
-            raise JiuWenBaseException(StatusCode.COMPONENT_CONFIG_PARAM_ERROR.code,
-                                      StatusCode.COMPONENT_CONFIG_PARAM_ERROR.errmsg.format(reason=e)) from e
+            raise build_error(StatusCode.SCHEMA_FORMAT_INVALID, cause=e, reason=str(e), data={data})
 
     @staticmethod
     def remove_none_values(data: Any) -> Any:
@@ -122,8 +121,7 @@ class SchemaUtils:
             schema: Either a JSON Schema dictionary or a Pydantic BaseModel class
 
         Raises:
-            JsonSchemaValidationError: If data fails jsonschema validation
-            pydantic.ValidationError: If data fails pydantic validation
+            ValidationError: If data fails pydantic validation or jsonschema validation
         """
         try:
             if isinstance(schema, dict):
@@ -139,8 +137,7 @@ class SchemaUtils:
                 schema.model_validate(data)
         except Exception as e:
             # Wrap the exception in a custom business exception
-            raise JiuWenBaseException(StatusCode.COMPONENT_CONFIG_INVALID.code,
-                                      StatusCode.COMPONENT_CONFIG_INVALID.errmsg.format(reason=e)) from e
+            raise build_error(StatusCode.SCHEMA_VALIDATE_INVALID, cause=e, reason=str(e), data=data)
 
     @staticmethod
     def get_schema_dict(schema: Type[BaseModel]) -> Optional[Dict[str, Any]]:
