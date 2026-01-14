@@ -27,7 +27,7 @@ from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.workflow import WorkflowExecutionState, WorkflowOutput
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, AssistantMessage, ToolMessage, Model
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
-from openjiuwen.core.foundation.tool import ToolCall
+from openjiuwen.core.foundation.llm import ToolCall
 
 
 @dataclass

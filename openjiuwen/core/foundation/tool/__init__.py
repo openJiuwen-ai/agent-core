@@ -7,7 +7,7 @@ from openjiuwen.core.foundation.tool.mcp.base import (
     MCPTool,
     McpToolCard,
 )
-from openjiuwen.core.foundation.tool.schema import ToolCall, ToolInfo
+from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.foundation.tool.service_api.restful_api import RestfulApi, RestfulApiCard
 from openjiuwen.core.foundation.tool.tool import tool
 
@@ -25,7 +25,6 @@ __all__ = [
     "ToolCard",
     "RestfulApiCard",
     "ToolInfo",
-    "ToolCall",
     # for mcp tool
     "McpToolCard",
 ]

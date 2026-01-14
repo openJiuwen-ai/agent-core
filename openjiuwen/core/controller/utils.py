@@ -22,7 +22,7 @@ from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.foundation.llm import ModelConfig, BaseMessage, AssistantMessage, UserMessage, ToolMessage, \
     ModelClientConfig, ModelRequestConfig, Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.tool import ToolCall
+from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.workflow import WorkflowOutput
 
 
