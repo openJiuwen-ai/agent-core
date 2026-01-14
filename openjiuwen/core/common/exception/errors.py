@@ -47,7 +47,7 @@ class BaseError(Exception):
         self.__cause__ = cause
 
         self._template_message = self._render_message()
-        self.message = self._template_message if msg is None else msg
+        self.message = "" if msg is None else msg
         super().__init__(self._template_message)
 
     def _render_message(self) -> str:
@@ -57,7 +57,7 @@ class BaseError(Exception):
         Never raise formatting exception outward.
         """
         try:
-            return _format_template(self.status.errmsg, **self.params)
+            return _format_template(self.status.errmsg, params=self.params)
         except Exception:
             return self.status.errmsg
 
