@@ -62,6 +62,10 @@ class ExampleOptimizer(BaseOptimizer):
             )
         self._num_examples = num_examples
 
+    @property
+    def num_examples(self) -> int:
+        return self._num_examples
+
     def _backward(self,
                   evaluated_cases: List[EvaluatedCase],
                   ):
@@ -121,6 +125,9 @@ class ExampleOptimizer(BaseOptimizer):
         if gradient is None:
             return content
         return "\n".join([content, gradient])
+
+    def format_prompt(self, prompt: PromptTemplate, gradient: str) -> str:
+        return self._format_prompt(prompt, gradient)
 
     def _sample_example(self, num_examples: int, evaluated_cases: List[EvaluatedCase]) -> Optional[List[Case]]:
         """sample example"""

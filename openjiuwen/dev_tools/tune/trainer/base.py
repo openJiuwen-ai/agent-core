@@ -23,9 +23,9 @@ class Progress(BaseModel):
 
     def run_batch(self) -> Generator:
         self.best_batch_score = 0
-        for iter in range(self.max_batch_iter):
-            self.current_batch_iter = iter
-            yield iter
+        for batch_iter in range(self.max_batch_iter):
+            self.current_batch_iter = batch_iter
+            yield batch_iter
 
 
 class Callbacks:

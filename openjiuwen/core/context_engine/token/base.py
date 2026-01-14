@@ -43,7 +43,7 @@ class TokenCounter(ABC):
         """
 
     @abstractmethod
-    def count_tools(self, tools: List[ToolInfo],  *, model: str = "", **kwargs) -> int:
+    def count_tools(self, tools: List[ToolInfo], *, model: str = "", **kwargs) -> int:
         """
         Count the number of tokens that a list of tool-calling metadata will consume.
 

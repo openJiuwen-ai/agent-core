@@ -216,17 +216,17 @@ class FeedbackPromptBuilder(BasePromptBuilder):
                     error_msg=f"No valid JSON string found"
                 )
             )
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             raise JiuWenBaseException(
                 StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
                 StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"An error occurred while parsing JSON"
+                    error_msg=f"An error occurred while parsing JSON: {str(e)}"
                 )
-            )
-        except Exception:
+            ) from e
+        except Exception as e:
             raise JiuWenBaseException(
                 StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
                 StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"An error occurred while parsing intent JSON from message"
+                    error_msg=f"An error occurred while parsing intent JSON from message: {str(e)}"
                 )
-            )
+            ) from e

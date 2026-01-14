@@ -22,7 +22,8 @@ class AgentConfig(BaseModel):
 
 
 class LLMCallConfig(BaseModel):
-    model: Optional[ModelConfig] = Field(default=None)
+    model: Optional[ModelRequestConfig] = Field(default=None)
+    model_client: Optional[ModelClientConfig] = Field(default=None)
     system_prompt: List[Dict] = Field(default_factory=list)
     user_prompt: List[Dict] = Field(default_factory=list)
     freeze_system_prompt: bool = Field(default=False)

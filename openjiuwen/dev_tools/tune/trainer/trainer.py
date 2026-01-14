@@ -150,7 +150,10 @@ class Trainer:
         self._optimizer.bind_parameter(agent.get_llm_calls())
         return progress
 
-    def _update_agent(self, agent: BaseAgent, parameters: Dict[str, TextualParameter | LLMCall]):
+    @staticmethod
+    def _update_agent(agent: BaseAgent, parameters: Optional[Dict[str, TextualParameter | LLMCall]] = None):
+        if parameters is None:
+            return
         agent_parameters = agent.get_llm_calls()
         for name, llm_call in agent_parameters.items():
             param = parameters.get(name)
@@ -162,6 +165,9 @@ class Trainer:
             elif isinstance(param, LLMCall):
                 llm_call.update_system_prompt(param.get_system_prompt().content)
                 llm_call.update_user_prompt(param.get_user_prompt().content)
+
+    def update_agent(self, agent: BaseAgent, parameters: Optional[Dict[str, TextualParameter | LLMCall]] = None):
+        return self._update_agent(agent, parameters)
 
     @staticmethod
     def _check_trainable(agent: BaseAgent) -> bool:
@@ -192,7 +198,7 @@ class ParameterSearcher:
         logger.info(f"start searching best parameter group from {len(candidates)} candidates, "
                     f"current epoch baseline score: {best_score}")
         for i, candidate in enumerate(candidates):
-            self._trainer._update_agent(agent, candidate)
+            self._trainer.update_agent(agent, candidate)
             score, evaluated_cases = self._trainer.evaluate(agent, self._case_loader)
             logger.info(f"finish evaluating candidate {i}, score {score}")
             if score > best_score:
@@ -203,9 +209,8 @@ class ParameterSearcher:
                 best_cases = evaluated_cases
         return best_score, best_parameters, best_cases, score
 
-    def generate_candidates(self,
-                            parameters: List[Dict[str, LLMCall]]
-                            ) -> List[Dict[str, LLMCall]]:
+    @staticmethod
+    def generate_candidates(parameters: List[Dict[str, LLMCall]]) -> List[Dict[str, LLMCall]]:
         n_params = len(parameters[0])
         n_candidates = len(parameters)
         node_names = list(parameters[0].keys())

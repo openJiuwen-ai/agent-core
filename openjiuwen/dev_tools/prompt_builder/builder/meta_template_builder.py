@@ -22,6 +22,12 @@ class MetaTemplateBuilder(BasePromptBuilder):
         super().__init__(model_config, model_client_config)
         self._meta_template_manager = dict()
 
+    def get_meta_template(self, template_name: str) -> Optional[any]:
+        return self._meta_template_manager.get(template_name)
+
+    def pop_meta_template(self, template_name: str) -> Optional[any]:
+        return self._meta_template_manager.pop(template_name, None)
+
     def register_meta_template(self, name: str, meta_template: str | PromptTemplate):
         template_name = f"{META_TEMPLATE_NAME_PREFIX}{name}"
         if isinstance(meta_template, str):

@@ -57,11 +57,11 @@ class JointOptimizer(BaseOptimizer):
 
     def _update(self):
         if self._is_optimize_instruction:
-            self._instruction_optimizer._update()
+            self._instruction_optimizer.update()
         instr_parameters = self._instruction_optimizer.parameters()
         for name, param in self._parameters.items():
             if not param.llm_call.get_freeze_user_prompt():
-                optimized_prompt = self._example_optimizer._format_prompt(
+                optimized_prompt = self._example_optimizer.format_prompt(
                     instr_parameters.get(name).llm_call.get_user_prompt(),
                     self._example_optimizer.parameters().get(name, {}).get_gradient("user_prompt")
                 )
@@ -72,12 +72,12 @@ class JointOptimizer(BaseOptimizer):
                     instr_parameters.get(name).llm_call.get_system_prompt()
                 )
                 if param.llm_call.get_freeze_user_prompt():
-                    optimized_prompt = self._example_optimizer._format_prompt(
+                    optimized_prompt = self._example_optimizer.format_prompt(
                         instr_parameters.get(name).llm_call.get_system_prompt(),
                         self._example_optimizer.parameters().get(name, {}).get_gradient("system_prompt")
                     )
                 param.llm_call.update_system_prompt(optimized_prompt)
 
     def _select_optimize_strategy(self):
-        need_optimize_example = self._example_optimizer._num_examples > 0
+        need_optimize_example = self._example_optimizer.num_examples > 0
         self._is_optimize_instruction = random.choice([True, False]) if need_optimize_example else True

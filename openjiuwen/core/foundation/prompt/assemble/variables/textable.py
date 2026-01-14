@@ -10,6 +10,7 @@ from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variab
 
 logger = logging.getLogger(__name__)
 
+
 class TextableVariable(Variable):
     """Variable class for processing string-type placeholders"""
     def __init__(self, text: str, name: str = "default", prefix: str = "{{", suffix: str = "}}"):

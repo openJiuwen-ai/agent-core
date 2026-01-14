@@ -36,8 +36,12 @@ class AdoptOptimizer(BaseOptimizer):
         self._model_name = model_name
 
         class ModelWithRetry(Model):
-            def __init__(self, model: Model):
-                self._model = model
+            def __init__(self, wrapped_model: Model):
+                super().__init__(
+                    model_client_config=wrapped_model.model_client_config,
+                    model_config=wrapped_model.model_config
+                )
+                self._model = wrapped_model
 
             async def invoke(self, model_name: str, messages: List[BaseMessage],
                              tools: List[ToolInfo]= None, temperature: float= 0.3,
@@ -95,8 +99,10 @@ class AdoptOptimizer(BaseOptimizer):
             model=self._model,
             model_name=self._model_name,
         )
-        optimizer._parameters = self._parameters
-        optimizer._update()
+        current_parameters = self.parameters()
+        llm_calls = {name: param.llm_call for name, param in current_parameters.items()}
+        optimizer.bind_parameter(llm_calls)
+        optimizer.update()
 
     def _calculate_global_gradient(self) -> Dict[str, str]:
         def differential_analysis(case: EvaluatedCase):
@@ -159,7 +165,6 @@ class AdoptOptimizer(BaseOptimizer):
             ).to_messages())
             response = self._model.invoke(self._model_name, messages).content
             revised_node_output = self._extract_content_from_response(response, "REVISED_NODE_OUTPUT")
-            # TODO: need check revisable
             node_case = EvaluatedCase(
                 case=Case(inputs=dict(inputs=input_list), label=dict(label=revised_node_output)),
                 answer=dict(answer=output_list),
@@ -175,8 +180,8 @@ class AdoptOptimizer(BaseOptimizer):
                 for case in list(executor.map(generate_each_node_cases, self._bad_cases)) if case is not None
             ]
 
-        callback = param.llm_call._optimizer_callback
-        param.llm_call._optimizer_callback = None
+        callback = param.llm_call.get_optimizer_callback
+        param.llm_call.set_optimizer_callback = None
         partial_optimizer = PartialOptimizer(
             model=self._model,
             model_name=self._model_name,

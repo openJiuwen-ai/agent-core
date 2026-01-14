@@ -311,9 +311,9 @@ def build_node_io_string(input_list: List, output_list: List):
             f"- <CURRENT_WRONG_NODE_OUTPUT> {safe_parse_json(output_list[0])} </CURRENT_WRONG_NODE_OUTPUT>"
         )
     io_pairs = []
-    for index, (input, output) in enumerate(zip(input_list, output_list)):
+    for index, (node_input, output) in enumerate(zip(input_list, output_list)):
         io_pairs.append(
-            f"- <NODE_INPUT_{index}> {safe_parse_json(input)} </NODE_INPUT_{index}>\n"
+            f"- <NODE_INPUT_{index}> {safe_parse_json(node_input)} </NODE_INPUT_{index}>\n"
             f"- <CURRENT_WRONG_NODE_OUTPUT_{index}> {safe_parse_json(output)} </CURRENT_WRONG_NODE_OUTPUT_{index}>"
         )
     return "\n".join(io_pairs)

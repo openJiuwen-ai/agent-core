@@ -110,14 +110,14 @@ class BaseOptimizer:
 
     async def trace_callback(self,
                              llm_call_id: str,
-                             input: Dict[str, str],
+                             node_input: Dict[str, str],
                              output: BaseMessage,
                              session: Session
                              ):
         trace_node = TraceNode(
             case_id=session.session_id(),
             llm_call_id=llm_call_id,
-            inputs=input,
+            inputs=node_input,
             outputs=TuneUtils.get_output_string_from_message(output)
         )
         self._history.add_history(session.session_id(), trace_node)

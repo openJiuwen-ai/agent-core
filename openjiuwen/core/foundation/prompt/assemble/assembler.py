@@ -87,7 +87,12 @@ class PromptAssembler:
                 variables[placeholder].name = placeholder
             else:
                 placeholder_str = f"{self.placeholder_prefix}{placeholder}{self.placeholder_suffix}"
-                variables[placeholder] = TextableVariable(name=placeholder, text=placeholder_str, prefix = self.placeholder_prefix, suffix = self.placeholder_suffix)
+                variables[placeholder] = TextableVariable(
+                    name=placeholder,
+                    text=placeholder_str,
+                    prefix=self.placeholder_prefix,
+                    suffix=self.placeholder_suffix
+                )
         return variables
 
     def prompt_assemble(self, **kwargs) -> Union[str, List[dict]]:

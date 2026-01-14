@@ -200,6 +200,9 @@ class InstructionOptimizer(BaseOptimizer):
             elif not param.llm_call.get_freeze_user_prompt():
                 self._optimize_system_or_user_prompt(param, "user_prompt")
 
+    def update(self):
+        return self._update()
+
     def _optimize_both_system_and_user_prompt(self, param: TextualParameter):
         optimized_system_prompt, optimized_user_prompt = self._optimize_both_instruction(
             param.llm_call.get_system_prompt(),

@@ -57,6 +57,9 @@ class LLMCall:
         if self._optimizer_callback is not None:
             await self._optimizer_callback(self._llm_call_id, inputs, response, session)
 
+    def get_optimizer_callback(self) -> Optional[Callable]:
+        return self._optimizer_callback
+
     def set_optimizer_callback(self, callback: Optional[Callable]) -> None:
         self._optimizer_callback = callback
 
