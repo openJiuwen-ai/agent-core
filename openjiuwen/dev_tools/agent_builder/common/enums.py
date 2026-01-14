@@ -17,4 +17,21 @@ class BuildStage(str, Enum):
     COMPLETED = "completed"
 
 
+class ProgressStage(str, Enum):
+    INITIALIZING = "initializing"
+    RESOURCE_RETRIEVING = "resource_retrieving"
+    CLARIFYING = "clarifying"
+    GENERATING = "generating"
+    VALIDATING = "validating"
+    CONVERTING = "converting"
+
+
+class ProgressStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    WARNING = "warning"
+
+
 AgentTypeLiteral = Literal["llm_agent", "workflow"]
