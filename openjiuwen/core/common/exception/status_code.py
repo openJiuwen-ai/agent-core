@@ -239,8 +239,15 @@ class StatusCode(Enum):
     )
 
     # Memory Engine 158000 - 159999
-    MEMORY_ENGINE_KV_STORE_NOT_REGISTER = (158000, "kv store is not registered in memory engine")
-    MEMORY_ENGINE_SEMANTIC_STORE_NOT_REGISTER = (158001, "semantic store is not registered in memory engine")
+    MEMORY_STORE_REGISTER_FAILED = (158000, "failed to register {store_type} to memory engine, reason: {error_msg}")
+    MEMORY_SET_CONFIG_OPERATION_FAILED = (158001, "failed to set {config_type} config, reason: {error_msg}")
+    MEMORY_ADD_MEMORY_OPERATION_FAILED = (158002, "failed to add {memory_type} memory, reason: {error_msg}")
+    MEMORY_DELETE_MEMORY_OPERATION_FAILED = (158003, "failed to delete {memory_type} memory, reason: {error_msg}")
+    MEMORY_UPDATE_MEMORY_OPERATION_FAILED = (158004, "failed to update {memory_type} memory, reason: {error_msg}")
+    MEMORY_GET_MEMORY_OPERATION_FAILED = (158005, "failed to get {memory_type} memory, reason: {error_msg}")
+    MEMORY_STORE_INIT_FAILED = (158006, "failed to init {store_type}, reason: {error_msg}")
+    MEMORY_STORE_CONNECT_FAILED = (158007, "failed to connect {store_type}, reason: {error_msg}")
+    MEMORY_STORE_VALIDATION_FAILED = (158008, "{store_type} validation failed, reason: {error_msg}")
 
     # Development Toolchain 160000 - 169999
     # Development Toolchain - Prompt Generation 160000 - 160999
