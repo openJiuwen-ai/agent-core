@@ -24,7 +24,8 @@ class InteractiveInput(BaseModel):
         super().__init__(**{})
         if raw_inputs is None:
             raise JiuWenBaseException(StatusCode.WORKFLOW_INPUT_INVALID.code,
-                                      StatusCode.WORKFLOW_INPUT_INVALID.errmsg)
+                StatusCode.WORKFLOW_INPUT_INVALID.errmsg.format
+                    (error_msg="value of raw_inputs is none"))
         if raw_inputs is _sentinel:
             self.raw_inputs = None
             return
@@ -33,8 +34,10 @@ class InteractiveInput(BaseModel):
     def update(self, node_id: str, value: Any):
         if self.raw_inputs is not None:
             raise JiuWenBaseException(StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.code,
-                                      StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.errmsg)
+                StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.errmsg.format
+                    (error_msg="raw_inputs existed, update is invalid"))
         if node_id is None or value is None:
             raise JiuWenBaseException(StatusCode.WORKFLOW_INPUT_INVALID.code,
-                            StatusCode.WORKFLOW_INPUT_INVALID.errmsg)
+                StatusCode.WORKFLOW_INPUT_INVALID.errmsg.format
+                    (error_msg="value is none or node_id is none"))
         self.user_inputs[node_id] = value

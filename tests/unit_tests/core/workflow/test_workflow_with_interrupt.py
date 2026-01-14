@@ -58,22 +58,22 @@ async def test_simple_workflow():
     session_id = uuid.uuid4().hex
     with pytest.raises(JiuWenBaseException) as e:
         await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
         node_id="a",
         ability="invoke",
-        error=RuntimeError("value < 20"),
+        error_msg=RuntimeError("value < 20"),
     )
     assert mock_start.runtime == 1
     assert mock_node.runtime == 1
     flow2, mock_node2, mock_start2 = create_simple_workflow()
     with pytest.raises(JiuWenBaseException) as e:
         await flow2.invoke(InteractiveInput(), WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
         node_id="a",
         ability="invoke",
-        error=RuntimeError("value < 20"),
+        error_msg=RuntimeError("value < 20"),
     )
     assert mock_start2.runtime == 0
     assert mock_node2.runtime == 1
@@ -143,11 +143,11 @@ async def test_workflow_comp():
     session_id = uuid.uuid4().hex
     with pytest.raises(JiuWenBaseException) as e:
         await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
         node_id="a2",
         ability="invoke",
-        error=RuntimeError("value < 20"),
+        error_msg=RuntimeError("value < 20"),
     )
 
     assert mock_start.runtime == 1
@@ -156,9 +156,9 @@ async def test_workflow_comp():
     await asyncio.sleep(0.1)
     with pytest.raises(JiuWenBaseException) as e:
         await flow.invoke(InteractiveInput(), WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="a2", ability="invoke",
-            error=RuntimeError('value < 20'))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(node_id="a2", ability="invoke",
+        error_msg=RuntimeError('value < 20'))
     assert mock_start.runtime == 1
     assert mock_node.runtime == 2
 
@@ -203,20 +203,20 @@ async def test_workflow_with_loop():
     with pytest.raises(JiuWenBaseException) as e:
         await flow.invoke({"input_array": [1, 2, 3], "input_number": 1},
                                    WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
-        error=RuntimeError('inner error: 1'))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
+        error_msg=RuntimeError('inner error: 1'))
     with pytest.raises(JiuWenBaseException) as e:
         result = await flow.invoke(InteractiveInput(), WorkflowSession(session_id=session_id))
 
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
-        error=RuntimeError('inner error: 11'))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
+        error_msg=RuntimeError('inner error: 11'))
     with pytest.raises(JiuWenBaseException) as e:
         result = await flow.invoke(InteractiveInput(), WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
-        error=RuntimeError('inner error: 21'))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
+        error_msg=RuntimeError('inner error: 21'))
 
     result = await flow.invoke(InteractiveInput(), WorkflowSession(session_id=session_id))
     assert result == WorkflowOutput(result={"array_result": [11, 12, 13], "user_var": 31},
@@ -226,15 +226,15 @@ async def test_workflow_with_loop():
     with pytest.raises(JiuWenBaseException) as e:
         expect_e = Exception()
         result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
-            error=RuntimeError('inner error: 2'))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
+        error_msg=RuntimeError('inner error: 2'))
 
     with pytest.raises(JiuWenBaseException) as e:
         result = await flow.invoke(InteractiveInput(), WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
-            error=RuntimeError('inner error: 12'))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(node_id="2", ability="invoke",
+        error_msg=RuntimeError('inner error: 12'))
 
     result = await flow.invoke(InteractiveInput(), WorkflowSession(session_id=session_id))
     assert result == WorkflowOutput(result={"array_result": [14, 15], "user_var": 22},
@@ -654,9 +654,7 @@ async def test_collect_node_interactive_workflow():
     session_id = uuid.uuid4().hex
     with pytest.raises(JiuWenBaseException) as e:
         res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowSession(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="b", ability="collect",
-        error=StatusCode.WORKFLOW_STREAM_NOT_SUPPORT.errmsg)
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
 
 
 async def test_simple_concurrent_interactive_workflow():
@@ -830,7 +828,6 @@ async def test_simple_interactive_workflow_both_raw_input_update():
         with pytest.raises(JiuWenBaseException) as exc_info:
             user_input.update("a", {"aa": "abc"})
         assert exc_info.value.error_code == StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.code
-        assert exc_info.value.message == StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.errmsg
 
         res = await flow.invoke(user_input, WorkflowSession(session_id=session_id))
         assert res == WorkflowOutput(

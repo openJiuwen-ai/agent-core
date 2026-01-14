@@ -417,8 +417,8 @@ class QuestionerDirectReplyHandler:
             response = (await self._model.invoke(
                 model=self._config.model.model_info.model_name, messages=llm_inputs)).content
         except Exception as e:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_ERROR,
-                                           "Failed to invoke llm for extraction", e)
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
+                                           "failed to invoke llm for extraction", e)
 
         if UserConfig.is_sensitive():
             logger.info("Success to invoke llm for extraction")

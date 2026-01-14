@@ -299,7 +299,8 @@ class WrappedNodeSession(StateSession):
         if self._stream_mode:
             raise JiuWenBaseException(
                 StatusCode.WORKFLOW_STREAM_NOT_SUPPORT.code,
-                StatusCode.WORKFLOW_STREAM_NOT_SUPPORT.errmsg,
+                StatusCode.WORKFLOW_STREAM_NOT_SUPPORT.errmsg.format
+                (error_msg="streaming process interface(transform or collect)"),
             )
         if self._interaction is None:
             self._interaction = WorkflowInteraction(self._inner)

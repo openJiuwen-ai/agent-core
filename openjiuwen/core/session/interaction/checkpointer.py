@@ -37,7 +37,8 @@ class InMemoryCheckpointer(Checkpointer):
                 workflow_store.clear(session.workflow_id())
             else:
                 raise JiuWenBaseException(StatusCode.WORKFLOW_STATE_INVALID.code,
-                                          StatusCode.WORKFLOW_STATE_INVALID.errmsg)
+                    StatusCode.WORKFLOW_STATE_INVALID.errmsg.format
+                        (error_msg="workflow state exists but non-interactive input and cleanup is disabled"))
 
     async def post_workflow_execute(self, session: BaseSession, result, exception):
         workflow_store = self._workflow_stores.get(session.session_id())

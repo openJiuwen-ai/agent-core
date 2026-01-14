@@ -321,7 +321,7 @@ class TraceWorkflowHandler(TraceBaseHandler):
             else:
                 span.error = {"error_code": StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
                               "message": StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                                  error=str(exception))}
+                                  error_msg=str(exception))}
             if on_invoke_data:
                 span.on_invoke_data.append(on_invoke_data)
             update_data = {

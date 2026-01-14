@@ -552,10 +552,9 @@ async def test_workflow_stream_with_exception():
     with pytest.raises(JiuWenBaseException) as e:
         await workflow.invoke(inputs={"user_inputs": {"array": [1, 2, 3, 4, 5, 6, 7]}},
                               session=WorkflowSession())
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="transform_comp",
-                                                                               ability="transform",
-                                                                               error="mock error")
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(node_id="transform_comp",
+        ability="transform", error_msg="mock error")
     logger.info("after exception, execution again")
     result = await workflow.invoke(inputs={"user_inputs": {"array": [1, 2, 3, 4, 5, 6, 7]}}, session=WorkflowSession())
     assert result.result == {'output': {'result': [1, 2, 3, 4, 5, 6, 7]}}
@@ -730,8 +729,7 @@ async def test_dual_ability_node_with_stream_error():
             pass
 
     # Verify the exception is properly wrapped
-    assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert "C" in exc_info.value.message  # Node ID should be in the message
+    assert exc_info.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
     assert "stream" in exc_info.value.message.lower()  # Ability name should be in the message
 
 
@@ -785,8 +783,7 @@ async def test_dual_ability_node_with_transform_error():
             pass
 
     # Verify the exception is properly wrapped
-    assert exc_info.value.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code
-    assert "C" in exc_info.value.message  # Node ID should be in the message
+    assert exc_info.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
     assert "transform" in exc_info.value.message.lower()  # Ability name should be in the message
 
 

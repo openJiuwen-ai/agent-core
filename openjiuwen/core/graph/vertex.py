@@ -112,23 +112,23 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         except GraphInterrupt:
             raise
         except JiuWenBaseException as e:
-            if e.error_code == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code:
+            if e.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code:
                 raise e
             raise JiuWenBaseException(
-                StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code,
-                StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
+                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
                     node_id=self._node_id,
                     ability=ability.name,
-                    error=e.message,
+                    error_msg=e.message,
                 ),
             ) from e
         except Exception as e:
             raise JiuWenBaseException(
-                StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.code,
-                StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
+                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
                     node_id=self._node_id,
                     ability=ability.name,
-                    error=e,
+                    error_msg=e,
                 ),
             ) from e
         finally:
