@@ -8,149 +8,150 @@ All interfaces in this package will be removed in v1.0.0.
 For migration guide, see: docs/AGENT_MIGRATION_GUIDE.md
 
 Created on: 2025-01-04
+
+Note: This module uses explicit imports to enable IDE navigation (Go to Definition).
+Deprecation warnings are issued when legacy classes are instantiated.
 """
 import warnings
-from typing import Any
-
-# Mapping of deprecated names to their modules and new alternatives
-_DEPRECATED_NAMES = {
-    # Legacy agents
-    "LegacyReActAgent": (
-        "openjiuwen.core.single_agent.legacy.react_agent",
-        "LegacyReActAgent",
-        "openjiuwen.core.single_agent.agents.react_agent.ReActAgent"
-    ),
-    "create_react_agent_config": (
-        "openjiuwen.core.single_agent.legacy.react_agent",
-        "create_react_agent_config",
-        "ReActAgentConfig() constructor"
-    ),
-    # Legacy base classes
-    "LegacyBaseAgent": (
-        "openjiuwen.core.single_agent.legacy.agent",
-        "BaseAgent",
-        "openjiuwen.core.single_agent.agent.BaseAgent"
-    ),
-    "ControllerAgent": (
-        "openjiuwen.core.single_agent.legacy.agent",
-        "ControllerAgent",
-        "openjiuwen.core.single_agent.agent.BaseAgent"
-    ),
-    "AgentSession": (
-        "openjiuwen.core.single_agent.legacy.agent",
-        "AgentSession",
-        "openjiuwen.core.session.Session"
-    ),
-    "WorkflowFactory": (
-        "openjiuwen.core.single_agent.legacy.agent",
-        "WorkflowFactory",
-        "Workflow class directly"
-    ),
-    "workflow_provider": (
-        "openjiuwen.core.single_agent.legacy.agent",
-        "workflow_provider",
-        "Workflow class directly"
-    ),
-    # Legacy configs
-    "AgentConfig": (
-        "openjiuwen.core.single_agent.legacy.config",
-        "AgentConfig",
-        "AgentCard + ReActAgentConfig"
-    ),
-    "LLMCallConfig": (
-        "openjiuwen.core.single_agent.legacy.config",
-        "LLMCallConfig",
-        "ReActAgentConfig"
-    ),
-    "IntentDetectionConfig": (
-        "openjiuwen.core.single_agent.legacy.config",
-        "IntentDetectionConfig",
-        "new config classes"
-    ),
-    "ConstrainConfig": (
-        "openjiuwen.core.single_agent.legacy.config",
-        "ConstrainConfig",
-        "ReActAgentConfig"
-    ),
-    "DefaultResponse": (
-        "openjiuwen.core.single_agent.legacy.config",
-        "DefaultResponse",
-        "new config classes"
-    ),
-    "WorkflowAgentConfig": (
-        "openjiuwen.core.single_agent.legacy.config",
-        "WorkflowAgentConfig",
-        "WorkflowAgentConfig from workflow module"
-    ),
-    "MemoryConfig": (
-        "openjiuwen.core.single_agent.legacy.config",
-        "MemoryConfig",
-        "MemoryScopeConfig"
-    ),
-    "LegacyReActAgentConfig": (
-        "openjiuwen.core.single_agent.legacy.config",
-        "LegacyReActAgentConfig",
-        "openjiuwen.core.single_agent.agents.react_agent.ReActAgentConfig"
-    ),
-}
-
-# Cache for loaded modules
-_loaded_modules = {}
+from functools import wraps
 
 
-def clear_module_cache() -> None:
-    """Clear the module cache for testing purposes.
+def _deprecated_class(cls, alternative: str):
+    """Decorator to add deprecation warning on class instantiation.
 
-    Provided to support tests that need to force re-imports and re-trigger
-    deprecation warnings without touching internal cache variables.
-    """
-    _loaded_modules.clear()
-
-
-def _import_deprecated(name: str) -> Any:
-    """Import a deprecated name and issue warning.
-    
     Args:
-        name: Name to import
-        
+        cls: The class to wrap
+        alternative: Description of the recommended alternative
+
     Returns:
-        The imported object
+        The wrapped class with deprecation warning on __init__
     """
-    if name not in _DEPRECATED_NAMES:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    
-    module_path, attr_name, alternative = _DEPRECATED_NAMES[name]
-    
-    # Issue deprecation warning
-    warnings.warn(
-        f"{name} is deprecated and will be removed in the future. "
-        f"Please use {alternative} instead.",
-        DeprecationWarning,
-        stacklevel=3
-    )
-    
-    # Import and cache
-    if module_path not in _loaded_modules:
-        import importlib
-        _loaded_modules[module_path] = importlib.import_module(module_path)
-    
-    return getattr(_loaded_modules[module_path], attr_name)
+    # Check if already decorated to avoid double warnings
+    if getattr(cls, 'deprecated_wrapped', False):
+        return cls
+
+    original_init = cls.__init__
+
+    @wraps(original_init)
+    def new_init(self, *args, **kwargs):
+        warnings.warn(
+            f"{cls.__name__} is deprecated and will be removed in the "
+            f"future. Please use {alternative} instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        original_init(self, *args, **kwargs)
+
+    cls.__init__ = new_init
+    cls.deprecated_wrapped = True
+    return cls
 
 
-def __getattr__(name: str) -> Any:
-    """Lazy loading with deprecation warnings.
-    
-    This is called when an attribute is not found in the module's namespace.
-    We use it to issue deprecation warnings when legacy names are accessed.
-    """
-    if name in _DEPRECATED_NAMES:
-        return _import_deprecated(name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# ===== Legacy imports (explicit for IDE navigation) =====
+
+# From legacy.agent
+from openjiuwen.core.single_agent.legacy.agent import (
+    BaseAgent as _BaseAgent,
+    ControllerAgent as _ControllerAgent,
+    AgentSession as _AgentSession,
+    WorkflowFactory as _WorkflowFactory,
+    workflow_provider,
+)
+
+# From legacy.config
+from openjiuwen.core.single_agent.legacy.config import (
+    AgentConfig as _AgentConfig,
+    LLMCallConfig as _LLMCallConfig,
+    IntentDetectionConfig as _IntentDetectionConfig,
+    ConstrainConfig as _ConstrainConfig,
+    DefaultResponse as _DefaultResponse,
+    WorkflowAgentConfig as _WorkflowAgentConfig,
+    LegacyReActAgentConfig as _LegacyReActAgentConfig,
+    MemoryConfig as _MemoryConfig,
+)
+
+# From legacy.react_agent
+from openjiuwen.core.single_agent.legacy.react_agent import (
+    LegacyReActAgent as _LegacyReActAgent,
+    create_react_agent_config,
+)
 
 
-def __dir__():
-    """Return list of available attributes."""
-    return list(_DEPRECATED_NAMES.keys())
+# ===== Apply deprecation warnings to legacy classes =====
+
+LegacyBaseAgent = _deprecated_class(
+    _BaseAgent,
+    "openjiuwen.core.single_agent.agent.BaseAgent"
+)
+ControllerAgent = _deprecated_class(
+    _ControllerAgent,
+    "openjiuwen.core.single_agent.agent.BaseAgent"
+)
+AgentSession = _deprecated_class(
+    _AgentSession,
+    "openjiuwen.core.session.Session"
+)
+WorkflowFactory = _deprecated_class(
+    _WorkflowFactory,
+    "Workflow class directly"
+)
+
+AgentConfig = _deprecated_class(
+    _AgentConfig,
+    "AgentCard + ReActAgentConfig"
+)
+LLMCallConfig = _deprecated_class(
+    _LLMCallConfig,
+    "ReActAgentConfig"
+)
+IntentDetectionConfig = _deprecated_class(
+    _IntentDetectionConfig,
+    "new config classes"
+)
+ConstrainConfig = _deprecated_class(
+    _ConstrainConfig,
+    "ReActAgentConfig"
+)
+DefaultResponse = _deprecated_class(
+    _DefaultResponse,
+    "new config classes"
+)
+WorkflowAgentConfig = _deprecated_class(
+    _WorkflowAgentConfig,
+    "WorkflowAgentConfig from workflow module"
+)
+MemoryConfig = _deprecated_class(
+    _MemoryConfig,
+    "MemoryScopeConfig"
+)
+LegacyReActAgentConfig = _deprecated_class(
+    _LegacyReActAgentConfig,
+    "openjiuwen.core.single_agent.agents.react_agent.ReActAgentConfig"
+)
+
+LegacyReActAgent = _deprecated_class(
+    _LegacyReActAgent,
+    "openjiuwen.core.single_agent.agents.react_agent.ReActAgent"
+)
 
 
-__all__ = list(_DEPRECATED_NAMES.keys())
+__all__ = [
+    # Legacy agents
+    "LegacyReActAgent",
+    "create_react_agent_config",
+    # Legacy base classes
+    "LegacyBaseAgent",
+    "ControllerAgent",
+    "AgentSession",
+    "WorkflowFactory",
+    "workflow_provider",
+    # Legacy configs
+    "AgentConfig",
+    "LLMCallConfig",
+    "IntentDetectionConfig",
+    "ConstrainConfig",
+    "DefaultResponse",
+    "WorkflowAgentConfig",
+    "MemoryConfig",
+    "LegacyReActAgentConfig",
+]

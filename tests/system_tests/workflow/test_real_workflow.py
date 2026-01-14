@@ -296,8 +296,8 @@ class RealWorkflowTest(unittest.TestCase):
     #                            测试用例本身                             #
     # ------------------------------------------------------------------ #
     @unittest.skip("skip system test")
-    @patch("jiuwen.core.utils.tool.service_api.restful_api.RestfulApi.invoke")
-    @patch("jiuwen.core.component.tool_comp.ToolExecutable.get_tool")
+    @patch("openjiuwen.core.foundation.tool.service_api.restful_api.RestfulApi.invoke")
+    @patch("openjiuwen.core.workflow.components.tool_related.tool_comp.ToolExecutable.get_tool")
     def test_workflow_llm_questioner_plugin(
             self,
             mock_plugin_get_tool,
