@@ -30,6 +30,8 @@ class BreakComponent(ComponentComposable, Executable):
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if self._loop_controller is None:
             raise JiuWenBaseException(StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.code,
-                                      StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.errmsg)
+                                      StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.errmsg.format(
+                                          error_msg="failed to initialize loop controller"
+                                      ))
         self._loop_controller.break_loop()
         return {}

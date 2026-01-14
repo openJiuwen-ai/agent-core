@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from enum import Enum
 
+from openjiuwen.core.common.exception.code_template import generate_error_message_template
+
 
 class StatusCode(Enum):
     """Status code enum"""
@@ -69,38 +71,36 @@ class StatusCode(Enum):
                                                      " as {error_msg}.")
 
     ## BranchComponent  101100 - 101119
-    COMPONENT_BRANCH_INIT_FAILED = (101100, "Branch adding error, as {error_msg}.")
-    COMPONENT_BRANCH_CONFIG_ERROR = (101101, "Branch condition type does not meet the requirements.")
-    COMPONENT_BRANCH_NOT_FOUND = (101102, "Branch meeting the condition was not found.")
+    COMPONENT_BRANCH_PARAM_ERROR = (101100, "component branch parameter error, reason: {error_msg}")
+    COMPONENT_BRANCH_EXECUTION_ERROR = (101101, "component branch execution error, reason: {error_msg}")
 
     ## SetVariableComponent  101120 - 101139
-    COMPONENT_SET_VAR_INPUT_PARAM_ERROR = (101120, "Set variable component mapping error, as {error_msg}.")
+    COMPONENT_SET_VAR_INPUT_PARAM_ERROR = (101120, "component set_var_input parameter error, reason: {error_msg}")
+    COMPONENT_SET_VAR_INIT_FAILED = (101121, "component set_var initialization failed, reason: {error_msg}")
 
     ## SubWorkflowComponent  101140 - 101149
-    COMPONENT_SUB_WORKFLOW_INIT_FAILED = (101140, "Sub workflow component init error, as {error_msg}.")
-    COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR = (101141, "Sub workflow component running error, detail: {detail}")
+    COMPONENT_SUB_WORKFLOW_INIT_FAILED = (101140, "component sub_workflow initialization failed, reason: {error_msg}")
+    COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR = (101141, "component sub_workflow runtime error, reason: {error_msg}")
 
     ## LoopComponent  101150 - 101159
-    COMPONENT_LOOP_NOT_SUPPORT = (101150, "Nested loops are not supported."
-                                        " Cannot add LoopComponent to a LoopGroup")
-    COMPONENT_LOOP_EXECUTION_ERROR = (101151, "Loop execution error: {error_msg}")
-    COMPONENT_LOOP_INPUT_INVALID = (101152, "Invalid inputs: {reason}")
-    COMPONENT_LOOP_CONFIG_NOT_FOUND = (101153, "LoopGroup config error, as {error_msg}.")
+    COMPONENT_LOOP_NOT_SUPPORT = (101150, "component loop is not supported, reason: {error_msg}")
+    COMPONENT_LOOP_EXECUTION_ERROR = (101151, "component loop execution error, reason: {error_msg}")
+    COMPONENT_LOOP_INPUT_INVALID = (101152, "component loop_input is invalid, reason: {error_msg}")
+    COMPONENT_LOOP_CONFIG_ERROR = (101153, "component loop config error, reason: {error_msg}")
 
     ## BreakComponent  101180 - 101189
-    COMPONENT_BREAK_EXECUTION_ERROR = (101180, "Failed to initialize loop controller")
+    COMPONENT_BREAK_EXECUTION_ERROR = (101180, "component break execution error, reason: {error_msg}")
 
     ## ToolComponent  102000 - 102019
-    COMPONENT_TOOL_EXECUTION_ERROR = (102000, "Tool component failed to bind a valid tool.")
-    COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "Tool component inputs error, as {error_msg}.")
+    COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
+    COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
 
     ## StartComponent  102100 - 102119
-    COMPONENT_START_INPUT_INVALID = (102100, "start component: global variable(s)"
-                                                    " defined with no value assigned:  {variable_name}")
-    COMPONENT_START_INIT_FAILED = (102101, "start component create error:  {reason}")
+    COMPONENT_START_INPUT_INVALID = (102100, "component start_input is invalid, reason: {error_msg}")
+    COMPONENT_START_CONFIG_ERROR = (102101, "component start config error, reason: {error_msg}")
 
     ## EndComponent  102120 - 102149
-    COMPONENT_END_INIT_FAILED = (102120, "end component create error: {reason}")
+    COMPONENT_END_INIT_FAILED = (102120, "component end initialization failed, reason: {error_msg}")
 
     # Workflow 110000 - 119999
     # Workflow - Orchestration And Execution 110000 - 110999

@@ -16,8 +16,8 @@ class SetVariableComponent(WorkflowComponent):
     def __init__(self, variable_mapping: dict[str, Any]):
         super().__init__()
         if not variable_mapping:
-            raise JiuWenBaseException(StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.code,
-                                      StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.errmsg.format(
+            raise JiuWenBaseException(StatusCode.COMPONENT_SET_VAR_INIT_FAILED.code,
+                                      StatusCode.COMPONENT_SET_VAR_INIT_FAILED.errmsg.format(
                                           error_msg=f'variable_mapping is None or empty'))
         self._variable_mapping = variable_mapping
 

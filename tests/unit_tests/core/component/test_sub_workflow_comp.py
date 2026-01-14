@@ -67,7 +67,7 @@ class TestSubWorkflowComp:
         assert err.value.message == StatusCode.COMPONENT_EXECUTION_RUNTIME_ERROR.errmsg.format(node_id="sub2",
              ability="invoke",
              error=StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
-                 detail='workflow nesting hierarchy is too big, must <= 1'))
+                 error_msg='workflow nesting hierarchy is too big, must <= 1'))
 
         main_workflow = self.create_nesting_workflow(3, workflow_max_nesting_depth=3)
 

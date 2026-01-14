@@ -25,19 +25,19 @@ class Start(WorkflowComponent):
 
         defined_variables = config.get("inputs", {})
         if not isinstance(defined_variables, list):
-            raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_INIT_FAILED.code,
-                                      message=StatusCode.COMPONENT_START_INIT_FAILED.errmsg.format(
-                                          reason="conf 'inputs' is not list"))
+            raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_CONFIG_ERROR.code,
+                                      message=StatusCode.COMPONENT_START_CONFIG_ERROR.errmsg.format(
+                                          error_msg="conf 'inputs' is not list"))
         for var in defined_variables:
             if not isinstance(var, dict):
-                raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_INIT_FAILED.code,
-                                          message=StatusCode.COMPONENT_START_INIT_FAILED.errmsg.format(
-                                          reason="conf 'inputs' list item must be dict"))
+                raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_CONFIG_ERROR.code,
+                                          message=StatusCode.COMPONENT_START_CONFIG_ERROR.errmsg.format(
+                                          error_msg="conf 'inputs' list item must be dict"))
             var_name = var.get("id")
             if not var_name:
-                raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_INIT_FAILED.code,
-                                          message=StatusCode.COMPONENT_START_INIT_FAILED.errmsg.format(
-                                              reason="conf 'inputs' list item not contain `id`"))
+                raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_CONFIG_ERROR.code,
+                                          message=StatusCode.COMPONENT_START_CONFIG_ERROR.errmsg.format(
+                                              error_msg="conf 'inputs' list item not contain `id`"))
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         logger.debug(f"start component inputs: {inputs}")
@@ -74,7 +74,9 @@ class Start(WorkflowComponent):
         if len(variables_not_given) > 0:
             raise JiuWenBaseException(error_code=StatusCode.COMPONENT_START_INPUT_INVALID.code,
                                       message=StatusCode.COMPONENT_START_INPUT_INVALID.errmsg.format(
-                                          variable_name=variables_not_given))
+                                          error_msg=f"global variable(s), "
+                                                    f"defined with no value assigned: {variables_not_given}"
+                                      ))
 
 
 class StartInputSchema(TypedDict):

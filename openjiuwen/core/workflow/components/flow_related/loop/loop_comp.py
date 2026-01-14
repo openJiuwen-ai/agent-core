@@ -91,7 +91,9 @@ class LoopGroup(BaseWorkflow, Executable):
         # Check for nested loop components
         if isinstance(workflow_comp, LoopComponent):
             raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_NOT_SUPPORT.code,
-                                      StatusCode.COMPONENT_LOOP_NOT_SUPPORT.errmsg)
+                                      StatusCode.COMPONENT_LOOP_NOT_SUPPORT.errmsg.format(
+                                          error_msg="nested loops are not supported"
+                                      ))
         if isinstance(workflow_comp, BreakComponent):
             self._break_components.append(workflow_comp)
         super().add_workflow_comp(comp_id, workflow_comp, wait_for_all=wait_for_all, inputs_schema=inputs_schema,
@@ -129,13 +131,13 @@ class LoopGroup(BaseWorkflow, Executable):
 
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if not self._start_nodes:
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_CONFIG_NOT_FOUND.code,
-                                      StatusCode.COMPONENT_LOOP_CONFIG_NOT_FOUND.errmsg.format(
+            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_CONFIG_ERROR.code,
+                                      StatusCode.COMPONENT_LOOP_CONFIG_ERROR.errmsg.format(
                                           error_msg="start_nodes haven't been configured"
                                       ))
         if not self._end_nodes:
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_CONFIG_NOT_FOUND.code,
-                                      StatusCode.COMPONENT_LOOP_CONFIG_NOT_FOUND.errmsg.format(
+            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_CONFIG_ERROR.code,
+                                      StatusCode.COMPONENT_LOOP_CONFIG_ERROR.errmsg.format(
                                           error_msg="end_nodes haven't been configured"
                                       ))
         self._auto_complete_abilities()
@@ -336,13 +338,13 @@ class LoopComponent(WorkflowComponent):
             if not isinstance(inputs, dict):
                 raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
                                           StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              reason=f"Inputs must be a dictionary, got {type(inputs).__name__}"
+                                              error_msg=f"inputs must be a dictionary, got {type(inputs).__name__}"
                                           ))
 
             if INPUTS_KEY not in inputs:
                 raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
                                           StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              reason=f"Invalid inputs: missing required key {INPUTS_KEY}"
+                                              error_msg=f"missing required key {INPUTS_KEY}"
                                           ))
 
             loop_input = LoopInput.model_validate(inputs.get(INPUTS_KEY))
@@ -377,13 +379,13 @@ class LoopComponent(WorkflowComponent):
             else:
                 raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
                                           StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              reason=f"Invalid loop type '{loop_input.loop_type}' for LoopComponent"
+                                              error_msg=f"invalid loop type '{loop_input.loop_type}' for LoopComponent"
                                           ))
 
             if self._loop_group.is_empty:
                 raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
                                           StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(
-                                              error_msg="Loop group is empty, no components to execute"))
+                                              error_msg="loop group is empty, no components to execute"))
 
             output_callback = OutputCallback(self._output_schema)
             callbacks: list = [output_callback]
@@ -400,7 +402,7 @@ class LoopComponent(WorkflowComponent):
             raise
         except Exception as e:
             raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
-                                      f"LoopComponent error: {str(e)}") from e
+                                      StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(error_msg=str(e))) from e
 
     def graph_invoker(self) -> bool:
         return True

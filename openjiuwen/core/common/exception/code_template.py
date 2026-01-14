@@ -172,7 +172,7 @@ def generate_error_message_template(
         raise ValueError(f"Unsupported failure type: {failure_type}")
 
     # ---------- optional reason ----------
-    if with_reason and failure_type not in {"INVALID", "NOT_FOUND", "NOT_SUPPORTED"}:
+    if with_reason:
         params.add("error_msg")
         msg += ", reason: {error_msg}"
 

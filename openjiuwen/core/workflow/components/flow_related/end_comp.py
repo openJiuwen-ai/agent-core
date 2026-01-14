@@ -38,7 +38,7 @@ class End(WorkflowComponent):
             if not isinstance(template, str):
                 raise JiuWenBaseException(StatusCode.COMPONENT_END_INIT_FAILED.code,
                                           message=StatusCode.COMPONENT_END_INIT_FAILED.errmsg.format(
-                                              reason="`responseTemplate` type error, is not str"))
+                                              error_msg="`responseTemplate` type error, is not str"))
             if template != "":
                 self.template = TemplateProcessor(template)
 
