@@ -18,8 +18,8 @@ from typing import List, Any, AsyncIterator, Union, Optional, Tuple, Dict
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.tool.base import ToolCard
-from openjiuwen.core.protocols.mcp import McpServerConfig
+from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard

@@ -20,7 +20,8 @@ from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import TaskSession
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.protocols.mcp import McpServerConfig, SseClient, StdioClient, PlaywrightClient
+from openjiuwen.core.foundation.tool import SseClient, StdioClient, PlaywrightClient
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
 

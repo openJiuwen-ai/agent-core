@@ -9,8 +9,8 @@ from mcp.client.sse import sse_client
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.protocols.mcp.base import NO_TIMEOUT
-from openjiuwen.core.protocols.mcp.client.mcp_client import McpClient
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
 
 class SseClient(McpClient):

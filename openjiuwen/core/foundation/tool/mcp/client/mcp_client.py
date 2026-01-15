@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
-from openjiuwen.core.protocols.mcp.base import NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 
 
 class McpClient(ABC):

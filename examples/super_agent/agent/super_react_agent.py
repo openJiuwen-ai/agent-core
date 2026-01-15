@@ -31,10 +31,10 @@ from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import Session
-from openjiuwen.core.foundation.llm import AIMessage
+from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
-from openjiuwen.core.protocols.mcp import McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.workflow import Workflow
 
 
@@ -232,7 +232,7 @@ class SuperReActAgent(BaseAgent):
         session: Session,
         is_first_call: bool = False,
         step_id: int = 0
-    ) -> AIMessage:
+    ) -> AssistantMessage:
         """
         Call LLM for reasoning
 
