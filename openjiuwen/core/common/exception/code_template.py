@@ -22,7 +22,9 @@ ALLOWED_SCOPES = {
     "PROMPT",
     "COMMON",
     "CONTEXT",
-    "TOOLCHAIN"
+    "TOOLCHAIN",
+    "MEMORY",
+    "RETRIEVAL"
 }
 
 ALLOWED_FAILURE_TYPES = {
@@ -65,18 +67,20 @@ def _exception_semantic_from_failure(failure_type: str) -> str:
 
 def _code_range_by_scope(scope: str) -> str:
     return {
-        "COMMON": "90000–99999",
-        "COMPONENT": "100000–109999",
-        "WORKFLOW": "110000–119999",
+        "WORKFLOW": "100000–100999",
+        "COMPONENT": "101000–119999",
         "AGENT": "120000–129999",
         "RUNNER": "130000–139999",
         "GRAPH": "140000–149999",
         "CONTEXT": "150000–154999",
-        "PROMPT": "160000–169999",
-        "TOOLCHAIN": "170000–179999",
+        "RETRIEVAL": "155000-157999",
+        "MEMORY": "158000-159999",
+        "TOOLCHAIN": "160000–179999",
+        "PROMPT": "180000-180999",
         "MODEL": "181000–181999",
+        "TOOL": "182000-182999",
+        "COMMON": "188000-188999",
         "SESSION": "190000–199999",
-        "TOOL": "200000–209999",
     }.get(scope, "custom")
 
 

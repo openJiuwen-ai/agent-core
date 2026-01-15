@@ -306,7 +306,7 @@ class StatusCode(Enum):
     # Common Capabilities - Exception Handling 184000 - 184999
     # Common Capabilities - Support Mcp Tool 185000 - 185999
 
-    # Common Capabilities - Common Utility 188000 - 180099
+    # Common Capabilities - Common Utility 188000 - 188999
     SSL_UTILS_CREATE_SSL_CONTEXT_ERROR = (188000, "ssl utils error, as {error_msg}")
     USER_CONFIG_LOAD_ERROR = (188001, "User config load error, as {error_msg}")
     JSON_LOADS_ERROR = (188002, "Json loads error, as {error_msg}")
