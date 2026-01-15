@@ -48,8 +48,8 @@ class BaseOptimizer:
         for name, llm_call in parameters.items():
             if not llm_call:
                 raise JiuWenBaseException(
-                    StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.code,
-                    StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.errmsg.format(
+                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.code,
+                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.errmsg.format(
                         error_msg=f"cannot bind a None parameter of {name}"
                     )
                 )
@@ -68,8 +68,8 @@ class BaseOptimizer:
             import traceback
             traceback.print_exc()
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"{str(e)}"
                 )
             )
@@ -89,8 +89,8 @@ class BaseOptimizer:
         except Exception as e:
             self._history.clear_history()
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_UPDATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_UPDATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"{str(e)}"
                 )
             )
@@ -134,8 +134,8 @@ class BaseOptimizer:
     def _validate_parameters(self):
         if not self._parameters:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.code,
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.errmsg.format(
                     error_msg="cannot optimize empty parameters"
                 )
             )

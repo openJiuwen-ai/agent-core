@@ -90,29 +90,29 @@ class BadCasePromptBuilder(BasePromptBuilder):
     def _validate_input(self, prompt: str, cases: List[EvaluatedCase]):
         if prompt is None:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"prompt cannot be None"
                 )
             )
         if not prompt.strip():
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"prompt cannot be empty"
                 )
             )
         if not cases:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"The cases cannot be empty"
                 )
             )
         if len(cases) > MAX_CASES_LIMIT:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"The number of cases cannot exceed {MAX_CASES_LIMIT}"
                 )
             )

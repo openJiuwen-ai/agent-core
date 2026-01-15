@@ -38,13 +38,13 @@ class TestModelContext:
         try:
             await context.add_messages(123)
         except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code
+            assert e.error_code == StatusCode.CONTEXT_MESSAGE_INVALID.code
 
         try:
             invalid_messages = [UserMessage(content="test"), {"role": "user", "content": "test"}]
             await context.add_messages(invalid_messages)
         except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code
+            assert e.error_code == StatusCode.CONTEXT_MESSAGE_INVALID.code
 
     @pytest.mark.asyncio
     async def test_model_context_add_batch_messages(self):
@@ -99,7 +99,7 @@ class TestModelContext:
         try:
             await context.get_messages(size=-1)
         except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.CONTEXT_ENGINE_GET_MESSAGE_ERROR.code
+            assert e.error_code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     @pytest.mark.asyncio
     async def test_model_context_get_empty_messages_with_history(self):
@@ -283,7 +283,7 @@ class TestModelContext:
         try:
             context.pop_messages(size=-1)
         except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.CONTEXT_ENGINE_POP_MESSAGE_ERROR.code
+            assert e.error_code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     @pytest.mark.asyncio
     async def test_model_context_pop_messages_with_history(self):
@@ -377,13 +377,13 @@ class TestModelContext:
         try:
             context.set_messages(123)
         except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code
+            assert e.error_code == StatusCode.CONTEXT_MESSAGE_INVALID.code
 
         try:
             invalid_messages = [UserMessage(content="test"), {"role": "user", "content": "test"}]
             await context.set_messages(invalid_messages)
         except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code
+            assert e.error_code == StatusCode.CONTEXT_MESSAGE_INVALID.code
 
     @pytest.mark.asyncio
     async def test_model_context_set_empty_context_window(self):
@@ -399,7 +399,7 @@ class TestModelContext:
         try:
             await context.get_context_window(window_size=-1)
         except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.CONTEXT_ENGINE_GET_CONTEXT_WINDOW_ERROR.code
+            assert e.error_code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     @pytest.mark.asyncio
     async def test_model_context_set_context_window_with_system_messages(self):

@@ -147,8 +147,8 @@ class FeedbackPromptBuilder(BasePromptBuilder):
         if mode == MODE_SELECT:
             if not isinstance(start_pos, int) or not isinstance(end_pos, int):
                 raise JiuWenBaseException(
-                    StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                    StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
+                    StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                    StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                         error_msg=f"start_pos and end_pos must be provided for int type"
                     )
                 )
@@ -156,8 +156,8 @@ class FeedbackPromptBuilder(BasePromptBuilder):
                 if 0 <= start_pos < end_pos <= len(prompt):
                     return True
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"start_pos and end_pos must be provided for select mode. "
                               f"Additionally, they must satisfy the conditions: "
                               f"0 <= start_pos < end_pos <= len(prompt)."
@@ -166,8 +166,8 @@ class FeedbackPromptBuilder(BasePromptBuilder):
         elif mode == MODE_INSERT:
             if not isinstance(start_pos, int):
                 raise JiuWenBaseException(
-                    StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                    StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
+                    StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                    StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                         error_msg=f"start_pos must be provided for int type"
                     )
                 )
@@ -175,8 +175,8 @@ class FeedbackPromptBuilder(BasePromptBuilder):
                 if 0 <= start_pos <= len(prompt):
                     return True
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"start_pos must be provided for insert mode. "
                               f"Additionally, it must satisfy the conditions: "
                               f"0 <= start_pos <= len(prompt)."
@@ -187,15 +187,15 @@ class FeedbackPromptBuilder(BasePromptBuilder):
     def _is_valid_prompt(self, prompt: str, feedback: str):
         if prompt is None or feedback is None:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"prompt or feedback cannot be None"
                 )
             )
         if not prompt.strip() or not feedback.strip():
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"prompt or feedback cannot be empty"
                 )
             )
@@ -211,22 +211,22 @@ class FeedbackPromptBuilder(BasePromptBuilder):
                 optimized_feedback = parsed_json.get("optimized_feedback", "").strip()
                 return intent, optimized_feedback.strip()
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"No valid JSON string found"
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
+                    error_msg=f"no valid JSON string found"
                 )
             )
         except json.JSONDecodeError as e:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"An error occurred while parsing JSON: {str(e)}"
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
+                    error_msg=f"an error occurred while parsing JSON: {str(e)}"
                 )
             ) from e
         except Exception as e:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"An error occurred while parsing intent JSON from message: {str(e)}"
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR.errmsg.format(
+                    error_msg=f"an error occurred while parsing intent JSON from message: {str(e)}"
                 )
             ) from e

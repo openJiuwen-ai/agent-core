@@ -44,8 +44,8 @@ class SessionModelContext(ModelContext):
     def pop_messages(self, size: int = 1, with_history: bool = True) -> List[BaseMessage]:
         if size is not None and size < 0:
             raise JiuWenBaseException(
-                StatusCode.CONTEXT_ENGINE_POP_MESSAGE_ERROR.code,
-                StatusCode.CONTEXT_ENGINE_POP_MESSAGE_ERROR.errmsg.format(
+                StatusCode.CONTEXT_EXECUTION_ERROR.code,
+                StatusCode.CONTEXT_EXECUTION_ERROR.errmsg.format(
                     error_msg="pop size should be larger than 0"
                 )
             )
@@ -55,8 +55,8 @@ class SessionModelContext(ModelContext):
     def get_messages(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
         if size is not None and size < 0:
             raise JiuWenBaseException(
-                StatusCode.CONTEXT_ENGINE_GET_MESSAGE_ERROR.code,
-                StatusCode.CONTEXT_ENGINE_GET_MESSAGE_ERROR.errmsg.format(
+                StatusCode.CONTEXT_EXECUTION_ERROR.code,
+                StatusCode.CONTEXT_EXECUTION_ERROR.errmsg.format(
                     error_msg="get size should be larger than 0"
                 )
             )
@@ -79,8 +79,8 @@ class SessionModelContext(ModelContext):
                                  ) -> ContextWindow:
         if window_size is not None and window_size <= 0:
             raise JiuWenBaseException(
-                StatusCode.CONTEXT_ENGINE_GET_CONTEXT_WINDOW_ERROR.code,
-                StatusCode.CONTEXT_ENGINE_GET_CONTEXT_WINDOW_ERROR.errmsg.format(
+                StatusCode.CONTEXT_EXECUTION_ERROR.code,
+                StatusCode.CONTEXT_EXECUTION_ERROR.errmsg.format(
                     error_msg="window size should be larger than 0"
                 )
             )
@@ -163,15 +163,15 @@ class SessionModelContext(ModelContext):
             for msg in messages:
                 if not isinstance(msg, BaseMessage):
                     raise JiuWenBaseException(
-                        StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code,
-                        StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.errmsg.format(
+                        StatusCode.CONTEXT_MESSAGE_INVALID.code,
+                        StatusCode.CONTEXT_MESSAGE_INVALID.errmsg.format(
                             error_msg="messages should be a BaseMessage or a list of BaseMessage"
                         )
                     )
             return
         raise JiuWenBaseException(
-            StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.code,
-            StatusCode.CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR.errmsg.format(
+            StatusCode.CONTEXT_MESSAGE_INVALID.code,
+            StatusCode.CONTEXT_MESSAGE_INVALID.errmsg.format(
                 error_msg="messages should be a BaseMessage or a list of BaseMessage"
             )
         )

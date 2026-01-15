@@ -32,8 +32,8 @@ class BaseEvaluator(ABC):
                        ) -> List[EvaluatedCase]:
         if len(cases) != len(predicts):
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_EVALUATOR_EVALUATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_EVALUATOR_EVALUATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_EVALUATOR_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_EVALUATOR_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"length of cases: {len(cases)} dose not equal with length of predicts: {len(predicts)} "
                 )
             )

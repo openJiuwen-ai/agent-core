@@ -36,8 +36,8 @@ class MetaTemplateBuilder(BasePromptBuilder):
             template_to_reg = copy.deepcopy(meta_template)
         else:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_REGISTER_ERROR.code,
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_REGISTER_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"failed to register meta-template: {name}"
                 )
             )
@@ -108,8 +108,8 @@ class MetaTemplateBuilder(BasePromptBuilder):
                                      ):
         if not custom_meta_template_name:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"failed to get custom meta-template, please provide template name"
                 )
             )
@@ -117,8 +117,8 @@ class MetaTemplateBuilder(BasePromptBuilder):
         custom_meta_template = self._meta_template_manager.get(custom_meta_template_name)
         if not custom_meta_template:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"failed to get custom meta-template: {custom_meta_template_name}"
                 )
             )
@@ -129,22 +129,22 @@ class MetaTemplateBuilder(BasePromptBuilder):
     def _is_valid_prompt(self, prompt: str, tools: List[ToolInfo]):
         if prompt is None:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"prompt cannot be None"
                 )
             )
         if not prompt.strip():
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"prompt cannot be empty"
                 )
             )
         if tools and any(not isinstance(tool, ToolInfo) for tool in tools):
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_META_TEMPLATE_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"each tool must be an instance of ToolInfo"
                 )
             )

@@ -56,8 +56,8 @@ class AdoptOptimizer(BaseOptimizer):
                         continue
                 logger.error("Failed to invoke the model, please check if the model is available.")
                 return JiuWenBaseException(
-                    error_code=StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.code,
-                    message=StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.errmsg.format(
+                    error_code=StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.code,
+                    message=StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.errmsg.format(
                         error_msg="Failed to invoke the model"
                     )
                 )
@@ -204,8 +204,8 @@ class AdoptOptimizer(BaseOptimizer):
         param = self._parameters.get(node_name)
         if not param:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.code,
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.errmsg.format(
                     error_msg=f"Cannot find parameter: {node_name}"
                 )
             )
@@ -261,8 +261,8 @@ class PartialOptimizer(InstructionOptimizer):
         local_gradients = self._calculate_textual_gradient_by_bad_cases(param, tools)
         if not local_gradients:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"Calculate local gradient of parameter: {name} failed."
                 )
             )

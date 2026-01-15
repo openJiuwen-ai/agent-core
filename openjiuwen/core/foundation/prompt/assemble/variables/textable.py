@@ -25,8 +25,10 @@ class TextableVariable(Variable):
             placeholder = match.group(1).strip()
             if len(placeholder) == 0:
                 raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR.code,
-                    message="Placeholders cannot be empty string"
+                    error_code=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.code,
+                    message=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.errmsg.format(
+                        error_msg="placeholders cannot be empty string"
+                    )
                 )
             if placeholder not in placeholders:
                 placeholders.append(placeholder)
@@ -58,8 +60,10 @@ class TextableVariable(Variable):
                         value = getattr(value, node)
             except Exception as e:
                 raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR.code,
-                    message=f"Error parsing the placeholder `{placeholder}`."
+                    error_code=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.code,
+                    message=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.errmsg.format(
+                        error_msg=f"failed to parsing the placeholder `{placeholder}`"
+                    )
                 ) from e
             if not isinstance(value, (str, int, float, bool)):
                 logger.info(f"Converting non-string value `{placeholder}` using str()."

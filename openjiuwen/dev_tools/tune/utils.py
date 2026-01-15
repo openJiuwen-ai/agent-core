@@ -19,8 +19,8 @@ class TuneUtils:
     def validate_digital_parameter(param: float, param_name: str, lower: float, upper: float):
         if param < lower or param > upper:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.code,
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.errmsg.format(
                     error_msg=f"{param_name} should be between {lower} and {upper}"
                 )
             )

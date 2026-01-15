@@ -74,13 +74,17 @@ class PromptAssembler:
         for name, variable in variables.items():
             if name not in input_keys:
                 raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR.code,
-                    message=f"Variable {name} is not defined in the PromptTemplate."
+                    error_code=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.code,
+                    message=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.errmsg.format(
+                        error_msg=f"variable {name} is not defined in the PromptTemplate."
+                    )
                 )
             if not isinstance(variable, Variable):
                 raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR.code,
-                    message=f"Variable {name} must be instantiated as a `Variable` object."
+                    error_code=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.code,
+                    message=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.errmsg.format(
+                        error_msg=f"variable {name} must be instantiated as a `Variable` object."
+                    )
                 )
         for placeholder in input_keys:
             if placeholder in variables:
@@ -112,14 +116,18 @@ class PromptAssembler:
         missing_keys = set(self.input_keys) - set(kwargs.keys())
         if missing_keys:
             raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_ASSEMBLER_TEMPLATE_FORMAT_ERROR.code,
-                message=f"Missing keys for updating the prompt assembler: {list(missing_keys)}"
+                error_code=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.code,
+                message=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.errmsg.format(
+                    error_msg=f"missing keys for updating the prompt assembler: {list(missing_keys)}"
+                )
             )
         unexpected_keys = set(kwargs.keys()) - set(self.input_keys)
         if unexpected_keys:
             raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_ASSEMBLER_TEMPLATE_FORMAT_ERROR.code,
-                message=f"Unexpected keys for updating the prompt assembler: {list(unexpected_keys)}"
+                error_code=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.code,
+                message=StatusCode.PROMPT_TEMPLATE_FORMAT_INVALID.errmsg.format(
+                    error_msg=f"unexpected keys for updating the prompt assembler: {list(unexpected_keys)}"
+                )
             )
         for variable in self.variables.values():
             input_kwargs = {k: v for k, v in kwargs.items() if k in variable.input_keys}

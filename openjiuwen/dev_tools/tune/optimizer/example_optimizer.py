@@ -54,8 +54,8 @@ class ExampleOptimizer(BaseOptimizer):
         self._model = Model(model_client_config, model_config)
         if num_examples < TuneConstant.MIN_EXAMPLE_NUM or num_examples > TuneConstant.MAX_EXAMPLE_NUM:
             raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.code,
+                StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.errmsg.format(
                     error_msg=f"num_examples should be between {TuneConstant.MIN_EXAMPLE_NUM} "
                               f"and {TuneConstant.MAX_EXAMPLE_NUM}"
                 )
