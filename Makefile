@@ -1,90 +1,124 @@
-# All targets
-.PHONY: help has-staged-changes install test format lint pylint fix-format fix-lint type-check check fix
-
-# Default target
+# Cross-platform Makefile (Windows-friendly)
+.PHONY: help install has-staged-changes format lint pylint spelling fix-format fix-lint type-check check fix
 .DEFAULT_GOAL := help
+
+# Less noisy
+MAKEFLAGS += --no-print-directory
+
+LINESEP := ------------------------------------------------------------------
+DEPENDENCIES := "ruff>=0.11.2" "pylint>=3.0.0" "mypy>=1.12.0" "types-requests" "codespell>=2.2.4"
+
+# SHELL = sh.exe / cmd.exe for PowerShell and cmd.exe on Windows, not anywhere else (even Git Bash)
+ifeq ($(filter cmd.exe sh.exe,$(SHELL)),$(SHELL))
+	START := 
+	END := 
+	NULL := NUL
+	BLANK := & echo.
+	FAIL_CMD := exit /b 1
+else
+	START := "
+	END := "
+	NULL := /dev/null
+	BLANK := ; echo ""
+	FAIL_CMD := exit 1
+endif
 
 # Check last COMMITS commits if COMMITS > 0
 COMMITS ?= 0
-CHECK_LAST_N_COMMITS := $(shell [ $(COMMITS) -gt 0 ] && echo yes)
-ifeq ($(CHECK_LAST_N_COMMITS),yes)
-DIFF_OPTION := HEAD~$(COMMITS)..
+
+# If COMMITS > 0, treat it as "check last N commits"
+ifneq ($(filter-out 0,$(COMMITS)),)
+	DIFF_OPTION := HEAD~$(COMMITS)..
 else
-DIFF_OPTION := --cached
+	DIFF_OPTION := --cached
 endif
 
-# Get all staged .py or .pyi Python files
-CHANGED_FILES := $(shell \
-	git diff --name-only $(DIFF_OPTION) --diff-filter=ACMR \
-	| grep -E '\.pyi?$$' || true \
-)
+# Get changed files from git, then filter to .py/.pyi using Make
+CHANGED_FILES_RAW := $(strip $(shell git diff --name-only $(DIFF_OPTION) --diff-filter=ACMR 2>$(NULL)))
+CHANGED_FILES := $(filter %.py %.pyi,$(CHANGED_FILES_RAW))
 
-# Show help message
+# Detect uv
+UV_EXISTS := $(strip $(shell uv --version >$(NULL) 2>&1 && echo yes))
+
 help:
-	@echo "Usage: make [target] [COMMITS=N]"
-	@echo ""
-	@echo "If COMMITS=N is specified and greater than 0, check Python files changed in last N commits"
-	@echo "Otherwise the currently staged changes are checked"
-	@echo ""
-	@echo "Available targets:"
-	@echo "  help       - Show this help message"
-	@echo "  install    - Install dependencies via uv (ruff, pylint, mypy, types-requests)"
-	@echo "  test       - Execute pytest"
-	@echo "  format     - Check formatting of staged Python files via ruff"
-	@echo "  lint       - Check linting of staged Python files via ruff"
-	@echo "  pylint     - Check linting of staged Python files via pylint (more comprehensive)"
-	@echo "  fix-format - Auto-fix formatting errors in staged Python files via ruff"
-	@echo "  fix-lint   - Auto-fix linting errors in staged Python files via ruff"
-	@echo "  type-check - Type-check staged Python files via mypy"
-	@echo "  check      - Run all checks (format, lint, pylint)"
-	@echo "  fix        - Run all auto-fixes (fix-lint, fix-format)"
+	@echo Usage: make [target] [COMMITS=N] $(BLANK)
+	@echo If COMMITS=N is specified and greater than 0, check Python files changed in last N commits
+	@echo Otherwise the currently staged changes are checked $(BLANK)
+	@echo Available targets:
+	@echo $(START)    help       - Show this help message$(END)
+	@echo $(START)    install    - Install dependencies via uv or pip: ruff, pylint, mypy, codespell$(END)
+	@echo $(START)    test       - Execute pytest$(END)
+	@echo $(START)    format     - Check formatting of selected Python files via ruff$(END)
+	@echo $(START)    lint       - Check linting of selected Python files via ruff$(END)
+	@echo $(START)    pylint     - Check linting of selected Python files via pylint: more comprehensive$(END)
+	@echo $(START)    spelling   - Check spelling of selected Python files via codespell$(END)
+	@echo $(START)    fix-format - Auto-fix formatting errors in selected Python files via ruff$(END)
+	@echo $(START)    fix-lint   - Auto-fix linting errors in selected Python files via ruff$(END)
+	@echo $(START)    type-check - Type-check selected Python files via mypy$(END)
+	@echo $(START)    check      - Run all checks: format, spelling, lint, pylint$(END)
+	@echo $(START)    fix        - Run all auto-fixes: fix-lint, fix-format$(END)
 
-# Install dependencies via uv
 install:
-	uv pip install "ruff>=0.11.2" "pylint>=3.0.0" "mypy>=1.12.0" "types-requests"
+ifeq ($(UV_EXISTS),yes)
+	@echo [Makefile] Installing dependencies via uv
+	@uv pip install $(DEPENDENCIES)
+else
+	@echo [Makefile] Installing dependencies via pip
+	@python -m pip install $(DEPENDENCIES)
+endif
 
-# Execute pytest
 test:
 	@pytest
 
-# Sanity check - this target fails if there are no staged Python files
+# Sanity check - fails if there are no selected Python files
 has-staged-changes:
-	@if [ -z "$(CHANGED_FILES)" ]; then \
-		echo "No Python files selected."; \
-		echo "Make sure you have used git add first, or have set COMMITS to a positive integer."; \
-		echo ""; \
-		echo "------------------------------------------------------------"; \
-		echo ""; \
-		$(MAKE) help; \
-		exit 1; \
-	fi
+ifeq ($(strip $(CHANGED_FILES)),)
+	@echo No Python files selected.
+	@echo Make sure you have used git add first, or have set COMMITS to a positive integer. $(BLANK)
+	@echo $(LINESEP) $(BLANK)
+	@$(MAKE) help
+	@$(FAIL_CMD)
+endif
 
-# Formatting check via ruff
 format: has-staged-changes
-	@ruff format --check $(CHANGED_FILES)
+	-@ruff format --check $(CHANGED_FILES)
 
-# Linting check via ruff
 lint: has-staged-changes
-	@ruff check --show-fixes $(CHANGED_FILES)
+	-@ruff check --show-fixes $(CHANGED_FILES)
 
-# Linting check via pylint (more comprehensive than ruff check)
 pylint: has-staged-changes
-	@pylint $(CHANGED_FILES)
+	-@pylint $(CHANGED_FILES)
 
-# Fix formatting errors via ruff
+spelling: has-staged-changes
+	-@codespell $(CHANGED_FILES)
+
 fix-format: has-staged-changes
-	@ruff format $(CHANGED_FILES)
+	-@ruff format $(CHANGED_FILES)
 
-# Fix linting errors via ruff
 fix-lint: has-staged-changes
-	@ruff check --fix $(CHANGED_FILES)
+	-@ruff check --fix $(CHANGED_FILES)
 
-# Use mypy for type-checking
 type-check: has-staged-changes
-	@mypy $(CHANGED_FILES)
+	-@mypy $(CHANGED_FILES)
 
-# Execute all checks
-check: format lint pylint
+check: has-staged-changes
+	@echo $(LINESEP)
+	@echo [Makefile] Checking code format...
+	-@$(MAKE) format COMMITS=$(COMMITS)
+	@echo $(LINESEP)
+	@echo [Makefile] Checking spelling...
+	-@$(MAKE) spelling COMMITS=$(COMMITS)
+	@echo $(LINESEP)
+	@echo [Makefile] Checking linting via ruff...
+	-@$(MAKE) lint COMMITS=$(COMMITS)
+	@echo $(LINESEP)
+	@echo [Makefile] Checking linting via pylint...
+	-@$(MAKE) pylint COMMITS=$(COMMITS)
 
-# Execute all auto-fixes
-fix: fix-lint fix-format
+fix: has-staged-changes
+	@echo $(LINESEP)
+	@echo [Makefile] Fixing linting via ruff...
+	-@$(MAKE) fix-lint COMMITS=$(COMMITS)
+	@echo $(LINESEP)
+	@echo [Makefile] Fixing code format...
+	-@$(MAKE) fix-format COMMITS=$(COMMITS)
