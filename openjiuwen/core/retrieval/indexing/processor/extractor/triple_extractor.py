@@ -5,11 +5,14 @@ Triple Extractor Implementation
 
 Uses LLM for triple extraction.
 """
+
 from typing import List, Any, Optional
 import json
 import asyncio
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.common.triple import Triple
@@ -28,7 +31,7 @@ class TripleExtractor(Extractor):
     ):
         """
         Initialize triple extractor
-        
+
         Args:
             llm_client: LLM client instance
             model_name: Model name
@@ -47,51 +50,81 @@ class TripleExtractor(Extractor):
     ) -> List[Triple]:
         """
         Extract triples
-        
+
         Args:
             chunks: List of text chunks
             **kwargs: Additional parameters
-            
+
         Returns:
             List of triples
         """
-        async def _extract_chunk(chunk: TextChunk) -> List[Triple]:
-            """Process triple extraction for a single chunk"""
+
+        async def _extract_chunk(chunk: TextChunk) -> tuple[List[Triple], bool]:
+            """Process triple extraction for a single chunk
+
+            Returns:
+                Tuple of (triples, success): triples extracted and whether extraction succeeded
+            """
             async with self.limiter:
                 try:
                     # Build prompt
                     prompt = self._build_prompt(chunk.text, chunk.metadata.get("title", ""))
                     messages = [{"role": "user", "content": prompt}]
-                    
+
                     # Call LLM
                     completion = await self.llm_client.ainvoke(
                         model_name=self.model_name,
                         messages=messages,
                         temperature=self.temperature,
                     )
-                    
+
                     # Parse result
-                    triples = self._parse_triples(completion.content, chunk.doc_id)
-                    return triples
-                    
+                    triples, parse_success = self._parse_triples(completion.content, chunk.doc_id)
+                    return triples, parse_success
+
                 except Exception as e:
                     logger.error(f"Failed to extract triples from chunk {chunk.id_}: {e}")
-                    return []
-        
+                    return [], False
+
         # Create parallel tasks using create_task
         tasks = [asyncio.create_task(_extract_chunk(chunk)) for chunk in chunks]
-        
+
         # Wait for all tasks to complete and collect results
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Merge all results
+
+        # Merge all results and check for failures
         all_triples = []
-        for result in results:
+        total_chunks = len(chunks)
+        failed_chunks = []
+
+        for idx, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error(f"Task failed with exception: {result}")
-            elif isinstance(result, list):
-                all_triples.extend(result)
-        
+                # Task-level exception (e.g., from asyncio)
+                chunk_id = chunks[idx].id_ if idx < len(chunks) else f"chunk_{idx}"
+                logger.error(f"Task failed with exception for chunk {chunk_id}: {result}")
+                failed_chunks.append(chunk_id)
+            elif isinstance(result, tuple):
+                # Result from _extract_chunk: (triples, success)
+                triples, success = result
+                if not success:
+                    chunk_id = chunks[idx].id_ if idx < len(chunks) else f"chunk_{idx}"
+                    failed_chunks.append(chunk_id)
+                all_triples.extend(triples)
+            else:
+                # Unexpected result type
+                chunk_id = chunks[idx].id_ if idx < len(chunks) else f"chunk_{idx}"
+                logger.warning(f"Unexpected result type from extraction task for chunk {chunk_id}: {type(result)}")
+                failed_chunks.append(chunk_id)
+
+        # If any chunk extraction failed, raise exception immediately
+        if failed_chunks:
+            error_msg = (
+                f"Triple extraction failed for {len(failed_chunks)}/{total_chunks} chunks. "
+                f"Recent Failed chunks: {', '.join(failed_chunks[:5])}{'...' if len(failed_chunks) > 5 else ''}. "
+                f"This may be due to rate limiting, API errors, or model issues."
+            )
+            raise JiuWenBaseException(StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR.code, error_msg)
+
         return all_triples
 
     def _build_prompt(self, passage: str, title: str = "") -> str:
@@ -109,10 +142,17 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
 """
         return prompt_template.format(passage=passage, title=title or "Untitled")
 
-    def _parse_triples(self, content: str, doc_id: str) -> List[Triple]:
-        """Parse triples returned by LLM"""
+    def _parse_triples(self, content: str, doc_id: str) -> tuple[List[Triple], bool]:
+        """Parse triples returned by LLM
+
+        Returns:
+            Tuple of (triples, parse_success):
+            - triples: List of extracted triples
+            - parse_success: True if parsing succeeded (even if no triples found),
+                            False if parsing failed (JSON decode error, etc.)
+        """
         triples = []
-        
+
         try:
             # Try to parse JSON
             # Remove possible markdown code block markers
@@ -121,21 +161,25 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
                 # Remove code block markers
                 lines = content.split("\n")
                 content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-            
+
             # Try to parse JSON directly
             try:
                 triple_list = json.loads(content)
             except json.JSONDecodeError:
                 # If not valid JSON, try to extract JSON portion
                 import re
-                json_match = re.search(r'\[\[.*?\]\]', content, re.DOTALL)
+
+                json_match = re.search(r"\[\[.*?\]\]", content, re.DOTALL)
                 if json_match:
                     triple_list = json.loads(json_match.group())
                 else:
+                    # JSON parsing failed completely
                     logger.error(f"Failed to parse triples from content: {content[:100]}")
-                    return []
-            
+                    return [], False
+
             # Convert to Triple objects
+            # Note: If triple_list is an empty array [], this is valid (no triples found)
+            # and parse_success should be True
             for triple_data in triple_list:
                 if isinstance(triple_data, list) and len(triple_data) >= 3:
                     triple = Triple(
@@ -146,8 +190,11 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
                         metadata={"doc_id": doc_id},
                     )
                     triples.append(triple)
-                    
+
+            # If we successfully parsed JSON (even if it's an empty array), return success=True
+            return triples, True
+
         except Exception as e:
+            # Any other exception during parsing is a failure
             logger.error(f"Failed to parse triples: {e}")
-        
-        return triples
+            return [], False

@@ -54,7 +54,7 @@ class ChromaVectorStore(VectorStore):
         # Validate chroma_path
         if not chroma_path or not chroma_path.strip():
             raise JiuWenBaseException(
-                StatusCode.VECTOR_STORE_PATH_REQUIRED_ERROR.code, "chroma_path is required and cannot be empty"
+                StatusCode.RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND.code, "chroma_path is required and cannot be empty"
             )
 
         self.config = config

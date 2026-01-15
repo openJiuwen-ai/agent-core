@@ -5,6 +5,7 @@ Sparse Retriever Implementation
 
 Sparse retriever based on BM25.
 """
+
 from typing import Any, List, Optional, Dict
 from typing import Literal
 
@@ -25,7 +26,7 @@ class SparseRetriever(Retriever):
     ):
         """
         Initialize sparse retriever
-        
+
         Args:
             vector_store: Vector store instance (needs to support sparse search)
         """
@@ -41,21 +42,21 @@ class SparseRetriever(Retriever):
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (sparse retrieval)
-        
+
         Args:
             query: Query string
             top_k: Number of results to return
             score_threshold: Score threshold
             mode: Retrieval mode (this retriever only supports sparse)
             **kwargs: Additional parameters
-            
+
         Returns:
             List of retrieval results
         """
         if mode != "sparse":
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_UNSUPPORTED_MODE_ERROR.code,
-                f"SparseRetriever only supports 'sparse' mode, got {mode}"
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT.code,
+                f"SparseRetriever only supports 'sparse' mode, got {mode}",
             )
 
         # Execute sparse search

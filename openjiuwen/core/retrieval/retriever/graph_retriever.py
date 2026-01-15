@@ -5,6 +5,7 @@ Graph Retriever Implementation
 
 A graph retriever combining chunk retrieval and graph retrieval with graph expansion support.
 """
+
 import asyncio
 import itertools
 from typing import Any, List, Optional, Dict, Literal
@@ -32,7 +33,7 @@ class GraphRetriever(Retriever):
     ):
         """
         Initialize graph retriever
-        
+
         Args:
             chunk_retriever: Chunk retriever (for document chunk retrieval, optional,
                 dynamically created based on mode if not provided)
@@ -65,14 +66,12 @@ class GraphRetriever(Retriever):
         allowed = self._allowed_modes().get(self.index_type)
         if allowed is None:
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_UNSUPPORTED_INDEX_TYPE_ERROR.code,
-                f"Unsupported index_type={self.index_type}"
+                StatusCode.RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT.code, f"Unsupported index_type={self.index_type}"
             )
         if mode not in allowed:
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_MODE_INCOMPATIBLE_ERROR.code,
-                f"mode={mode} is incompatible with index_type={self.index_type}; "
-                f"allowed modes: {sorted(allowed)}"
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID.code,
+                f"mode={mode} is incompatible with index_type={self.index_type}; allowed modes: {sorted(allowed)}",
             )
 
     def _retriever_supports_mode(self, retriever: Retriever, mode: str) -> bool:
@@ -99,32 +98,32 @@ class GraphRetriever(Retriever):
     ) -> Retriever:
         """
         Get corresponding retriever based on mode
-        
+
         Args:
             mode: Retrieval mode
             is_chunk: Whether chunk retriever (True=chunk_retriever, False=triple_retriever)
-            
+
         Returns:
             Corresponding retriever instance
         """
         self._ensure_mode_allowed(mode)
-        
+
         # If fixed retriever is provided, use it directly (but need to check if it supports the mode)
         fixed_retriever = self.chunk_retriever if is_chunk else self.triple_retriever
         if fixed_retriever:
             if not self._retriever_supports_mode(fixed_retriever, mode):
                 raise JiuWenBaseException(
-                    StatusCode.RETRIEVER_NOT_SUPPORT_MODE_ERROR.code,
+                    StatusCode.RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT.code,
                     f"Provided {'chunk' if is_chunk else 'triple'} retriever "
-                    f"{fixed_retriever.__class__.__name__} does not support mode={mode}"
+                    f"{fixed_retriever.__class__.__name__} does not support mode={mode}",
                 )
             return fixed_retriever
-        
+
         # Dynamically create retriever
         if not self.vector_store:
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_VECTOR_STORE_REQUIRED_ERROR.code,
-                "vector_store is required for dynamic retriever creation"
+                StatusCode.RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND.code,
+                "vector_store is required for dynamic retriever creation",
             )
 
         collection_name = self.chunk_collection if is_chunk else self.triple_collection
@@ -132,17 +131,17 @@ class GraphRetriever(Retriever):
         if not collection_name:
             collection_type = "chunk" if is_chunk else "triple"
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_COLLECTION_REQUIRED_ERROR.code,
-                f"{collection_type}_collection is required for dynamic retriever creation"
+                StatusCode.RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND.code,
+                f"{collection_type}_collection is required for dynamic retriever creation",
             )
 
         # Create corresponding retriever based on mode
         if mode == "vector":
             from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
+
             if not self.embed_model:
                 raise JiuWenBaseException(
-                    StatusCode.RETRIEVER_EMBED_MODEL_REQUIRED_ERROR.code,
-                    "embed_model is required for vector mode"
+                    StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.code, "embed_model is required for vector mode"
                 )
             retriever = VectorRetriever(
                 vector_store=self.vector_store,
@@ -150,16 +149,18 @@ class GraphRetriever(Retriever):
             )
         elif mode == "sparse":
             from openjiuwen.core.retrieval.retriever.sparse_retriever import SparseRetriever
+
             retriever = SparseRetriever(
                 vector_store=self.vector_store,
             )
         else:  # hybrid
             from openjiuwen.core.retrieval.retriever.hybrid_retriever import HybridRetriever
+
             retriever = HybridRetriever(
                 vector_store=self.vector_store,
                 embed_model=self.embed_model,
             )
-        
+
         return retriever
 
     async def retrieve(
@@ -172,14 +173,14 @@ class GraphRetriever(Retriever):
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (graph retrieval)
-        
+
         Args:
             query: Query string
             top_k: Number of results to return
             score_threshold: Score threshold
             mode: Retrieval mode (must be compatible with index_type)
             **kwargs: Additional parameters (may include topk_triples, graph_hops, etc.)
-            
+
         Returns:
             List of retrieval results
         """
@@ -189,8 +190,8 @@ class GraphRetriever(Retriever):
         # GraphRetriever always performs graph expansion by default, caller doesn't need to pass graph_expansion flag
         if score_threshold is not None and mode != "vector":
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_SCORE_THRESHOLD_ERROR.code,
-                "score_threshold is only supported when mode='vector'"
+                StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID.code,
+                "score_threshold is only supported when mode='vector'",
             )
         effective_threshold = score_threshold
 
@@ -206,8 +207,7 @@ class GraphRetriever(Retriever):
         )
 
         logger.info(
-            f"[graph] Graph retrieval: graph_expansion=True "
-            f"chunk_hits={len(chunk_results)} topk={top_k} mode={mode}"
+            f"[graph] Graph retrieval: graph_expansion=True chunk_hits={len(chunk_results)} topk={top_k} mode={mode}"
         )
 
         expanded_results = chunk_results
@@ -235,14 +235,14 @@ class GraphRetriever(Retriever):
     ) -> List[RetrievalResult]:
         """
         Graph expansion: expand retrieval through triples based on initial chunk retrieval results
-        
+
         Args:
             query: Query string
             chunks: Initial chunk retrieval results
             topk: Final return count
             topk_triples: Triple retrieval count
             mode: Retrieval mode
-            
+
         Returns:
             List of expanded retrieval results
         """

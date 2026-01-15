@@ -41,7 +41,6 @@ class StatusCode(Enum):
     COMPONENT_LLM_TEMPLATE_PROCESS_ERROR = (101006, "component llm_template process error, reason: {error_msg}")
     COMPONENT_LLM_TEMPLATE_INVALID = (101007, "component llm_template is invalid, reason: {error_msg}")
 
-
     ## LLM Service 102001 - 102999
     MODEL_SERVICE_CONFIG_ERROR = (102001, "model service config error, reason: {error_msg}")
     MODEL_CONFIG_ERROR = (102002, "model config error, reason: {error_msg}")
@@ -106,20 +105,32 @@ class StatusCode(Enum):
     GRAPH_SET_END_NODE_FAILED = (110002, "Graph create error, caused by end node set failed, detail: {detail}")
     GRAPH_ADD_NODE_FAILED = (110003, "Graph create error, caused by add node failed, detail: {detail}")
     GRAPH_ADD_EDGE_FAILED = (110004, "Graph create error, caused by add edge failed, detail: {detail}")
-    GRAPH_ADD_CONDITION_EDGE_FAILED = (110005,
-                                       "Graph create error, caused by add conditional edge failed, detail: {detail}")
+    GRAPH_ADD_CONDITION_EDGE_FAILED = (
+        110005,
+        "Graph create error, caused by add conditional edge failed, detail: {detail}",
+    )
     WORKFLOW_COMPONENT_CONFIG_ERROR = (110006, "Workflow component config error: {error_msg}")
-    DRAWABLE_GRAPH_SET_START_NODE_FAILED = (110021, "Drawable Graph create error, caused by start node set failed, "\
-                                                    "node id: {node_id}")
-    DRAWABLE_GRAPH_SET_END_NODE_FAILED = (110022, "Drawable Graph create error, caused by end node set failed, "\
-                                                    "node id: {node_id}")
-    DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED = (110023, "Drawable Graph create error, caused by break node set failed, "\
-                                                    "node id: {node_id}")
+    DRAWABLE_GRAPH_SET_START_NODE_FAILED = (
+        110021,
+        "Drawable Graph create error, caused by start node set failed, node id: {node_id}",
+    )
+    DRAWABLE_GRAPH_SET_END_NODE_FAILED = (
+        110022,
+        "Drawable Graph create error, caused by end node set failed, node id: {node_id}",
+    )
+    DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED = (
+        110023,
+        "Drawable Graph create error, caused by break node set failed, node id: {node_id}",
+    )
     DRAWABLE_GRAPH_INVALID_TITLE = (110024, "Invalid value of argument 'title', expected a str")
-    DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH = (110025, "Invalid value of argument 'expand_subgraph', "\
-                                              "expected a boolean or a non-negative integer")
-    DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION = (110026, "Invalid value of argument 'enable_animation', "\
-                                              "expected a boolean")
+    DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH = (
+        110025,
+        "Invalid value of argument 'expand_subgraph', expected a boolean or a non-negative integer",
+    )
+    DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION = (
+        110026,
+        "Invalid value of argument 'enable_animation', expected a boolean",
+    )
 
     # Workflow - Exception Handling 111000 - 111999
     # Agent Orchestration 120000 - 129999
@@ -168,12 +179,13 @@ class StatusCode(Enum):
     # GraphEngine 140000 - 149999
     # GraphEngine - Graph Orchestration and Execution 140000 - 140999
     # GraphEngine - Conditional Evaluation 140000 - 140019
-    EXPRESSION_CONDITION_SYNTAX_ERROR = (140000, "Expression condition has syntax error,"
-                                         " expression as {expression}, error as {error_msg}.")
+    EXPRESSION_CONDITION_SYNTAX_ERROR = (
+        140000,
+        "Expression condition has syntax error, expression as {expression}, error as {error_msg}.",
+    )
     EXPRESSION_CONDITION_EVAL_ERROR = (140001, "Expression condition eval error, as {error_msg}.")
     ARRAY_CONDITION_ERROR = (140002, "Array condition error")
     NUMBER_CONDITION_ERROR = (140003, "Number condition error")
-
 
     # ContextEngine 150000 - 154999
     # ContextEngine - Context Structured Storage and Retrieval 150000 - 150999
@@ -186,50 +198,58 @@ class StatusCode(Enum):
 
     # KnowledgeBase Retrieval 155000 - 157999
     # KnowledgeBase Retrieval - Embedding 155000 - 155099
-    EMBEDDING_EMPTY_INPUT_ERROR = (155000, "Empty text or texts list provided for embedding")
-    EMBEDDING_MODEL_NOT_FOUND_ERROR = (155001, "Embedding model not found: {error_msg}")
-    EMBEDDING_CONNECTION_ERROR = (155002, "Failed to connect to embedding service: {error_msg}")
-    EMBEDDING_RESPONSE_FORMAT_ERROR = (155003, "Invalid embedding response format: {error_msg}")
-    EMBEDDING_REQUEST_FAILED_ERROR = (155004, "Failed to get embedding after {max_retries} attempts: {error_msg}")
-    EMBEDDING_UNREACHABLE_ERROR = (155005, "Unreachable code in embedding: {error_msg}")
+    RETRIEVAL_EMBEDDING_INPUT_INVALID = (155000, "Empty text or texts list provided for embedding")
+    RETRIEVAL_EMBEDDING_MODEL_NOT_FOUND = (155001, "Embedding model not found: {error_msg}")
+    RETRIEVAL_EMBEDDING_CALL_FAILED = (155002, "Failed to connect to embedding service: {error_msg}")
+    RETRIEVAL_EMBEDDING_RESPONSE_INVALID = (155003, "Invalid embedding response format: {error_msg}")
+    RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED = (
+        155004,
+        "Failed to get embedding after {max_retries} attempts: {error_msg}",
+    )
+    RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED = (155005, "Unreachable code in embedding: {error_msg}")
     # KnowledgeBase Retrieval - Indexing 155100 - 155199
-    INDEXING_CHUNK_SIZE_ERROR = (155100, "Invalid chunk size: {error_msg}")
-    INDEXING_CHUNK_OVERLAP_ERROR = (155101, "Invalid chunk overlap: {error_msg}")
-    INDEXING_TOKENIZER_ERROR = (155102, "Tokenizer error: {error_msg}")
-    INDEXING_FILE_NOT_FOUND_ERROR = (155103, "File not found: {error_msg}")
-    INDEXING_UNSUPPORTED_FORMAT_ERROR = (155104, "Unsupported file format: {error_msg}")
-    INDEXING_EMBED_MODEL_REQUIRED_ERROR = (155105, "Embed model is required: {error_msg}")
-    INDEXING_DIMENSION_REQUIRED_ERROR = (155106, "Dimension is required: {error_msg}")
-    INDEXING_PATH_REQUIRED_ERROR = (155107, "Path is required and cannot be empty: {error_msg}")
+    RETRIEVAL_INDEXING_CHUNK_SIZE_INVALID = (155100, "Invalid chunk size: {error_msg}")
+    RETRIEVAL_INDEXING_CHUNK_OVERLAP_INVALID = (155101, "Invalid chunk overlap: {error_msg}")
+    RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR = (155102, "Tokenizer error: {error_msg}")
+    RETRIEVAL_INDEXING_FILE_NOT_FOUND = (155103, "File not found: {error_msg}")
+    RETRIEVAL_INDEXING_FORMAT_NOT_SUPPORT = (155104, "Unsupported file format: {error_msg}")
+    RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND = (155105, "Embed model is required: {error_msg}")
+    RETRIEVAL_INDEXING_DIMENSION_NOT_FOUND = (155106, "Dimension is required: {error_msg}")
+    RETRIEVAL_INDEXING_PATH_NOT_FOUND = (155107, "Path is required and cannot be empty: {error_msg}")
     # KnowledgeBase Retrieval - Retriever 155200 - 155299
-    RETRIEVER_UNSUPPORTED_MODE_ERROR = (155200, "Unsupported retrieval mode: {error_msg}")
-    RETRIEVER_SCORE_THRESHOLD_ERROR = (155201, "Score threshold is only supported when mode='vector': {error_msg}")
-    RETRIEVER_EMBED_MODEL_REQUIRED_ERROR = (155202, "Embed model is required: {error_msg}")
-    RETRIEVER_UNSUPPORTED_INDEX_TYPE_ERROR = (155203, "Unsupported index type: {error_msg}")
-    RETRIEVER_MODE_INCOMPATIBLE_ERROR = (155204, "Mode is incompatible with index type: {error_msg}")
-    RETRIEVER_NOT_SUPPORT_MODE_ERROR = (155205, "Retriever does not support mode: {error_msg}")
-    RETRIEVER_VECTOR_STORE_REQUIRED_ERROR = (155206, "Vector store is required: {error_msg}")
-    RETRIEVER_COLLECTION_REQUIRED_ERROR = (155207, "Collection is required: {error_msg}")
-    RETRIEVER_GRAPH_RETRIEVER_REQUIRED_ERROR = (155208, "Graph retriever is required: {error_msg}")
-    RETRIEVER_LLM_CLIENT_REQUIRED_ERROR = (155209, "LLM client is required: {error_msg}")
-    RETRIEVER_TOP_K_REQUIRED_ERROR = (155210, "top_k is required: {error_msg}")
+    RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT = (155200, "Unsupported retrieval mode: {error_msg}")
+    RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID = (
+        155201,
+        "Score threshold is only supported when mode='vector': {error_msg}",
+    )
+    RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND = (155202, "Embed model is required: {error_msg}")
+    RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT = (155203, "Unsupported index type: {error_msg}")
+    RETRIEVAL_RETRIEVER_MODE_INVALID = (155204, "Mode is incompatible with index type: {error_msg}")
+    RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT = (155205, "Retriever does not support mode: {error_msg}")
+    RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND = (155206, "Vector store is required: {error_msg}")
+    RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND = (155207, "Collection is required: {error_msg}")
+    RETRIEVAL_RETRIEVER_GRAPH_RETRIEVER_NOT_FOUND = (155208, "Graph retriever is required: {error_msg}")
+    RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND = (155209, "LLM client is required: {error_msg}")
+    RETRIEVAL_RETRIEVER_TOP_K_NOT_FOUND = (155210, "top_k is required: {error_msg}")
     # KnowledgeBase Retrieval - Utils 155300 - 155399
-    UTILS_CONFIG_FILE_NOT_FOUND_ERROR = (155300, "Configuration file not found: {error_msg}")
-    UTILS_PYYAML_REQUIRED_ERROR = (155301, "PyYAML is required: {error_msg}")
-    UTILS_UNSUPPORTED_CONFIG_FORMAT_ERROR = (155302, "Unsupported configuration file format: {error_msg}")
-    UTILS_NO_CONFIG_TO_SAVE_ERROR = (155303, "No configuration to save: {error_msg}")
-    UTILS_CONFIG_NOT_LOADED_ERROR = (155304, "Configuration not loaded: {error_msg}")
+    RETRIEVAL_UTILS_CONFIG_FILE_NOT_FOUND = (155300, "Configuration file not found: {error_msg}")
+    RETRIEVAL_UTILS_PYYAML_NOT_FOUND = (155301, "PyYAML is required: {error_msg}")
+    RETRIEVAL_UTILS_CONFIG_FORMAT_NOT_SUPPORT = (155302, "Unsupported configuration file format: {error_msg}")
+    RETRIEVAL_UTILS_CONFIG_NOT_FOUND = (155303, "No configuration to save: {error_msg}")
+    RETRIEVAL_UTILS_CONFIG_PROCESS_ERROR = (155304, "Configuration not loaded: {error_msg}")
     # KnowledgeBase Retrieval - Vector Store 155400 - 155499
-    VECTOR_STORE_PATH_REQUIRED_ERROR = (155400, "Path is required and cannot be empty: {error_msg}")
+    RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND = (155400, "Path is required and cannot be empty: {error_msg}")
     # KnowledgeBase Retrieval - Knowledge Base 155500 - 155599
-    KB_PARSER_REQUIRED_ERROR = (155500, "Parser is required: {error_msg}")
-    KB_CHUNKER_REQUIRED_ERROR = (155501, "Chunker is required: {error_msg}")
-    KB_INDEX_MANAGER_REQUIRED_ERROR = (155502, "Index manager is required: {error_msg}")
-    KB_VECTOR_STORE_REQUIRED_ERROR = (155503, "Vector store is required: {error_msg}")
-    KB_BUILD_INDEX_FAILED_ERROR = (155504, "Failed to build index: {error_msg}")
-    KB_BUILD_CHUNK_INDEX_FAILED_ERROR = (155505, "Failed to build chunk index: {error_msg}")
-    KB_VECTORSTORE_AND_INDEXER_DATABASE_MISMATCH_ERROR = (
-        155506,
+    RETRIEVAL_KB_PARSER_NOT_FOUND = (155500, "Parser is required: {error_msg}")
+    RETRIEVAL_KB_CHUNKER_NOT_FOUND = (155501, "Chunker is required: {error_msg}")
+    RETRIEVAL_KB_INDEX_MANAGER_NOT_FOUND = (155502, "Index manager is required: {error_msg}")
+    RETRIEVAL_KB_VECTOR_STORE_NOT_FOUND = (155503, "Vector store is required: {error_msg}")
+    RETRIEVAL_KB_INDEX_BUILD_EXECUTION_ERROR = (155504, "Failed to build index: {error_msg}")
+    RETRIEVAL_KB_CHUNK_INDEX_BUILD_EXECUTION_ERROR = (155505, "Failed to build chunk index: {error_msg}")
+    RETRIEVAL_KB_TRIPLE_INDEX_BUILD_EXECUTION_ERROR = (155506, "Failed to build triple index: {error_msg}")
+    RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR = (155507, "Failed to extract triples: {error_msg}")
+    RETRIEVAL_KB_DATABASE_CONFIG_INVALID = (
+        155508,
         "Vector store and index manager uses different database names: {error_msg}",
     )
 
@@ -291,12 +311,16 @@ class StatusCode(Enum):
     PLUGIN_UNEXPECTED_ERROR = (182000, "Plugin unexpected error")
     PLUGIN_REQUEST_TIMEOUT_ERROR = (182001, "Plugin restful api request timed out")
     PLUGIN_RESPONSE_FORMAT_ERROR = (182002, "Plugin restful api response format error")
-    PLUGIN_RESPONSE_TOO_BIG_ERROR = (182003,
-        "Plugin restful api  response too big, maxLength={max_length}, actualLength={actual_length}")
+    PLUGIN_RESPONSE_TOO_BIG_ERROR = (
+        182003,
+        "Plugin restful api  response too big, maxLength={max_length}, actualLength={actual_length}",
+    )
     PLUGIN_RESPONSE_HTTP_CODE_ERROR = (182004, "Plugin restful api http code error")
     PLUGIN_PARAMS_CHECK_FAILED = (182005, "Plugin params check failed")
-    PLUGIN_RESTFUL_API_METHOD_ERROR = (182006,
-        "Plugin restful api unsupported HTTP method: '{method}', only accepts: {support}")
+    PLUGIN_RESTFUL_API_METHOD_ERROR = (
+        182006,
+        "Plugin restful api unsupported HTTP method: '{method}', only accepts: {support}",
+    )
 
     # Common Capabilities - Logger 183000 - 183999
     LOG_PATH_SENSITIVE_ERROR = (183000, "Log path is sensitive or unsafe: {path}")
@@ -327,10 +351,10 @@ class StatusCode(Enum):
     SESSION_AGENT_GROUP_ADD_FAILED = (190040, "failed to add single_agent group, reason: {reason}")
     SESSION_AGENT_GROUP_GET_FAILED = (190041, "failed to get single_agent group, reason: {reason}")
     SESSION_AGENT_GROUP_REMOVE_FAILED = (190042, "failed to remove single_agent group, reason: {reason}")
-    
+
     # Session - Resource Management - Workflow Additional
     SESSION_WORKFLOW_REMOVE_FAILED = (190003, "failed to remove workflow, reason: {reason}")
-    
+
     # Session - Resource Management - Agent 190050 - 190059
     SESSION_AGENT_ADD_FAILED = (190050, "failed to add single_agent, reason: {reason}")
     SESSION_AGENT_GET_FAILED = (190051, "failed to get single_agent, reason: {reason}")
@@ -357,8 +381,10 @@ class StatusCode(Enum):
     SESSION_STATE_INVALID_SESSION_TYPE = (192001, "Invalid session type: {session_type}, expected BaseSession")
     SESSION_STATE_INVALID_STATE_TYPE = (192002, "Invalid state type: {state_type}, expected CommitState")
     # Session - StreamWriter 193000 - 193999
-    STREAM_WRITER_WRITE_SCHEMA_FAILED = (193001,
-                                         "failed to write stream, stream schema validate failed, details: {detail}")
+    STREAM_WRITER_WRITE_SCHEMA_FAILED = (
+        193001,
+        "failed to write stream, stream schema validate failed, details: {detail}",
+    )
     STREAM_WRITER_WRITE_FAILED = (193002, "failed to write stream, reason: {reason}")
     STREAM_FRAME_TIMEOUT_FAILED = (193003, "stream frame is timeout ({timeout}s), no stream output")
     STREAM_FIRST_FRAME_TIMEOUT_FAILED = (193004, "stream first frame is timeout ({timeout}s), no stream output")
@@ -371,15 +397,17 @@ class StatusCode(Enum):
 
     # Session - Component Executable 196100 - 196199
     SESSION_COMPONENT_INVALID_SESSION_TYPE = (196100, "session should be NodeSession instance")
-    SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED = (196101, "Component ability '{ability}' is registered but '{method}' "
-                                                 "method is not implemented. Please implement the '{method}' method "
-                                                 "in your component class '{class_name}'.")
+    SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED = (
+        196101,
+        "Component ability '{ability}' is registered but '{method}' "
+        "method is not implemented. Please implement the '{method}' method "
+        "in your component class '{class_name}'.",
+    )
     SESSION_COMPONENT_ABILITY_NOT_SUPPORTED = (196102, "{ability} is not supported")
 
     # Session - Checkpointer 197000 - 197099
     SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR = (197000, "workflow store is None")
     SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR = (197001, "agent store is None")
-
 
     @property
     def code(self):

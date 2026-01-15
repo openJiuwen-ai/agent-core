@@ -5,6 +5,7 @@ Vector Retriever Implementation
 
 Retriever implementation based on vector store.
 """
+
 from typing import Any, List, Optional, Dict
 from typing import Literal
 
@@ -27,7 +28,7 @@ class VectorRetriever(Retriever):
     ):
         """
         Initialize vector retriever
-        
+
         Args:
             vector_store: Vector store instance
             embed_model: Embedding model instance (required for vector retrieval)
@@ -45,36 +46,35 @@ class VectorRetriever(Retriever):
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (vector retrieval)
-        
+
         Args:
             query: Query string
             top_k: Number of results to return
             score_threshold: Score threshold
             mode: Retrieval mode (only supports vector=vector retrieval)
             **kwargs: Additional parameters
-            
+
         Returns:
             List of retrieval results
         """
         if mode != "vector":
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_UNSUPPORTED_MODE_ERROR.code,
-                f"VectorRetriever only supports 'vector' mode, got {mode}"
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT.code,
+                f"VectorRetriever only supports 'vector' mode, got {mode}",
             )
 
         if score_threshold is not None and mode != "vector":
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_SCORE_THRESHOLD_ERROR.code,
-                "score_threshold is only supported when mode='vector'"
+                StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID.code,
+                "score_threshold is only supported when mode='vector'",
             )
 
         # Vector retrieval
         if self.embed_model is None:
             raise JiuWenBaseException(
-                StatusCode.RETRIEVER_EMBED_MODEL_REQUIRED_ERROR.code,
-                "embed_model is required for vector search"
+                StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.code, "embed_model is required for vector search"
             )
-        
+
         query_vector = await self.embed_model.embed_query(query)
         search_results = await self.vector_store.search(
             query_vector=query_vector,
@@ -93,7 +93,7 @@ class VectorRetriever(Retriever):
         for result in search_results:
             if score_threshold is not None and result.score is not None and result.score < score_threshold:
                 continue
-            
+
             retrieval_result = RetrievalResult(
                 text=result.text,
                 score=result.score,
@@ -113,11 +113,9 @@ class VectorRetriever(Retriever):
     ) -> List[List[RetrievalResult]]:
         """Batch retrieval"""
         import asyncio
-        
+
         # Execute multiple retrievals concurrently
-        tasks = [
-            self.retrieve(query, top_k=top_k, **kwargs) for query in queries
-        ]
+        tasks = [self.retrieve(query, top_k=top_k, **kwargs) for query in queries]
         results = await asyncio.gather(*tasks)
         return results
 

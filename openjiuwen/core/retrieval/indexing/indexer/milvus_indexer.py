@@ -92,7 +92,7 @@ class MilvusIndexer(Indexer):
             if config.index_type in ("vector", "hybrid"):
                 if not embed_model:
                     raise JiuWenBaseException(
-                        StatusCode.INDEXING_EMBED_MODEL_REQUIRED_ERROR.code,
+                        StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND.code,
                         "embed_model is required for vector/hybrid index type",
                     )
                 texts = [chunk.text for chunk in chunks]
@@ -329,7 +329,7 @@ class MilvusIndexer(Indexer):
 
             if dimension is None or dimension == 0:
                 raise JiuWenBaseException(
-                    StatusCode.INDEXING_DIMENSION_REQUIRED_ERROR.code,
+                    StatusCode.RETRIEVAL_INDEXING_DIMENSION_NOT_FOUND.code,
                     "dimension is required for vector/hybrid index type",
                 )
 
