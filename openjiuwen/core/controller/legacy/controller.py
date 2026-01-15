@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.single_agent.legacy import AgentConfig
-from openjiuwen.core.controller.event.event import Event
+from openjiuwen.core.controller.legacy.event.event import Event
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger

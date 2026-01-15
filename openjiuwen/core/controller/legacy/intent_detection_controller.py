@@ -9,9 +9,9 @@ from enum import Enum
 from typing import Any, Dict, Optional
 
 from openjiuwen.core.common.utils.message_utils import MessageUtils
-from openjiuwen.core.controller.controller import BaseController
-from openjiuwen.core.controller.event.event import Event
-from openjiuwen.core.controller.task.task import Task, TaskStatus
+from openjiuwen.core.controller.legacy.controller import BaseController
+from openjiuwen.core.controller.legacy.event.event import Event
+from openjiuwen.core.controller.legacy.task.task import Task, TaskStatus
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session import Session

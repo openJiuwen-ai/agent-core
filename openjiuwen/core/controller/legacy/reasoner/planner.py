@@ -3,8 +3,8 @@
 
 from typing import List
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.controller.event.event import Event
-from openjiuwen.core.controller.task.task import Task, TaskStatus
+from openjiuwen.core.controller.legacy.event.event import Event
+from openjiuwen.core.controller.legacy.task.task import Task, TaskStatus
 from openjiuwen.core.common.constants.enums import TaskType
 
 

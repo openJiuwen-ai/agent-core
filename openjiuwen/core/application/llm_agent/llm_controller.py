@@ -11,7 +11,7 @@ from openjiuwen.core.single_agent.legacy import (
     LegacyReActAgentConfig as ReActAgentConfig,
 )
 from openjiuwen.core.controller import BaseController, Event, EventType, Task, TaskResult, TaskStatus
-from openjiuwen.core.controller.utils import MessageHandlerUtils
+from openjiuwen.core.controller.legacy.utils import MessageHandlerUtils
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.common.constants.enums import TaskType
 from openjiuwen.core.common.exception.status_code import StatusCode

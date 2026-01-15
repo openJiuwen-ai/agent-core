@@ -9,7 +9,7 @@ from typing import Dict, Optional
 from unittest.mock import MagicMock
 
 from openjiuwen.core.single_agent.legacy import AgentConfig
-from openjiuwen.core.controller.controller import BaseController
+from openjiuwen.core.controller.legacy.controller import BaseController
 from openjiuwen.core.controller import Event
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.session import Session

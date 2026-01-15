@@ -11,7 +11,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from openjiuwen.core.controller.event.event import Event
+from openjiuwen.core.controller.legacy.event.event import Event
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.message_queue_base import InvokeQueueMessage
 from openjiuwen.core.runner.message_queue_inmemory import MessageQueueInMemory

@@ -1,22 +1,27 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Controller module - Agent controllers
+"""Controller legacy module - Agent controllers"""
 
-This module re-exports from legacy submodule for backward compatibility.
-"""
+from openjiuwen.core.controller.legacy.controller import BaseController
 
-from openjiuwen.core.controller.legacy import (
-    BaseController,
+from openjiuwen.core.controller.legacy.intent_detection_controller import (
     IntentDetectionController,
     IntentType,
     Intent,
     TaskQueue,
+)
+
+from openjiuwen.core.controller.legacy.task.task import (
     Task,
     TaskInput,
     TaskStatus,
     TaskResult,
-    IntentDetector,
-    Planner,
+)
+
+from openjiuwen.core.controller.legacy.reasoner.intent_detector import IntentDetector
+from openjiuwen.core.controller.legacy.reasoner.planner import Planner
+
+from openjiuwen.core.controller.legacy.event.event import (
     Event,
     EventType,
     EventPriority,
@@ -24,6 +29,9 @@ from openjiuwen.core.controller.legacy import (
     EventContent,
     EventContext,
     SourceType,
+)
+
+from openjiuwen.core.controller.legacy.config.reasoner_config import (
     IntentDetectionConfig,
     PlannerConfig,
     ProactiveIdentifierConfig,
