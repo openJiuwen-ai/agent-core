@@ -2,13 +2,13 @@
 """
 Extractor abstract base class test cases
 """
-from unittest.mock import AsyncMock
+
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
-from openjiuwen.core.retrieval.common.document import TextChunk
-from openjiuwen.core.retrieval.common.triple import Triple
+from openjiuwen.core.retrieval import Extractor
+from openjiuwen.core.retrieval import TextChunk
+from openjiuwen.core.retrieval import Triple
 
 
 class ConcreteExtractor(Extractor):
@@ -19,12 +19,14 @@ class ConcreteExtractor(Extractor):
         for chunk in chunks:
             # Simple extraction logic: extract some triples from text
             if "knows" in chunk.text:
-                triples.append(Triple(
-                    subject="Alice",
-                    predicate="knows",
-                    object="Bob",
-                    metadata={"doc_id": chunk.doc_id},
-                ))
+                triples.append(
+                    Triple(
+                        subject="Alice",
+                        predicate="knows",
+                        object="Bob",
+                        metadata={"doc_id": chunk.doc_id},
+                    )
+                )
         return triples
 
 
@@ -60,4 +62,3 @@ class TestExtractor:
         """Test cannot directly instantiate abstract class"""
         with pytest.raises(TypeError):
             Extractor()
-

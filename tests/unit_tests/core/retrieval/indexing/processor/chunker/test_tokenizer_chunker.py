@@ -2,12 +2,13 @@
 """
 Tokenizer chunker test cases
 """
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.chunker.tokenizer_chunker import TokenizerChunker
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval import TokenizerChunker
+from openjiuwen.core.retrieval import TextChunk
 
 
 @pytest.fixture
@@ -78,4 +79,3 @@ class TestTokenizerChunker:
         )
         chunks = chunker.chunk_text(None)
         assert chunks == []
-

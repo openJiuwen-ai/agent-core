@@ -2,13 +2,13 @@
 """
 TXT/MD file parser test cases
 """
+
 import os
 import tempfile
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser import TxtMdParser
+from openjiuwen.core.retrieval import TxtMdParser
 
 
 class TestTxtMdParser:
@@ -24,9 +24,9 @@ class TestTxtMdParser:
     async def test_parse_empty_file(self):
         """Test parsing empty file"""
         parser = TxtMdParser()
-        
+
         # Create temporary empty file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             temp_path = f.name
 
         try:
@@ -49,9 +49,9 @@ class TestTxtMdParser:
     async def test_parse_strips_content(self):
         """Test content whitespace stripping"""
         parser = TxtMdParser()
-        
+
         # Create temporary file (with whitespace before and after)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("   \n  Content  \n   ")
             temp_path = f.name
 
@@ -62,4 +62,3 @@ class TestTxtMdParser:
                 assert documents[0].text.strip() == "Content"
         finally:
             os.unlink(temp_path)
-

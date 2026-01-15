@@ -2,11 +2,11 @@
 """
 Processor abstract base class test cases
 """
-from unittest.mock import AsyncMock
+
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.base import Processor
+from openjiuwen.core.retrieval import Processor
 
 
 class ConcreteProcessor(Processor):
@@ -31,4 +31,3 @@ class TestProcessor:
         """Test cannot directly instantiate abstract class"""
         with pytest.raises(TypeError):
             Processor()
-

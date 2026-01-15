@@ -2,12 +2,13 @@
 """
 Sparse retriever test cases
 """
+
 from unittest.mock import AsyncMock
 
 import pytest
 
-from openjiuwen.core.retrieval.retriever.sparse_retriever import SparseRetriever
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
+from openjiuwen.core.retrieval import SparseRetriever
+from openjiuwen.core.retrieval import SearchResult
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
@@ -15,10 +16,12 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 def mock_vector_store():
     """Create mock vector store"""
     store = AsyncMock()
-    store.sparse_search = AsyncMock(return_value=[
-        SearchResult(id="1", text="Result 1", score=0.95, metadata={"doc_id": "doc_1"}),
-        SearchResult(id="2", text="Result 2", score=0.85, metadata={"doc_id": "doc_2"}),
-    ])
+    store.sparse_search = AsyncMock(
+        return_value=[
+            SearchResult(id="1", text="Result 1", score=0.95, metadata={"doc_id": "doc_1"}),
+            SearchResult(id="2", text="Result 2", score=0.85, metadata={"doc_id": "doc_2"}),
+        ]
+    )
     return store
 
 
@@ -51,4 +54,3 @@ class TestSparseRetriever:
         assert len(results_list) == 2
         assert len(results_list[0]) == 2
         assert len(results_list[1]) == 2
-

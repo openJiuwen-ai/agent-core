@@ -2,12 +2,13 @@
 """
 Text splitter abstract base class test cases
 """
+
 from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.spliter.base import Splitter
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval import Splitter
+from openjiuwen.core.retrieval import Document, TextChunk
 
 
 class ConcreteSplitter(Splitter):
@@ -46,12 +47,13 @@ class TestSplitter:
     @staticmethod
     def test_init_with_tokenizer():
         """Test initialization with tokenizer"""
+
         def encode_fn(x):
             return x.split()
-        
+
         def decode_fn(x):
             return " ".join(x)
-        
+
         mock_tokenizer = MagicMock()
         mock_tokenizer.encode = encode_fn
         mock_tokenizer.decode = decode_fn
@@ -64,6 +66,7 @@ class TestSplitter:
     @staticmethod
     def test_init_with_callable_tokenizer():
         """Test initialization with callable tokenizer"""
+
         def tokenizer_func(text):
             return text.split()
 
@@ -135,4 +138,3 @@ class TestSplitter:
         """Test cannot directly instantiate abstract class"""
         with pytest.raises(TypeError):
             Splitter()
-

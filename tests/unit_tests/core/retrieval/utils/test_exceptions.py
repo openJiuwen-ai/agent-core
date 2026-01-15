@@ -2,9 +2,10 @@
 """
 Exception definition test cases
 """
+
 import pytest
 
-from openjiuwen.core.retrieval.utils.exceptions import (
+from openjiuwen.core.retrieval import (
     RAGException,
     KnowledgeBaseError,
     KnowledgeBaseIndexError,
@@ -105,4 +106,3 @@ class TestVectorStoreError:
     def test_vector_store_error_inheritance():
         """测试向量存储错误继承关系"""
         assert issubclass(VectorStoreError, RAGException)
-

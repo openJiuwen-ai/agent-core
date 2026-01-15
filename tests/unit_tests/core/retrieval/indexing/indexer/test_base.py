@@ -2,13 +2,13 @@
 """
 Index manager abstract base class test cases
 """
-from unittest.mock import AsyncMock
+
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
-from openjiuwen.core.retrieval.common.config import IndexConfig
-from openjiuwen.core.retrieval.common.document import TextChunk
+from openjiuwen.core.retrieval import Indexer
+from openjiuwen.core.retrieval import IndexConfig
+from openjiuwen.core.retrieval import TextChunk
 
 
 class ConcreteIndexer(Indexer):
@@ -75,4 +75,3 @@ class TestIndexer:
         info = await indexer.get_index_info("test_index")
         assert "count" in info
         assert info["count"] == 10
-

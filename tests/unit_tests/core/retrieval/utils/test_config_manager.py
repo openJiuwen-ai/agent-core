@@ -2,15 +2,15 @@
 """
 Config manager test cases
 """
+
 import json
 import os
 import tempfile
-from pathlib import Path
 
 import pytest
 
-from openjiuwen.core.retrieval.utils.config_manager import ConfigManager
-from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig
+from openjiuwen.core.retrieval import ConfigManager
+from openjiuwen.core.retrieval import KnowledgeBaseConfig
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
@@ -20,7 +20,7 @@ class TestConfigManager:
     @staticmethod
     def test_init_with_path():
         """测试使用路径初始化"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             config_data = {
                 "kb_id": "test_kb",
                 "index_type": "vector",
@@ -42,7 +42,7 @@ class TestConfigManager:
     @staticmethod
     def test_load_from_file_json():
         """测试从 JSON 文件加载配置"""
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             config_data = {
                 "kb_id": "test_kb",
                 "index_type": "hybrid",
@@ -67,7 +67,7 @@ class TestConfigManager:
         except ImportError:
             pytest.skip("PyYAML not installed")
 
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             config_data = {
                 "kb_id": "test_kb",
                 "index_type": "vector",

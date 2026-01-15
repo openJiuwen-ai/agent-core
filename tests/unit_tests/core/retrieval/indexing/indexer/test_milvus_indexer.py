@@ -2,14 +2,14 @@
 """
 Milvus index manager test cases
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.indexer.milvus_indexer import MilvusIndexer
-from openjiuwen.core.retrieval.common.config import IndexConfig
-from openjiuwen.core.retrieval.common.document import TextChunk
-from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
+from openjiuwen.core.retrieval import MilvusIndexer
+from openjiuwen.core.retrieval import IndexConfig
+from openjiuwen.core.retrieval import TextChunk
 
 
 @pytest.fixture
@@ -149,8 +149,10 @@ class TestMilvusIndexer:
         chunks = [TextChunk(id_="1", text="updated chunk", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
-        with patch.object(indexer, "delete_index", new_callable=AsyncMock) as mock_delete, \
-             patch.object(indexer, "build_index", new_callable=AsyncMock) as mock_build:
+        with (
+            patch.object(indexer, "delete_index", new_callable=AsyncMock) as mock_delete,
+            patch.object(indexer, "build_index", new_callable=AsyncMock) as mock_build,
+        ):
             mock_delete.return_value = True
             mock_build.return_value = True
 
@@ -243,4 +245,3 @@ class TestMilvusIndexer:
         indexer = MilvusIndexer(milvus_uri="http://localhost:19530")
         # Should not raise exception
         indexer.close()
-

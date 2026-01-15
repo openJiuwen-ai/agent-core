@@ -2,14 +2,14 @@
 """
 Triple extractor test cases
 """
+
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.extractor.triple_extractor import TripleExtractor
-from openjiuwen.core.retrieval.common.document import TextChunk
-from openjiuwen.core.retrieval.common.triple import Triple
+from openjiuwen.core.retrieval import TripleExtractor
+from openjiuwen.core.retrieval import TextChunk
 
 
 @pytest.fixture
@@ -23,12 +23,14 @@ def mock_llm_client():
 def mock_completion():
     """Create mock completion object"""
     completion = MagicMock()
-    completion.content = json.dumps({
-        "triples": [
-            ["Alice", "knows", "Bob"],
-            ["Bob", "works_at", "Company"],
-        ]
-    })
+    completion.content = json.dumps(
+        {
+            "triples": [
+                ["Alice", "knows", "Bob"],
+                ["Bob", "works_at", "Company"],
+            ]
+        }
+    )
     return completion
 
 

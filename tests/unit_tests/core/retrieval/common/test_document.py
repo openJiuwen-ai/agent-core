@@ -2,10 +2,11 @@
 """
 Document data model test cases
 """
+
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval import Document, TextChunk
 
 
 class TestDocument:
@@ -106,10 +107,9 @@ class TestTextChunk:
         """Test missing required fields"""
         with pytest.raises(ValidationError):
             TextChunk()
-        
+
         with pytest.raises(ValidationError):
             TextChunk(id_="chunk_1")
-        
+
         with pytest.raises(ValidationError):
             TextChunk(id_="chunk_1", text="Test chunk")
-

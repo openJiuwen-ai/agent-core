@@ -2,13 +2,14 @@
 """
 Agentic retriever test cases
 """
-from unittest.mock import AsyncMock, MagicMock, patch
+
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
-from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.retrieval import AgenticRetriever
+from openjiuwen.core.retrieval import GraphRetriever
+from openjiuwen.core.retrieval import RetrievalResult
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
@@ -16,10 +17,12 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 def mock_graph_retriever():
     """Create mock graph retriever"""
     retriever = AsyncMock(spec=GraphRetriever)
-    retriever.retrieve = AsyncMock(return_value=[
-        RetrievalResult(text="Result 1", score=0.9),
-        RetrievalResult(text="Result 2", score=0.8),
-    ])
+    retriever.retrieve = AsyncMock(
+        return_value=[
+            RetrievalResult(text="Result 1", score=0.9),
+            RetrievalResult(text="Result 2", score=0.8),
+        ]
+    )
     retriever.index_type = "hybrid"
     return retriever
 
@@ -83,20 +86,22 @@ class TestAgenticRetriever:
     @pytest.mark.asyncio
     async def test_retrieve_success_single_iteration(self, mock_graph_retriever, mock_llm_client):
         """Test retrieval success (single iteration)"""
-        mock_graph_retriever.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 1", score=0.9),
-        ])
-        
+        mock_graph_retriever.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 1", score=0.9),
+            ]
+        )
+
         mock_response = MagicMock()
         mock_response.content = "original query"  # Rewritten query same as original, should stop
         mock_llm_client.ainvoke = AsyncMock(return_value=mock_response)
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
             max_iter=3,
         )
-        
+
         results = await retriever.retrieve("original query", top_k=5)
         assert len(results) == 1
         # Should only iterate once since rewritten query is same as original
@@ -105,23 +110,25 @@ class TestAgenticRetriever:
     @pytest.mark.asyncio
     async def test_retrieve_multiple_iterations(self, mock_graph_retriever, mock_llm_client):
         """Test retrieval (multiple iterations)"""
-        mock_graph_retriever.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 1", score=0.9),
-        ])
-        
+        mock_graph_retriever.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 1", score=0.9),
+            ]
+        )
+
         # First rewrite returns new query, second returns same query
         mock_responses = [
             MagicMock(content="rewritten query 1"),
             MagicMock(content="rewritten query 1"),  # Different from original, but same as second
         ]
         mock_llm_client.ainvoke = AsyncMock(side_effect=mock_responses)
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
             max_iter=3,
         )
-        
+
         results = await retriever.retrieve("original query", top_k=5)
         assert len(results) == 1
         # Should iterate 2 times (first + one after rewrite)
@@ -130,23 +137,22 @@ class TestAgenticRetriever:
     @pytest.mark.asyncio
     async def test_retrieve_max_iterations(self, mock_graph_retriever, mock_llm_client):
         """Test retrieval reaching maximum iterations"""
-        mock_graph_retriever.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 1", score=0.9),
-        ])
-        
+        mock_graph_retriever.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 1", score=0.9),
+            ]
+        )
+
         # Each time returns a different rewritten query
-        mock_responses = [
-            MagicMock(content=f"rewritten query {i}")
-            for i in range(3)
-        ]
+        mock_responses = [MagicMock(content=f"rewritten query {i}") for i in range(3)]
         mock_llm_client.ainvoke = AsyncMock(side_effect=mock_responses)
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
             max_iter=3,
         )
-        
+
         results = await retriever.retrieve("original query", top_k=5)
         assert len(results) == 1
         # Should reach maximum iteration count
@@ -159,26 +165,28 @@ class TestAgenticRetriever:
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
         )
-        
+
         with pytest.raises(JiuWenBaseException, match="top_k is required"):
             await retriever.retrieve("test query", top_k=None)
 
     @pytest.mark.asyncio
     async def test_retrieve_with_custom_mode(self, mock_graph_retriever, mock_llm_client):
         """Test retrieval with custom mode"""
-        mock_graph_retriever.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 1", score=0.9),
-        ])
-        
+        mock_graph_retriever.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 1", score=0.9),
+            ]
+        )
+
         mock_response = MagicMock()
         mock_response.content = "original query"
         mock_llm_client.ainvoke = AsyncMock(return_value=mock_response)
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
         )
-        
+
         results = await retriever.retrieve("test query", top_k=5, mode="vector")
         assert len(results) == 1
         # Verify specified mode is used
@@ -188,19 +196,21 @@ class TestAgenticRetriever:
     @pytest.mark.asyncio
     async def test_retrieve_with_score_threshold(self, mock_graph_retriever, mock_llm_client):
         """Test retrieval with score threshold"""
-        mock_graph_retriever.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 1", score=0.9),
-        ])
-        
+        mock_graph_retriever.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 1", score=0.9),
+            ]
+        )
+
         mock_response = MagicMock()
         mock_response.content = "original query"
         mock_llm_client.ainvoke = AsyncMock(return_value=mock_response)
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
         )
-        
+
         results = await retriever.retrieve("test query", top_k=5, score_threshold=0.8)
         assert len(results) == 1
         # Verify score threshold is passed
@@ -216,19 +226,19 @@ class TestAgenticRetriever:
             [RetrievalResult(text="Result 2", score=0.8)],
         ]
         mock_graph_retriever.retrieve = AsyncMock(side_effect=mock_results)
-        
+
         mock_responses = [
             MagicMock(content="rewritten query"),
             MagicMock(content="rewritten query"),  # Second time same, stop
         ]
         mock_llm_client.ainvoke = AsyncMock(side_effect=mock_responses)
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
             max_iter=3,
         )
-        
+
         results = await retriever.retrieve("test query", top_k=5)
         # Should fuse multiple results
         assert len(results) >= 1
@@ -236,19 +246,21 @@ class TestAgenticRetriever:
     @pytest.mark.asyncio
     async def test_batch_retrieve(self, mock_graph_retriever, mock_llm_client):
         """Test batch retrieval"""
-        mock_graph_retriever.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 1", score=0.9),
-        ])
-        
+        mock_graph_retriever.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 1", score=0.9),
+            ]
+        )
+
         mock_response = MagicMock()
         mock_response.content = "original query"
         mock_llm_client.ainvoke = AsyncMock(return_value=mock_response)
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
         )
-        
+
         queries = ["query 1", "query 2"]
         results_list = await retriever.batch_retrieve(queries, top_k=5)
         assert len(results_list) == 2
@@ -259,12 +271,12 @@ class TestAgenticRetriever:
     async def test_close(self, mock_graph_retriever, mock_llm_client):
         """Test closing retriever"""
         mock_graph_retriever.close = AsyncMock()
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
         )
-        
+
         await retriever.close()
         mock_graph_retriever.close.assert_called_once()
 
@@ -272,12 +284,12 @@ class TestAgenticRetriever:
     async def test_close_sync_close(self, mock_graph_retriever, mock_llm_client):
         """Test closing retriever (synchronous close method)"""
         mock_graph_retriever.close = MagicMock()
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph_retriever,
             llm_client=mock_llm_client,
         )
-        
+
         await retriever.close()
         mock_graph_retriever.close.assert_called_once()
 
@@ -286,11 +298,10 @@ class TestAgenticRetriever:
         """Test closing graph retriever without close method"""
         mock_graph = MagicMock()
         del mock_graph.close  # Remove close method
-        
+
         retriever = AgenticRetriever(
             graph_retriever=mock_graph,
             llm_client=mock_llm_client,
         )
         # Should not raise exception
         await retriever.close()
-

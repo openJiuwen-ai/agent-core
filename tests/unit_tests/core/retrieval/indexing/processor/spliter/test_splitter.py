@@ -2,11 +2,12 @@
 """
 Sentence splitter test cases
 """
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.spliter.splitter import SentenceSplitter
+from openjiuwen.core.retrieval import SentenceSplitter
 
 
 def _mock_encode(x):
@@ -187,4 +188,3 @@ class TestSentenceSplitter:
                 assert "Short sentence 1" in chunks[0][0]
                 assert "Short sentence 2" in chunks[0][0]
                 assert "Short sentence 3" in chunks[0][0]
-

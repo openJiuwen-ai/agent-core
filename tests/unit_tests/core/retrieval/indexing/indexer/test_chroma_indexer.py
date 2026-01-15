@@ -2,13 +2,14 @@
 """
 ChromaDB index manager test cases
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.indexer.chroma_indexer import ChromaIndexer
-from openjiuwen.core.retrieval.common.config import IndexConfig
-from openjiuwen.core.retrieval.common.document import TextChunk
+from openjiuwen.core.retrieval import ChromaIndexer
+from openjiuwen.core.retrieval import IndexConfig
+from openjiuwen.core.retrieval import TextChunk
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
@@ -172,8 +173,10 @@ class TestChromaIndexer:
         chunks = [TextChunk(id_="1", text="updated chunk", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
-        with patch.object(indexer, "delete_index", new_callable=AsyncMock) as mock_delete, \
-             patch.object(indexer, "build_index", new_callable=AsyncMock) as mock_build:
+        with (
+            patch.object(indexer, "delete_index", new_callable=AsyncMock) as mock_delete,
+            patch.object(indexer, "build_index", new_callable=AsyncMock) as mock_build,
+        ):
             mock_delete.return_value = True
             mock_build.return_value = True
 
@@ -216,6 +219,7 @@ class TestChromaIndexer:
         # Mock asyncio.to_thread
         async def mock_to_thread_impl(func, *args, **kwargs):
             return func(*args, **kwargs)
+
         mock_to_thread.side_effect = mock_to_thread_impl
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -240,6 +244,7 @@ class TestChromaIndexer:
         # Mock asyncio.to_thread
         async def mock_to_thread_impl(func, *args, **kwargs):
             return func(*args, **kwargs)
+
         mock_to_thread.side_effect = mock_to_thread_impl
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -260,6 +265,7 @@ class TestChromaIndexer:
         # Mock asyncio.to_thread
         async def mock_to_thread_impl(func, *args, **kwargs):
             return func(*args, **kwargs)
+
         mock_to_thread.side_effect = mock_to_thread_impl
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -278,6 +284,7 @@ class TestChromaIndexer:
         # Mock asyncio.to_thread to raise exception
         async def mock_to_thread_impl(func, *args, **kwargs):
             return func(*args, **kwargs)
+
         mock_to_thread.side_effect = mock_to_thread_impl
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -297,6 +304,7 @@ class TestChromaIndexer:
         # Mock asyncio.to_thread
         async def mock_to_thread_impl(func, *args, **kwargs):
             return func(*args, **kwargs)
+
         mock_to_thread.side_effect = mock_to_thread_impl
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -330,6 +338,7 @@ class TestChromaIndexer:
         # Mock asyncio.to_thread
         async def mock_to_thread_impl(func, *args, **kwargs):
             return func(*args, **kwargs)
+
         mock_to_thread.side_effect = mock_to_thread_impl
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -351,6 +360,7 @@ class TestChromaIndexer:
         # Mock asyncio.to_thread to raise exception
         async def mock_to_thread_impl(func, *args, **kwargs):
             return func(*args, **kwargs)
+
         mock_to_thread.side_effect = mock_to_thread_impl
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -371,6 +381,7 @@ class TestChromaIndexer:
         # Mock asyncio.to_thread
         async def mock_to_thread_impl(func, *args, **kwargs):
             return func(*args, **kwargs)
+
         mock_to_thread.side_effect = mock_to_thread_impl
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -387,4 +398,3 @@ class TestChromaIndexer:
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
         # Should not raise exception (ChromaDB client doesn't have close method)
         indexer.close()
-

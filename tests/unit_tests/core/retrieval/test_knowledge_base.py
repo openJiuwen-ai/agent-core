@@ -2,12 +2,13 @@
 """
 Knowledge base abstract base class test cases
 """
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
-from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig
+from openjiuwen.core.retrieval import KnowledgeBase
+from openjiuwen.core.retrieval import KnowledgeBaseConfig
 
 
 class ConcreteKnowledgeBase(KnowledgeBase):
@@ -142,4 +143,3 @@ class TestKnowledgeBase:
         )
         # Should catch exception, not raise
         await kb.close()
-

@@ -2,12 +2,13 @@
 """
 Vector retriever test cases
 """
-from unittest.mock import AsyncMock, MagicMock
+
+from unittest.mock import AsyncMock
 
 import pytest
 
-from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
+from openjiuwen.core.retrieval import VectorRetriever
+from openjiuwen.core.retrieval import SearchResult
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
@@ -15,10 +16,12 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 def mock_vector_store():
     """Create mock vector store"""
     store = AsyncMock()
-    store.search = AsyncMock(return_value=[
-        SearchResult(id="1", text="Result 1", score=0.95, metadata={"doc_id": "doc_1"}),
-        SearchResult(id="2", text="Result 2", score=0.85, metadata={"doc_id": "doc_2"}),
-    ])
+    store.search = AsyncMock(
+        return_value=[
+            SearchResult(id="1", text="Result 1", score=0.95, metadata={"doc_id": "doc_1"}),
+            SearchResult(id="2", text="Result 2", score=0.85, metadata={"doc_id": "doc_2"}),
+        ]
+    )
     store.sparse_search = AsyncMock(return_value=[])
     return store
 
@@ -64,10 +67,12 @@ class TestVectorRetriever:
     async def test_retrieve_fallback_to_sparse(self, mock_vector_store, mock_embed_model):
         """Test fallback to sparse retrieval when vector retrieval returns no results"""
         mock_vector_store.search = AsyncMock(return_value=[])
-        mock_vector_store.sparse_search = AsyncMock(return_value=[
-            SearchResult(id="1", text="Sparse result", score=0.8, metadata={}),
-        ])
-        
+        mock_vector_store.sparse_search = AsyncMock(
+            return_value=[
+                SearchResult(id="1", text="Sparse result", score=0.8, metadata={}),
+            ]
+        )
+
         retriever = VectorRetriever(
             vector_store=mock_vector_store,
             embed_model=mock_embed_model,
@@ -106,4 +111,3 @@ class TestVectorRetriever:
         assert len(results_list) == 2
         assert len(results_list[0]) == 2
         assert len(results_list[1]) == 2
-

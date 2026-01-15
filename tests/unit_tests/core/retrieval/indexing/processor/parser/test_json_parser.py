@@ -2,14 +2,15 @@
 """
 JSON file parser test cases
 """
+
 import json
 import os
 import tempfile
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.parser.json_parser import JSONParser
+from openjiuwen.core.retrieval import JSONParser
 
 
 class TestJSONParser:
@@ -25,15 +26,15 @@ class TestJSONParser:
     async def test_parse_json_success(self):
         """Test parsing JSON file successfully"""
         parser = JSONParser()
-        
+
         # Create temporary JSON file
         json_data = {
             "name": "test",
             "value": 123,
             "items": ["item1", "item2"],
         }
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump(json_data, f)
             temp_path = f.name
 
@@ -51,8 +52,8 @@ class TestJSONParser:
     async def test_parse_json_empty_object(self):
         """Test parsing empty JSON object"""
         parser = JSONParser()
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump({}, f)
             temp_path = f.name
 
@@ -67,10 +68,10 @@ class TestJSONParser:
     async def test_parse_json_array(self):
         """Test parsing JSON array"""
         parser = JSONParser()
-        
+
         json_data = [1, 2, 3, "test"]
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump(json_data, f)
             temp_path = f.name
 
@@ -86,9 +87,9 @@ class TestJSONParser:
     async def test_parse_json_invalid_format(self):
         """Test parsing invalid JSON format"""
         parser = JSONParser()
-        
+
         # Create invalid JSON file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             f.write("{ invalid json }")
             temp_path = f.name
 
@@ -112,13 +113,13 @@ class TestJSONParser:
     async def test_parse_json_with_exception(self):
         """Test exception during parsing"""
         parser = JSONParser()
-        
+
         with patch("aiofiles.open") as mock_open:
             mock_open.side_effect = Exception("File read error")
-            
-            with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
                 temp_path = f.name
-            
+
             try:
                 documents = await parser.parse(temp_path, doc_id="doc_1")
                 # Should return empty list (exception is caught)
@@ -131,13 +132,13 @@ class TestJSONParser:
     async def test_parse_json_with_unicode(self):
         """Test parsing JSON containing Unicode characters"""
         parser = JSONParser()
-        
+
         json_data = {
             "name": "测试",
             "description": "这是一个测试",
         }
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump(json_data, f, ensure_ascii=False)
             temp_path = f.name
 
@@ -153,10 +154,10 @@ class TestJSONParser:
     async def test_parse_json_formatted_output(self):
         """Test JSON formatted output"""
         parser = JSONParser()
-        
+
         json_data = {"key": "value", "nested": {"inner": "data"}}
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False, encoding='utf-8') as f:
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
             json.dump(json_data, f)
             temp_path = f.name
 
@@ -169,4 +170,3 @@ class TestJSONParser:
             assert "\n" in parsed_text or "  " in parsed_text
         finally:
             os.unlink(temp_path)
-

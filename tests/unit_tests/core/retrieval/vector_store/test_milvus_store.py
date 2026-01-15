@@ -2,13 +2,14 @@
 """
 Milvus vector store test cases
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
-from openjiuwen.core.retrieval.common.config import VectorStoreConfig
-from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.retrieval import MilvusVectorStore
+from openjiuwen.core.retrieval import VectorStoreConfig
+from openjiuwen.core.retrieval import SearchResult
 
 
 @pytest.fixture
@@ -137,10 +138,7 @@ class TestMilvusVectorStore:
         )
 
         # Create data exceeding batch_size
-        data = [
-            {"id": str(i), "embedding": [0.1] * 384, "content": f"Content {i}"}
-            for i in range(200)
-        ]
+        data = [{"id": str(i), "embedding": [0.1] * 384, "content": f"Content {i}"} for i in range(200)]
 
         await store.add(data, batch_size=50)
         # Should insert in multiple batches
@@ -152,15 +150,19 @@ class TestMilvusVectorStore:
     async def test_search_success(self, mock_client_class, vector_store_config):
         """Test successful vector search"""
         mock_client = MagicMock()
-        mock_client.search = MagicMock(return_value=[[
-            {
-                "id": "1",
-                "content": "Test content",
-                "metadata": {"source": "test"},
-                "document_id": "doc_1",
-                "score": 0.9,
-            }
-        ]])
+        mock_client.search = MagicMock(
+            return_value=[
+                [
+                    {
+                        "id": "1",
+                        "content": "Test content",
+                        "metadata": {"source": "test"},
+                        "document_id": "doc_1",
+                        "score": 0.9,
+                    }
+                ]
+            ]
+        )
         mock_client_class.return_value = mock_client
 
         store = MilvusVectorStore(
@@ -213,14 +215,18 @@ class TestMilvusVectorStore:
     async def test_sparse_search_success(self, mock_client_class, vector_store_config):
         """Test successful sparse search"""
         mock_client = MagicMock()
-        mock_client.search = MagicMock(return_value=[[
-            {
-                "id": "1",
-                "content": "Test content",
-                "metadata": {},
-                "score": 0.8,
-            }
-        ]])
+        mock_client.search = MagicMock(
+            return_value=[
+                [
+                    {
+                        "id": "1",
+                        "content": "Test content",
+                        "metadata": {},
+                        "score": 0.8,
+                    }
+                ]
+            ]
+        )
         mock_client_class.return_value = mock_client
 
         store = MilvusVectorStore(
@@ -276,14 +282,18 @@ class TestMilvusVectorStore:
     ):
         """Test successful hybrid search"""
         mock_client = MagicMock()
-        mock_client.hybrid_search = MagicMock(return_value=[[
-            {
-                "id": "1",
-                "content": "Test content",
-                "metadata": {},
-                "score": 0.9,
-            }
-        ]])
+        mock_client.hybrid_search = MagicMock(
+            return_value=[
+                [
+                    {
+                        "id": "1",
+                        "content": "Test content",
+                        "metadata": {},
+                        "score": 0.9,
+                    }
+                ]
+            ]
+        )
         mock_client_class.return_value = mock_client
 
         mock_ann_request = MagicMock()
@@ -339,8 +349,10 @@ class TestMilvusVectorStore:
             milvus_uri="http://localhost:19530",
         )
 
-        with patch.object(store, "search", new_callable=AsyncMock) as mock_search, \
-             patch.object(store, "sparse_search", new_callable=AsyncMock) as mock_sparse:
+        with (
+            patch.object(store, "search", new_callable=AsyncMock) as mock_search,
+            patch.object(store, "sparse_search", new_callable=AsyncMock) as mock_sparse,
+        ):
             mock_search.return_value = [
                 SearchResult(id="1", text="Vector result", score=0.9, metadata={}),
             ]
@@ -457,4 +469,3 @@ class TestMilvusVectorStore:
 
         # Should catch exception, not raise
         store.close()
-

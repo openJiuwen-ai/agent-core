@@ -2,10 +2,11 @@
 """
 Text chunker abstract base class test cases
 """
+
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
-from openjiuwen.core.retrieval.common.document import Document
+from openjiuwen.core.retrieval import Chunker
+from openjiuwen.core.retrieval import Document
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
@@ -34,9 +35,10 @@ class TestChunker:
     @staticmethod
     def test_init_with_custom_values():
         """Test initialization with custom values"""
+
         def word_count_length(x):
             return len(x.split())
-        
+
         chunker = ConcreteChunker(
             chunk_size=1024,
             chunk_overlap=100,
@@ -62,8 +64,7 @@ class TestChunker:
     def test_init_invalid_overlap_negative():
         """Test initialization with negative chunk_overlap"""
         with pytest.raises(
-            JiuWenBaseException,
-            match="chunk_overlap must be greater than or equal to 0, current value: -1"
+            JiuWenBaseException, match="chunk_overlap must be greater than or equal to 0, current value: -1"
         ):
             ConcreteChunker(chunk_size=100, chunk_overlap=-1)
 
@@ -120,4 +121,3 @@ class TestChunker:
         chunks = await chunker.process(documents)
         assert len(chunks) > 0
         assert all(chunk.doc_id == "doc_1" for chunk in chunks)
-

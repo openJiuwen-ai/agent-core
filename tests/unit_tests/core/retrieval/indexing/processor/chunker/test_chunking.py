@@ -2,12 +2,13 @@
 """
 Text chunker test cases
 """
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.chunker.chunking import TextChunker
-from openjiuwen.core.retrieval.common.document import Document
+from openjiuwen.core.retrieval import TextChunker
+from openjiuwen.core.retrieval import Document
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 
 
@@ -145,7 +146,8 @@ class TestTextChunker:
         """Test getting character chunker"""
         chunker = TextChunker(chunk_size=512, chunk_overlap=50)
         result = chunker.get_chunker(512, 50, "char", None)
-        from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
+        from openjiuwen.core.retrieval import CharChunker
+
         assert isinstance(result, CharChunker)
 
     @staticmethod
@@ -160,4 +162,3 @@ class TestTextChunker:
         result = chunker.get_chunker(512, 50, "token", mock_embed_model)
         # chunk_size should be adjusted to 256
         assert result.chunk_size == 256
-

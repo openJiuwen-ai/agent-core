@@ -2,16 +2,13 @@
 """
 Text splitter test cases
 """
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.chunker.text_splitter import (
-    TextSplitter,
-    CharSplitter,
-    IndexSentenceSplitter,
-)
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval import TextSplitter, CharSplitter, IndexSentenceSplitter
+from openjiuwen.core.retrieval import Document, TextChunk
 
 
 class ConcreteTextSplitter(TextSplitter):
@@ -126,9 +123,10 @@ class TestIndexSentenceSplitter:
     @staticmethod
     def test_init_with_default_splitter_config():
         """Test initialization with default splitter configuration"""
+
         def tokenize_fn(x):
             return x.split()
-        
+
         mock_tokenizer = MagicMock()
         mock_tokenizer.tokenize = tokenize_fn
 
@@ -146,9 +144,10 @@ class TestIndexSentenceSplitter:
     @staticmethod
     def test_split_with_document():
         """Test splitting document"""
+
         def tokenize_fn(x):
             return x.split()
-        
+
         mock_tokenizer = MagicMock()
         mock_tokenizer.tokenize = tokenize_fn
 
@@ -173,9 +172,10 @@ class TestIndexSentenceSplitter:
     @staticmethod
     def test_split_with_text_chunk():
         """Test splitting text chunk"""
+
         def tokenize_fn(x):
             return x.split()
-        
+
         mock_tokenizer = MagicMock()
         mock_tokenizer.tokenize = tokenize_fn
 
@@ -191,4 +191,3 @@ class TestIndexSentenceSplitter:
             text_chunk = TextChunk(id_="1", text="This is a test", doc_id="doc_1")
             chunks = splitter.split(text_chunk)
             assert len(chunks) == 1
-

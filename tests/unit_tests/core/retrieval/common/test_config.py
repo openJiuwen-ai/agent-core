@@ -2,10 +2,11 @@
 """
 Configuration class test cases
 """
+
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.core.retrieval.common.config import (
+from openjiuwen.core.retrieval import (
     KnowledgeBaseConfig,
     RetrievalConfig,
     IndexConfig,
@@ -183,4 +184,3 @@ class TestEmbeddingConfig:
         """Test missing required model_name"""
         with pytest.raises(ValidationError):
             EmbeddingConfig()
-
