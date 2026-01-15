@@ -17,8 +17,8 @@ import unittest
 from dataclasses import dataclass, field
 from typing import Any, List
 
-from openjiuwen.core.single_agent import WorkflowAgentConfig
-from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig
+from openjiuwen.core.application.workflow_agent import WorkflowAgent
 from openjiuwen.core.workflow import ComponentConfig, WorkflowCard, WorkflowComponent
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start

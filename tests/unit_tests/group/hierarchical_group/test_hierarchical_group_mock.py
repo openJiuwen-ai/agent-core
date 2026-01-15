@@ -23,17 +23,17 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from openjiuwen.core.single_agent import (
+from openjiuwen.core.single_agent.legacy import (
     AgentConfig,
     ControllerAgent,
     WorkflowAgentConfig,
     WorkflowSchema,
 )
 from openjiuwen.core.common.constants.enums import ControllerType
-from openjiuwen.core.application.agents_for_studio.workflow_agent import (
+from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
-from openjiuwen.core.application.agents_for_studio.llm_agent import (
+from openjiuwen.core.application.llm_agent import (
     LLMAgent,
     ReActAgentConfig,
 )
@@ -375,7 +375,7 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         ])
 
         with patch(
-            "openjiuwen.core.application.agents_for_studio.llm_agent."
+            "openjiuwen.core.application.llm_agent."
             "llm_controller.Model"
         ) as mock_model_class:
             mock_model_class.return_value = mock_llm

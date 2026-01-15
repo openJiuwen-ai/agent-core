@@ -6,7 +6,7 @@ import re
 import secrets
 from typing import List, Union
 
-from openjiuwen.core.single_agent import AgentConfig
+from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.controller.config.reasoner_config import IntentDetectionConfig
 from openjiuwen.core.controller.event.event import Event
 from openjiuwen.core.controller.task.task import Task, TaskInput

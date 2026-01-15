@@ -7,7 +7,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Dict, AsyncIterator
 
-from openjiuwen.core.single_agent import AgentSession, BaseAgent
+from openjiuwen.core.single_agent.legacy import AgentSession, LegacyBaseAgent as BaseAgent
 from openjiuwen.core.multi_agent.legacy.config import AgentGroupConfig
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
@@ -36,7 +36,7 @@ class AgentGroupSession(AgentSession):
         """
         # Create Config with agent_config if not provided
         if config is None:
-            from openjiuwen.core.single_agent import AgentConfig
+            from openjiuwen.core.single_agent.legacy import AgentConfig
             config = Config()
             # Create virtual AgentConfig for Group Session
             agent_config = AgentConfig(id="agent_group_session")

@@ -3,7 +3,7 @@
 from typing import Generator, List
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.single_agent import BaseAgent
+from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.dev_tools.tune.base import TuneConstant, EvaluatedCase
 
 

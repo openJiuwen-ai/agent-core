@@ -6,7 +6,7 @@ import asyncio
 from typing import Dict, List, Optional, Union
 
 from openjiuwen.core.common.constants.enums import TaskType
-from openjiuwen.core.single_agent import AgentConfig, WorkflowSchema
+from openjiuwen.core.single_agent.legacy import AgentConfig, WorkflowSchema
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.controller import (
     TaskStatus,
@@ -1119,8 +1119,7 @@ class WorkflowController(IntentDetectionController):
             from openjiuwen.core.runner import Runner
             logger.info(f"Trying to find workflow from resource_mgr: {workflow_id}")
             # List all available workflows
-            # todo: will be replace by Runner.resource_mgr.get_tool_infos(type="workflow", tag=agent_id)
-            all_workflows = Runner.resource_mgr._resource_registry.workflow()._resource
+            all_workflows = Runner.resource_mgr.workflow().get_all_workflows()
             logger.info(f"Available workflows in resource_mgr: {list(all_workflows.keys())}")
 
             workflow = await Runner.resource_mgr.get_workflow(workflow_id, session.base())

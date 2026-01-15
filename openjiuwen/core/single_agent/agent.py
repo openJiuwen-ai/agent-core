@@ -181,7 +181,7 @@ class AbilityKit:
     ) -> Tuple[Any, ToolMessage]:
         """Execute an ability call
 
-        Get instance from Session/ResourceManager, execute and return result
+        Get instance from Runner.resource_mgr by card info, execute and return
 
         Args:
             tool_call: Tool call from LLM
@@ -190,6 +190,8 @@ class AbilityKit:
         Returns:
             (result, ToolMessage) tuple
         """
+        from openjiuwen.core.runner import Runner
+
         tool_name = tool_call.name
 
         # Parse arguments
@@ -207,8 +209,10 @@ class AbilityKit:
 
         # Check ability type and execute accordingly
         if tool_name in self._tools:
-            # Execute Tool
-            tool = session.get_tool(tool_name)
+            # Execute Tool - get instance from Runner.resource_mgr
+            tool_card = self._tools[tool_name]
+            tool_id = tool_card.id or tool_card.name
+            tool = Runner.resource_mgr.get_tool(id=tool_id)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)
@@ -216,11 +220,13 @@ class AbilityKit:
                     error_msg = f"Tool execution error: {str(e)}"
                     logger.error(error_msg)
             else:
-                error_msg = f"Tool instance not found: {tool_name}"
+                error_msg = f"Tool instance not found in resource_mgr: {tool_id}"
 
         elif tool_name in self._workflows:
-            # Execute Workflow
-            workflow = await session.get_workflow(tool_name)
+            # Execute Workflow - get instance from Runner.resource_mgr
+            workflow_card = self._workflows[tool_name]
+            workflow_id = workflow_card.id or workflow_card.name
+            workflow = await Runner.resource_mgr.get_workflow(id=workflow_id)
             if workflow:
                 try:
                     result = await workflow.invoke(tool_args, session)
@@ -228,12 +234,25 @@ class AbilityKit:
                     error_msg = f"Workflow execution error: {str(e)}"
                     logger.error(error_msg)
             else:
-                error_msg = f"Workflow instance not found: {tool_name}"
+                error_msg = (
+                    f"Workflow instance not found in resource_mgr: {workflow_id}"
+                )
 
         elif tool_name in self._agents:
-            # Execute sub-Agent
-            # TODO: Get agent instance from ResourceManager
-            error_msg = f"Sub-agent execution not yet implemented: {tool_name}"
+            # Execute sub-Agent - get instance from Runner.resource_mgr
+            agent_card = self._agents[tool_name]
+            agent_id = agent_card.id or agent_card.name
+            agent = await Runner.resource_mgr.get_agent(id=agent_id)
+            if agent:
+                try:
+                    result = await agent.invoke(tool_args)
+                except Exception as e:
+                    error_msg = f"Agent execution error: {str(e)}"
+                    logger.error(error_msg)
+            else:
+                error_msg = (
+                    f"Agent instance not found in resource_mgr: {agent_id}"
+                )
 
         elif tool_name in self._mcp_servers:
             # Execute MCP tool
@@ -241,8 +260,8 @@ class AbilityKit:
             error_msg = f"MCP tool execution not yet implemented: {tool_name}"
 
         else:
-            # Fallback: try to get tool from session
-            tool = session.get_tool(tool_name)
+            # Fallback: try to get tool from Runner.resource_mgr by name
+            tool = Runner.resource_mgr.get_tool(id=tool_name)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)
@@ -250,7 +269,7 @@ class AbilityKit:
                     error_msg = f"Tool execution error: {str(e)}"
                     logger.error(error_msg)
             else:
-                error_msg = f"Ability not found: {tool_name}"
+                error_msg = f"Ability not found in resource_mgr: {tool_name}"
 
         # Build ToolMessage
         content = str(result) if result is not None else (error_msg or "")

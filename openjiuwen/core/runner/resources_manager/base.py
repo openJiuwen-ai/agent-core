@@ -4,7 +4,8 @@ from enum import Enum
 from typing import Awaitable, Callable, Generic, TypeAlias, TypeVar
 
 from openjiuwen.core.multi_agent import BaseGroup, GroupCard
-from openjiuwen.core.single_agent import BaseAgent, AgentCard
+from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
 from pydantic import BaseModel

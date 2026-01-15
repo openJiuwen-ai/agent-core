@@ -703,7 +703,7 @@ class ControllerAgent(BaseAgent):
                 # Only WorkflowController writes to session here
                 # Other controllers (e.g. HierarchicalMainController) forward
                 # lower single_agent results, which already wrote to shared session
-                from openjiuwen.core.application.agents_for_studio.workflow_agent.workflow_controller import (
+                from openjiuwen.core.application.workflow_agent.workflow_controller import (
                     WorkflowController
                 )
                 if isinstance(res, list) and isinstance(self.controller, WorkflowController):

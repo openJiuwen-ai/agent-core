@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, AsyncIterator, Optional, Union, List
 
-from openjiuwen.core.single_agent import AgentSession, BaseAgent
+from openjiuwen.core.single_agent.legacy import AgentSession, LegacyBaseAgent as BaseAgent
 from openjiuwen.core.multi_agent.config import GroupConfig
 from openjiuwen.core.multi_agent.schema.group_card import GroupCard
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
@@ -38,7 +38,7 @@ class AgentGroupSession(AgentSession):
             resource_mgr: Resource manager (optional, auto-created)
         """
         if config is None:
-            from openjiuwen.core.single_agent import AgentConfig
+            from openjiuwen.core.single_agent.legacy import AgentConfig
             config = Config()
             agent_config = AgentConfig(id="agent_group_session")
             config.set_agent_config(agent_config)

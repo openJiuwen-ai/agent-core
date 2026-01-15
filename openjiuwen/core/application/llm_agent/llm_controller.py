@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 
 from typing import Dict, Optional, List, Any
 
-from openjiuwen.core.single_agent import ReActAgentConfig
+from openjiuwen.core.single_agent.legacy import (
+    LegacyReActAgentConfig as ReActAgentConfig,
+)
 from openjiuwen.core.controller import BaseController, Event, EventType, Task, TaskResult, TaskStatus
 from openjiuwen.core.controller.utils import MessageHandlerUtils
 from openjiuwen.core.common.utils.message_utils import MessageUtils

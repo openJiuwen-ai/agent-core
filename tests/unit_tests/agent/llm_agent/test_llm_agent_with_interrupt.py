@@ -14,13 +14,13 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from openjiuwen.core.common.constants.enums import ControllerType, TaskType
-from openjiuwen.core.single_agent import WorkflowAgentConfig, WorkflowSchema
-from openjiuwen.core.application.agents_for_studio.llm_agent import (
+from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
+from openjiuwen.core.application.llm_agent import (
     create_llm_agent_config,
     create_llm_agent,
     LLMAgent
 )
-from openjiuwen.core.application.agents_for_studio.workflow_agent import (
+from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
 from openjiuwen.core.controller import Task, TaskInput
@@ -109,7 +109,7 @@ class TestReActAgentInterrupt(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.asyncio
     @patch(
-        "openjiuwen.core.application.agents_for_studio.llm_agent.llm_controller."
+        "openjiuwen.core.application.llm_agent.llm_controller."
         "LLMController._generate_plan_from_llm"
     )
     @patch(

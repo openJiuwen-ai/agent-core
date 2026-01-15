@@ -20,7 +20,11 @@ os.environ["RESTFUL_SSL_VERIFY"] = "false"
 import unittest
 from typing import Any, Dict, AsyncIterator
 
-from openjiuwen.core.single_agent import AgentConfig, BaseAgent, ControllerAgent
+from openjiuwen.core.single_agent.legacy import (
+    AgentConfig,
+    LegacyBaseAgent,
+    ControllerAgent,
+)
 from examples.groups.hierarchical_group import (
     HierarchicalGroup,
     HierarchicalGroupConfig
@@ -34,7 +38,7 @@ from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import OutputSchema
 
 
-class SimpleEchoAgent(BaseAgent):
+class SimpleEchoAgent(LegacyBaseAgent):
     """简单回显 Agent - 用于测试
 
     收到消息后返回带有 agent_id 标记的响应

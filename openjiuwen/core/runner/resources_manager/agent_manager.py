@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 from openjiuwen.core.runner.resources_manager.base import AgentProvider
-from openjiuwen.core.single_agent import BaseAgent
+from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent

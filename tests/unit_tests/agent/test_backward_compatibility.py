@@ -3,11 +3,15 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Backward Compatibility Tests
 
-Ensure old interfaces continue working and issue proper deprecation warnings
+Ensure old interfaces continue working and issue proper deprecation warnings.
+
+Note: Legacy classes must now be imported from
+openjiuwen.core.single_agent.legacy module.
 """
 import warnings
 from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
-from openjiuwen.core.single_agent import (
+from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.single_agent.legacy import (
     AgentConfig,
     ControllerAgent,
     AgentSession,
@@ -16,16 +20,9 @@ from openjiuwen.core.single_agent import (
     create_react_agent_config,
     LLMCallConfig,
     ConstrainConfig,
-)
-from openjiuwen.core.single_agent import (
-    ReActAgent,
-    ReActAgentConfig,
-    AgentCard,
-    BaseAgent
-)
-from openjiuwen.core.single_agent.legacy import (
     LegacyReActAgent,
     LegacyReActAgentConfig,
+    LegacyBaseAgent,
 )
 
 
@@ -106,7 +103,7 @@ class TestLegacyConstructor:
             )
             
             # Create agent config
-            config = ReActAgentConfig(
+            config = LegacyReActAgentConfig(
                 id="test_agent",
                 version="1.0",
                 description="Test Agent",
@@ -114,7 +111,7 @@ class TestLegacyConstructor:
             )
             
             # Create agent - should work without errors
-            agent = ReActAgent(agent_config=config)
+            agent = LegacyReActAgent(agent_config=config)
             
             # Verify agent created successfully
             assert agent.agent_config.id == "test_agent"
@@ -137,14 +134,14 @@ class TestLegacyConstructor:
             )
             
             # Create agent config
-            config = ReActAgentConfig(
+            config = LegacyReActAgentConfig(
                 id="test_agent",
                 version="1.0",
                 model=model_config
             )
             
             # Create agent with tools parameter (should not raise error)
-            agent = ReActAgent(agent_config=config, tools=[])
+            agent = LegacyReActAgent(agent_config=config, tools=[])
             assert agent is not None
 
 
@@ -166,12 +163,12 @@ class TestLegacyMethods:
                 model_provider="OpenAI",
                 model_info=model_info
             )
-            config = ReActAgentConfig(
+            config = LegacyReActAgentConfig(
                 id="test_agent",
                 version="1.0",
                 model=model_config
             )
-            agent = ReActAgent(agent_config=config)
+            agent = LegacyReActAgent(agent_config=config)
             
             # Call add_tools - should work without errors
             agent.add_tools([])
@@ -192,12 +189,12 @@ class TestLegacyMethods:
                 model_provider="OpenAI",
                 model_info=model_info
             )
-            config = ReActAgentConfig(
+            config = LegacyReActAgentConfig(
                 id="test_agent",
                 version="1.0",
                 model=model_config
             )
-            agent = ReActAgent(agent_config=config)
+            agent = LegacyReActAgent(agent_config=config)
             
             # Call add_workflows - should work without errors
             agent.add_workflows([])
@@ -213,7 +210,7 @@ class TestWarningMessages:
             warnings.simplefilter("always")
 
             # Instantiate a deprecated class to trigger warning
-            _ = ReActAgentConfig()
+            _ = LegacyReActAgentConfig()
 
             our_warnings = _filter_our_warnings(w)
             assert len(our_warnings) > 0
@@ -307,14 +304,14 @@ class TestLegacyCompatibilityIntegration:
             )
             
             # Old style agent
-            old_config = ReActAgentConfig(
+            old_config = LegacyReActAgentConfig(
                 id="old_agent",
                 version="1.0",
                 model=model_config
             )
-            old_agent = ReActAgent(agent_config=old_config)
+            old_agent = LegacyReActAgent(agent_config=old_config)
             
             # Verify old agent is created successfully
             assert old_agent is not None
             # Old agent uses legacy BaseAgent
-            assert isinstance(old_agent, BaseAgent)
+            assert isinstance(old_agent, LegacyBaseAgent)

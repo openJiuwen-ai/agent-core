@@ -26,8 +26,8 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from openjiuwen.core.common.constants.enums import ControllerType
-from openjiuwen.core.single_agent import WorkflowAgentConfig, WorkflowSchema
-from openjiuwen.core.application.agents_for_studio.workflow_agent import (
+from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
+from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
 from openjiuwen.core.workflow import WorkflowCard, Workflow, Start, End

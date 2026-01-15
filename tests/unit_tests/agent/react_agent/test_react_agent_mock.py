@@ -1,7 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-使用 Mock 大模型测试 ReAct Agent 功能
+使用 Mock 大模型测试 ReAct Agent 功能（老接口 / Legacy API）
+
+⚠️ 本测试文件测试的是**老版本接口**：
+- 使用 `create_react_agent_config()` 创建配置
+- 从 `openjiuwen.core.single_agent.legacy` 导入 `LegacyReActAgent`
+- 这些接口已标记为 deprecated，将在 v1.0.0 移除
+
+📌 新接口测试请参考: test_new_react_agent_mock.py
+- 使用 `AgentCard` + `ReActAgentConfig` 的 Card + Config 模式
+- 从 `openjiuwen.core.single_agent.agents.react_agent` 导入
 
 本测试用例通过模拟大模型返回来提升测试速度和稳定性。
 直接调用 agent.invoke() 方法，不依赖 Runner。
@@ -31,7 +40,10 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.core.single_agent import create_react_agent_config, ReActAgent
+from openjiuwen.core.single_agent.legacy import (
+    create_react_agent_config,
+    LegacyReActAgent as ReActAgent,
+)
 from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 

@@ -70,6 +70,12 @@ from openjiuwen.core.single_agent.legacy.config import (
     MemoryConfig as _MemoryConfig,
 )
 
+# From legacy.schema
+from openjiuwen.core.single_agent.legacy.schema import (
+    WorkflowSchema as _WorkflowSchema,
+    PluginSchema as _PluginSchema,
+)
+
 # From legacy.react_agent
 from openjiuwen.core.single_agent.legacy.react_agent import (
     LegacyReActAgent as _LegacyReActAgent,
@@ -134,6 +140,15 @@ LegacyReActAgent = _deprecated_class(
     "openjiuwen.core.single_agent.agents.react_agent.ReActAgent"
 )
 
+WorkflowSchema = _deprecated_class(
+    _WorkflowSchema,
+    "WorkflowCard"
+)
+PluginSchema = _deprecated_class(
+    _PluginSchema,
+    "Tool class directly"
+)
+
 
 __all__ = [
     # Legacy agents
@@ -154,4 +169,7 @@ __all__ = [
     "WorkflowAgentConfig",
     "MemoryConfig",
     "LegacyReActAgentConfig",
+    # Legacy schemas
+    "WorkflowSchema",
+    "PluginSchema",
 ]

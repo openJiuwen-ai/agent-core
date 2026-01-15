@@ -14,10 +14,18 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.schema.config import (
+    ModelClientConfig,
+    ModelRequestConfig
+)
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.llm import AssistantMessage, Model, UserMessage, \
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    Model,
+    UserMessage,
     SystemMessage
+)
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
 from openjiuwen.core.session.session import Session
@@ -38,13 +46,29 @@ class ReActAgentConfig(BaseModel):
     model_provider: str = Field(default="openai", description="Model provider")
     api_key: str = Field(default="", description="API key")
     api_base: str = Field(default="", description="API base URL")
-    prompt_template_name: str = Field(default="", description="Prompt template name")
+    prompt_template_name: str = Field(
+        default="",
+        description="Prompt template name"
+    )
     prompt_template: List[Dict] = Field(
         default_factory=list,
         description="Prompt template list"
     )
-    context_window_limit: int = Field(default=20, description="Context window limit")
+    context_window_limit: int = Field(
+        default=20,
+        description="Context window limit"
+    )
     max_iterations: int = Field(default=5, description="Maximum iterations")
+
+    # LLM configuration objects (for Model initialization)
+    model_client_config: Optional[ModelClientConfig] = Field(
+        default=None,
+        description="Model client configuration"
+    )
+    model_config_obj: Optional[ModelRequestConfig] = Field(
+        default=None,
+        description="Model request configuration"
+    )
 
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
         """Configure model name
@@ -131,7 +155,10 @@ class ReActAgentConfig(BaseModel):
         self.mem_scope_id = mem_scope_id
         return self
 
-    def configure_max_iterations(self, max_iterations: int) -> 'ReActAgentConfig':
+    def configure_max_iterations(
+            self,
+            max_iterations: int
+    ) -> 'ReActAgentConfig':
         """Configure maximum iterations
 
         Args:
@@ -141,6 +168,45 @@ class ReActAgentConfig(BaseModel):
             self (supports chaining)
         """
         self.max_iterations = max_iterations
+        return self
+
+    def configure_model_client(
+            self,
+            provider: str,
+            api_key: str,
+            api_base: str,
+            model_name: str,
+            verify_ssl: bool = False
+    ) -> 'ReActAgentConfig':
+        """Configure model client for LLM initialization
+
+        This method creates ModelClientConfig and ModelRequestConfig
+        for the Model class initialization.
+
+        Args:
+            provider: Model provider name (e.g., "OpenAI", "SiliconFlow")
+            api_key: API key
+            api_base: API base URL
+            model_name: Model name
+            verify_ssl: Whether to verify SSL (default False)
+
+        Returns:
+            self (supports chaining)
+        """
+        self.model_provider = provider
+        self.api_key = api_key
+        self.api_base = api_base
+        self.model_name = model_name
+
+        self.model_client_config = ModelClientConfig(
+            client_provider=provider,
+            api_key=api_key,
+            api_base=api_base,
+            verify_ssl=verify_ssl
+        )
+        self.model_config_obj = ModelRequestConfig(
+            model_name=model_name
+        )
         return self
 
 
@@ -154,6 +220,10 @@ class ReActAgent(BaseAgent):
     Output format (compatible with legacy):
         invoke: {"output": "response content", "result_type": "answer|error"}
         stream: yields OutputSchema objects
+
+    Note:
+        This agent currently does not support Runner.run_agent().
+        Use agent.invoke() directly with a session parameter.
     """
 
     def __init__(
@@ -260,7 +330,7 @@ class ReActAgent(BaseAgent):
         """
         llm = self._get_llm()
         return await llm.invoke(
-            model_name=self.config.model_name,
+            model=self.config.model_name,
             messages=messages,
             tools=tools
         )
@@ -276,7 +346,7 @@ class ReActAgent(BaseAgent):
             inputs: User input, supports the following formats:
                 - dict: {"query": "...", "conversation_id": "..."}
                 - str: Used directly as query
-            session: Session object (optional)
+            session: Session object (required for tool execution)
 
         Returns:
             Dict with output and result_type
@@ -291,23 +361,18 @@ class ReActAgent(BaseAgent):
         else:
             raise ValueError("Input must be dict with 'query' or str")
 
-        # Create session if not provided
-        if session is None:
-            from openjiuwen.core.session.session import Session as SessionImpl
-            session = SessionImpl()
-
         # Get or create model context
         context = await self.context_engine.create_context(session=session)
 
-        # Add user message to context (convert to legacy type for context_engine)
+        # Add user message to context
         await context.add_messages(UserMessage(content=user_input))
 
         # Build system messages from prompt template
-        # Convert to legacy type for context_engine compatibility
+        # prompt_template is List[Dict], access via dict keys
         system_messages = [
-            SystemMessage(role=msg.role, content=msg.content)
+            SystemMessage(role=msg["role"], content=msg["content"])
             for msg in self.config.prompt_template
-            if msg.role == "system"
+            if msg.get("role") == "system"
         ]
 
         # Get tool info from _ability_kit
@@ -332,8 +397,7 @@ class ReActAgent(BaseAgent):
                 context_window.get_tools() or None
             )
 
-            # Convert AssistantMessage to legacy AIMessage for context storage
-            # (to be removed after context_engine adapts to llm)
+            # Add AI message to context
             ai_msg_for_context = AssistantMessage(
                 content=ai_message.content,
                 tool_calls=ai_message.tool_calls
@@ -350,7 +414,6 @@ class ReActAgent(BaseAgent):
                     )
 
                 # Execute tools using _execute_ability (supports parallel)
-                # llm.ToolCall is duck-type compatible with foundation.tool.ToolCall
                 results = await self._execute_ability(
                     ai_message.tool_calls, session
                 )
@@ -420,10 +483,11 @@ class ReActAgent(BaseAgent):
 
         task = asyncio.create_task(stream_process())
 
-        # If we own's stream, read from session's stream iterator
-        if own_stream and session is not None and hasattr(session, 'stream_iterator'):
-            async for result in session.stream_iterator():
-                yield result
+        # If we own the stream, read from session's stream iterator
+        if own_stream and session is not None:
+            if hasattr(session, 'stream_iterator'):
+                async for result in session.stream_iterator():
+                    yield result
 
         await task
 

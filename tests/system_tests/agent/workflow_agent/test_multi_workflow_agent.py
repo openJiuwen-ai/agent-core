@@ -23,11 +23,11 @@ from datetime import datetime
 import unittest
 from unittest.mock import patch, AsyncMock
 
-from openjiuwen.core.single_agent import (
+from openjiuwen.core.single_agent.legacy import (
     WorkflowAgentConfig,
-    DefaultResponse
+    DefaultResponse,
 )
-from openjiuwen.core.application.agents_for_studio.workflow_agent import WorkflowAgent
+from openjiuwen.core.application.workflow_agent import WorkflowAgent
 from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
@@ -1230,7 +1230,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skip("skip system test")
     @patch(
-        "openjiuwen.core.application.agents_for_studio.workflow_agent.workflow_controller."
+        "openjiuwen.core.application.workflow_agent.workflow_controller."
         "WorkflowController._detect_workflow_via_llm"
     )
     async def test_default_response_when_no_task_detected(
@@ -1408,7 +1408,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skip("skip system test")
     @patch(
-        "openjiuwen.core.application.agents_for_studio.workflow_agent.workflow_controller."
+        "openjiuwen.core.application.workflow_agent.workflow_controller."
         "WorkflowController._detect_workflow_via_llm"
     )
     async def test_default_response_stream_returns_workflow_final(

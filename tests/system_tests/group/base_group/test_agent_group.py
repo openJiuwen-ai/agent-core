@@ -11,7 +11,7 @@ import unittest
 from datetime import datetime
 from typing import Dict, AsyncIterator, Any
 
-from openjiuwen.core.single_agent import AgentConfig, BaseAgent
+from openjiuwen.core.single_agent.legacy import AgentConfig, LegacyBaseAgent
 from openjiuwen.core.multi_agent.legacy import (
     AgentGroupConfig,
     AgentGroupSession,
@@ -32,7 +32,7 @@ def build_current_date():
     return current_datetime.strftime("%Y-%m-%d")
 
 
-class PlanningAgent(BaseAgent):
+class PlanningAgent(LegacyBaseAgent):
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
@@ -47,7 +47,7 @@ class PlanningAgent(BaseAgent):
         }
 
 
-class ExecuteAgent(BaseAgent):
+class ExecuteAgent(LegacyBaseAgent):
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
@@ -62,7 +62,8 @@ class ExecuteAgent(BaseAgent):
             "result": "Task is done."
         }
 
-class SummaryAgent(BaseAgent):
+
+class SummaryAgent(LegacyBaseAgent):
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 

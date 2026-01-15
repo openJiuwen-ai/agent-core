@@ -5,7 +5,7 @@ from typing import Optional, Union, Any
 
 from openjiuwen.core.multi_agent import BaseGroup
 from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
-from openjiuwen.core.single_agent import AgentConfig, BaseAgent
+from openjiuwen.core.single_agent.legacy import AgentConfig, LegacyBaseAgent as BaseAgent
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger

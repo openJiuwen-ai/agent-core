@@ -3,8 +3,8 @@
 from typing import Dict, Any, AsyncIterator
 
 from openjiuwen.core.common.constants.enums import ControllerType
-from openjiuwen.core.single_agent import ControllerAgent, WorkflowAgentConfig
-from openjiuwen.core.application.agents_for_studio.workflow_agent.workflow_controller import WorkflowController
+from openjiuwen.core.single_agent.legacy import ControllerAgent, WorkflowAgentConfig
+from openjiuwen.core.application.workflow_agent.workflow_controller import WorkflowController
 from openjiuwen.core.session import Session
 
 
