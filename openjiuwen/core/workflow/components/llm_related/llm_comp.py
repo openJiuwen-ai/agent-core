@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
-import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Any, Dict, Optional, AsyncIterator, Union
@@ -16,11 +15,12 @@ from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Input, Output
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.security.user_config import UserConfig
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, UserMessage
-from openjiuwen.core.foundation.llm import ModelRequestConfig as LLMModelConfig, ModelClientConfig
-from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.foundation.llm import (
+    BaseMessage, SystemMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
+)
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
 WORKFLOW_CHAT_HISTORY = "workflow_chat_history"
@@ -372,7 +372,9 @@ class LLMPromptFormatter:
 
 @dataclass
 class LLMCompConfig(ComponentConfig):
-    model: 'ModelConfig' = None
+    model_id: Optional[str] = None
+    model_client_config: Optional[ModelClientConfig] = field(default=None)
+    model_config: Optional[ModelRequestConfig] = field(default=None)
     template_content: List[Any] = field(default_factory=list)
     response_format: Dict[str, Any] = field(default_factory=dict)
     output_config: Dict[str, Any] = field(default_factory=dict)
@@ -466,15 +468,14 @@ class LLMExecutable(ComponentExecutable):
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         self._set_session(session)
         self._set_context(context)
-        model_inputs = self._prepare_model_inputs(inputs)
+        model_inputs = await self._prepare_model_inputs(inputs)
         if UserConfig.is_sensitive():
             logger.info("[%s] model inputs", self._session.executable_id())
         else:
             logger.info("[%s] model inputs %s", self._session.executable_id(), model_inputs)
         response = ""
         try:
-            llm_response = await self._llm.invoke(
-                model=self._config.model.model_info.model_name, messages=model_inputs)
+            llm_response = await self._llm.invoke(messages=model_inputs)
             response = llm_response.content
         except Exception as e:
             if UserConfig.is_sensitive():
@@ -507,47 +508,23 @@ class LLMExecutable(ComponentExecutable):
             else:
                 ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED, str(e), e)
 
-    def _initialize_if_needed(self):
+    async def _initialize_if_needed(self):
         if not self._initialized:
             try:
-                self._llm = self._create_llm_instance()
+                self._llm = await self._create_llm_instance()
                 self._initialized = True
             except Exception as e:
                 ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INIT_FAILED,
                                                "Failed to initialize llm if needed", e)
 
-    def _create_llm_instance(self):
-        model_info = self._config.model.model_info
-
-        # Map provider name to correct case for _CLIENT_TYPE_REGISTRY
-        provider = self._config.model.model_provider
-        client_type = _PROVIDER_NAME_MAP.get(provider.lower(), provider)
-
-        # 创建 ModelClientConfig
-        model_client_config = ModelClientConfig(
-            client_provider=client_type,
-            api_key=model_info.api_key,
-            api_base=model_info.api_base,
-            timeout=getattr(model_info, 'timeout', 60),
-            max_retries=3,
-            verify_ssl=(os.getenv("LLM_SSL_VERIFY") or "false").strip().lower() == 'true',
-            ssl_cert=os.getenv("LLM_SSL_CERT")
-        )
-        
-        # 创建 ModelConfig
-        llm1_model_config = LLMModelConfig(
-            model_name=model_info.model_name if hasattr(model_info, 'model_name') else "",
-            temperature=getattr(model_info, 'temperature', 0.95),
-            top_p=getattr(model_info, 'top_p', 0.1),
-            max_tokens=getattr(model_info, 'max_tokens', None),
-            stop=getattr(model_info, 'stop', None)
-        )
-        
-        # 创建并返回 Model 实例
-        return Model(
-            model_client_config=model_client_config,
-            model_config=llm1_model_config
-        )
+    async def _create_llm_instance(self):
+        if self._config.model_id is None:
+            if self._config.model_client_config is None or self._config.model_config is None:
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED,
+                                               "Failed to create llm instance")
+            return Model(self._config.model_client_config, self._config.model_config)
+        else:
+            return await Runner.resource_mgr.get_model(id=self._config.model_id)
 
     def _build_user_prompt_content(self, inputs: dict) -> list[BaseMessage]:
         template_content_list = self._config.template_content
@@ -573,7 +550,7 @@ class LLMExecutable(ComponentExecutable):
     def _build_template_filters(self) -> dict:
         filters = {}
 
-        model_name = self._config.model.model_info.model_name
+        model_name = self._config.model_config.model_name
         if model_name:
             filters["model_name"] = model_name
 
@@ -597,25 +574,23 @@ class LLMExecutable(ComponentExecutable):
     def _set_context(self, context):
         self._context = context
 
-    def _prepare_model_inputs(self, inputs):
-        self._initialize_if_needed()
+    async def _prepare_model_inputs(self, inputs):
+        await self._initialize_if_needed()
         return self._get_model_input(inputs)
 
     async def _invoke_for_json_format(self, inputs: Input) -> AsyncIterator[Output]:
-        model_inputs = self._prepare_model_inputs(inputs)
+        model_inputs = await self._prepare_model_inputs(inputs)
         if UserConfig.is_sensitive():
             logger.info("[%s] model inputs", self._session.executable_id())
         else:
             logger.info("[%s] model inputs %s", self._session.executable_id(), model_inputs)
-        llm_output = await self._llm.invoke(model=self._config.model.model_info.model_name,
-                                             messages=model_inputs) # Add await if invoke is async
+        llm_output = await self._llm.invoke(messages=model_inputs) # Add await if invoke is async
         llm_output_content = llm_output.content
         yield self._create_output(llm_output_content)
 
     async def _stream_with_chunks(self, inputs: Input) -> AsyncIterator[Output]:
-        model_inputs = self._prepare_model_inputs(inputs)
-        async for chunk in self._llm.stream(model=self._config.model.model_info.model_name,
-                                             messages=model_inputs):
+        model_inputs = await self._prepare_model_inputs(inputs)
+        async for chunk in self._llm.stream(messages=model_inputs):
             content = WorkflowLLMUtils.extract_content(chunk)
             if content:
                 formatted_res = OutputFormatter.format_response(content,

@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -18,6 +17,7 @@ from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable, Input, Output
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import Session
 from openjiuwen.core.foundation.llm import (
     BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
@@ -94,7 +94,9 @@ class FieldInfo(BaseModel):
 
 @dataclass
 class QuestionerConfig(ComponentConfig):
-    model: 'ModelConfig' = None
+    model_id: Optional[str] = None
+    model_client_config: Optional[ModelClientConfig] = field(default=None)
+    model_config: Optional[ModelRequestConfig] = field(default=None)
     response_type: str = field(default=ResponseType.ReplyDirectly.value)
     question_content: str = field(default="")
     extract_fields_from_response: bool = field(default=True)
@@ -414,8 +416,7 @@ class QuestionerDirectReplyHandler:
             logger.info(f"Invoke llm for extraction, inputs = {llm_inputs}")
 
         try:
-            response = (await self._model.invoke(
-                model=self._config.model.model_info.model_name, messages=llm_inputs)).content
+            response = (await self._model.invoke(messages=llm_inputs)).content
         except Exception as e:
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
                                            "failed to invoke llm for extraction", e)
@@ -507,7 +508,8 @@ class QuestionerExecutable(ComponentExecutable):
         self._validate_config(config)
         self._config = config
         self._default_config = QuestionerDefaultConfig()
-        self._llm = self._create_llm_instance()
+        self._llm: Union[Model, None] = None
+        self._initialized: bool = False
         self._prompt: PromptTemplate = self._init_prompt()
         self._state = None
 
@@ -559,7 +561,7 @@ class QuestionerExecutable(ComponentExecutable):
             current_state = QuestionerState()  # create new state
 
         current_state = current_state.handle_event(QuestionerEvent.START_EVENT)
-
+        await self._initialize_if_needed()
         invoke_result = dict()
         if self._config.response_type == ResponseType.ReplyDirectly.value:
             invoke_result = await self._handle_questioner_direct_reply_safe(
@@ -575,29 +577,23 @@ class QuestionerExecutable(ComponentExecutable):
 
         return invoke_result
 
-    def _create_llm_instance(self) -> Model:
-        model_info = self._config.model.model_info
-        provider = self._config.model.model_provider
+    async def _create_llm_instance(self) -> Model:
+        if self._config.model_id is None:
+            if self._config.model_client_config is None or self._config.model_config is None:
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
+                                               "Failed to create llm instance")
+            return Model(self._config.model_client_config, self._config.model_config)
+        else:
+            return await Runner.resource_mgr.get_model(id=self._config.model_id)
 
-        model_client_config = ModelClientConfig(
-            client_provider=provider,
-            api_key=model_info.api_key,
-            api_base=model_info.api_base,
-            timeout=getattr(model_info, 'timeout', 60),
-            max_retries=3,
-            verify_ssl=os.getenv("LLM_SSL_VERIFY", "").strip().lower() == "true",
-            ssl_cert=os.getenv("LLM_SSL_CERT")
-        )
-
-        llm_model_config = ModelRequestConfig(
-            model_name=model_info.model_name if hasattr(model_info, 'model_name') else "",
-            temperature=getattr(model_info, 'temperature', 0.95),
-            top_p=getattr(model_info, 'top_p', 0.1),
-            max_tokens=getattr(model_info, 'max_tokens', None),
-            stop=getattr(model_info, 'stop', None)
-        )
-
-        return Model(model_client_config=model_client_config, model_config=llm_model_config)
+    async def _initialize_if_needed(self):
+        if not self._initialized:
+            try:
+                self._llm = await self._create_llm_instance()
+                self._initialized = True
+            except Exception as e:
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
+                                               "Failed to initialize llm if needed.", e)
 
     def _init_prompt(self) -> PromptTemplate:
         return PromptTemplate(content=self._default_config.prompt_template)

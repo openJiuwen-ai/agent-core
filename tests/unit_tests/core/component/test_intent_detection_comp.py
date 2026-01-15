@@ -7,7 +7,7 @@ import types
 from unittest.mock import Mock, AsyncMock, patch
 
 from openjiuwen.core.workflow import BranchRouter, WorkflowCard
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelConfig, ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import IntentDetectionCompConfig, \
     IntentDetectionComponent
@@ -31,6 +31,27 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 os.environ["LLM_SSL_VERIFY"] = "false"
 
 # ------------------------------------------------
+
+
+def _create_model_request_config() -> ModelRequestConfig:
+    """创建模型配置"""
+    return ModelRequestConfig(
+        model="gpt-3.5-turbo",
+        temperature=0.7,
+        top_p=0.9
+    )
+
+
+def _create_model_client_config() -> ModelClientConfig:
+    """创建模型配置"""
+    return ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-fake",
+        api_base="https://api.openai.com/v1",
+        timeout=30,
+        max_retries=3,
+        verify_ssl=False
+    )
 
 
 @pytest.fixture
@@ -61,7 +82,8 @@ def fake_config(fake_model_config) -> IntentDetectionCompConfig:
     return IntentDetectionCompConfig(
         user_prompt="请判断用户意图",
         category_name_list=["name1", "name2", "name3"],
-        model=fake_model_config
+        model_config=_create_model_request_config(),
+        model_client_config=_create_model_client_config()
     )
 
 
@@ -114,7 +136,8 @@ class TestIntentDetectionComponent:
         config = IntentDetectionCompConfig(
             user_prompt="请判断用户意图",
             category_name_list=["查询某地的景点", "查询某地天气"],
-            model=model_config,
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config()
         )
         intent_component = IntentDetectionComponent(config)
         intent_component.add_branch("${intent.classification_id} == 0", ["end"], "默认分支")

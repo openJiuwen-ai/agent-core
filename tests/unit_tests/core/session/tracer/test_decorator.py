@@ -1,19 +1,18 @@
-from typing import Dict, List, Any, Union
+from typing import List, Union, Optional, Dict, Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.workflow import LLMCompConfig, WorkflowCard
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session.stream import StreamMode, BaseStreamMode
 from openjiuwen.core.session.tracer import decorate_tool_with_trace, decorate_workflow_with_trace, \
     decorate_model_with_trace
-from openjiuwen.core.foundation.llm import BaseModelClient, BaseModelInfo
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.llm import (
+    BaseModelClient, BaseOutputParser, ModelClientConfig, ModelRequestConfig, BaseMessage
+)
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard, Input, Output
 from openjiuwen.core.workflow.components.llm_related.llm_comp import LLMExecutable
 
@@ -21,18 +20,24 @@ pytestmark = pytest.mark.asyncio
 
 
 def get_llm_config():
-    model_config = ModelConfig(model_provider="SiliconFlow",
-                               model_info=BaseModelInfo(
-                                   model="Qwen/Qwen3-32B",
-                                   api_base="sk",
-                                   api_key="http://",
-                                   temperature=0.7,
-                                   top_p=0.9,
-                                   timeout=30
-                               ))
+    model_config = ModelRequestConfig(
+        model="Qwen/Qwen3-32B",
+        temperature=0.7,
+        top_p=0.9,
+    )
+
+    model_client_config = ModelClientConfig(
+        client_provider="SiliconFlow",
+        api_key="sk",
+        api_base="http://",
+        timeout=30,
+        max_retries=3,
+        verify_ssl=False
+    )
 
     return LLMCompConfig(
-        model=model_config,
+        model_config=model_config,
+        model_client_config=model_client_config,
         template_content=[{"role": "user", "content": "hello"}],
         response_format={"type": "json"},
         output_config={
@@ -96,40 +101,33 @@ class MockModel(BaseModelClient):
         model_request_config = ModelRequestConfig(model="Qwen/Qwen3-32B")
         super().__init__(model_request_config, model_client_config)
 
-    def _invoke(self, model_name: str, messages: Union[List[str], List[Dict], str],
-                tools: Union[List[ToolInfo], List[Dict]] = None, temperature: float = 0.1,
-                top_p: float = 0.1, **kwargs: Any):
+    async def invoke(self,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            *,
+            tools: Union[List[ToolInfo], List[dict], None] = None,
+            temperature: Optional[float] = None,
+            top_p: Optional[float] = None,
+            model: str = None,
+            max_tokens: Optional[int] = None,
+            stop: Union[Optional[str], None] = None,
+            output_parser: Optional[BaseOutputParser] = None,
+            timeout: float = None,
+            **kwargs):
         logger.info(f"begin to invoke, inputs={messages}")
         return messages
 
-    def _stream(self, model_name: str, messages: Union[List[str], List[Dict], str],
-                tools: Union[List[ToolInfo], List[Dict]] = None, temperature: float = 0.1,
-                top_p: float = 0.1, **kwargs: Any):
-        logger.info(messages)
-        logger.info(f"begin to ainvoke , inputs={messages}")
-        yield messages
-
-    async def _astream(self, model_name: str, messages: Union[List[str], List[Dict], str],
-                       tools: Union[List[ToolInfo], List[Dict]] = None, temperature: float = 0.1,
-                       top_p: float = 0.1, **kwargs: Any):
-        logger.info(messages)
-        logger.info(f"begin to astream , inputs={messages}")
-        yield messages
-
-    async def _ainvoke(self, model_name: str, messages: Union[List[str], List[Dict], str],
-                       tools: Union[List[ToolInfo], List[Dict]] = None, temperature: float = 0.1,
-                       top_p: float = 0.1, **kwargs: Any):
-        logger.info(messages)
-        logger.info(f"begin to ainvoke , inputs={messages}")
-        return messages
-
-    async def invoke(self, model_name, messages, *, tools=None, temperature=None, top_p=None,
-                     max_tokens=None, stop=None, output_parser=None, timeout=None, **kwargs):
-        logger.info(f"begin to invoke, inputs={messages}")
-        return messages
-
-    async def stream(self, model_name, messages, *, tools=None, temperature=None, top_p=None,
-                     max_tokens=None, stop=None, output_parser=None, timeout=None, **kwargs):
+    async def stream(self,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            *,
+            tools: Union[List[ToolInfo], List[dict], None] = None,
+            temperature: Optional[float] = None,
+            top_p: Optional[float] = None,
+            model: str = None,
+            max_tokens: Optional[int] = None,
+            stop: Union[Optional[str], None] = None,
+            output_parser: Optional[BaseOutputParser] = None,
+            timeout: float = None,
+            **kwargs):
         logger.info(f"begin to stream, inputs={messages}")
         yield messages
 
@@ -240,7 +238,7 @@ class TestDecator:
 
         mocked_model = decorate_model_with_trace(model, mock_session)
 
-        await mocked_model.invoke("a", [BaseMessage(role="aa")])
+        await mocked_model.invoke(model="a", messages=[BaseMessage(role="aa")])
 
         for item in results:
             print(item)
@@ -248,7 +246,7 @@ class TestDecator:
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "Qwen/Qwen3-32B"
 
         results.clear()
-        async for item in mocked_model.stream("a", [BaseMessage(role="aa")]):
+        async for item in mocked_model.stream(model="a", messages=[BaseMessage(role="aa")]):
             print(item)
 
         for item in results:
@@ -257,7 +255,7 @@ class TestDecator:
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "Qwen/Qwen3-32B"
 
         results.clear()
-        await mocked_model.invoke("a", [BaseMessage(role="aa")])
+        await mocked_model.invoke(model="a", messages=[BaseMessage(role="aa")])
 
         for item in results:
             print(item)

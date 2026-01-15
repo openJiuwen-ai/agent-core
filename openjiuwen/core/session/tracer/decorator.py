@@ -22,7 +22,7 @@ def decorate_model_with_trace(model, agent_session):
         return model
     wrapped_model = create_wrapper_class(model, "WrappedModel")
     try:
-        model_name = model.config.model.model_info.model_name
+        model_name = model.config.model_config.model_name
     except Exception:
         model_name = type(model).__name__
     instance_info = {"class_name": model_name, "type": "llm"}

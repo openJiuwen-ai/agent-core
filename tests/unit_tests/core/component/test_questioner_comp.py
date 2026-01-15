@@ -11,7 +11,7 @@ from openjiuwen.core.session import InteractionOutput
 from openjiuwen.core.session import Session
 from openjiuwen.core.session import TaskSession
 from openjiuwen.core.common.constants.constant import INTERACTION
-from openjiuwen.core.foundation.llm import ModelConfig
+from openjiuwen.core.foundation.llm import ModelConfig, ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import FieldInfo, QuestionerConfig, QuestionerComponent
 from openjiuwen.core.workflow import Start
@@ -32,6 +32,27 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 
 class MockLLMModel:
     pass
+
+
+def _create_model_request_config() -> ModelRequestConfig:
+    """创建模型配置"""
+    return ModelRequestConfig(
+        model="gpt-3.5-turbo",
+        temperature=0.7,
+        top_p=0.9
+    )
+
+
+def _create_model_client_config() -> ModelClientConfig:
+    """创建模型配置"""
+    return ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-fake",
+        api_base="https://api.openai.com/v1",
+        timeout=30,
+        max_retries=3,
+        verify_ssl=False
+    )
 
 
 class TestQuestionComp:
@@ -91,15 +112,9 @@ class TestQuestionComp:
         )
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
-        model_config = ModelConfig(
-            model_provider="OpenAI",
-            model_info=BaseModelInfo(
-                api_key="sk-fake",
-                api_base="https://api.openai.com"
-            )
-        )
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -152,15 +167,9 @@ class TestQuestionComp:
         )
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
-        model_config = ModelConfig(
-            model_provider="OpenAI",
-            model_info=BaseModelInfo(
-                api_key="sk-fake",
-                api_base="https://api.openai.com"
-            )
-        )
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
             question_content="查询什么城市的天气",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -236,15 +245,9 @@ class TestQuestionComp:
         )
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
-        model_config = ModelConfig(
-            model_provider="OpenAI",
-            model_info=BaseModelInfo(
-                api_key="sk-fake",
-                api_base="https://api.openai.com"
-            )
-        )
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -273,6 +276,7 @@ class TestQuestionComp:
 
 
 class TestQuestionerStream:
+
     @pytest.mark.asyncio
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
@@ -309,15 +313,9 @@ class TestQuestionerStream:
         )
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
-        model_config = ModelConfig(
-            model_provider="OpenAI",
-            model_info=BaseModelInfo(
-                api_key="sk-fake",
-                api_base="https://api.openai.com"
-            )
-        )
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -368,22 +366,13 @@ class TestQuestionerStream:
         )
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
-        model_config = ModelConfig(model_provider=MODEL_PROVIDER,
-                                   model_info=BaseModelInfo(
-                                       model=MODEL_NAME,
-                                       api_base=API_BASE,
-                                       api_key=API_KEY,
-                                       temperature=0.7,
-                                       top_p=0.9,
-                                       timeout=30  # 添加超时设置
-                                   ))
-
         key_fields = [
             FieldInfo(field_name="location", description="地点", required=True),
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -432,22 +421,13 @@ class TestQuestionerStream:
         )
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
-        model_config = ModelConfig(model_provider=MODEL_PROVIDER,
-                                   model_info=BaseModelInfo(
-                                       model=MODEL_NAME,
-                                       api_base=API_BASE,
-                                       api_key=API_KEY,
-                                       temperature=0.7,
-                                       top_p=0.9,
-                                       timeout=30  # 添加超时设置
-                                   ))
-
         key_fields = [
             FieldInfo(field_name="location", description="地点", required=True),
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -526,16 +506,9 @@ class TestQuestionerStream:
         
         end_component = End({"responseTemplate": "{{name}}"})
         
-        model_config = ModelConfig(
-            model_provider="OpenAI",
-            model_info=BaseModelInfo(
-                api_key="sk-fake",
-                api_base="https://api.openai.com"
-            )
-        )
-        
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,

@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import ast
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Optional, Union, Callable, List
@@ -19,6 +18,7 @@ from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Output, Input
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import Session
 from openjiuwen.core.foundation.llm import (
     BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
@@ -114,8 +114,10 @@ def get_default_template():
 
 @dataclass
 class IntentDetectionCompConfig(ComponentConfig):
+    model_id: Optional[str] = None
+    model_client_config: Optional[ModelClientConfig] = field(default=None)
+    model_config: Optional[ModelRequestConfig] = field(default=None)
     category_name_list: list[str] = field(default_factory=list)
-    model: 'ModelConfig' = None
     user_prompt: str = ""
     example_content: list[str] = field(default_factory=list)
     enable_history: bool = False
@@ -176,7 +178,7 @@ class IntentDetectionExecutable(ComponentExecutable):
         # Extract context data
         self._set_session(session)
         self._router.set_session(session)
-        self._initialize_if_needed()
+        await self._initialize_if_needed()
         chat_history = self._get_chat_history_from_context(context)
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
         llm_output = await self._invoke_llm_and_get_result(current_inputs)
@@ -201,35 +203,19 @@ class IntentDetectionExecutable(ComponentExecutable):
     def _set_session(self, session: Session):
         self._session = session
 
-    def _create_llm_instance(self) -> Model:
-        model_info = self._config.model.model_info
-        provider = self._config.model.model_provider
-        provider_type = _PROVIDER_NAME_MAP.get(provider.lower(), provider)
+    async def _create_llm_instance(self) -> Model:
+        if self._config.model_id is None:
+            if self._config.model_client_config is None or self._config.model_config is None:
+                ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED,
+                                               "Failed to create llm instance")
+            return Model(self._config.model_client_config, self._config.model_config)
+        else:
+            return await Runner.resource_mgr.get_model(id=self._config.model_id)
 
-        model_client_config = ModelClientConfig(
-            client_provider=provider_type,
-            api_key=model_info.api_key,
-            api_base=model_info.api_base,
-            timeout=getattr(model_info, 'timeout', 60),
-            max_retries=3,
-            verify_ssl=os.getenv("LLM_SSL_VERIFY").strip().lower() == "true",
-            ssl_cert=os.getenv("LLM_SSL_CERT")
-        )
-
-        llm_model_config = ModelRequestConfig(
-            model_name=model_info.model_name if hasattr(model_info, 'model_name') else "",
-            temperature=getattr(model_info, 'temperature', 0.95),
-            top_p=getattr(model_info, 'top_p', 0.1),
-            max_tokens=getattr(model_info, 'max_tokens', None),
-            stop=getattr(model_info, 'stop', None)
-        )
-
-        return Model(model_client_config=model_client_config, model_config=llm_model_config)
-
-    def _initialize_if_needed(self):
+    async def _initialize_if_needed(self):
         if not self._initialized:
             try:
-                self._llm = self._create_llm_instance()
+                self._llm = await self._create_llm_instance()
                 self._initialized = True
             except Exception as e:
                 ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED,
@@ -304,7 +290,7 @@ class IntentDetectionExecutable(ComponentExecutable):
             logger.info(f"Invoke llm for intent detection, inputs = {llm_inputs}")
 
         try:
-            llm_output = await self._llm.invoke(model=self._config.model.model_info.model_name, messages=llm_inputs)
+            llm_output = await self._llm.invoke(messages=llm_inputs)
             llm_output_content = llm_output.content
         except Exception as e:
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED,
