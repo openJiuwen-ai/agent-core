@@ -44,8 +44,11 @@ class UserConfig:
         """set config file path"""
         if cls._instance is not None:
             raise JiuWenBaseException(
-                error_code=StatusCode.USER_CONFIG_LOAD_ERROR.code,
-                message=StatusCode.USER_CONFIG_LOAD_ERROR.errmsg.format(error_msg="Config already initialized."))
+                error_code=StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR.code,
+                message=StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR.errmsg.format(
+                    error_msg="config already initialized"
+                )
+            )
         cls._user_path = cls._resolve_and_check(path)
 
     @classmethod
@@ -86,8 +89,10 @@ class UserConfig:
             path.relative_to(root)
         except ValueError as e:
             raise JiuWenBaseException(
-                error_code=StatusCode.USER_CONFIG_LOAD_ERROR.code,
-                message=StatusCode.USER_CONFIG_LOAD_ERROR.errmsg.format(error_msg="Config file must inside root."),
+                error_code=StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR.code,
+                message=StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR.errmsg.format(
+                    error_msg="config file must inside root"
+                ),
             ) from e
 
         return path

@@ -27,7 +27,9 @@ class Executable(Generic[Input, Output]):
     async def interrupt(self, message: dict):
         raise InterruptException(
             error_code=StatusCode.WORKFLOW_INTERRUPT_EXECUTION_ERROR.code,
-            message=json.dumps(message, ensure_ascii=False)
+            message=StatusCode.WORKFLOW_INTERRUPT_EXECUTION_ERROR.errmsg.format(
+                error_msg=json.dumps(message, ensure_ascii=False)
+            )
         )
 
     def skip_trace(self) -> bool:

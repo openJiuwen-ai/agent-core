@@ -67,10 +67,10 @@ def get_log_max_bytes(max_bytes_config: Any) -> int:
         max_bytes = int(max_bytes_config)
     except (ValueError, TypeError) as e:
         raise JiuWenBaseException(
-            error_code=StatusCode.LOG_CONFIG_INVALID_ERROR.code,
-            message=StatusCode.LOG_CONFIG_INVALID_ERROR.errmsg.format(
-                error_msg=f"Invalid max_bytes configuration: {max_bytes_config}, error: {e}"
-            ),
+            error_code=StatusCode.COMMON_LOG_CONFIG_INVALID.code,
+            message=StatusCode.COMMON_LOG_CONFIG_INVALID.errmsg.format(
+                error_msg=f"invalid max_bytes configuration: {max_bytes_config}, error: {e}"
+            )
         ) from e
 
     default_log_max_bytes = 100 * 1024 * 1024
@@ -94,14 +94,18 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
         path_str = os.fspath(path_value)
     except TypeError:
         raise JiuWenBaseException(
-            error_code=StatusCode.LOG_PATH_SENSITIVE_ERROR.code,
-            message=StatusCode.LOG_PATH_SENSITIVE_ERROR.errmsg.format(path=path_value),
+            error_code=StatusCode.COMMON_LOG_PATH_INVALID.code,
+            message=StatusCode.COMMON_LOG_PATH_INVALID.errmsg.format(
+                error_msg=f'the path_value is {path_value}'
+            ),
         ) from None
 
     if not path_str or str(path_str).strip() == "":
         raise JiuWenBaseException(
-            error_code=StatusCode.LOG_PATH_SENSITIVE_ERROR.code,
-            message=StatusCode.LOG_PATH_SENSITIVE_ERROR.errmsg.format(path=path_str),
+            error_code=StatusCode.COMMON_LOG_PATH_INVALID.code,
+            message=StatusCode.COMMON_LOG_PATH_INVALID.errmsg.format(
+                error_msg=f'the path_str is {path_str}'
+            ),
         )
 
     try:
@@ -111,8 +115,10 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
 
     if is_sensitive_path(real_path):
         raise JiuWenBaseException(
-            error_code=StatusCode.LOG_PATH_SENSITIVE_ERROR.code,
-            message=StatusCode.LOG_PATH_SENSITIVE_ERROR.errmsg.format(path=real_path),
+            error_code=StatusCode.COMMON_LOG_PATH_INVALID.code,
+            message=StatusCode.COMMON_LOG_PATH_INVALID.errmsg.format(
+                error_msg=f'the real_path is {real_path}'
+            ),
         )
 
     return real_path

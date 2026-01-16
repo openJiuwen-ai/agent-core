@@ -126,7 +126,7 @@ class OpenAIModelClient(BaseModelClient):
             raise JiuWenBaseException(
                 error_code=StatusCode.MODEL_CALL_FAILED.code,
                 message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"OpenAI API async invoke error: {str(e)}"
+                    error_msg=f"openAI API async invoke error: {str(e)}"
                 )
             ) from e
         finally:
@@ -199,7 +199,7 @@ class OpenAIModelClient(BaseModelClient):
             raise JiuWenBaseException(
                 error_code=StatusCode.MODEL_CALL_FAILED.code,
                 message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"OpenAI API async stream error: {str(e)}"
+                    error_msg=f"openAI API async stream error: {str(e)}"
                 )
             ) from e
         finally:

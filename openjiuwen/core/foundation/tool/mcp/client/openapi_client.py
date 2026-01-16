@@ -193,7 +193,12 @@ class OpenApiClient(McpClient):
             tool_result = await self._tool_manager.call_tool(tool_name, arguments)
             return tool_result.to_mcp_result()
         except Exception as e:
-            raise JiuWenBaseException(error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message=f"{e}") from e
+            raise JiuWenBaseException(
+                error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
+                message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                    error_msg=f"{e}"
+                )
+            ) from e
 
     async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Any:
         tool = await self._tool_manager.get_tool(tool_name)
@@ -208,19 +213,26 @@ async def load_conf(file: Union[str, Path]) -> Dict[str, Any]:
     path = Path(file).expanduser().resolve()
     if not path.exists():
         raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code,
-            message=f"path not exits: {path}"
+            error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
+            message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                error_msg=f"path not exists: {path}"
+            )
         )
     if not path.is_file():
         raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code,
-            message=f"the {path} is not a file"
+            error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
+            message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                error_msg=f"the {path} is not a file"
+            )
         )
     if path.is_symlink():
         raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code,
-            message=f"Symbolic link not allowed:{path}"
+            error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
+            message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                error_msg=f"symbolic link not allowed:{path}"
+            )
         )
+
 
     suffix = path.suffix.lower()
 
@@ -235,17 +247,27 @@ async def load_conf(file: Union[str, Path]) -> Dict[str, Any]:
                 return yaml.safe_load(content)
             else:
                 raise JiuWenBaseException(
-                    error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message=f"Only supports. json/. yaml/. yml, "
-                                                                                f"current extension: {suffix}"
+                    error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
+                    message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                        error_msg=f"only supports. json/. yaml/. yml, "
+                        f"current extension: {suffix}"
+                    )
                 )
         except Exception as e:
-            raise JiuWenBaseException(error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code, message=f"{e}") from e
+            raise JiuWenBaseException(
+                error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
+                message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                    error_msg=f"{e}"
+                )
+            )from e
 
     data = await anyio.to_thread.run_sync(parse)
 
     if not isinstance(data, dict):
         raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_UNEXPECTED_ERROR.code,
-            message=f"only support dict type: {type(data)}",
+            error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
+            message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
+                error_msg=f"only support dict type: {type(data)}"
+            )
         )
     return data

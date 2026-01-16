@@ -627,11 +627,11 @@ class TestLogDirectoryCreation:
             mock_makedirs.side_effect = OSError("Permission denied")
 
             with pytest.raises(JiuWenBaseException) as exc_info:
-                DefaultLogger("test_failure", config)
-
-            assert exc_info.value.error_code == StatusCode.LOG_PATH_CREATE_FAILED.code
-            assert "Failed to create log directory" in exc_info.value.message
-
+                DefaultLogger('test_failure', config)
+            
+            assert exc_info.value.error_code == StatusCode.COMMON_LOG_PATH_INIT_FAILED.code
+            assert "common log_path initialization failed" in exc_info.value.message
+    
     @staticmethod
     def test_create_existing_directory_no_error(temp_config_dir):
         """No error will be reported when the test directory already exists"""
@@ -683,7 +683,7 @@ class TestLogDirectoryCreation:
         }
 
         with pytest.raises(JiuWenBaseException) as exc_info:
-            DefaultLogger("test_sensitive", config)
-
-        assert exc_info.value.error_code == StatusCode.LOG_PATH_SENSITIVE_ERROR.code
-        assert "sensitive" in exc_info.value.message.lower() or "unsafe" in exc_info.value.message.lower()
+            DefaultLogger('test_sensitive', config)
+        
+        assert exc_info.value.error_code == StatusCode.COMMON_LOG_PATH_INVALID.code
+        assert "common log_path is invalid" in exc_info.value.message.lower()

@@ -161,7 +161,7 @@ class SiliconFlowModelClient(BaseModelClient):
             raise JiuWenBaseException(
                 error_code=StatusCode.MODEL_CALL_FAILED.code,
                 message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"SiliconFlow API async invoke error: {str(e)}"
+                    error_msg=f"siliconFlow API async invoke error: {str(e)}"
                 )
             ) from e
 
@@ -227,7 +227,7 @@ class SiliconFlowModelClient(BaseModelClient):
             raise JiuWenBaseException(
                 error_code=StatusCode.MODEL_CALL_FAILED.code,
                 message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"SiliconFlow API async stream error: {str(e)}"
+                    error_msg=f"siliconFlow API async stream error: {str(e)}"
                 )
             ) from e
 

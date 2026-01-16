@@ -117,18 +117,14 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             raise JiuWenBaseException(
                 StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
                 StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-                    node_id=self._node_id,
-                    ability=ability.name,
-                    error_msg=e.message,
+                    error_msg=f"node_id: {self._node_id}, ability: {ability.name}, error: {e}"
                 ),
             ) from e
         except Exception as e:
             raise JiuWenBaseException(
                 StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
                 StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-                    node_id=self._node_id,
-                    ability=ability.name,
-                    error_msg=e,
+                    error_msg=f"node_id: {self._node_id}, ability: {ability.name}, error: {e}"
                 ),
             ) from e
         finally:

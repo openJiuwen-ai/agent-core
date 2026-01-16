@@ -299,45 +299,46 @@ class StatusCode(Enum):
     TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR = (
         173002, "toolchain bad_case_template execution error, reason: {error_msg}"
     )
-    # Common Capabilities 180000 - 189999
-    # Common Capabilities - Prompt Template 180000 - 180999
-    PROMPT_TEMPLATE_FORMAT_INVALID = (180000, "prompt template_format is invalid, reason: {error_msg}")
-    PROMPT_TEMPLATE_CONTENT_INVALID = (180001, "prompt template_content is invalid, reason: {error_msg}")
+    # Foundation 180000 - 189999
+    # Foundation - Prompt Template 180000 - 180999
+    PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED = (180000,
+                                             "prompt assembler_variable initialization failed, reason: {error_msg}")
+    PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR = (
+        180001, "prompt assembler_template parameter error, reason: {error_msg}")
+    PROMPT_TEMPLATE_RUNTIME_ERROR = (180002, "prompt template runtime error, reason: {error_msg}")
+    PROMPT_TEMPLATE_NOT_FOUND = (180003, "prompt template not found, reason: {error_msg}")
+    PROMPT_TEMPLATE_INVALID = (180004, "prompt template is invalid, reason: {error_msg}")
 
-    # Common Capabilities - Model API 181000 - 181999
-    MODEL_PROVIDER_INVALID_ERROR = (181000, "Invalid model provider, the reason is {error_msg}")
-    MODEL_CALL_FAILED = (181001, "Failed to call model, the reason is: {error_msg}")
-    # Common Capabilities - Tool Definition and Execution 182000 - 182999
-    PLUGIN_UNEXPECTED_ERROR = (182000, "Plugin unexpected error")
-    PLUGIN_REQUEST_TIMEOUT_ERROR = (182001, "Plugin restful api request timed out")
-    PLUGIN_RESPONSE_FORMAT_ERROR = (182002, "Plugin restful api response format error")
-    PLUGIN_RESPONSE_TOO_BIG_ERROR = (
-        182003,
-        "Plugin restful api  response too big, maxLength={max_length}, actualLength={actual_length}",
-    )
-    PLUGIN_RESPONSE_HTTP_CODE_ERROR = (182004, "Plugin restful api http code error")
-    PLUGIN_PARAMS_CHECK_FAILED = (182005, "Plugin params check failed")
-    PLUGIN_RESTFUL_API_METHOD_ERROR = (
-        182006,
-        "Plugin restful api unsupported HTTP method: '{method}', only accepts: {support}",
-    )
+    # Foundation - Model API 181000 - 181999
+    MODEL_PROVIDER_INVALID = (181000, "model provider is invalid, reason: {error_msg}")
+    MODEL_CALL_FAILED = (181001, "model call failed, reason: {error_msg}")
+    # Foundation - Tool Definition and Execution 182000 - 182999
+    PLUGIN_EXECUTION_RUNTIME_ERROR = (182000, "plugin execution runtime error, reason: {error_msg}")
+    PLUGIN_REQUEST_TIMEOUT = (182001, "plugin request timeout ({timeout}s), reason: {error_msg}")
+    PLUGIN_RESPONSE_PROCESS_ERROR = (182002, "plugin response process error, reason: {error_msg}")
+    PLUGIN_RESPONSE_INVALID = (182003,
+                               "plugin response is invalid, reason: {error_msg}")
+    PLUGIN_RESPONSE_CALL_FAILED = (182004, "plugin response call failed, reason: {error_msg}")
+    PLUGIN_INPUT_PARAM_ERROR = (182005, "plugin input parameter error, reason: {error_msg}")
+    PLUGIN_RESTFUL_API_NOT_SUPPORT = (182006,
+                                      "plugin restful_api is not supported, reason: {error_msg}")
 
     # Common Capabilities - Logger 183000 - 183999
-    LOG_PATH_SENSITIVE_ERROR = (183000, "Log path is sensitive or unsafe: {path}")
-    LOG_PATH_CREATE_FAILED = (183001, "Failed to create log directory: {path}, error: {error_msg}")
-    LOG_CONFIG_LOAD_ERROR = (183002, "Failed to load log configuration file: {error_msg}")
-    LOG_CONFIG_INVALID_ERROR = (183003, "Log configuration is invalid: {error_msg}")
-    LOG_FILE_OPERATION_ERROR = (183004, "Log file operation failed: {error_msg}")
+    COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
+    COMMON_LOG_PATH_INIT_FAILED = (183001, "common log_path initialization failed, reason: {error_msg}")
+    COMMON_LOG_CONFIG_PROCESS_ERROR = (183002, "common log_config process error, reason: {error_msg}")
+    COMMON_LOG_CONFIG_INVALID = (183003, "common log_config is invalid, reason: {error_msg}")
+    COMMON_LOG_EXECUTION_RUNTIME_ERROR = (183004, "common log_execution runtime error, reason: {error_msg}")
     # Common Capabilities - Exception Handling 184000 - 184999
     # Common Capabilities - Support Mcp Tool 185000 - 185999
 
     # Common Capabilities - Common Utility 188000 - 188999
-    SSL_UTILS_CREATE_SSL_CONTEXT_ERROR = (188000, "ssl utils error, as {error_msg}")
-    USER_CONFIG_LOAD_ERROR = (188001, "User config load error, as {error_msg}")
-    JSON_LOADS_ERROR = (188002, "Json loads error, as {error_msg}")
-    JSON_DUMPS_ERROR = (188003, "Json dumps error, as {error_msg}")
-    URL_INVALID_ERROR = (188004, "Url invalid error, as {error_msg}")
-    INVALID_SSL_CERT_ERROR = (188005, "Invalid ssl cert error, as {error_msg}")
+    COMMON_SSL_CONTEXT_INIT_FAILED = (188000, "common ssl_context initialization failed, reason: {error_msg}")
+    COMMON_USER_CONFIG_PROCESS_ERROR = (188001, "common user_config process error, reason: {error_msg}")
+    COMMON_JSON_INPUT_PROCESS_ERROR = (188002, "common json_input process error, reason: {error_msg}")
+    COMMON_JSON_EXECUTION_PROCESS_ERROR = (188003, "common json_execution process error, reason: {error_msg}")
+    COMMON_URL_INPUT_INVALID = (188004, "common url_input is invalid, reason: {error_msg}")
+    COMMON_SSL_CERT_INVALID = (188005, "common ssl_cert is invalid, reason: {error_msg}")
 
     # Session 190000 - 199999
     # Session - Resource Management 190000 - 190999

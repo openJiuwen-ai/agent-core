@@ -64,11 +64,10 @@ class TestSubWorkflowComp:
         with pytest.raises(JiuWenBaseException) as err:
             main_workflow = self.create_nesting_workflow(3, workflow_max_nesting_depth=1)
             await main_workflow.invoke(inputs={}, session=WorkflowSession())
-        assert err.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(node_id="sub2",
-            ability="invoke",
-            error_msg=StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
-                 error_msg='workflow nesting hierarchy is too big, must <= 1'))
-
+        sub_workflow_err = StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
+            error_msg="workflow nesting hierarchy is too big, must <= 1"
+        )
+        assert f"node_id: sub2, ability: invoke, error: [101141] {sub_workflow_err}" in err.value.message
         main_workflow = self.create_nesting_workflow(3, workflow_max_nesting_depth=3)
 
         await main_workflow.invoke(inputs={}, session=WorkflowSession())
