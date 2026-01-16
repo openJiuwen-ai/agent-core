@@ -17,7 +17,6 @@ from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable, Input, Output
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import Session
 from openjiuwen.core.foundation.llm import (
     BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
@@ -584,6 +583,7 @@ class QuestionerExecutable(ComponentExecutable):
                                                "Failed to create llm instance")
             return Model(self._config.model_client_config, self._config.model_config)
         else:
+            from openjiuwen.core.runner import Runner
             return await Runner.resource_mgr.get_model(id=self._config.model_id)
 
     async def _initialize_if_needed(self):
