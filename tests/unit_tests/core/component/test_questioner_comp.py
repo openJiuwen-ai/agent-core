@@ -352,114 +352,6 @@ class TestQuestionerStream:
             async for chunk in flow.stream(user_input, workflow_session, workflow_context):
                 print(f"stream output >>> {chunk}")
 
-    @unittest.skip("skip system test")
-    @pytest.mark.asyncio  # 新增
-    async def test_real_workflow_stream_start_questioner_end_with_interaction(self):
-        flow = Workflow()
-
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
-        end_component = End({"responseTemplate": "{{location}} | {{time}}"})
-
-        key_fields = [
-            FieldInfo(field_name="location", description="地点", required=True),
-            FieldInfo(field_name="time", description="时间", required=True, default_value="today")
-        ]
-        questioner_config = QuestionerConfig(
-            model_config=_create_model_request_config(),
-            model_client_config=_create_model_client_config(),
-            question_content="",
-            extract_fields_from_response=True,
-            field_names=key_fields,
-            with_chat_history=True
-        )
-        questioner_component = QuestionerComponent(questioner_comp_config=questioner_config)
-
-        flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}"})
-        flow.set_end_comp("e", end_component,
-                          inputs_schema={"location": "${questioner.location}", "time": "${questioner.time}"})
-        flow.add_workflow_comp("questioner", questioner_component, inputs_schema={"query": "${s.query}"})
-
-        flow.add_connection("s", "questioner")
-        flow.add_connection("questioner", "e")
-
-        session_id = "test_questioner"
-        config = ContextEngineConfig()
-        ce_engine = ContextEngine(config)
-        workflow_context = await ce_engine.create_context(context_id="questioner_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
-        interaction_output_schema = list()
-        async for chunk in flow.stream({"query": "时间为2025-10-01"}, workflow_session, workflow_context):
-            if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
-                interaction_output_schema.append(chunk)
-
-        if interaction_output_schema:
-            user_input = InteractiveInput()
-            for item in interaction_output_schema:
-                component_id = item.payload.id
-                user_input.update(component_id, "地点是杭州")
-            workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
-            async for chunk in flow.stream(user_input, workflow_session, workflow_context):
-                print(f"stream output >>> {chunk}")
-
-    @unittest.skip("skip system test")
-    @pytest.mark.asyncio  # 新增
-    async def test_real_workflow_invoke_start_questioner_end_with_interaction(self):
-        flow = Workflow()
-
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
-        end_component = End({"responseTemplate": "{{location}} | {{time}}"})
-
-        key_fields = [
-            FieldInfo(field_name="location", description="地点", required=True),
-            FieldInfo(field_name="time", description="时间", required=True, default_value="today")
-        ]
-        questioner_config = QuestionerConfig(
-            model_config=_create_model_request_config(),
-            model_client_config=_create_model_client_config(),
-            question_content="",
-            extract_fields_from_response=True,
-            field_names=key_fields,
-            with_chat_history=True
-        )
-        questioner_component = QuestionerComponent(questioner_comp_config=questioner_config)
-
-        flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}"})
-        flow.set_end_comp("e", end_component,
-                          inputs_schema={"location": "${questioner.location}", "time": "${questioner.time}"})
-        flow.add_workflow_comp("questioner", questioner_component, inputs_schema={"query": "${s.query}"})
-
-        flow.add_connection("s", "questioner")
-        flow.add_connection("questioner", "e")
-
-        session_id = "test_questioner"
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
-        workflow_result = await flow.invoke({"query": "时间为2025-10-01"}, workflow_session)
-        assert workflow_result.state == WorkflowExecutionState.INPUT_REQUIRED
-
-        time.sleep(3)
-
-        if workflow_result.state == WorkflowExecutionState.INPUT_REQUIRED:
-            component_id = workflow_result.result[0].payload.id
-            assert component_id == "questioner"
-            workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
-            user_feedback = InteractiveInput()
-            user_feedback.update(component_id, "地点是杭州")
-            workflow_result = await flow.invoke(user_feedback, workflow_session)
-            assert workflow_result.state == WorkflowExecutionState.COMPLETED
-            assert workflow_result.result.get("responseContent", "") == "杭州 | 2025-10-01"
-
     @pytest.mark.asyncio
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
     @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
@@ -588,3 +480,198 @@ class TestQuestionerStream:
         print("✅ 测试通过：Questioner 组件状态在第二次 workflow 调用时正确重置！")
         print("   - 第一次调用：张三 ✓")
         print("   - 第二次调用：李四 ✓（未残留张三）")
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._create_llm_instance")
+    async def test_questioner_type_conversion_with_multiple_types(self, mock_create_llm):
+        """
+        Test questioner correctly validates and converts multiple basic data types.
+        
+        Scenario:
+        - LLM returns string representations for various types
+        - string "25" for integer field -> should convert to 25
+        - string "98.5" for number field -> should convert to 98.5
+        - string "true" for boolean field -> should convert to True
+        - "Alice" for string field -> should keep as "Alice"
+        
+        This test covers the type validation and conversion logic in _validate_and_convert_fields.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+        
+        # Create mock LLM that returns JSON string with various types
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        # LLM returns string representations that need type conversion
+        mock_response.content = '''```json
+{
+    "name": "Alice",
+    "age": "25",
+    "score": "98.5",
+    "is_vip": "true"
+}
+```'''
+        mock_llm.invoke = AsyncMock(return_value=mock_response)
+        mock_create_llm.return_value = mock_llm
+        
+        # Build workflow: start -> questioner -> end
+        flow = Workflow()
+        
+        key_fields = [
+            FieldInfo(field_name="name", description="User name", type="string", required=True),
+            FieldInfo(field_name="age", description="User age", type="integer", required=True),
+            FieldInfo(field_name="score", description="User score", type="number", required=True),
+            FieldInfo(field_name="is_vip", description="VIP status", type="boolean", required=True),
+        ]
+        
+        start_component = Start({
+            "inputs": [
+                {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
+            ]
+        })
+        
+        # Use responseTemplate to output all extracted fields
+        end_component = End({"responseTemplate": "name={{name}},age={{age}},score={{score}},is_vip={{is_vip}}"})
+        
+        questioner_config = QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=key_fields,
+            with_chat_history=False,
+        )
+        
+        questioner_comp = QuestionerComponent(questioner_config)
+        
+        # Register components
+        flow.set_start_comp("start", start_component, inputs_schema={"query": "${query}"})
+        flow.add_workflow_comp("questioner", questioner_comp, inputs_schema={"query": "${start.query}"})
+        flow.set_end_comp("end", end_component, inputs_schema={
+            "name": "${questioner.name}",
+            "age": "${questioner.age}",
+            "score": "${questioner.score}",
+            "is_vip": "${questioner.is_vip}"
+        })
+        
+        # Connect topology
+        flow.add_connection("start", "questioner")
+        flow.add_connection("questioner", "end")
+        
+        # Execute workflow
+        session_id = "test_type_conversion"
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        
+        result = await flow.invoke({"query": "Extract user info with multiple types"}, workflow_session)
+        
+        # Verify workflow completed successfully
+        assert result.state == WorkflowExecutionState.COMPLETED
+        
+        response_content = result.result.get("responseContent", "")
+        print(f"[INFO] Response content: {response_content}")
+        
+        # Verify all fields are present and correctly converted
+        # string field: "Alice" -> "Alice"
+        assert "name=Alice" in response_content
+        
+        # integer field: "25" -> 25 (converted from string)
+        assert "age=25" in response_content
+        
+        # number field: "98.5" -> 98.5 (converted from string)
+        assert "score=98.5" in response_content
+        
+        # boolean field: "true" -> True (converted from string)
+        assert "is_vip=True" in response_content
+        
+        print("✅ Test passed: Questioner correctly converts multiple basic data types!")
+        print("   - string: 'Alice' -> 'Alice' ✓")
+        print("   - integer: '25' -> 25 ✓")
+        print("   - number: '98.5' -> 98.5 ✓")
+        print("   - boolean: 'true' -> True ✓")
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._create_llm_instance")
+    async def test_questioner_type_validation_failure_triggers_continue_ask(self, mock_create_llm):
+        """
+        Test that type validation failure triggers continue-ask for required fields.
+        
+        Scenario:
+        - LLM returns float 3.14 for an integer field "age"
+        - Float 3.14 cannot be converted to integer (not a whole number)
+        - The "age" field is treated as not extracted
+        - Since "age" is required, questioner should trigger continue-ask
+        
+        This test verifies that invalid type values are properly rejected
+        and the workflow enters INPUT_REQUIRED state to ask user again.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+        
+        # Create mock LLM that returns invalid type for integer field
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        # LLM returns float for integer field - this should fail validation
+        mock_response.content = '''```json
+{
+    "name": "Bob",
+    "age": 3.14
+}
+```'''
+        mock_llm.invoke = AsyncMock(return_value=mock_response)
+        mock_create_llm.return_value = mock_llm
+        
+        # Build workflow: start -> questioner -> end
+        flow = Workflow()
+        
+        key_fields = [
+            FieldInfo(field_name="name", description="User name", type="string", required=True),
+            FieldInfo(field_name="age", description="User age", type="integer", required=True),
+        ]
+        
+        start_component = Start({
+            "inputs": [
+                {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
+            ]
+        })
+        
+        end_component = End({"responseTemplate": "name={{name}},age={{age}}"})
+        
+        questioner_config = QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=key_fields,
+            with_chat_history=False,
+        )
+        
+        questioner_comp = QuestionerComponent(questioner_config)
+        
+        # Register components
+        flow.set_start_comp("start", start_component, inputs_schema={"query": "${query}"})
+        flow.add_workflow_comp("questioner", questioner_comp, inputs_schema={"query": "${start.query}"})
+        flow.set_end_comp("end", end_component, inputs_schema={
+            "name": "${questioner.name}",
+            "age": "${questioner.age}"
+        })
+        
+        # Connect topology
+        flow.add_connection("start", "questioner")
+        flow.add_connection("questioner", "end")
+        
+        # Execute workflow
+        session_id = "test_type_validation_failure"
+        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        
+        result = await flow.invoke({"query": "My name is Bob, I am 3.14 years old"}, workflow_session)
+        
+        # Verify workflow requires user input because age validation failed
+        assert result.state == WorkflowExecutionState.INPUT_REQUIRED, \
+            "Workflow should require input because integer field 'age' received float 3.14"
+        
+        # Verify the interaction is triggered by questioner component
+        component_id = result.result[0].payload.id
+        assert component_id == "questioner"
+        
+        print("✅ Test passed: Type validation failure correctly triggers continue-ask!")
+        print("   - Expected type: integer")
+        print("   - LLM returned: 3.14 (float)")
+        print("   - Result: Field rejected, workflow asks user again ✓")

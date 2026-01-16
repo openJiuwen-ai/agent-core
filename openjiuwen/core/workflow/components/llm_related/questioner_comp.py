@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional, List, Dict, Union
+from typing import Any, Optional, List, Dict, Union, Tuple, Literal
 
 from pydantic import BaseModel, Field, ConfigDict, ValidationError
 
@@ -86,6 +86,7 @@ class ResponseType(Enum):
 class FieldInfo(BaseModel):
     field_name: str
     description: str
+    type: Literal["string", "integer", "number", "boolean"] = Field(default="string")
     cn_field_name: str = Field(default="")
     required: bool = Field(default=False)
     default_value: Any = Field(default="")
@@ -261,6 +262,77 @@ class QuestionerUtils:
             value = input_value.strip().lower()
             return value not in ("null", "none")
         return True
+
+    @staticmethod
+    def validate_and_convert_type(value: Any, expected_type: str) -> Tuple[Any, bool]:
+        """
+        Validate and convert a value to the expected type.
+        
+        Args:
+            value: The value to validate and convert
+            expected_type: One of "string", "integer", "number", "boolean"
+            
+        Returns:
+            Tuple of (converted_value, is_valid)
+            - If conversion succeeds: (converted_value, True)
+            - If conversion fails: (None, False)
+        """
+        if value is None:
+            return None, False
+
+        try:
+            if expected_type == "string":
+                # String type: always convert to string
+                return str(value), True
+
+            elif expected_type == "integer":
+                # Integer type: try to convert to int
+                if isinstance(value, bool):
+                    # Avoid bool being treated as int (True=1, False=0)
+                    return None, False
+                if isinstance(value, int):
+                    return value, True
+                if isinstance(value, float):
+                    # Only accept if it's a whole number
+                    if value == int(value):
+                        return int(value), True
+                    return None, False
+                if isinstance(value, str):
+                    # Try to parse string as integer
+                    cleaned = value.strip()
+                    return int(cleaned), True
+                return None, False
+
+            elif expected_type == "number":
+                # Number type: try to convert to float
+                if isinstance(value, bool):
+                    return None, False
+                if isinstance(value, (int, float)):
+                    return float(value), True
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    return float(cleaned), True
+                return None, False
+
+            elif expected_type == "boolean":
+                # Boolean type: only accept bool or string "true"/"false" (case-insensitive)
+                if isinstance(value, bool):
+                    return value, True
+                if isinstance(value, str):
+                    cleaned = value.strip().lower()
+                    if cleaned == "true":
+                        return True, True
+                    if cleaned == "false":
+                        return False, True
+                    return None, False
+                return None, False
+
+            else:
+                # Unknown type: treat as string (backward compatible)
+                return str(value), True
+
+        except (ValueError, TypeError):
+            return None, False
 
 
 class QuestionerDirectReplyHandler:
@@ -438,7 +510,44 @@ class QuestionerDirectReplyHandler:
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR,
                                            "Failed to parse json from llm response")
         result = {k: v for k, v in result.items() if QuestionerUtils.is_valid_value(v)}
+        
+        # Validate and convert field types based on FieldInfo.type
+        result = self._validate_and_convert_fields(result)
         return result
+
+    def _validate_and_convert_fields(self, extracted_result: dict) -> dict:
+        """
+        Validate and convert extracted field values based on FieldInfo.type definitions.
+        
+        If validation fails, attempts type conversion. If conversion also fails,
+        the field is treated as not extracted (removed from result).
+        
+        Args:
+            extracted_result: Dict of field_name -> extracted_value from LLM
+            
+        Returns:
+            Dict with validated and type-converted values. Invalid fields are removed.
+        """
+        # Build field_name -> expected_type mapping
+        field_type_map = {f.field_name: f.type for f in self._config.field_names}
+        
+        validated_result = {}
+        for field_name, value in extracted_result.items():
+            # Get expected type, default to "string" for backward compatibility
+            expected_type = field_type_map.get(field_name, "string")
+            
+            converted_value, is_valid = QuestionerUtils.validate_and_convert_type(value, expected_type)
+            
+            if is_valid:
+                validated_result[field_name] = converted_value
+            else:
+                # Log warning and skip this field (treated as not extracted)
+                logger.warning(
+                    f"Field '{field_name}' failed type validation: "
+                    f"value={value}, expected_type={expected_type}"
+                )
+        
+        return validated_result
 
     def _filter_non_extracted_key_fields(self) -> List[FieldInfo]:
         result = []
