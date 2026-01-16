@@ -23,6 +23,7 @@ from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import ComponentAbility
 from openjiuwen.core.graph.visualization.drawable import Drawable
 from openjiuwen.core.workflow.components.flow_related.loop.loop_comp import AdvancedLoopComponent
+from openjiuwen.core.runner import Runner
 from tests.unit_tests.core.workflow.mock_nodes import AddTenNode, MockEndNode, MockStartNode, CommonNode, \
     StreamCompNode, CollectCompNode, Node1
 
@@ -837,9 +838,10 @@ def test_visualize_simple_workflow_intent():
         inputs_schema={"query": "${start.query}"},
     )
 
-    tool_config = ToolComponentConfig()
+    tool_config = ToolComponentConfig(tool_id="WeatherReporter")
     weather_tool = RestfulApi(
         card=RestfulApiCard(
+            id="WeatherReporter",
             name="WeatherReporter",
             description="天气查询插件",
             input_params={
@@ -855,7 +857,8 @@ def test_visualize_simple_workflow_intent():
             method="GET",
         ),
     )
-    plugin = ToolComponent(tool_config).bind_tool(weather_tool)
+    Runner.resource_mgr.add_tool(weather_tool)
+    plugin = ToolComponent(tool_config)
     flow.add_workflow_comp(
         "plugin",
         plugin,
