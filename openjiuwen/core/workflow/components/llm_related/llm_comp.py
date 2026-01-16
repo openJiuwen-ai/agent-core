@@ -375,6 +375,8 @@ class LLMCompConfig(ComponentConfig):
     model_client_config: Optional[ModelClientConfig] = field(default=None)
     model_config: Optional[ModelRequestConfig] = field(default=None)
     template_content: List[Any] = field(default_factory=list)
+    system_prompt_template: Optional[SystemMessage] = None
+    user_prompt_template: Optional[UserMessage] = None
     response_format: Dict[str, Any] = field(default_factory=dict)
     output_config: Dict[str, Any] = field(default_factory=dict)
     enable_history: bool = False
@@ -527,8 +529,23 @@ class LLMExecutable(ComponentExecutable):
             return await Runner.resource_mgr.get_model(id=self._config.model_id)
 
     def _build_user_prompt_content(self, inputs: dict) -> list[BaseMessage]:
+        system_prompt_template = getattr(self._config, "system_prompt_template", None)
+        user_prompt_template = getattr(self._config, "user_prompt_template", None)
+
+        if system_prompt_template is not None or user_prompt_template is not None:
+            if user_prompt_template is None:
+                return [UserMessage(content="")]
+            return PromptTemplate(content=[user_prompt_template]).format(inputs).to_messages()
+
         template_content_list = self._config.template_content
-        user_prompt = [element for element in template_content_list if element.get(_ROLE, "") == MessageRole.USER.value]
+        if not template_content_list:
+            return []
+
+        user_prompt = [
+            element for element in template_content_list
+            if element.get(_ROLE, "") == MessageRole.USER.value
+        ]
+
         return PromptTemplate(content=[user_prompt[0]]).format(inputs).to_messages()
 
     def _get_model_input(self, inputs: dict):
@@ -600,6 +617,14 @@ class LLMExecutable(ComponentExecutable):
                 yield stream_out
 
     def _build_system_prompt(self, inputs: dict):
+        system_prompt_template = getattr(self._config, "system_prompt_template", None)
+        user_prompt_template = getattr(self._config, "user_prompt_template", None)
+
+        if system_prompt_template is not None or user_prompt_template is not None:
+            if system_prompt_template is None:
+                return []
+            return PromptTemplate(content=[system_prompt_template]).format(inputs).to_messages()
+
         system_prompt = []
         for element in self._config.template_content:
             if element.get(_ROLE, "") == "system":
