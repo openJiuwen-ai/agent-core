@@ -201,7 +201,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _create_plugin_component() -> ToolComponent:
         """创建插件组件，真正调用外部 RESTful API。"""
-        tool_config = ToolComponentConfig()
+        tool_config = ToolComponentConfig(tool_id="weather_tool")
         weather_tool = RestfulApi(
             card=RestfulApiCard(
                 name="WeatherReporter",
@@ -219,7 +219,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                 method="GET",
             ),
         )
-        return ToolComponent(tool_config).bind_tool(weather_tool)
+        Runner.resource_mgr.add_tool("weather_tool", weather_tool)
+        return ToolComponent(tool_config)
 
     @staticmethod
     def _create_start_component():

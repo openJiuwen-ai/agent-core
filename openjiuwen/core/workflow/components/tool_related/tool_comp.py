@@ -2,26 +2,26 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from dataclasses import dataclass
-from typing import Union, Any
+from typing import Union, Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
-from openjiuwen.core.workflow.components.base import ComponentConfig
-from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.context_engine import ModelContext
+from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.graph.executable import Executable, Input, Output
 from openjiuwen.core.session import Session
-from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.workflow.components.base import ComponentConfig
+from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 
 DEFAULT_EXCEPTION_ERROR_CODE = -1
 
 
 @dataclass
 class ToolComponentConfig(ComponentConfig):
-    pass
+    tool_id: Optional[str] = None
 
 
 class ToolComponentInput(BaseModel):
@@ -91,11 +91,15 @@ class ToolComponent(ComponentComposable):
     def __init__(self, config: ToolComponentConfig):
         super().__init__()
         self._config = config
-        self._tool = None
+        tool_id = self._config.tool_id
+        if tool_id is None:
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INIT_FAILED,
+                                           "tool_id in ToolComponentConfig is empty")
+        from openjiuwen.core.runner import Runner
+        self._tool = Runner.resource_mgr.get_tool(id=tool_id)
+        if self._tool is None:
+            ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INIT_FAILED,
+                                           f"{tool_id} is not found in runner")
 
     def to_executable(self) -> Executable:
         return ToolExecutable(self._config).set_tool(self._tool)
-
-    def bind_tool(self, tool: Tool):
-        self._tool = tool
-        return self

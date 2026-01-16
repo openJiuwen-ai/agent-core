@@ -18,7 +18,6 @@ from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Output, Input
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import Session
 from openjiuwen.core.foundation.llm import (
     BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
@@ -210,6 +209,8 @@ class IntentDetectionExecutable(ComponentExecutable):
                                                "Failed to create llm instance")
             return Model(self._config.model_client_config, self._config.model_config)
         else:
+            # 延迟导入，避免循环依赖
+            from openjiuwen.core.runner import Runner
             return await Runner.resource_mgr.get_model(id=self._config.model_id)
 
     async def _initialize_if_needed(self):

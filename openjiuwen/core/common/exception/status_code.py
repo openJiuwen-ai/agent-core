@@ -91,6 +91,7 @@ class StatusCode(Enum):
     ## ToolComponent  102000 - 102019
     COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
+    COMPONENT_TOOL_INIT_FAILED = (102002, "component tool initialization failed, reason: {error_msg}")
 
     ## StartComponent  102100 - 102119
     COMPONENT_START_INPUT_INVALID = (102100, "component start_input is invalid, reason: {error_msg}")
