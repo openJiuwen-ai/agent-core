@@ -7,7 +7,7 @@ import tiktoken
 from transformers import PreTrainedTokenizerBase
 
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
-from openjiuwen.core.retrieval.indexing.processor.spliter.splitter import SentenceSplitter
+from openjiuwen.core.retrieval.indexing.processor.splitter.splitter import SentenceSplitter
 from openjiuwen.core.common.logging import logger
 
 DEFAULT_CHUNK_SIZE = 200

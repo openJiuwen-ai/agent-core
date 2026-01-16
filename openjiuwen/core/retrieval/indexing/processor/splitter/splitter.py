@@ -5,7 +5,7 @@ from pysbd import Segmenter
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
-from openjiuwen.core.retrieval.indexing.processor.spliter.base import Splitter
+from openjiuwen.core.retrieval.indexing.processor.splitter.base import Splitter
 
 
 class SentenceSplitter(Splitter):

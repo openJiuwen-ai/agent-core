@@ -40,7 +40,7 @@ class TestSentenceSplitter:
     @classmethod
     def test_init_with_defaults(cls, mock_tokenizer):
         """Test initialization with default values"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.spliter.splitter.Segmenter") as mock_segmenter_class:
+        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
             mock_segmenter = MagicMock()
             mock_segmenter_class.return_value = mock_segmenter
 
@@ -57,7 +57,7 @@ class TestSentenceSplitter:
     @classmethod
     def test_init_with_custom_language(cls, mock_tokenizer):
         """Test initialization with custom language"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.spliter.splitter.Segmenter") as mock_segmenter_class:
+        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
             mock_segmenter = MagicMock()
             mock_segmenter_class.return_value = mock_segmenter
 
@@ -72,7 +72,7 @@ class TestSentenceSplitter:
     @classmethod
     def test_call_empty_text(cls, mock_tokenizer):
         """Test splitting empty text"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.spliter.splitter.Segmenter") as mock_segmenter_class:
+        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
             mock_segmenter = MagicMock()
             mock_segmenter_class.return_value = mock_segmenter
 
@@ -87,7 +87,7 @@ class TestSentenceSplitter:
     @classmethod
     def test_call_whitespace_only(cls, mock_tokenizer):
         """Test splitting text containing only whitespace"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.spliter.splitter.Segmenter") as mock_segmenter_class:
+        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
             mock_segmenter = MagicMock()
             mock_segmenter_class.return_value = mock_segmenter
 
@@ -102,7 +102,7 @@ class TestSentenceSplitter:
     @classmethod
     def test_call_single_sentence(cls, mock_tokenizer):
         """Test splitting single sentence"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.spliter.splitter.Segmenter") as mock_segmenter_class:
+        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
             mock_segmenter = MagicMock()
             mock_segmenter.segment.return_value = ["This is a test sentence."]
             mock_segmenter_class.return_value = mock_segmenter
@@ -121,7 +121,7 @@ class TestSentenceSplitter:
     @classmethod
     def test_call_multiple_sentences(cls, mock_tokenizer):
         """Test splitting multiple sentences"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.spliter.splitter.Segmenter") as mock_segmenter_class:
+        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
             mock_segmenter = MagicMock()
             mock_segmenter.segment.return_value = [
                 "First sentence.",
@@ -147,7 +147,7 @@ class TestSentenceSplitter:
     @classmethod
     def test_call_long_sentence(cls, mock_tokenizer):
         """Test splitting very long sentence"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.spliter.splitter.Segmenter") as mock_segmenter_class:
+        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
             mock_segmenter = MagicMock()
             long_sentence = " ".join(["word"] * 1000)  # Very long sentence
             mock_segmenter.segment.return_value = [long_sentence]
@@ -165,7 +165,7 @@ class TestSentenceSplitter:
     @classmethod
     def test_call_combines_sentences(cls, mock_tokenizer):
         """Test combining sentences into chunks"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.spliter.splitter.Segmenter") as mock_segmenter_class:
+        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
             mock_segmenter = MagicMock()
             mock_segmenter.segment.return_value = [
                 "Short sentence 1.",
