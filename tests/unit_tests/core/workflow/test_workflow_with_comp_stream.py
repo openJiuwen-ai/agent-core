@@ -803,7 +803,7 @@ async def test_stream_trigger_consumer_twice():
     wf_id = "llm_workflow"
     name = "llm_workflow"
     version = "0.0.1"
-    inputs_schem_dict = {
+    inputs_schema_dict = {
         "type": "object",
         "properties": {
             "query": {
@@ -812,7 +812,7 @@ async def test_stream_trigger_consumer_twice():
             }
         }
     }
-    workflow_inputs_schema = inputs_schem_dict
+    workflow_inputs_schema = inputs_schema_dict
     workflow_card = WorkflowCard(name=name, id=wf_id, version=version, inputs_schema=workflow_inputs_schema)
     flow = Workflow(card=workflow_card)
 
@@ -845,7 +845,7 @@ async def test_stream_trigger_consumer():
     wf_id = "llm_workflow"
     name = "llm_workflow"
     version = "0.0.1"
-    inputs_schem_dict = {
+    inputs_schema_dict = {
         "type": "object",
         "properties": {
             "query": {
@@ -854,7 +854,7 @@ async def test_stream_trigger_consumer():
             }
         }
     }
-    workflow_inputs_schema = inputs_schem_dict
+    workflow_inputs_schema = inputs_schema_dict
     workflow_card = WorkflowCard(name=name, id=wf_id, version=version, inputs_schema=workflow_inputs_schema)
     flow = Workflow(card=workflow_card)
 
