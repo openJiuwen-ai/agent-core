@@ -19,8 +19,18 @@ class MessageMixin:
     timestamp = Column(String(32), nullable=True)
 
 
+@declarative_mixin
+class ScopeUserMixin:
+    user_id = Column(String(64), nullable=False, primary_key=True)
+    scope_id = Column(String(64), nullable=False, primary_key=True)
+
+
 class UserMessage(MessageMixin, Base):
     __tablename__ = "user_message"
+
+
+class ScopeUserMapping(ScopeUserMixin, Base):
+    __tablename__ = "scope_user_mapping"
 
 
 async def create_tables(
@@ -31,7 +41,10 @@ async def create_tables(
         await conn.run_sync(
             lambda sync_conn: Base.metadata.create_all(
                 sync_conn,
-                tables=[UserMessage.__table__],
+                tables=[
+                    UserMessage.__table__,
+                    ScopeUserMapping.__table__
+                ],
                 checkfirst=True
             )
         )

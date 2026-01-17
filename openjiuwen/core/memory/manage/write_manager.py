@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Tuple
+from typing import Tuple, Any
 
 from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.mem_unit.memory_unit import BaseMemoryUnit
@@ -52,13 +52,6 @@ class WriteManager:
     async def delete_mem_by_user_id(self, user_id: str, scope_id: str):
         for manager in self.managers:
             await self.managers[manager].delete_by_user_id(user_id=user_id, scope_id=scope_id)
-
-    async def delete_mem_by_scope_id(self, scope_id: str):
-        for manager in self.managers:
-            if hasattr(self.managers[manager], 'delete_by_scope_id'):
-                await self.managers[manager].delete_by_scope_id(scope_id=scope_id)
-            else:
-                logger.warning(f"Manager {manager} does not support delete_by_scope_id method")
 
     async def __get_mem_type_from_store(self, user_id: str, scope_id: str, mem_id: str) -> str | None:
         data = None

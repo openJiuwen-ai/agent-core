@@ -158,26 +158,8 @@ class UserProfileManager(BaseMemoryManager):
             return False
         mem_ids = [item['id'] for item in data]
         await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
-        await self._delete_vector_user_profile_memory(memory_id=mem_ids, user_id=user_id,
-                                                      scope_id=scope_id, mem_type=MemoryType.USER_PROFILE.value)
-        return True
-
-    async def delete_by_scope_id(self, scope_id: str):
-        all_keys = await self.mem_store.kv_store.get_by_prefix("UMD/")
-        user_ids = set()
-        for key in all_keys:
-            parts = key.split("/")
-            if len(parts) >= 4 and parts[2] == scope_id and parts[3] == MemoryType.USER_PROFILE.value:
-                user_ids.add(parts[1])
-
-        for user_id in user_ids:
-            data = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id,
-                                                mem_type=MemoryType.USER_PROFILE.value)
-            if data is not None:
-                mem_ids = [item['id'] for item in data]
-                await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
-                await self._delete_vector_user_profile_memory(memory_id=mem_ids, user_id=user_id,
-                                                              scope_id=scope_id, mem_type=MemoryType.USER_PROFILE.value)
+        await self._delete_vector_store_table(user_id=user_id, scope_id=scope_id,
+                                              mem_type=MemoryType.USER_PROFILE.value)
         return True
 
     async def list_user_profile(self, user_id: str, scope_id: str, profile_type: Optional[str] = None,
@@ -291,5 +273,12 @@ class UserProfileManager(BaseMemoryManager):
         if self.semantic_recall:
             table_name = generate_idx_name(user_id, scope_id, mem_type)
             await self.semantic_recall.delete_docs(memory_id, table_name)
+        else:
+            raise ValueError('vector store must not be None')
+
+    async def _delete_vector_store_table(self, user_id: str, scope_id: str, mem_type):
+        if self.semantic_recall:
+            table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=mem_type)
+            await self.semantic_recall.delete_table(table_name=table_name)
         else:
             raise ValueError('vector store must not be None')

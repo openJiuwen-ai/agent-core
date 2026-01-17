@@ -514,3 +514,9 @@ class ChromaVectorStore(VectorStore):
                 pass
             except Exception as e:
                 logger.warning(f"Failed to close ChromaDB client: {e}")
+
+    async def table_exists(self, table_name: str) -> bool:
+        pass
+
+    async def delete_table(self, table_name: str) -> None:
+        pass

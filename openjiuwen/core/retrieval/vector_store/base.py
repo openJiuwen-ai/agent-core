@@ -104,3 +104,11 @@ class VectorStore(ABC):
         **kwargs: Any,
     ) -> bool:
         """Delete vectors"""
+
+    @abstractmethod
+    async def table_exists(self, table_name: str) -> bool:
+        pass
+
+    @abstractmethod
+    async def delete_table(self, table_name: str) -> None:
+        pass

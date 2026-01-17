@@ -49,7 +49,7 @@ class MemoryChromaVectorStore(VectorStore):
         if table_name is None or table_name.strip() == "":
             raise ValueError(f"Chroma collection name is required for {operation}")
 
-    async def is_collection_exists(self, table_name: str) -> bool:
+    async def table_exists(self, table_name: str) -> bool:
         """Check whether the collection exists"""
         try:
             await asyncio.to_thread(
@@ -140,7 +140,7 @@ class MemoryChromaVectorStore(VectorStore):
         """Delete vectors"""
         table_name = kwargs.get("table_name")
         self.check_table_name(table_name, "delete")
-        collection_is_exists = await self.is_collection_exists(table_name)
+        collection_is_exists = await self.table_exists(table_name)
         if not collection_is_exists:
             logger.debug(f"Chroma Collection {table_name} does not exist, skip delete vector")
             return True
@@ -155,7 +155,7 @@ class MemoryChromaVectorStore(VectorStore):
         return True
 
     async def delete_table(self, table_name: str) -> bool:
-        collection_is_exists = await self.is_collection_exists(table_name)
+        collection_is_exists = await self.table_exists(table_name)
         if not collection_is_exists:
             logger.debug(f"Chroma Collection {table_name} does not exist, skip delete collection")
             return True

@@ -32,6 +32,6 @@ class MemoryScopeConfig(BaseModel):
     embedding_cfg: EmbeddingConfig = Field(default=None)
 
 
-class MemoryAgentConfig(BaseModel):
+class AgentMemoryConfig(BaseModel):
     mem_variables: list[Param] = Field(default_factory=list)  # memory variables config
     enable_long_term_mem: bool = Field(default=True)  # enable long term memory or not

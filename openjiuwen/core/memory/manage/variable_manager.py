@@ -63,26 +63,6 @@ class VariableManager(BaseMemoryManager):
         await self.kv_store.delete_by_prefix(user_prefix)
         await self.kv_store.delete_by_prefix(session_prefix)
 
-    async def delete_by_scope_id(self, scope_id: str):
-        if self.kv_store is None:
-            logger.error("kv_store cannot be None")
-            return
-        # 删除所有用户的该scope_id的变量
-        all_user_vars = await self.kv_store.get_by_prefix("user_var/")
-        all_session_vars = await self.kv_store.get_by_prefix("session_var/")
-        
-        # 处理用户变量
-        for key in all_user_vars:
-            parts = key.split(self.SEPARATOR)
-            if len(parts) >= 4 and parts[2] == scope_id:
-                await self.kv_store.delete(key)
-        
-        # 处理会话变量
-        for key in all_session_vars:
-            parts = key.split(self.SEPARATOR)
-            if len(parts) >= 4 and parts[2] == scope_id:
-                await self.kv_store.delete(key)
-
     async def delete_user_variable(self, user_id: str, scope_id: str, var_name: str):
         if self.kv_store is None:
             logger.error("kv_store cannot be None")

@@ -13,7 +13,7 @@ from tests.unit_tests.core.memory.store.mock_kv_store import MockKVStore
 # from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
-from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryAgentConfig, MemoryScopeConfig
+from openjiuwen.core.memory.config.config import MemoryEngineConfig, AgentMemoryConfig, MemoryScopeConfig
 from openjiuwen.core.common.schema.param import Param
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
 
@@ -129,7 +129,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         logger.info(f"All user profiles after add_messages: {user_profile}")
         logger.info(f"Number of user profiles: {len(user_profile)}")
 
-        user_variables_before = await self.engine.get_user_variable(user_id=user_id, scope_id=scope_id)
+        user_variables_before = await self.engine.get_variables(user_id=user_id, scope_id=scope_id)
         logger.info(f"user_variables_before: {user_variables_before}")
 
         # Add some test data first
@@ -150,7 +150,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         ))
 
         # Add some user variables
-        await self.engine.update_user_variable(
+        await self.engine.update_variables(
             variables={"姓名": "张明", "职业": "软件工程师", "居住地": "杭州"},
             user_id=user_id,
             scope_id=scope_id
@@ -159,7 +159,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         # Check that user memory exists before deletion
         user_profile_before = await self.engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id,
                                                                      page_size=10, page_idx=1)
-        user_variables_before = await self.engine.get_user_variable(user_id=user_id, scope_id=scope_id)
+        user_variables_before = await self.engine.get_variables(user_id=user_id, scope_id=scope_id)
 
         logger.info(f"All user profiles before delete_scope: {user_profile_before}")
         logger.info(f"Number of user profiles before: {len(user_profile_before)}")
@@ -179,7 +179,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         # Check that user memory is deleted after deletion
         user_profile_after = await self.engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id,
                                                                     page_size=10, page_idx=1)
-        user_variables_after = await self.engine.get_user_variable(user_id=user_id, scope_id=scope_id)
+        user_variables_after = await self.engine.get_variables(user_id=user_id, scope_id=scope_id)
 
         logger.info(f"All user profiles after delete_scope: {user_profile_after}")
         logger.info(f"Number of user profiles after: {len(user_profile_after)}")
@@ -189,7 +189,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         logger.info(f"All user profiles after add_messages: {user_profile}")
         logger.info(f"Number of user profiles: {len(user_profile)}")
 
-        user_variables = await self.engine.get_user_variable(user_id=user_id, scope_id=scope_id)
+        user_variables = await self.engine.get_variables(user_id=user_id, scope_id=scope_id)
         logger.info(f"All user variables after delete_scope: {user_variables}")
 
 
@@ -222,7 +222,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
             model_client_cfg=scope_model_client_cfg,
             embedding_cfg=embed_config
         )
-        agent_cfg = MemoryAgentConfig(
+        agent_cfg = AgentMemoryConfig(
             mem_variables=[
                 Param.string("姓名", "用户姓名", required=False),
                 Param.string("职业", "用户职业", required=False),
@@ -260,7 +260,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         for profile in user_profile:
             logger.info(f"Profile: {profile}")
         logger.info(f"get_user_profile raw: {user_profile}")
-        test_variable = await self.engine.get_user_variable(user_id=user_id, scope_id=scope_id)
+        test_variable = await self.engine.get_variables(user_id=user_id, scope_id=scope_id)
         logger.info(f"test_variable: {test_variable}")
         user_profile_mem_list = []
         user_profile_set = set()
@@ -346,18 +346,18 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(test_variable['居住地'], "杭州")
 
         # test update variable
-        await self.engine.update_user_variable(user_id=user_id,
+        await self.engine.update_variables(user_id=user_id,
                                                scope_id=scope_id,
                                                variables={"姓名": "李四"})
-        test_variable = await self.engine.get_user_variable(user_id=user_id, scope_id=scope_id)
+        test_variable = await self.engine.get_variables(user_id=user_id, scope_id=scope_id)
         self.assertEqual(len(test_variable), 5)
         self.assertEqual(test_variable['姓名'], "李四")
 
         # test delete variable
-        await self.engine.delete_user_variable(user_id=user_id,
+        await self.engine.delete_variables(user_id=user_id,
                                               scope_id=scope_id,
                                               names=["年龄"])
-        test_variable = await self.engine.get_user_variable(user_id=user_id, scope_id=scope_id)
+        test_variable = await self.engine.get_variables(user_id=user_id, scope_id=scope_id)
         self.assertEqual(len(test_variable), 4)
         self.assertEqual(test_variable['姓名'], "李四")
         self.assertNotIn("年龄", test_variable)
@@ -367,7 +367,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
                                                scope_id=scope_id)
         user_profile = await self.engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id,
                                                               page_size=10, page_idx=1)
-        test_variable = await self.engine.get_user_variable(user_id=user_id, scope_id=scope_id)
+        test_variable = await self.engine.get_variables(user_id=user_id, scope_id=scope_id)
         search_res = await self.engine.search_user_mem(user_id=user_id, scope_id=scope_id, query="用户的职业", num=1)
         self.assertTrue(not user_profile)
         self.assertTrue(not test_variable)

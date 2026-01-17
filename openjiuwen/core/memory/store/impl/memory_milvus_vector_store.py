@@ -40,7 +40,7 @@ class MemoryMilvusVectorStore(VectorStore):
 
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> Any:
-        logger.error("create_client not implemented in MemoryChromaVectorStore")
+        logger.error("create_client not implemented in MemoryMilvusVectorStore")
         pass
 
     async def _ensure_connection(self):
@@ -155,7 +155,7 @@ class MemoryMilvusVectorStore(VectorStore):
 
     async def delete_table(self, table_name: str) -> bool:
         await self._ensure_connection()
-        if not utility.has_collection(table_name, using="default"):
+        if not await self.table_exists(table_name):
             logger.debug(f"Milvus Collection {table_name} does not exist, skip delete collection")
             return True
         await asyncio.to_thread(
@@ -165,3 +165,6 @@ class MemoryMilvusVectorStore(VectorStore):
         )
         self.collections.pop(table_name, None)
         return True
+
+    async def table_exists(self, table_name: str) -> bool:
+        return utility.has_collection(table_name, using="default")

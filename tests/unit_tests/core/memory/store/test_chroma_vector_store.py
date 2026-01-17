@@ -45,7 +45,7 @@ class TestMemoryChromaVectorStore:
         assert table_name in chroma_store.collection_cache
         assert chroma_store.collection_cache[table_name] is collection
         # 验证集合在客户端中存在
-        assert await chroma_store.is_collection_exists(table_name)
+        assert await chroma_store.table_exists(table_name)
 
         # 第二次调用get_collection应该从缓存中获取
         collection2 = await chroma_store.get_collection(table_name)
@@ -80,13 +80,13 @@ class TestMemoryChromaVectorStore:
         """测试集合是否存在"""
         # 测试集合不存在
 
-        assert await chroma_store.is_collection_exists(table_name) is False
+        assert await chroma_store.table_exists(table_name) is False
 
         # 创建集合
         await chroma_store.get_collection(table_name)
 
         # 测试集合存在
-        assert await chroma_store.is_collection_exists(table_name) is True
+        assert await chroma_store.table_exists(table_name) is True
 
     @pytest.mark.asyncio
     async def test_add_single_vector(self, chroma_store, persist_directory, table_name):
@@ -257,14 +257,14 @@ class TestMemoryChromaVectorStore:
         await chroma_store.add(data=vector_data, table_name=table_name)
 
         # 验证表存在
-        assert chroma_store.is_collection_exists(table_name)
+        assert chroma_store.table_exists(table_name)
 
         # 调用delete_table方法
         result = await chroma_store.delete_table(table_name)
 
         # 验证删除成功
         assert result is True
-        assert not await chroma_store.is_collection_exists(table_name)
+        assert not await chroma_store.table_exists(table_name)
         assert table_name not in chroma_store.collection_cache
 
     @pytest.mark.asyncio
