@@ -10,6 +10,7 @@ from sqlalchemy import (
     delete,
     select,
 )
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import (
     async_sessionmaker, AsyncEngine, AsyncSession,
 )
@@ -41,9 +42,15 @@ class DefaultKVStore(BaseKVStore):
         await self._create_table_if_not_exist()
         async with self.async_session() as session:
             async with session.begin():
-                await session.merge(
-                    KVStoreTable(key=key, value=value)
+                stmt = (
+                    insert(KVStoreTable)
+                    .values(key=key, value=value)
+                    .on_conflict_do_update(
+                        index_elements=["key"],
+                        set_={"value": value}
+                    )
                 )
+                await session.execute(stmt)
 
     async def exclusive_set(
         self, key: str, value: str, expiry: Optional[int] = None
@@ -66,9 +73,15 @@ class DefaultKVStore(BaseKVStore):
                         return False
                 expire_at = now + expiry if expiry else None
                 val = json.dumps({"value": value, "expiry": expire_at})
-                await session.merge(
-                    KVStoreTable(key=key, value=val)
+                stmt = (
+                    insert(KVStoreTable)
+                    .values(key=key, value=val)
+                    .on_conflict_do_update(
+                        index_elements=["key"],
+                        set_={"value": val}
+                    )
                 )
+                await session.execute(stmt)
                 return True
 
     async def get(self, key: str) -> str | None:

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.single_agent.legacy.schema import WorkflowSchema
 from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, ModelConfig
-from openjiuwen.core.memory.config.config import MemoryScopeConfig
+from openjiuwen.core.memory.config.config import MemoryScopeConfig, AgentMemoryConfig
 
 
 class AgentConfig(BaseModel):
@@ -101,6 +101,10 @@ class LegacyReActAgentConfig(AgentConfig):
     memory_config: MemoryScopeConfig = Field(
         default_factory=MemoryScopeConfig,
         description="Memory configuration"
+    )
+    agent_memory_config: AgentMemoryConfig = Field(
+        default_factory=AgentMemoryConfig,
+        description="Memory agent configuration for adding memory"
     )
     
     @property

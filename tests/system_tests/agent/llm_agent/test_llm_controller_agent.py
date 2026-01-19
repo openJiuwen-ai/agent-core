@@ -6,14 +6,16 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from openjiuwen.core.memory import DefaultKVStore, MemoryChromaVectorStore
+from openjiuwen.core.retrieval import EmbeddingConfig
 from openjiuwen.core.single_agent.legacy import PluginSchema, WorkflowSchema
 from openjiuwen.core.application.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo, ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.workflow import End, WorkflowCard
 from openjiuwen.core.workflow import IntentDetectionComponent, IntentDetectionCompConfig
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
 from openjiuwen.core.workflow import Start
-from openjiuwen.core.memory.config.config import MemoryEngineConfig
+from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig, AgentMemoryConfig
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
 from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore as MilvusVectorStore
@@ -22,7 +24,6 @@ from openjiuwen.core.foundation.tool import LocalFunction
 from openjiuwen.core.foundation.tool import RestfulApi, ToolCard, RestfulApiCard
 from openjiuwen.core.foundation.tool import tool
 from openjiuwen.core.workflow import Workflow
-from tests.unit_tests.core.memory.store.mock_kv_store import MockKVStore
 
 API_BASE = os.getenv("API_BASE", "")
 API_KEY = os.getenv("API_KEY", "")
@@ -304,24 +305,47 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
 
     async def _create_memory_engine(self):
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        semantic_store = MilvusSemanticStore(
-            milvus_host=os.getenv("MILVUS_HOST"),
-            milvus_port=os.getenv("MILVUS_PORT"),
-            collection_name=os.getenv("MILVUS_COLLECTION_NAME"),
-            embedding_dims=os.getenv("EMBEDDING_MODEL_DIMENTION", 1024),
-            token=os.getenv("MILVUS_TOKEN", None)
+        resource_dir = os.path.join(project_root, "resources")
+        os.makedirs(resource_dir, exist_ok=True)
+        kv_path = os.path.join(resource_dir, "kv_store.db")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{kv_path}",
+            pool_pre_ping=True,
+            echo=False,
         )
-        db_user = os.getenv("DB_USER")
-        db_passport = os.getenv("DB_PASSWORD")
-        db_host = os.getenv("DB_HOST")
-        db_port = os.getenv("DB_PORT")
-        agent_db_name = os.getenv("AGENT_DB_NAME")
-        db_store = DefaultDbStore(create_async_engine(
-            f"mysql+aiomysql://{db_user}:{db_passport}@{db_host}:{db_port}/{agent_db_name}?charset=utf8mb4"
+        kv_store = DefaultKVStore(engine)
+        db_store = DefaultDbStore(engine)
+        vector_store = MemoryChromaVectorStore(persist_directory="./resource_dir")
+        memory_engine = LongTermMemory()
+        await memory_engine.register_store(kv_store=kv_store, db_store=db_store, vector_store=vector_store)
+        memory_engine.set_config(MemoryEngineConfig(
+            default_model_cfg=ModelRequestConfig(),
+            default_model_client_cfg=ModelClientConfig(
+                client_provider="SiliconFlow",
+                api_key="xxx",
+                api_base="xxx",
+                verify_ssl=False
+            ),
         ))
-        LongTermMemory.register_store(kv_store=MockKVStore(), db_store=db_store, semantic_store=semantic_store)
-        await LongTermMemory.create_mem_engine_instance(MemoryEngineConfig())
-        print("✅ Memory engine created")
+        return memory_engine
+
+    def _create_memory_scope_config(self):
+        return MemoryScopeConfig(
+            model_cfg=ModelRequestConfig(
+                model=MODEL_NAME
+            ),
+            model_client_cfg=ModelClientConfig(
+                client_provider=MODEL_PROVIDER,
+                api_key=API_KEY,
+                api_base=API_BASE,
+                verify_ssl=False
+            ),
+            embedding_cfg=EmbeddingConfig(
+                model_name=os.getenv("EMBED_MODEL_NAME"),
+                api_key=os.getenv("EMBED_API_KEY"),
+                base_url=os.getenv("EMBED_API_BASE")
+            )
+        )
 
     @unittest.skip("require network")
     async def test_llm_agent_invoke_with_real_plugin(self):
@@ -503,15 +527,13 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
     @unittest.skip("skip system test require llm")
     # This ut should be at the bottom, singleton memory engine is created from this ut
     async def test_llm_agent_with_memory(self):
-        await self._create_memory_engine()
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
         user_id = "default_user_id"
-        group_id = "react_agent_123"
+        scope_id = "react_agent_123"
         model_config = self._create_model_config()
         prompt_template = self._create_prompt_template()
-        memory_engine = LongTermMemory.get_mem_engine_instance()
-        memory_engine.set_group_llm_config(group_id=group_id, llm_config=model_config)
+        memory_engine = await self._create_memory_engine()
         llm_agent_config = create_llm_agent_config(
             agent_id="react_agent_123",
             agent_version="0.0.1",
@@ -522,7 +544,11 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             prompt_template=prompt_template,
             tools=[]
         )
-
+        llm_agent_config.memory_config = self._create_memory_scope_config()
+        llm_agent_config.agent_memory_config = AgentMemoryConfig(
+            mem_variables=[],
+            enable_long_term_mem=True
+        )
         llm_agent: LLMAgent = create_llm_agent(
             agent_config=llm_agent_config,
             workflows=[],
@@ -532,28 +558,26 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         # 调用
         result = await llm_agent.invoke({"query": "我叫张明，目前刚到杭州来杭州做软件开发工作",
                                          "user_id": user_id,
-                                         "group_id": group_id})
+                                         "scope_id": scope_id})
         print(f"LLMAgent 输出结果：{result}")
         result = await llm_agent.invoke({"query": "我叫什么名字",
                                          "user_id": user_id,
-                                         "group_id": group_id})
+                                         "scope_id": scope_id})
         print(f"LLMAgent 输出结果：{result}")
-        await asyncio.sleep(10)
-        result = await memory_engine.search_user_mem(user_id=user_id, group_id=group_id, query="我叫什么名字", num=1)
+        await asyncio.sleep(20)
+        result = await memory_engine.search_user_mem(user_id=user_id, scope_id=scope_id, query="我叫什么名字", num=1)
         self.assertEqual(len(result), 1) # may be [] is llm_agent.invoke return too fast
         print("memory result:", result[0])
 
     @unittest.skip("skip system test require llm")
     async def test_llm_agent_with_multi_memory(self):
-        await self._create_memory_engine()
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
         user_id = "default_user_id"
-        group_id = "react_agent_123"
+        scope_id = "react_agent_123"
         model_config = self._create_model_config()
         prompt_template = self._create_prompt_template()
-        memory_engine = LongTermMemory.get_mem_engine_instance()
-        memory_engine.set_group_llm_config(group_id=group_id, llm_config=model_config)
+        memory_engine = await self._create_memory_engine()
         llm_agent_config = create_llm_agent_config(
             agent_id="react_agent_123",
             agent_version="0.0.1",
@@ -564,7 +588,11 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             prompt_template=prompt_template,
             tools=[]
         )
-
+        llm_agent_config.memory_config = self._create_memory_scope_config()
+        llm_agent_config.agent_memory_config = AgentMemoryConfig(
+            mem_variables=[],
+            enable_long_term_mem=True
+        )
         llm_agent: LLMAgent = create_llm_agent(
             agent_config=llm_agent_config,
             workflows=[],
@@ -576,12 +604,12 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         for query in querys:
             result = await llm_agent.invoke({"query": query,
                                          "user_id": user_id,
-                                         "group_id": group_id})
+                                         "scope_id": scope_id})
             print(f"LLMAgent 输出结果：{result}")
-        await asyncio.sleep(20)
-        result = await memory_engine.list_user_mem(user_id=user_id, group_id=group_id, num=4, page=1)
+        await asyncio.sleep(30)
+        result = await memory_engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id, page_size=4, page_idx=1)
         print(f"page1: memory result:{result}")
-        result = await memory_engine.list_user_mem(user_id=user_id, group_id=group_id, num=4, page=2)
+        result = await memory_engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id, page_size=4, page_idx=2)
         print(f"page2: memory result:{result}")
-        result = await memory_engine.list_user_mem(user_id=user_id, group_id=group_id, num=999, page=1)
+        result = await memory_engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id, page_size=99, page_idx=1)
         print(f"total memory result:{result}")

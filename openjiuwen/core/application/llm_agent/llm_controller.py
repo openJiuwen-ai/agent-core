@@ -72,12 +72,13 @@ class LLMController(BaseController):
             self,
             config: ReActAgentConfig,
             context_engine,
-            session,
-            enable_memory=False
+            session
     ):
         super().__init__(config, context_engine, session)
         self.config = config
-        self.enable_memory = enable_memory
+        self._enable_memory = self.config.agent_memory_config.enable_long_term_mem
+        self._long_term_memory_instance = LongTermMemory()
+        self._memory_inited = False
 
     async def handle_event(self, event: Event, session: Session) -> Optional[Dict]:
         """Handle Message - only handles user input
@@ -1259,28 +1260,30 @@ class LLMController(BaseController):
 
     async def _get_system_prompt_keywords(self, inputs: Any, user_id: str):
         result = {}
-        if self.enable_memory:
+        if self._enable_memory:
+            if not self._memory_inited:
+                await self._init_memory_config()
             memory_keywords = await self._get_keywords_from_memory(inputs, user_id)
             result.update(memory_keywords)
         return result
 
     async def _get_keywords_from_memory(self, inputs: Any, user_id: str):
         result = {}
-        group_id = f"{self._config.id}"
+        scope_id = f"{self._config.id}"
         if isinstance(inputs, str):
             query = inputs
         elif isinstance(inputs, dict):
             query = inputs.get("query", "")
         else:
             query = ""
-        logger.info(f"group_id: {group_id} | user_id: {user_id} | inputs: {inputs}")
+        logger.info(f"scope_id: {scope_id} | user_id: {user_id} | inputs: {inputs}")
         memory_engine = LongTermMemory()
         if not memory_engine:
             return result
-        if user_id and group_id:
-            memory_variables = await memory_engine.list_user_variables(
+        if user_id and scope_id:
+            memory_variables = await memory_engine.get_variables(
                 user_id=user_id,
-                group_id=group_id
+                scope_id=scope_id
             )
             if memory_variables:
                 filter_memory_variables = {k: v for k, v in memory_variables.items()
@@ -1292,15 +1295,12 @@ class LLMController(BaseController):
             try:
                 long_term_memory = await memory_engine.search_user_mem(
                     user_id=user_id,
-                    group_id=group_id,
+                    scope_id=scope_id,
                     query=query,
                     num=10
                 )
                 if long_term_memory:
-                    memory_contents = [{
-                        "mem": mem.get("mem", ""),
-                        "timestamp": convert_timestamp(mem.get("timestamp", "")),
-                    } for mem in long_term_memory]
+                    memory_contents = [mem.mem_info.content for mem in long_term_memory]
                     result.update(
                         {"sys_long_term_memory": JsonUtils.safe_json_dumps(memory_contents, ensure_ascii=False)})
                 logger.info(f"long_term_memory: {long_term_memory}")
@@ -1408,3 +1408,14 @@ class LLMController(BaseController):
             f"no match found for node_id={node_ids}"
         )
         return None
+
+    async def _init_memory_config(self):
+        scope_id = f"{self.config.id}"
+        memory_scope_config = self.config.memory_config
+        logger.info(f"When init Memory Engine, scope_id: {scope_id}")
+        if memory_scope_config is not None:
+            if (self._long_term_memory_instance and
+                    hasattr(memory_scope_config, 'model_cfg') and
+                    memory_scope_config.model_cfg is not None):
+                await self._long_term_memory_instance.set_scope_config(scope_id, memory_scope_config)
+            self._memory_inited = True

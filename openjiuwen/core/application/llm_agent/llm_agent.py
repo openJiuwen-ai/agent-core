@@ -116,14 +116,14 @@ class LLMAgent(ControllerAgent):
         # Initialize base class (pass controller)
         super().__init__(agent_config, controller=None)
 
-        self._init_memory_config(agent_config.memory_config)
-        self._enable_memory = False
+        self._long_term_memory_instance = LongTermMemory()
+        self._enable_memory = agent_config.agent_memory_config.enable_long_term_mem,
+        self._memory_agent_config = agent_config.agent_memory_config
 
         self.controller = LLMController(
             config=agent_config,
             context_engine=self.context_engine,
-            session=self._session,
-            enable_memory=self._enable_memory
+            session=self._session
         )
 
     async def invoke(self, inputs: Dict, session: Session = None) -> Dict:
@@ -237,23 +237,11 @@ class LLMAgent(ControllerAgent):
         self._config = self._config_wrapper
         self.controller.set_llm_controller_prompt_template(prompt_template)
 
-    def _init_memory_config(self, memory_config):
-        group_id = f"{self.agent_config.id}"
-        logger.info(f"When init Memory Engine, group_id: {group_id}")
-        if memory_config is not None:
-            self._memory_engine = LongTermMemory()
-            # Only set scope config if model_cfg is provided
-            # set_scope_config requires valid model_cfg and model_client_cfg
-            if (self._memory_engine and
-                    hasattr(memory_config, 'model_cfg') and
-                    memory_config.model_cfg is not None):
-                self._memory_engine.set_scope_config(group_id, memory_config)
-
     async def _write_messages_to_memory(self, inputs, result=None):
         user_id = inputs.get("user_id")
-        group_id = inputs.get("group_id", "default_group_id")
+        scope_id = inputs.get("scope_id", "default_group_id")
 
-        if not user_id or not self._memory_engine:
+        if not user_id or not self._long_term_memory_instance:
             return
         message_list = []
         # Add user message
@@ -272,11 +260,12 @@ class LLMAgent(ControllerAgent):
                 message_list.append(assistant_message)
 
         try:
-            await self._memory_engine.add_conversation_messages(
+            await self._long_term_memory_instance.add_messages(
                 user_id=user_id,
-                group_id=group_id,
+                scope_id=scope_id,
                 messages=message_list,
                 timestamp=datetime.datetime.now(tz=timezone.utc),
+                agent_config=self._memory_agent_config,
             )
         except Exception as e:
             logger.error(
