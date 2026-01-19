@@ -19,7 +19,7 @@ from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, Base
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.workflow import Workflow
-from openjiuwen.core.workflow.components.llm_related.llm_comp import LLMExecutable
+from openjiuwen.core.workflow.components.llm.llm_comp import LLMExecutable
 
 fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
@@ -116,7 +116,7 @@ class FakeModel(Model):
 
 
 @patch(
-    "openjiuwen.core.workflow.components.llm_related.llm_comp.Model",
+    "openjiuwen.core.workflow.components.llm.llm_comp.Model",
     autospec=True,
 )
 class TestLLMExecutableInvoke:

@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-
+from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Self, Union, Callable, Any, Optional, Dict
 
@@ -10,22 +10,22 @@ from openjiuwen.core.common.constants.constant import INDEX, CONFIG_KEY, LOOP_ID
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.workflow.components.component import ComponentComposable, WorkflowComponent
-from openjiuwen.core.workflow.components.flow_related.loop.break_comp import BreakComponent, LoopController
 from openjiuwen.core.workflow.components.condition.array import ArrayConditionInSession
 from openjiuwen.core.workflow.components.condition.condition import Condition, AlwaysTrue, FuncCondition
 from openjiuwen.core.workflow.components.condition.expression import ExpressionCondition
 from openjiuwen.core.workflow.components.condition.number import NumberConditionInSession
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.intermediate_loop_var import \
+from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import \
     IntermediateLoopVarCallback
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.loop_callback import LoopCallback, END_ROUND, \
+from openjiuwen.core.workflow.components.flow.loop.callback.loop_callback import LoopCallback, END_ROUND, \
     START_ROUND, OUT_LOOP, \
     FIRST_LOOP
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.output import OutputCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.atomic_node import AtomicNode
 from openjiuwen.core.graph.base import Graph, INPUTS_KEY
 from openjiuwen.core.graph.executable import Output, Input, Executable
-from openjiuwen.core.session import LOOP_NUMBER_MAX_LIMIT_DEFAULT, LOOP_NUMBER_MAX_LIMIT_KEY, Transformer
+from openjiuwen.core.session import LOOP_NUMBER_MAX_LIMIT_DEFAULT, LOOP_NUMBER_MAX_LIMIT_KEY, Transformer, \
+    extract_origin_key, NESTED_PATH_SPLIT, is_ref_path
 from openjiuwen.core.session import BaseSession, Session
 from openjiuwen.core.session import NodeSession, SubWorkflowSession
 from openjiuwen.core.graph.stream_actor.manager import ActorManager
@@ -35,35 +35,12 @@ from openjiuwen.core.graph.graph import PregelGraph
 from openjiuwen.core.graph.pregel import GraphInterrupt, START, END
 
 
-class EmptyExecutable(Executable):
-    async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
-        pass
+BROKEN = "_broken"
+FIRST_IN_LOOP = "_first_in_loop"
 
-    def skip_trace(self) -> bool:
-        return True
-
-
-class PostLoopBody(Executable):
-    def __init__(self):
-        self._finish_index = -1
-
-    async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
-        finish_index = session.state().get(FINISH_INDEX)
-        if finish_index is not None:
-            self._finish_index = finish_index
-        self._finish_index += 1
-        session.state().update({FINISH_INDEX: self._finish_index})
-        session.state().commit()
-        return None
-
-    def skip_trace(self) -> bool:
-        return True
-
-    def get_finish_index(self) -> int:
-        return self._finish_index
-
-    def set_finish_index(self, finish_index: int) -> None:
-        self._finish_index = finish_index
+CONDITION_NODE_ID = "condition"
+BODY_NODE_ID = "body"
+POST_BODY_NODE_ID = "post_body"
 
 
 class LoopGroup(BaseWorkflow, Executable):
@@ -94,13 +71,13 @@ class LoopGroup(BaseWorkflow, Executable):
                                       StatusCode.COMPONENT_LOOP_NOT_SUPPORT.errmsg.format(
                                           error_msg="nested loops are not supported"
                                       ))
-        if isinstance(workflow_comp, BreakComponent):
+        if isinstance(workflow_comp, LoopBreakComponent):
             self._break_components.append(workflow_comp)
         super().add_workflow_comp(comp_id, workflow_comp, wait_for_all=wait_for_all, inputs_schema=inputs_schema,
                                   stream_inputs_schema=stream_inputs_schema,
                                   stream_outputs_schema=stream_outputs_schema,
                                   outputs_schema=outputs_schema, comp_ability=comp_ability)
-        if self._drawable and isinstance(workflow_comp, BreakComponent):
+        if self._drawable and isinstance(workflow_comp, LoopBreakComponent):
             self._drawable.set_break_node(comp_id)
 
     def start_nodes(self, nodes: list[str]) -> Self:
@@ -168,18 +145,204 @@ class LoopGroup(BaseWorkflow, Executable):
             return True
 
 
-BROKEN = "_broken"
-FIRST_IN_LOOP = "_first_in_loop"
+class LoopComponent(WorkflowComponent):
+    def __init__(self, loop_group: LoopGroup, output_schema: dict):
+        super().__init__()
+        self._loop_group = loop_group
+        self._output_schema = output_schema
+        if loop_group.is_empty:
+            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
+                                      StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(
+                                          error_msg="empty loop group has no components to execute"))
 
-CONDITION_NODE_ID = "condition"
-BODY_NODE_ID = "body"
-POST_BODY_NODE_ID = "post_body"
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        try:
+            if not isinstance(inputs, dict):
+                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
+                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
+                                              error_msg=f"inputs must be a dictionary, got {type(inputs).__name__}"
+                                          ))
+
+            if INPUTS_KEY not in inputs:
+                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
+                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
+                                              error_msg=f"missing required key {INPUTS_KEY}"
+                                          ))
+
+            loop_input = LoopInput.model_validate(inputs.get(INPUTS_KEY))
+            condition: Condition
+            if loop_input.loop_type == LoopType.Array.value:
+                condition = ArrayConditionInSession(loop_input.loop_array)
+            elif loop_input.loop_type == LoopType.Number.value:
+                max_loop_limit = session.get_env(LOOP_NUMBER_MAX_LIMIT_KEY) or LOOP_NUMBER_MAX_LIMIT_DEFAULT
+                try:
+                    max_loop_limit = int(max_loop_limit)
+                except (TypeError, ValueError):
+                    max_loop_limit = LOOP_NUMBER_MAX_LIMIT_DEFAULT
+
+                if loop_input.loop_number is None:
+                    raise JiuWenBaseException(StatusCode.NUMBER_CONDITION_ERROR.code,
+                                              "loop_number variable not found or is None")
+
+                if loop_input.loop_number > max_loop_limit:
+                    raise JiuWenBaseException(
+                        StatusCode.NUMBER_CONDITION_ERROR.code,
+                        f"loop_number exceeds maximum limit {max_loop_limit}"
+                    )
+
+                condition = NumberConditionInSession(loop_input.loop_number)
+            elif loop_input.loop_type == LoopType.AlwaysTrue.value:
+                condition = AlwaysTrue()
+            elif loop_input.loop_type == LoopType.Expression.value:
+                if isinstance(loop_input.bool_expression, bool):
+                    condition = FuncCondition(lambda: loop_input.bool_expression)
+                else:
+                    condition = ExpressionCondition(loop_input.bool_expression)
+            else:
+                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
+                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
+                                              error_msg=f"invalid loop type '{loop_input.loop_type}' for LoopComponent"
+                                          ))
+
+            if self._loop_group.is_empty:
+                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
+                                          StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(
+                                              error_msg="loop group is empty, no components to execute"))
+
+            output_callback = OutputCallback(self._output_schema)
+            callbacks: list = [output_callback]
+            if loop_input.intermediate_var:
+                callbacks.append(IntermediateLoopVarCallback(loop_input.intermediate_var))
+
+            loop_component = AdvancedLoopComponent(self._loop_group, condition, self._loop_group.break_components,
+                                                   callbacks)
+            return await loop_component.on_invoke({INPUTS_KEY: {}, CONFIG_KEY: inputs.get(CONFIG_KEY)},
+                                                  session.base())
+        except GraphInterrupt:
+            raise
+        except JiuWenBaseException:
+            raise
+        except Exception as e:
+            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
+                                      StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(error_msg=str(e))) from e
+
+    def graph_invoker(self) -> bool:
+        return True
+
+    @property
+    def loop_group(self) -> LoopGroup:
+        return self._loop_group
+
+
+class LoopController(ABC):
+    @abstractmethod
+    def break_loop(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def is_broken(self) -> bool:
+        raise NotImplementedError()
+
+
+class LoopBreakComponent(ComponentComposable, Executable):
+    def __init__(self):
+        super().__init__()
+        self._loop_controller = None
+
+    def set_controller(self, loop_controller: LoopController):
+        self._loop_controller = loop_controller
+
+    async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
+        if self._loop_controller is None:
+            raise JiuWenBaseException(StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.code,
+                                      StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.errmsg.format(
+                                          error_msg="failed to initialize loop controller"
+                                      ))
+        self._loop_controller.break_loop()
+        return {}
+
+
+class LoopSetVariableComponent(WorkflowComponent):
+
+    def __init__(self, variable_mapping: dict[str, Any]):
+        super().__init__()
+        if not variable_mapping:
+            raise JiuWenBaseException(StatusCode.COMPONENT_SET_VAR_INIT_FAILED.code,
+                                      StatusCode.COMPONENT_SET_VAR_INIT_FAILED.errmsg.format(
+                                          error_msg=f'variable_mapping is None or empty'))
+        self._variable_mapping = variable_mapping
+
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        root_session = session.base().parent()
+        for left, right in self._variable_mapping.items():
+            left_ref_str = extract_origin_key(left)
+            keys = left_ref_str.split(NESTED_PATH_SPLIT)
+
+            if len(keys) == 0:
+                raise JiuWenBaseException(StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.code,
+                                          StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.errmsg.format(
+                                              error_msg=f'key[{left}] not supported format'))
+
+            node_id = keys[0]
+            node_session = NodeSession(root_session, node_id)
+            node_session.state().set_outputs(LoopSetVariableComponent.generate_output(
+                keys[1:], LoopSetVariableComponent.generate_value(session, right)
+            ))
+        return None
+
+    @staticmethod
+    def generate_value(session: Session, value: Any):
+        if isinstance(value, str) and is_ref_path(value):
+            ref_str = extract_origin_key(value)
+            return session.get_global_state(ref_str)
+        return value
+
+    @staticmethod
+    def generate_output(keys: list[str], value: Any):
+        output = value
+        for i in range(len(keys) - 1, -1, -1):
+            key = keys[i]
+            output = {key: output}
+
+        return output
+
+
+class EmptyExecutable(Executable):
+    async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
+        pass
+
+    def skip_trace(self) -> bool:
+        return True
+
+
+class PostLoopBody(Executable):
+    def __init__(self):
+        self._finish_index = -1
+
+    async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
+        finish_index = session.state().get(FINISH_INDEX)
+        if finish_index is not None:
+            self._finish_index = finish_index
+        self._finish_index += 1
+        session.state().update({FINISH_INDEX: self._finish_index})
+        session.state().commit()
+        return None
+
+    def skip_trace(self) -> bool:
+        return True
+
+    def get_finish_index(self) -> int:
+        return self._finish_index
+
+    def set_finish_index(self, finish_index: int) -> None:
+        self._finish_index = finish_index
 
 
 class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, AtomicNode):
 
     def __init__(self, body: Executable,
-                 condition: Union[str, Callable[[], bool], Condition] = None, break_nodes: list[BreakComponent] = None,
+                 condition: Union[str, Callable[[], bool], Condition] = None,
+                 break_nodes: list[LoopBreakComponent] = None,
                  callbacks: list[LoopCallback] = None, new_graph: Graph = None):
         super().__init__()
         self._node_id = None
@@ -321,92 +484,3 @@ class LoopInput(BaseModel):
     loop_array: Optional[Dict[str, Any]] = Field(default_factory=dict)
     bool_expression: Optional[Union[str, bool]] = Field("")
     intermediate_var: Dict[str, Union[str, Any]] = Field(default_factory=dict)
-
-
-class LoopComponent(WorkflowComponent):
-    def __init__(self, loop_group: LoopGroup, output_schema: dict):
-        super().__init__()
-        self._loop_group = loop_group
-        self._output_schema = output_schema
-        if loop_group.is_empty:
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
-                                      StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(
-                                          error_msg="empty loop group has no components to execute"))
-
-    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        try:
-            if not isinstance(inputs, dict):
-                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
-                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              error_msg=f"inputs must be a dictionary, got {type(inputs).__name__}"
-                                          ))
-
-            if INPUTS_KEY not in inputs:
-                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
-                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              error_msg=f"missing required key {INPUTS_KEY}"
-                                          ))
-
-            loop_input = LoopInput.model_validate(inputs.get(INPUTS_KEY))
-            condition: Condition
-            if loop_input.loop_type == LoopType.Array.value:
-                condition = ArrayConditionInSession(loop_input.loop_array)
-            elif loop_input.loop_type == LoopType.Number.value:
-                max_loop_limit = session.get_env(LOOP_NUMBER_MAX_LIMIT_KEY) or LOOP_NUMBER_MAX_LIMIT_DEFAULT
-                try:
-                    max_loop_limit = int(max_loop_limit)
-                except (TypeError, ValueError):
-                    max_loop_limit = LOOP_NUMBER_MAX_LIMIT_DEFAULT
-
-                if loop_input.loop_number is None:
-                    raise JiuWenBaseException(StatusCode.NUMBER_CONDITION_ERROR.code,
-                                              "loop_number variable not found or is None")
-
-                if loop_input.loop_number > max_loop_limit:
-                    raise JiuWenBaseException(
-                        StatusCode.NUMBER_CONDITION_ERROR.code,
-                        f"loop_number exceeds maximum limit {max_loop_limit}"
-                    )
-
-                condition = NumberConditionInSession(loop_input.loop_number)
-            elif loop_input.loop_type == LoopType.AlwaysTrue.value:
-                condition = AlwaysTrue()
-            elif loop_input.loop_type == LoopType.Expression.value:
-                if isinstance(loop_input.bool_expression, bool):
-                    condition = FuncCondition(lambda: loop_input.bool_expression)
-                else:
-                    condition = ExpressionCondition(loop_input.bool_expression)
-            else:
-                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
-                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              error_msg=f"invalid loop type '{loop_input.loop_type}' for LoopComponent"
-                                          ))
-
-            if self._loop_group.is_empty:
-                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
-                                          StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(
-                                              error_msg="loop group is empty, no components to execute"))
-
-            output_callback = OutputCallback(self._output_schema)
-            callbacks: list = [output_callback]
-            if loop_input.intermediate_var:
-                callbacks.append(IntermediateLoopVarCallback(loop_input.intermediate_var))
-
-            loop_component = AdvancedLoopComponent(self._loop_group, condition, self._loop_group.break_components,
-                                                   callbacks)
-            return await loop_component.on_invoke({INPUTS_KEY: {}, CONFIG_KEY: inputs.get(CONFIG_KEY)},
-                                                  session.base())
-        except GraphInterrupt:
-            raise
-        except JiuWenBaseException:
-            raise
-        except Exception as e:
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
-                                      StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(error_msg=str(e))) from e
-
-    def graph_invoker(self) -> bool:
-        return True
-
-    @property
-    def loop_group(self) -> LoopGroup:
-        return self._loop_group

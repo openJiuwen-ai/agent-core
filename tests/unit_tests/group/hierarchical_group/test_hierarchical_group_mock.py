@@ -463,7 +463,7 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         ])
 
         with patch(
-            "openjiuwen.core.workflow.components.llm_related."
+            "openjiuwen.core.workflow.components.llm."
             "questioner_comp.Model"
         ) as mock_model_class, patch(
             "openjiuwen.core.memory.long_term_memory."

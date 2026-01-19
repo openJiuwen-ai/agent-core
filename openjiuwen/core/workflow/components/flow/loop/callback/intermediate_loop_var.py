@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Union, Any
 
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.loop_callback import LoopCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.loop_callback import LoopCallback
 from openjiuwen.core.session import BaseSession
 from openjiuwen.core.graph.executable import Output
 

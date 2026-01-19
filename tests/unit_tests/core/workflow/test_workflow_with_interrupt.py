@@ -11,11 +11,11 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.workflow import BranchComponent, WorkflowCard
 from openjiuwen.core.workflow import ArrayCondition
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.intermediate_loop_var import IntermediateLoopVarCallback
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.output import OutputCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
 from openjiuwen.core.workflow import LoopGroup, LoopComponent
-from openjiuwen.core.workflow import SetVariableComponent
-from openjiuwen.core.workflow.components.flow_related.workflow_comp import SubWorkflowComponent
+from openjiuwen.core.workflow import LoopSetVariableComponent
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.session import FORCE_DEL_WORKFLOW_STATE_KEY
 from openjiuwen.core.session import get_default_inmemory_checkpointer
 from openjiuwen.core.session import InteractionOutput
@@ -24,7 +24,7 @@ from openjiuwen.core.session import WorkflowSession
 from openjiuwen.core.session.stream import BaseStreamMode, TraceSchema, OutputSchema
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
 from openjiuwen.core.workflow import ComponentAbility
-from openjiuwen.core.workflow.components.flow_related.loop.loop_comp import AdvancedLoopComponent
+from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
 from tests.unit_tests.core.workflow.mock_nodes import (
     InteractiveNode4StreamCp,
     MockStartNode,
@@ -173,7 +173,7 @@ async def test_workflow_with_loop():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
     loop_group.add_workflow_comp("2", AddTenNode4Cp("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    loop_group.add_workflow_comp("3", SetVariableComponent(
+    loop_group.add_workflow_comp("3", LoopSetVariableComponent(
         {"${l.user_var}": "${2.result}"}))
     loop_group.start_comp("1")
     loop_group.end_comp("3")
@@ -256,7 +256,7 @@ async def test_workflow_with_loop_interactive():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
     loop_group.add_workflow_comp("2", InteractiveNode4Cp("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    loop_group.add_workflow_comp("3", SetVariableComponent(
+    loop_group.add_workflow_comp("3", LoopSetVariableComponent(
         {"${l.user_var}": "${2.result}"}))
     loop_group.start_comp("1")
     loop_group.end_comp("3")
@@ -403,7 +403,7 @@ async def test_workflow_with_loop_comp_interactive():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
     loop_group.add_workflow_comp("2", InteractiveNode4Cp("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    loop_group.add_workflow_comp("3", SetVariableComponent(
+    loop_group.add_workflow_comp("3", LoopSetVariableComponent(
         {"${l.user_var}": "${2.result}"}))
     loop_group.start_comp("1")
     loop_group.end_comp("3")

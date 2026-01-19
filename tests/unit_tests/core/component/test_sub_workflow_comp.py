@@ -8,7 +8,7 @@ from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow import WorkflowComponent
-from openjiuwen.core.workflow.components.flow_related.workflow_comp import SubWorkflowComponent
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
 from openjiuwen.core.session import WorkflowSession

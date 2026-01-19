@@ -7,7 +7,7 @@ from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import LoopGroup, LoopComponent
-from openjiuwen.core.workflow import SetVariableComponent
+from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
@@ -101,7 +101,7 @@ async def test_loop_number():
     loop_group.add_workflow_comp("loop_1", AddTenNode("loop_1"), inputs_schema={"source": "${loop.index}"})
     loop_group.add_workflow_comp("loop_2", AddTenNode("loop_2"), inputs_schema={"source": "${loop.user_num}"})
 
-    set_variable_component = SetVariableComponent({"${loop.user_num}": "${loop_2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${loop.user_num}": "${loop_2.result}"})
 
     loop_group.add_workflow_comp("loop_3", set_variable_component)
     loop_group.start_nodes(["loop_1"])

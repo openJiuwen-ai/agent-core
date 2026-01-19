@@ -1,8 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import asyncio
 import inspect
-import json
 import os
 import re
 import uuid
@@ -14,7 +12,7 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.workflow.components.component import ComponentComposable
-from openjiuwen.core.workflow.components.branch_router import BranchRouter, WORKFLOW_DRAWABLE
+from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter, WORKFLOW_DRAWABLE
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph, Router, ExecutableGraph
 

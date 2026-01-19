@@ -14,7 +14,7 @@ from openjiuwen.core.foundation.llm import (
     BaseModelClient, BaseOutputParser, ModelClientConfig, ModelRequestConfig, BaseMessage
 )
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard, Input, Output
-from openjiuwen.core.workflow.components.llm_related.llm_comp import LLMExecutable
+from openjiuwen.core.workflow.components.llm.llm_comp import LLMExecutable
 
 pytestmark = pytest.mark.asyncio
 

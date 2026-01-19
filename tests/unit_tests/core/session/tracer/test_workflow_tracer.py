@@ -12,16 +12,16 @@ from openjiuwen.core.workflow import Input, Output, WorkflowCard
 from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import WorkflowComponent
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.intermediate_loop_var import IntermediateLoopVarCallback
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.output import OutputCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
 from openjiuwen.core.workflow import LoopGroup
-from openjiuwen.core.workflow import SetVariableComponent
+from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
-from openjiuwen.core.workflow.components.flow_related.workflow_comp import SubWorkflowComponent
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
 from openjiuwen.core.workflow import ComponentAbility
-from openjiuwen.core.workflow.components.flow_related.loop.loop_comp import AdvancedLoopComponent
+from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
 from tests.unit_tests.core.workflow.mock_nodes import AddTenNode, CommonNode, MockStartNode, MockEndNode, StreamCompNode
 
 fake_base = types.ModuleType("base")
@@ -527,7 +527,7 @@ class TestTraceWorkflow:
         loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
         loop_group.add_workflow_comp("2", AddTenNode("2"),
                                      inputs_schema={"source": "${l.user_var}"})
-        loop_group.add_workflow_comp("3", SetVariableComponent(
+        loop_group.add_workflow_comp("3", LoopSetVariableComponent(
             {"${l.user_var}": "${2.result}"}))
         loop_group.start_comp("1")
         loop_group.end_comp("3")

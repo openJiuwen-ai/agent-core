@@ -8,17 +8,17 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.workflow import Input, Output, WorkflowCard
 from openjiuwen.core.workflow import BranchComponent
 from openjiuwen.core.workflow import BranchRouter
-from openjiuwen.core.workflow import BreakComponent
+from openjiuwen.core.workflow import LoopBreakComponent
 from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow import NumberCondition
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import WorkflowComponent
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.intermediate_loop_var import IntermediateLoopVarCallback
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.output import OutputCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
 from openjiuwen.core.workflow import LoopGroup, LoopComponent
-from openjiuwen.core.workflow import SetVariableComponent
+from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
-from openjiuwen.core.workflow.components.flow_related.workflow_comp import SubWorkflowComponent
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session import Session
@@ -26,7 +26,7 @@ from openjiuwen.core.session import WorkflowSession
 from openjiuwen.core.session.stream import BaseStreamMode, CustomSchema, TraceSchema
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
 from openjiuwen.core.workflow import ComponentAbility
-from openjiuwen.core.workflow.components.flow_related.loop.loop_comp import AdvancedLoopComponent
+from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode, CommonNode, \
     AddTenNode, Node1, SlowNode, CountNode, StreamNode, CollectCompNode, TransformCompNode, StreamCompNode
 
@@ -70,7 +70,7 @@ async def create_workflow():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.index}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"),
                                  inputs_schema={"source": "${l.intermediate_loop_var.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.intermediate_loop_var.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.intermediate_loop_var.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.start_nodes(["1"])
     loop_group.end_nodes(["3"])
@@ -295,7 +295,7 @@ async def test_workflow_with_loop():
     loop_group.add_workflow_comp("1", AddTenNode("1", {"check": "${s.a}"}),
                                  inputs_schema={"source": "${l.item}", "check": "${s.a}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.add_workflow_comp("4", CommonNode("4"), inputs_schema={"index": "${l.index}"})
     loop_group.start_comp("1")
@@ -343,7 +343,7 @@ async def test_workflow_with_loop_component():
     loop_group.add_workflow_comp("1", AddTenNode("1", {"check": "${s.a}"}),
                                  inputs_schema={"source": "${l.item}", "check": "${s.a}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.add_workflow_comp("4", CommonNode("4"), inputs_schema={"index": "${l.index}"})
     loop_group.start_comp("1")
@@ -387,7 +387,7 @@ async def test_workflow_with_loop_component_number_condition():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.index}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.start_nodes(["1"])
     loop_group.end_nodes(["3"])
@@ -429,7 +429,7 @@ async def test_workflow_with_loop_component_expression_condition():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.index}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.start_nodes(["1"])
     loop_group.end_nodes(["3"])
@@ -471,7 +471,7 @@ async def test_workflow_with_loop_component_always_true():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.index}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
 
     sw = BranchComponent()
@@ -480,7 +480,7 @@ async def test_workflow_with_loop_component_always_true():
 
     loop_group.add_workflow_comp("sw", sw)
 
-    break_node = BreakComponent()
+    break_node = LoopBreakComponent()
     loop_group.add_workflow_comp("4", break_node)
 
     loop_group.add_workflow_comp("5", CommonNode("5"),
@@ -527,9 +527,9 @@ async def test_workflow_with_loop_component_break():
     loop_group = LoopGroup()
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
-    break_node = BreakComponent()
+    break_node = LoopBreakComponent()
     loop_group.add_workflow_comp("4", break_node)
     loop_group.start_nodes(["1"])
     loop_group.end_nodes(["3"])
@@ -573,9 +573,9 @@ async def test_workflow_with_loop_break():
     loop_group = LoopGroup()
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
-    break_node = BreakComponent()
+    break_node = LoopBreakComponent()
     loop_group.add_workflow_comp("4", break_node)
     loop_group.start_nodes(["1"])
     loop_group.end_nodes(["3"])
@@ -1057,7 +1057,7 @@ async def test_nested_loop():
         loop_group.add_workflow_comp("loop_1", AddTenNode("loop_1"), inputs_schema={"source": "${loop.index}"})
         loop_group.add_workflow_comp("loop_2", AddTenNode("loop_2"), inputs_schema={"source": "${loop.user_num}"})
 
-        set_variable_component = SetVariableComponent({"${loop.user_num}": "${loop_2.result}"})
+        set_variable_component = LoopSetVariableComponent({"${loop.user_num}": "${loop_2.result}"})
 
         loop_group.add_workflow_comp("loop_3", set_variable_component)
         loop_group.start_nodes(["loop_1"])

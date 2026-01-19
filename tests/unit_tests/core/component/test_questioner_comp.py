@@ -79,9 +79,10 @@ class TestQuestionComp:
     def _create_context(session_id):
         return TaskSession(trace_id=session_id)
 
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_invoke_questioner_component_in_workflow_initial_ask(self, mock_get_model, mock_init_prompt,
                                                                  mock_llm_inputs,
@@ -135,8 +136,9 @@ class TestQuestionComp:
             result={'responseContent': "hangzhou | today"},
             state=WorkflowExecutionState.COMPLETED)
 
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_invoke_questioner_component_in_workflow_repeat_ask(self, mock_get_model, mock_llm_inputs,
                                                                 mock_extraction):
@@ -202,9 +204,10 @@ class TestQuestionComp:
                                                                   flow)  # workflow实例、session id保持一致
         assert final_result.result.get("responseContent") == "hangzhou | today"
 
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_stream_questioner_component_in_workflow_initial_ask_with_tracer(self, mock_get_model, mock_init_prompt,
                                                                              mock_llm_inputs, mock_extraction):
@@ -278,8 +281,9 @@ class TestQuestionComp:
 class TestQuestionerStream:
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_invoke_questioner_component_in_workflow_repeat_ask_with_stream_writer_and_context_engine(
             self,
@@ -353,9 +357,10 @@ class TestQuestionerStream:
                 print(f"stream output >>> {chunk}")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_questioner_state_reset_on_second_workflow_invocation(
             self, mock_get_model, mock_init_prompt, mock_llm_inputs, mock_extraction
@@ -482,7 +487,7 @@ class TestQuestionerStream:
         print("   - 第二次调用：李四 ✓（未残留张三）")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._create_llm_instance")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._create_llm_instance")
     async def test_questioner_type_conversion_with_multiple_types(self, mock_create_llm):
         """
         Test questioner correctly validates and converts multiple basic data types.
@@ -589,7 +594,7 @@ class TestQuestionerStream:
         print("   - boolean: 'true' -> True ✓")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._create_llm_instance")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._create_llm_instance")
     async def test_questioner_type_validation_failure_triggers_continue_ask(self, mock_create_llm):
         """
         Test that type validation failure triggers continue-ask for required fields.

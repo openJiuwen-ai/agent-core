@@ -16,7 +16,7 @@ from openjiuwen.core.workflow.base import WorkflowCard, WorkflowChunk, WorkflowE
     WorkflowOutput
 from openjiuwen.core.workflow._workflow import BaseWorkflow
 from openjiuwen.core.workflow.components.component import ComponentComposable
-from openjiuwen.core.workflow.components.flow_related.end_comp import End
+from openjiuwen.core.workflow.components.flow.end_comp import End
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Router, INPUTS_KEY, CONFIG_KEY
 from openjiuwen.core.graph.executable import Executable, Input, Output
