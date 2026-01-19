@@ -66,6 +66,7 @@ class ChromaVectorStore(VectorStore):
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
         self.database_name = self.config.database_name
+        self._distance_metric = config.distance_metric.replace("dot", "ip").replace("euclidean", "l2")
 
         # Initialize ChromaDB persistent client
         self._client = self.create_client(
@@ -75,7 +76,7 @@ class ChromaVectorStore(VectorStore):
 
         # Get or create collection
         self._collection = self._client.get_or_create_collection(
-            name=self.collection_name, metadata={"hnsw:space": "cosine" if config.distance_metric == "cosine" else "l2"}
+            name=self.collection_name, metadata={"hnsw:space": self._distance_metric}
         )
 
     @property
@@ -87,6 +88,11 @@ class ChromaVectorStore(VectorStore):
     def collection(self):
         """Get ChromaDB collection"""
         return self._collection
+
+    @property
+    def distance_metric(self) -> str:
+        """Get raw distance metric string"""
+        return self._distance_metric
 
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> chromadb.PersistentClient:
@@ -463,13 +469,15 @@ class ChromaVectorStore(VectorStore):
             if mode == "vector":
                 # ChromaDB returns distance, need to convert to similarity score
                 if raw_score_val is not None:
-                    # For cosine distance, similarity = 1 - distance
-                    # For L2 distance, need normalization
-                    if self.config.distance_metric == "cosine":
-                        raw_score_scaled = 1.0 - raw_score_val
+                    if self._distance_metric == "l2":
+                        # L2 distance, simple normalization (max distance is 4)
+                        raw_score_scaled = max(0.0, (4.0 - raw_score_val) / 4.0)
+                    elif self._distance_metric == "cosine":
+                        # For cosine distance, similarity = 1 - distance
+                        raw_score_scaled = (2.0 - raw_score_val) / 2.0
                     else:
-                        # L2 distance, simple normalization (assuming max distance is 2)
-                        raw_score_scaled = max(0.0, 1.0 - raw_score_val / 2.0)
+                        # Chroma ip is a distance: d = 1 - dot
+                        raw_score_scaled = 1.0 - raw_score_val
                     final_score = raw_score_scaled
             elif mode == "sparse":
                 # Text search score (ChromaDB may return similarity score or distance)

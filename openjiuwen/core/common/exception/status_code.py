@@ -218,6 +218,7 @@ class StatusCode(Enum):
     RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND = (155105, "Embed model is required: {error_msg}")
     RETRIEVAL_INDEXING_DIMENSION_NOT_FOUND = (155106, "Dimension is required: {error_msg}")
     RETRIEVAL_INDEXING_PATH_NOT_FOUND = (155107, "Path is required and cannot be empty: {error_msg}")
+    RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID = (155108, "Invalid distance metric selected: {error_msg}")
     RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR = (155109, "Runtime error when adding documents: {error_msg}")
     # KnowledgeBase Retrieval - Retriever 155200 - 155299
     RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT = (155200, "Unsupported retrieval mode: {error_msg}")
@@ -253,7 +254,7 @@ class StatusCode(Enum):
     RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR = (155507, "Failed to extract triples: {error_msg}")
     RETRIEVAL_KB_DATABASE_CONFIG_INVALID = (
         155508,
-        "Vector store and index manager uses different database names: {error_msg}",
+        "Vector store and index manager have incompatible {config_name} configs: {error_msg}",
     )
 
     # Memory Engine 158000 - 159999

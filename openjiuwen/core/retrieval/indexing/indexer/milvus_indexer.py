@@ -7,7 +7,7 @@ Responsible for building, updating and deleting Milvus indices.
 """
 
 import asyncio
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Literal, Optional, Dict
 
 from pymilvus import DataType, Function, FunctionType, MilvusClient, MilvusException
 
@@ -36,6 +36,7 @@ class MilvusIndexer(Indexer):
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
         database_name: str = "",
+        distance_metric: Literal["cosine", "euclidean", "dot"] = "cosine",
         doc_index_callback: type[BaseCallback] = TqdmCallback,
         **kwargs: Any,
     ):
@@ -50,6 +51,7 @@ class MilvusIndexer(Indexer):
             sparse_vector_field: Sparse vector field name
             metadata_field: Metadata field name
             database_name: name of the database to use
+            distance_metric: distance metric for vector search
             doc_index_callback: class of callback object to use, must be subclass of BaseCallback
         """
         self.milvus_uri = milvus_uri
@@ -60,6 +62,20 @@ class MilvusIndexer(Indexer):
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
         self.database_name = database_name
+        match distance_metric:
+            case "cosine":
+                self._distance_metric = "COSINE"
+            case "euclidean":
+                self._distance_metric = "L2"
+            case "dot":
+                self._distance_metric = "IP"
+            case _:
+                raise JiuWenBaseException(
+                    error_code=StatusCode.RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID.code,
+                    message=StatusCode.RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID.errmsg.format(
+                        error_msg=f'expecting one of ["cosine", "euclidean", "dot"], but got "{distance_metric}"'
+                    ),
+                )
         self.doc_index_callback = doc_index_callback
         if not isinstance(doc_index_callback, type) or not issubclass(doc_index_callback, BaseCallback):
             raise JiuWenBaseException(
@@ -80,6 +96,11 @@ class MilvusIndexer(Indexer):
     def client(self) -> MilvusClient:
         """Get Milvus client"""
         return self._client
+
+    @property
+    def distance_metric(self) -> str:
+        """Get raw distance metric string"""
+        return self._distance_metric
 
     async def build_index(
         self,
@@ -374,7 +395,7 @@ class MilvusIndexer(Indexer):
             index_params.add_index(
                 field_name=self.vector_field,
                 index_type="IVF_FLAT",
-                metric_type="COSINE",
+                metric_type=self._distance_metric,
                 params={"nlist": 1024},
             )
 

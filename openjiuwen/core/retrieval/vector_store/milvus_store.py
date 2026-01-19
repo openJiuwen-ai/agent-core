@@ -55,6 +55,7 @@ class MilvusVectorStore(VectorStore):
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
         self.database_name = self.config.database_name
+        self._distance_metric = config.distance_metric.replace("dot", "ip").replace("euclidean", "l2").upper()
 
         # Initialize Milvus client & database
         self._client = self.create_client(
@@ -67,6 +68,11 @@ class MilvusVectorStore(VectorStore):
     def client(self) -> MilvusClient:
         """Get Milvus client"""
         return self._client
+
+    @property
+    def distance_metric(self) -> str:
+        """Get raw distance metric string"""
+        return self._distance_metric
 
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> MilvusClient:
@@ -156,7 +162,7 @@ class MilvusVectorStore(VectorStore):
             anns_field=self.vector_field,
             limit=top_k,
             output_fields=output_fields,
-            search_params={"metric_type": "COSINE", "params": {}},
+            search_params={"metric_type": self._distance_metric, "params": {}},
             filter=filter_expr,
         )
 
@@ -239,7 +245,7 @@ class MilvusVectorStore(VectorStore):
                 dense_req = AnnSearchRequest(
                     data=[query_vector],
                     anns_field=self.vector_field,
-                    param={"metric_type": "COSINE", "params": {}},
+                    param={"metric_type": self._distance_metric, "params": {}},
                     limit=top_k,
                 )
                 search_requests.append(dense_req)
@@ -357,7 +363,15 @@ class MilvusVectorStore(VectorStore):
 
             if mode == "vector":
                 if raw_score_val is not None:
-                    raw_score_scaled = (raw_score_val + 1.0) / 2.0
+                    if self._distance_metric == "L2":
+                        # Milvus L2 returns squared L2 distance
+                        raw_score_scaled = (4.0 - raw_score_val) / 4.0
+                    elif self._distance_metric == "COSINE":
+                        # Milvus COSINE returns similarity in [-1, 1]
+                        raw_score_scaled = (raw_score_val + 1.0) / 2.0
+                    else:
+                        # Milvus IP returns raw inner product (unbounded)
+                        raw_score_scaled = raw_score_val
                     final_score = raw_score_scaled
             elif mode == "sparse":
                 if raw_score_val is not None:

@@ -118,7 +118,7 @@ class TestSimpleKnowledgeBase:
     ):
         """Test different database_name in vector store and index manager raises expected error"""
         setattr(mock_index_manager, "database_name", "different_name")
-        with pytest.raises(JiuWenBaseException, match="Database name mismatch between vector_store and index_manager"):
+        with pytest.raises(JiuWenBaseException, match="incompatible database_name configs"):
             kb = SimpleKnowledgeBase(
                 config=mock_config,
                 vector_store=mock_vector_store,
