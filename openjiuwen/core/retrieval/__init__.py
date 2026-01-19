@@ -11,6 +11,7 @@ from openjiuwen.core.retrieval.simple_knowledge_base import (
 from openjiuwen.core.retrieval.graph_knowledge_base import GraphKnowledgeBase
 
 # Common data models and configs
+from openjiuwen.core.retrieval.common.callbacks import BaseCallback, TqdmCallback
 from openjiuwen.core.retrieval.common.config import (
     KnowledgeBaseConfig,
     RetrievalConfig,
@@ -117,6 +118,8 @@ _COMMON_CLASSES = [
     "RetrievalResult",
     "SearchResult",
     "Triple",
+    "BaseCallback",
+    "TqdmCallback",
 ]
 
 _EMBEDDING_CLASSES = [

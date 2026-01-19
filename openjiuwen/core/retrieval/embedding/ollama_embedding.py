@@ -14,6 +14,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.retrieval.common.callbacks import BaseCallback
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
 
 
@@ -131,6 +132,15 @@ class OllamaEmbedding(Embedding):
     ) -> List[List[float]]:
         if not texts:
             raise JiuWenBaseException(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.code, "Empty texts list provided")
+        callback_cls = kwargs.pop("callback_cls", BaseCallback)
+        if not isinstance(callback_cls, type) or not issubclass(callback_cls, BaseCallback):
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.code,
+                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.errmsg.format(
+                    method_name="OllamaEmbedding.embed_documents",
+                    argument="callback_cls",
+                ),
+            )
 
         # Filter out empty texts
         non_empty_texts = [text for text in texts if text.strip()]
@@ -148,14 +158,19 @@ class OllamaEmbedding(Embedding):
         # Process in batches if batch_size is specified
         if batch_size is not None and batch_size > 0:
             all_embeddings = []
-            for i in range(0, len(non_empty_texts), batch_size):
+            indices = list(range(0, len(non_empty_texts), batch_size))
+            callback_obj = callback_cls(seq=indices)
+            for i in indices:
                 j = i + batch_size
                 batch_texts = non_empty_texts[i:j]
                 batch_embeddings = await self._get_ollama_embedding(batch_texts, **kwargs)
                 all_embeddings.extend(batch_embeddings)
+                callback_obj(start_idx=i, end_idx=j, batch=batch_texts)
             embeddings = all_embeddings
         else:
+            callback_obj = callback_cls(seq=[None])
             embeddings = await self._get_ollama_embedding(non_empty_texts, **kwargs)
+            callback_obj(batch=non_empty_texts)
 
         return embeddings
 

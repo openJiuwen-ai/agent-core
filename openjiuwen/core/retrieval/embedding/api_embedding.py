@@ -15,6 +15,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.retrieval.common.callbacks import BaseCallback
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
 
 
@@ -93,6 +94,16 @@ class APIEmbedding(Embedding):
     ) -> List[List[float]]:
         if not texts:
             raise JiuWenBaseException(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.code, "Empty texts list provided")
+        callback_cls = kwargs.pop("callback_cls", BaseCallback)
+        if not isinstance(callback_cls, type) or not issubclass(callback_cls, BaseCallback):
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.code,
+                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.errmsg.format(
+                    method_name="APIEmbedding.embed_documents",
+                    argument="callback_cls",
+                ),
+            )
+
         non_empty = [t for t in texts if t.strip()]
         if len(non_empty) != len(texts):
             raise JiuWenBaseException(
@@ -108,10 +119,13 @@ class APIEmbedding(Embedding):
         if self.max_batch_size:
             bsz = min(bsz, self.max_batch_size)
         all_embeddings: List[List[float]] = []
-        for i in range(0, len(non_empty), bsz):
+        indices = list(range(0, len(non_empty), bsz))
+        callback_obj = callback_cls(seq=indices)
+        for i in indices:
             j = i + bsz
             batch = non_empty[i:j]
             all_embeddings.extend(await self._get_embeddings(batch, **kwargs))
+            callback_obj(start_idx=i, end_idx=j, batch=batch)
         return all_embeddings
 
     async def _get_embeddings(self, text: str | List[str], **kwargs) -> List[List[float]]:
