@@ -15,6 +15,8 @@ from openjiuwen.core.memory.manage.mem_model.memory_unit import UserProfileUnit,
     BaseMemoryUnit
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class UserProfileSearchParams(BaseModel):
@@ -66,15 +68,35 @@ class UserProfileManager(BaseMemoryManager):
 
     async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, Model] | None = None):
         if not isinstance(memory, UserProfileUnit):
-            raise ValueError('user profile add Must pass UserProfileUnit class.')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"user profile add Must pass UserProfileUnit class",
+            )
         if not memory.user_id:
-            raise ValueError('user_profile_manager add operation must pass user_id')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"user_profile_manager add operation must pass user_id",
+            )
         if not memory.scope_id:
-            raise ValueError('user_profile_manager add operation must pass scope_id')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"user_profile_manager add operation must pass scope_id",
+            )
         if not memory.profile_mem:
-            raise ValueError('user_profile_manager add operation must pass profile_mem')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"user_profile_manager add operation must pass profile_mem",
+            )
         if not memory.profile_type:
-            raise ValueError('user_profile_manager add operation must pass profile_type')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"user_profile_manager add operation must pass profile_type",
+            )
         conflict_info = await self._get_conflict_info(memory=memory, llm=llm)
         for conflict in conflict_info:
             conf_id = conflict['id']
@@ -266,7 +288,11 @@ class UserProfileManager(BaseMemoryManager):
             table_name = generate_idx_name(user_id, scope_id, mem_type)
             await self.semantic_recall.add_docs([(memory_id, mem)], table_name, scope_id=scope_id)
         else:
-            raise ValueError('vector store must not be None')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"vector store must not be None",
+            )
 
     async def _delete_vector_user_profile_memory(
             self, user_id: str, scope_id: str,
@@ -275,11 +301,19 @@ class UserProfileManager(BaseMemoryManager):
             table_name = generate_idx_name(user_id, scope_id, mem_type)
             await self.semantic_recall.delete_docs(memory_id, table_name)
         else:
-            raise ValueError('vector store must not be None')
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"vector store must not be None",
+            )
 
     async def _delete_vector_store_table(self, user_id: str, scope_id: str, mem_type):
         if self.semantic_recall:
             table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=mem_type)
             await self.semantic_recall.delete_table(table_name=table_name)
         else:
-            raise ValueError('vector store must not be None')
+            raise build_error(
+                StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"vector store must not be None",
+            )

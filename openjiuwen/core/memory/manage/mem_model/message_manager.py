@@ -10,6 +10,8 @@ from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryMa
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
 from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
 from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class MessageAddRequest(BaseModel):
@@ -35,11 +37,23 @@ class MessageManager:
 
     async def add(self, req: MessageAddRequest) -> str:
         if req.user_id is None:
-            raise ValueError('Must provide user_id')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="message",
+                error_msg=f"must provide user_id for add message",
+            )
         if req.scope_id is None:
-            raise ValueError('Must provide scope_id')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="message",
+                error_msg=f"must provide scope_id for add message",
+            )
         if req.content is None:
-            raise ValueError('Must provide content')
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="message",
+                error_msg=f"must provide content for add message",
+            )
         message_id = str(await self.data_id.generate_next_id(user_id=req.user_id))
         time = datetime.now(timezone.utc) if not req.timestamp else req.timestamp
         req.content = BaseMemoryManager.encrypt_memory_if_needed(self.crypto_key, req.content)
@@ -65,7 +79,11 @@ class MessageManager:
         if session_id is not None:
             filters['session_id'] = session_id
         if message_len <= 0:
-            raise ValueError('message_len Must bigger than zero')
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="message",
+                error_msg=f"message length Must bigger than zero for get message",
+            )
         messages = await self.sql_db.get_with_sort(table=self.message_table, filters=filters, order="DESC",
                                                    limit=message_len)
         result = []

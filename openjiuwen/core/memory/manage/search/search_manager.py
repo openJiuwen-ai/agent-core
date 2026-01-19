@@ -10,6 +10,8 @@ from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfile
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class SearchParams(BaseModel):
@@ -42,10 +44,18 @@ class SearchManager:
         search_type = params.search_type
         # search_type is illegal
         if search_type is not None and search_type not in self.all_mem_manager_list:
-            raise ValueError(f"{search_type} is not a valid search type")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=search_type,
+                error_msg=f"{search_type} is not a valid search type",
+            )
         # search_type is valid, but the corresponding manager has not been initialized
         if search_type and not self.managers.get(search_type):
-            raise ValueError(f"{search_type} memory manager not inited")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=search_type,
+                error_msg=f"{search_type} memory manager not inited",
+            )
         result = []
         # search_type not specified, traverse available managers
         if search_type is None:
@@ -77,18 +87,34 @@ class SearchManager:
 
     async def list_user_profile(self, user_id: str, scope_id: str, profile_type: Optional[str] = None) -> list[dict]:
         if MemoryType.USER_PROFILE.value not in self.managers:
-            raise ValueError(f"{MemoryType.USER_PROFILE.value} memory manager not inited")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.USER_PROFILE.value,
+                error_msg=f"{MemoryType.USER_PROFILE.value} memory manager not inited",
+            )
         if not isinstance(self.managers[MemoryType.USER_PROFILE.value], UserProfileManager):
-            raise ValueError(f"{MemoryType.USER_PROFILE.value} manager class is not UserProfileManager")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.USER_PROFILE.value,
+                error_msg=f"{MemoryType.USER_PROFILE.value} manager class is not UserProfileManager",
+            )
         return await self.managers[MemoryType.USER_PROFILE.value].list_user_profile(user_id=user_id,
                                                                                     scope_id=scope_id,
                                                                                     profile_type=profile_type)
 
     async def get_user_variable(self, user_id: str, scope_id: str, var_name: str) -> str | None:
         if MemoryType.VARIABLE.value not in self.managers:
-            raise ValueError(f"{MemoryType.VARIABLE.value} memory manager not inited")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.VARIABLE.value,
+                error_msg=f"{MemoryType.VARIABLE.value} memory manager not inited",
+            )
         if not isinstance(self.managers[MemoryType.VARIABLE.value], VariableManager):
-            raise ValueError(f"{MemoryType.VARIABLE.value} manager class is not VariableManager")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.VARIABLE.value,
+                error_msg=f"{MemoryType.VARIABLE.value} manager class is not VariableManager",
+            )
         res = await self.managers[MemoryType.VARIABLE.value].query_variable(user_id=user_id,
                                                                             scope_id=scope_id, name=var_name)
         if res is None:
@@ -97,7 +123,15 @@ class SearchManager:
 
     async def get_all_user_variable(self, user_id: str, scope_id: str) -> dict[str, Any]:
         if MemoryType.VARIABLE.value not in self.managers:
-            raise ValueError(f"{MemoryType.VARIABLE.value} memory manager not inited")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.VARIABLE.value,
+                error_msg=f"{MemoryType.VARIABLE.value} memory manager not inited",
+            )
         if not isinstance(self.managers[MemoryType.VARIABLE.value], VariableManager):
-            raise ValueError(f"{MemoryType.VARIABLE.value} manager class is not VariableManager")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.VARIABLE.value,
+                error_msg=f"{MemoryType.VARIABLE.value} manager class is not VariableManager",
+            )
         return await self.managers[MemoryType.VARIABLE.value].query_variable(user_id=user_id, scope_id=scope_id)

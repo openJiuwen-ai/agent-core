@@ -5,6 +5,7 @@ import pytest
 
 from openjiuwen.core.memory.store.impl.memory_chroma_vector_store import MemoryChromaVectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -66,13 +67,13 @@ class TestMemoryChromaVectorStore:
     def test_check_table_name(chroma_store):
         """测试检查表名"""
         # 测试空表名应该抛出异常
-        with pytest.raises(ValueError, match="Chroma collection name is required for test_operation"):
+        with pytest.raises(BaseError, match="chroma collection name is required for test_operation"):
             chroma_store.check_table_name(None, "test_operation")
 
-        with pytest.raises(ValueError, match="Chroma collection name is required for test_operation"):
+        with pytest.raises(BaseError, match="chroma collection name is required for test_operation"):
             chroma_store.check_table_name("", "test_operation")
 
-        with pytest.raises(ValueError, match="Chroma collection name is required for test_operation"):
+        with pytest.raises(BaseError, match="chroma collection name is required for test_operation"):
             chroma_store.check_table_name("   ", "test_operation")
 
     @pytest.mark.asyncio

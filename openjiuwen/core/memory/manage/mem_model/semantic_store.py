@@ -5,6 +5,8 @@ from typing import List, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class SemanticStore:
@@ -64,7 +66,11 @@ class SemanticStore:
             embeddings = await self.embedding_model.embed_documents(texts=texts)
             
             if len(memory_ids) != len(embeddings):
-                raise ValueError(f"memory_ids and embeddings must have same length")
+                raise build_error(
+                    StatusCode.MEMORY_STORE_VALIDATION_INVALID,
+                    store_type="semantic store",
+                    error_msg=f"memory_ids and embeddings must have same length",
+                )
             
             # Prepare data for vector store, content is not stored
             data = []

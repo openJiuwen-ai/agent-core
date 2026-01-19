@@ -5,6 +5,8 @@ from typing import Any, Dict, List
 
 from sqlalchemy import insert, update, select, delete, Table, MetaData, and_, or_, desc, asc
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 from openjiuwen.core.memory.store import BaseDbStore
 
@@ -57,7 +59,12 @@ class SqlDbStore:
         try:
             t = await self.get_table(table)
             if sort_by not in t.c:
-                raise ValueError(f"Sort column '{sort_by}' does not exist in table '{table}'")
+                raise build_error(
+                    StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                    memory_type="message",
+                    error_msg=f"sort column '{sort_by}' does not exist "
+                              f"in db store table '{table}'"
+                )
             clauses = [
                 t.c[col] == val for col, val in filters.items() if col in t.c
             ]
@@ -109,7 +116,12 @@ class SqlDbStore:
             clause_list = []
             for col, values in conditions.items():
                 if not isinstance(values, list):
-                    raise TypeError(f"condition[{col}] must be a List")
+                    raise build_error(
+                        StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                        memory_type="message",
+                        error_msg=f"db store condition[{col}] must be a list, "
+                                  f"(got {type(conditions[col]).__name__})",
+                    )
                 clause_list.append(t.c[col].in_(values))
             if clause_list:
                 stmt = stmt.where(and_(*clause_list))

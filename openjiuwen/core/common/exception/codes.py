@@ -154,6 +154,20 @@ class StatusCode(Enum):
     NUMBER_CONDITION_ERROR = (140003, "number condition error")
 
     # =========================
+    # Memory Engine 158000 – 159999
+    # =========================
+    MEMORY_REGISTER_STORE_EXECUTION_ERROR = (158000, "failed to register {store_type} to memory engine, "
+                                                     "reason: {error_msg}")
+    MEMORY_SET_CONFIG_EXECUTION_ERROR = (158001, "failed to set {config_type} config, reason: {error_msg}")
+    MEMORY_ADD_MEMORY_EXECUTION_ERROR = (158002, "failed to add {memory_type} memory, reason: {error_msg}")
+    MEMORY_DELETE_MEMORY_EXECUTION_ERROR = (158003, "failed to delete {memory_type} memory, reason: {error_msg}")
+    MEMORY_UPDATE_MEMORY_EXECUTION_ERROR = (158004, "failed to update {memory_type} memory, reason: {error_msg}")
+    MEMORY_GET_MEMORY_EXECUTION_ERROR = (158005, "failed to get {memory_type} memory, reason: {error_msg}")
+    MEMORY_STORE_INIT_FAILED = (158006, "failed to init {store_type}, reason: {error_msg}")
+    MEMORY_CONNECT_STORE_EXECUTION_ERROR = (158007, "failed to connect {store_type}, reason: {error_msg}")
+    MEMORY_STORE_VALIDATION_INVALID = (158008, "{store_type} validation failed, reason: {error_msg}")
+
+    # =========================
     # Foundation Tool 160000–169999
     # =========================
     TOOL_STREAM_NOT_SUPPORTED = (160001, "stream is not support, card={card}")

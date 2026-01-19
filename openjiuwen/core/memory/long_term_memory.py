@@ -30,6 +30,8 @@ from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.memory.manage.mem_model.scope_user_mapping_manager import ScopeUserMappingManager
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class MemInfo(BaseModel):
@@ -95,13 +97,25 @@ class LongTermMemory(metaclass=Singleton):
             embedding_model: Embedding model for semantic search
         """
         if kv_store is None:
-            raise ValueError("kv_store is required, cannot be None")
+            raise build_error(
+                StatusCode.MEMORY_REGISTER_STORE_EXECUTION_ERROR,
+                store_type="kv store",
+                error_msg="kv store is required, cannot be None",
+            )
 
         if vector_store is not None and not isinstance(vector_store, VectorStore):
-            raise TypeError("vector_store must be instance of VectorStore")
+            raise build_error(
+                StatusCode.MEMORY_REGISTER_STORE_EXECUTION_ERROR,
+                store_type="vector store",
+                error_msg="vector store must be instance of VectorStore",
+            )
 
         if db_store is not None and not isinstance(db_store, BaseDbStore):
-            raise TypeError("db_store must be instance of BaseDbStore")
+            raise build_error(
+                StatusCode.MEMORY_REGISTER_STORE_EXECUTION_ERROR,
+                store_type="db store",
+                error_msg="db store must be instance of BaseDbStore",
+            )
 
         self.kv_store = kv_store
         self.semantic_store = SemanticStore(vector_store=vector_store)
@@ -122,7 +136,11 @@ class LongTermMemory(metaclass=Singleton):
             config: memory engine configuration parameters
         """
         if not self.kv_store or not self.semantic_store or not self.db_store:
-            raise ValueError("Stores must be registered before setting config.")
+            raise build_error(
+                StatusCode.MEMORY_SET_CONFIG_EXECUTION_ERROR,
+                config_type="system",
+                error_msg="stores must be registered before setting config",
+            )
         self._sys_mem_config = config
         data_id_generator = DataIdManager()
         user_mem_store = UserMemStore(self.kv_store)
@@ -366,7 +384,12 @@ class LongTermMemory(metaclass=Singleton):
                 logger.debug("Successfully added memory units")
             except ValueError as e:
                 logger.error(f"Failed to add mem, error: {str(e)}")
-                raise ValueError(f"Failed to add mem, error: {str(e)}") from e
+                raise build_error(
+                    StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                    memory_type="unknown",
+                    error_msg=f"{str(e)}",
+                    cause=e
+                ) from e
             return
 
     async def get_recent_messages(
@@ -435,7 +458,11 @@ class LongTermMemory(metaclass=Singleton):
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
-                raise ValueError("Write manager is not initialized.")
+                raise build_error(
+                    StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                    memory_type="all",
+                    error_msg=f"write manager is not initialized",
+                )
             await self.write_manager.delete_mem_by_id(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
 
     async def delete_mem_by_user_id(self,
@@ -458,7 +485,11 @@ class LongTermMemory(metaclass=Singleton):
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
-                raise ValueError("Write manager is not initialized.")
+                raise build_error(
+                    StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                    memory_type="all",
+                    error_msg=f"write manager is not initialized",
+                )
             await self.write_manager.delete_mem_by_user_id(user_id=user_id, scope_id=scope_id)
 
     async def update_mem_by_id(self,
@@ -483,7 +514,11 @@ class LongTermMemory(metaclass=Singleton):
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
-                raise ValueError("Write manager is not initialized.")
+                raise build_error(
+                    StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR,
+                    memory_type="all",
+                    error_msg=f"write manager is not initialized",
+                )
             await self.write_manager.update_mem_by_id(user_id=user_id, scope_id=scope_id,
                                                       mem_id=mem_id, memory=memory)
 
@@ -509,7 +544,11 @@ class LongTermMemory(metaclass=Singleton):
             logger.error(f"Invalid scope_id format, scope_id={scope_id}")
             return {}
         if not self.search_manager:
-            raise ValueError("Search manager is not initialized.")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg=f"search manager is not initialized",
+            )
         ret: dict[str, str] = {}
         if names is None:
             return await self.search_manager.get_all_user_variable(user_id=user_id, scope_id=scope_id)
@@ -522,7 +561,11 @@ class LongTermMemory(metaclass=Singleton):
                 value = await self.search_manager.get_user_variable(user_id, scope_id, name)
                 ret[name] = value
             return ret
-        raise TypeError("names must be str | list[str] | None")
+        raise build_error(
+            StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+            memory_type="all",
+            error_msg=f"names must be str | list[str] | None",
+        )
 
     async def search_user_mem(self,
                               query: str,
@@ -538,7 +581,11 @@ class LongTermMemory(metaclass=Singleton):
         # Set the correct embedding model for this scope
         await self._set_semantic_store_embedding_model(scope_id)
         if not self.search_manager:
-            raise ValueError("Search Manager is not initialized")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg=f"search manager is not initialized",
+            )
         params = SearchParams(
             query=query,
             scope_id=scope_id,
@@ -610,7 +657,11 @@ class LongTermMemory(metaclass=Singleton):
             logger.error(f"Invalid scope_id format, scope_id={scope_id}")
             return []
         if not self.search_manager:
-            raise ValueError("Search manager is not initialized.")
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg=f"search manager is not initialized",
+            )
         search_data = await self.search_manager.list_user_mem(user_id=user_id, scope_id=scope_id,
                                                               nums=page_size, pages=page_idx)
 
@@ -619,9 +670,9 @@ class LongTermMemory(metaclass=Singleton):
 
         mem_results: list[MemInfo] = []
         for item in search_data:
-            mem_type = item.get("mem_type", MemoryType.USER_PROFILE)
+            mem_type = item.get("mem_type", MemoryType.UNKNOWN.value)
             # Apply filtering if type is not UNKNOWN
-            if memory_type == MemoryType.UNKNOWN or mem_type == memory_type:
+            if memory_type == MemoryType.UNKNOWN or mem_type == memory_type.value:
                 mem_results.append(
                     MemInfo(
                         mem_id=item["id"],
@@ -650,7 +701,11 @@ class LongTermMemory(metaclass=Singleton):
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.variable_manager:
-                raise ValueError("Variable manager is not initialized.")
+                raise build_error(
+                    StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR,
+                    memory_type="variable",
+                    error_msg=f"variable manager is not initialized",
+                )
             for name, value in variables.items():
                 await self.variable_manager.update_user_variable(
                     user_id=user_id,
@@ -677,7 +732,11 @@ class LongTermMemory(metaclass=Singleton):
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.variable_manager:
-                raise ValueError("Variable manager is not initialized.")
+                raise build_error(
+                    StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                    memory_type="variable",
+                    error_msg=f"variable manager is not initialized",
+                )
             for name in names:
                 await self.variable_manager.delete_user_variable(user_id=user_id, scope_id=scope_id, var_name=name)
             return True

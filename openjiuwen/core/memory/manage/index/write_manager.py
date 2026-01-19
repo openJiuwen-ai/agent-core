@@ -7,6 +7,8 @@ from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class WriteManager:
@@ -31,7 +33,11 @@ class WriteManager:
                 logger.warning(f"Unsupported memory type: {mem_type}")
 
         if has_inner_exception:
-            raise ValueError(f"Memory engine add mem has exception")
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"memory engine add mem has exception",
+            )
 
     async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str):
         mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)

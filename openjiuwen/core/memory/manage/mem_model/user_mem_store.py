@@ -5,6 +5,8 @@ from typing import Any
 from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class UserMemStore:
@@ -18,7 +20,11 @@ class UserMemStore:
 
     def __init__(self, kv_store_instance: BaseKVStore):
         if kv_store_instance is None:
-            raise ValueError("store instance is None in UserMemStore")
+            raise build_error(
+                StatusCode.MEMORY_STORE_INIT_FAILED,
+                store_type="user mem store",
+                error_msg=f"kv store instance is None in UserMemStore"
+            )
         self.kv_store = kv_store_instance
 
     async def write(self, user_id: str, scope_id: str, mem_id: str, data: dict[str, Any]) -> bool:
