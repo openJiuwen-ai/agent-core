@@ -315,7 +315,7 @@ class MilvusIndexer(Indexer):
         schema.add_field(
             field_name=self.text_field,
             datatype=DataType.VARCHAR,
-            max_length=4096,
+            max_length=65535,
             enable_analyzer=enable_bm25,
             analyzer_params={"tokenizer": "jieba"} if enable_bm25 else {},
         )
