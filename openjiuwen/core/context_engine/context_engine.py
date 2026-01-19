@@ -1,15 +1,21 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+import functools
+
+from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import ContextError
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.processor.base import ContextProcessor
 
 
 class ContextEngine:
@@ -28,6 +34,8 @@ class ContextEngine:
         If omitted, a default configuration is used.
     """
 
+    _PROCESSOR_MAP: Dict[str, type[ContextProcessor]] = dict()
+
     def __init__(self,
                  config: ContextEngineConfig = None,
                  ):
@@ -38,6 +46,7 @@ class ContextEngine:
                              context_id: str = "default_context_id",
                              session: Session = None,
                              *,
+                             processors: List[Tuple[str, BaseModel]] = None,
                              history_messages: List[BaseMessage] = None,
                              token_counter: TokenCounter = None,
                              mem_scope_id: str = None,
@@ -73,11 +82,17 @@ class ContextEngine:
         if full_context_id in self._context_pool:
             return self._context_pool.get(full_context_id)
 
+        processor_instances = [
+            self._create_processor(processor_type, processor_config)
+            for processor_type, processor_config in (processors or [])
+        ]
+
         context = SessionModelContext(
-            context_id=context_id,
-            session_id=session_id,
+            context_id,
+            session_id,
+            self._config,
             history_messages=history_messages or [],
-            window_size_limit=self._config.default_window_message_num,
+            processors=processor_instances,
             token_counter=token_counter,
         )
         self._context_pool[full_context_id] = context
@@ -171,3 +186,58 @@ class ContextEngine:
                           with this ID.
         """
         return
+
+    @classmethod
+    def register_processor(cls, processor_class=None):
+        """
+        Class-method decorator for plugging a new ContextProcessor into the engine.
+
+        Usage
+        -----
+        @register_processor(MyProcessorConfig)
+        class MyProcessor(ContextProcessor):
+            ...
+
+        The decorator performs two book-keeping actions:
+        1. Maps `processor_class.processor_type()` -> `processor_class`
+           so the engine can instantiate the processor at runtime.
+        2. Maps `processor_class.processor_type()` -> `config`
+           so the engine can validate/convert the user-supplied config dict.
+
+        Parameters
+        ----------
+        config : subclass of ContextProcessorConfig
+            Configuration schema that belongs to the processor being decorated.
+        processor_class : subclass of ContextProcessor, optional
+            When used as a **parameter-less** decorator this argument is None;
+            the inner function receives the real class object.
+
+        Returns
+        -------
+        callable
+            A decorator that accepts the processor class and returns it unchanged
+            after registration (allowing normal class-definition syntax).
+        """
+        @functools.wraps(processor_class)
+        def register_processor_class(processor_class: type[ContextProcessor]):
+            cls._PROCESSOR_MAP[processor_class.processor_type()] = processor_class
+            return processor_class
+        return register_processor_class
+
+    def _create_processor(self, processor_type: str, config: BaseModel):
+        processor_class = self._PROCESSOR_MAP.get(processor_type)
+        if not processor_class:
+            raise ContextError(
+                StatusCode.CONTEXT_CREATE_PROCESSOR_ERROR,
+                msg=f"cannot find processor type '{processor_type}'"
+            )
+
+        try:
+            processor = processor_class(config)
+        except Exception as e:
+            raise ContextError(
+                StatusCode.CONTEXT_CREATE_PROCESSOR_ERROR,
+                msg=f"init processor type '{processor_type}' failed"
+            ) from e
+
+        return processor
