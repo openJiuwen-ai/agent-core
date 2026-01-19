@@ -32,7 +32,7 @@ class CustomStream(WorkflowComponent):
     async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         values = inputs.get("value")
         async for item in values:
-            yield {"value": "tranform_{}".format(item)}
+            yield {"value": "transform_{}".format(item)}
 
 
 class TestSubWorkflowComp:
@@ -97,9 +97,9 @@ class TestSubWorkflowComp:
         main_workflow.add_stream_connection("sub_workflow_comp", "end")
         chunks = []
         expect_chunks = [
-            OutputSchema(type='end node stream', index=0, payload={'output': {'result': 'tranform_stream_1'}}),
-            OutputSchema(type='end node stream', index=1, payload={'output': {'result': 'tranform_stream_2'}}),
-            OutputSchema(type='end node stream', index=2, payload={'output': {'result': 'tranform_stream_3'}})]
+            OutputSchema(type='end node stream', index=0, payload={'output': {'result': 'transform_stream_1'}}),
+            OutputSchema(type='end node stream', index=1, payload={'output': {'result': 'transform_stream_2'}}),
+            OutputSchema(type='end node stream', index=2, payload={'output': {'result': 'transform_stream_3'}})]
 
         async for chunk in main_workflow.stream(inputs={}, session=WorkflowSession(),
                                                 stream_modes=[BaseStreamMode.OUTPUT]):
