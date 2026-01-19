@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.retrieval import MilvusIndexer
 from openjiuwen.core.retrieval import IndexConfig
 from openjiuwen.core.retrieval import TextChunk
@@ -137,6 +138,20 @@ class TestMilvusIndexer:
             mock_ensure.return_value = None
             result = await indexer.build_index(chunks, config)
             assert result is False  # Should fail
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
+    async def test_build_index_with_duplicate_doc_ids(self, mock_client_class):
+        """Test vector index but without embedding model"""
+        mock_client = MagicMock(query=MagicMock(return_value=[dict(document_id="doc_1")]))
+        mock_client_class.return_value = mock_client
+
+        indexer = MilvusIndexer(milvus_uri="http://localhost:19530")
+        chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
+        config = IndexConfig(index_name="test_index", index_type="vector")
+
+        with pytest.raises(JiuWenBaseException, match="some documents with same doc_id already exist"):
+            await indexer.build_index(chunks, config)
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")

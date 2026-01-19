@@ -92,6 +92,35 @@ class ChromaIndexer(Indexer):
         """Build index"""
         try:
             collection_name = config.index_name
+            vector_store_config = VectorStoreConfig(
+                collection_name=collection_name, database_name=kwargs.pop("database_name", "")
+            )
+            vector_store = ChromaVectorStore(
+                config=vector_store_config,
+                chroma_path=self.chroma_path,
+                text_field=self.text_field,
+                vector_field=self.vector_field,
+                sparse_vector_field=self.sparse_vector_field,
+                metadata_field=self.metadata_field,
+                doc_id_field=self.doc_id_field,
+            )
+            collection = vector_store.collection
+
+            # Raise exception if any doc_id already exists
+            all_doc_ids = sorted({chunk.doc_id for chunk in chunks})
+            duplicate_doc_ids = []
+            filter_values = {None, ""}
+            for doc_id in all_doc_ids:
+                if doc_id not in filter_values and collection.get(where={self.doc_id_field: doc_id}):
+                    duplicate_doc_ids.append(doc_id)
+            if duplicate_doc_ids:
+                raise JiuWenBaseException(
+                    error_code=StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR.code,
+                    message=StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR.errmsg.format(
+                        error_msg="some documents with same doc_id already exist, if they are the same documents, "
+                        f"please consider updating instead of adding. {duplicate_doc_ids=}"
+                    ),
+                )
 
             # If vector index is needed, generate embeddings
             embeddings = None
@@ -105,20 +134,6 @@ class ChromaIndexer(Indexer):
                 embeddings = await embed_model.embed_documents(texts, callback_cls=self.doc_index_callback)
                 for chunk, embedding in zip(chunks, embeddings):
                     chunk.embedding = embedding
-
-            vector_store_config = VectorStoreConfig(
-                collection_name=collection_name, database_name=kwargs.pop("database_name", "")
-            )
-
-            vector_store = ChromaVectorStore(
-                config=vector_store_config,
-                chroma_path=self.chroma_path,
-                text_field=self.text_field,
-                vector_field=self.vector_field,
-                sparse_vector_field=self.sparse_vector_field,
-                metadata_field=self.metadata_field,
-                doc_id_field=self.doc_id_field,
-            )
 
             # Convert TextChunk to ChromaDB required fields
             data = []
@@ -139,6 +154,10 @@ class ChromaIndexer(Indexer):
             logger.info(f"Successfully built index {collection_name} with {len(chunks)} chunks")
             return True
         except Exception as e:
+            # Stored data could be damaged with runtime errors ignored, therefore it is raised
+            should_raise = [StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR.code]
+            if isinstance(e, JiuWenBaseException) and getattr(e, "error_code", None) in should_raise:
+                raise e
             logger.error(f"Failed to build index: {e}")
             return False
 
@@ -180,13 +199,9 @@ class ChromaIndexer(Indexer):
                 collection.get,
                 where={self.doc_id_field: doc_id},
             )
-            results2 = await asyncio.to_thread(
-                collection.get,
-            )
 
             if not results or not results.get("ids") or len(results["ids"]) == 0:
                 logger.info(f"No entries found for doc_id={doc_id}")
-                logger.info(f"{index_name=} {results2=}")
                 return False
 
             # Delete matching records

@@ -74,6 +74,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
+        mock_store.collection = MagicMock(get=MagicMock(return_value=[]))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -82,6 +83,7 @@ class TestChromaIndexer:
             TextChunk(id_="2", text="chunk 2", doc_id="doc_1"),
         ]
         config = IndexConfig(index_name="test_index", index_type="vector")
+        await indexer.delete_index("doc_1", "test_index")
 
         result = await indexer.build_index(chunks, config, mock_embed_model)
         assert result is True
@@ -98,6 +100,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
+        mock_store.collection = MagicMock(get=MagicMock(return_value=[]))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -118,6 +121,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
+        mock_store.collection = MagicMock(get=MagicMock(return_value=[]))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -134,10 +138,16 @@ class TestChromaIndexer:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
-    async def test_build_index_vector_type_without_embed_model(self, mock_client_class):
+    @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.ChromaVectorStore")
+    async def test_build_index_vector_type_without_embed_model(self, mock_store_class, mock_client_class):
         """Test vector index but without embedding model"""
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
+
+        mock_store = AsyncMock()
+        mock_store.add = AsyncMock()
+        mock_store.collection = MagicMock(get=MagicMock(return_value=[]))
+        mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
         chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
@@ -161,6 +171,20 @@ class TestChromaIndexer:
             mock_store_class.side_effect = Exception("ChromaDB error")
             result = await indexer.build_index(chunks, config, mock_embed_model)
             assert result is False
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
+    async def test_build_index_with_duplicate_doc_ids(self, mock_client_class):
+        """Test vector index but without embedding model"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
+        config = IndexConfig(index_name="test_index", index_type="vector")
+
+        with pytest.raises(JiuWenBaseException, match="some documents with same doc_id already exist"):
+            await indexer.build_index(chunks, config)
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
