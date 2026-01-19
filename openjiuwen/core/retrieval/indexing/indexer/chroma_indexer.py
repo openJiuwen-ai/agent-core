@@ -132,7 +132,7 @@ class ChromaIndexer(Indexer):
             duplicate_doc_ids = []
             filter_values = {None, ""}
             for doc_id in all_doc_ids:
-                if doc_id not in filter_values and collection.get(where={self.doc_id_field: doc_id}):
+                if doc_id not in filter_values and collection.get(where={self.doc_id_field: doc_id}).get("ids"):
                     duplicate_doc_ids.append(doc_id)
             if duplicate_doc_ids:
                 raise JiuWenBaseException(
