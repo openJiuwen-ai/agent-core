@@ -279,7 +279,7 @@ class StatusCode(Enum):
     TOOLCHAIN_AGENT_PARAM_ERROR = (
         170000, "toolchain agent parameter error, reason: {error_msg}"
     )
-    TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR = (
+    TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR = (
         170001, "toolchain optimizer_backword execution error, reason: {error_msg}"
     )
     TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR = (

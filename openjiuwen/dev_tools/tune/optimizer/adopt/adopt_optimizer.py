@@ -261,8 +261,8 @@ class PartialOptimizer(InstructionOptimizer):
         local_gradients = self._calculate_textual_gradient_by_bad_cases(param, tools)
         if not local_gradients:
             raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"Calculate local gradient of parameter: {name} failed."
                 )
             )

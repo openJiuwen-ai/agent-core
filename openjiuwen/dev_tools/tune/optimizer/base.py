@@ -68,8 +68,8 @@ class BaseOptimizer:
             import traceback
             traceback.print_exc()
             raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWORD_EXECUTION_ERROR.errmsg.format(
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR.code,
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR.errmsg.format(
                     error_msg=f"{str(e)}"
                 )
             )
