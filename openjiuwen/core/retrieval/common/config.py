@@ -8,7 +8,7 @@ All configuration classes are unified in this file.
 
 from typing import Optional, Literal, Dict, Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 
 class KnowledgeBaseConfig(BaseModel):

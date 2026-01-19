@@ -41,12 +41,6 @@ class StatusCode(Enum):
     COMPONENT_LLM_TEMPLATE_PROCESS_ERROR = (101006, "component llm_template process error, reason: {error_msg}")
     COMPONENT_LLM_TEMPLATE_INVALID = (101007, "component llm_template is invalid, reason: {error_msg}")
 
-    ## LLM Service 102001 - 102999
-    MODEL_SERVICE_CONFIG_ERROR = (102001, "model service config error, reason: {error_msg}")
-    MODEL_CONFIG_ERROR = (102002, "model config error, reason: {error_msg}")
-    MODEL_INVOKE_PARAM_ERROR = (102003, "model invoke parameter error, reason: {error_msg}")
-    MODEL_CLIENT_CONFIG_INVALID = (102004, "model client_config is invalid, reason: {error_msg}")
-
     ## IntentDetectionComponent 101050 - 101069
     COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR = (101050,
         "component intent_detection_input parameter error, reason: {error_msg}")
@@ -350,6 +344,11 @@ class StatusCode(Enum):
     # Foundation - Model API 181000 - 181999
     MODEL_PROVIDER_INVALID = (181000, "model provider is invalid, reason: {error_msg}")
     MODEL_CALL_FAILED = (181001, "model call failed, reason: {error_msg}")
+    MODEL_SERVICE_CONFIG_ERROR = (181002, "model service config error, reason: {error_msg}")
+    MODEL_CONFIG_ERROR = (181003, "model config error, reason: {error_msg}")
+    MODEL_INVOKE_PARAM_ERROR = (181004, "model invoke parameter error, reason: {error_msg}")
+    MODEL_CLIENT_CONFIG_INVALID = (181005, "model client_config is invalid, reason: {error_msg}")
+
     # Foundation - Tool Definition and Execution 182000 - 182999
     PLUGIN_EXECUTION_RUNTIME_ERROR = (182000, "plugin execution runtime error, reason: {error_msg}")
     PLUGIN_REQUEST_TIMEOUT = (182001, "plugin request timeout ({timeout}s), reason: {error_msg}")
