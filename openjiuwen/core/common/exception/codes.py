@@ -14,89 +14,83 @@ class StatusCode(Enum):
     # Workflow Component 100000–109999
     # =========================
 
-    # Interactive & Recovery 100000–100029
-    INTERACTIVE_INPUT_INVALID = (100000, "interactive input is invalid")
-    INTERACTIVE_UPDATE_INVALID = (100001, "interactive input update is invalid")
-    COMPONENT_NOT_EXECUTABLE = (100002, "workflow component is not executable")
-    CONTROLLER_INTERRUPTED = (100003, "controller interrupted")
-    INTERACTIVE_STREAM_NOT_SUPPORTED = (100004, "interactive operation is not supported for stream processing")
-    COMPONENT_EXECUTION_ERROR = (
-        100005,
-        "component execution error, node_id: {node_id}, ability: {ability}, reason: {error_msg}",
-    )
-    WORKFLOW_STATE_EXISTS = (100006, "workflow state already exists and cleanup is disabled")
+    # Workflow: Interactive And Recovery 100000 - 100029
+    WORKFLOW_INPUT_INVALID = (100000, "workflow input is invalid, reason: {error_msg}")
+    WORKFLOW_STATE_RUNTIME_ERROR = (100001, "workflow state runtime error, reason: {error_msg}")
+    WORKFLOW_EXECUTION_NOT_SUPPORT = (100002, "workflow execution is not supported, reason: {error_msg}")
+    WORKFLOW_INTERRUPT_EXECUTION_ERROR = (100003, "workflow interrupt execution error, reason: {error_msg}")
+    WORKFLOW_STREAM_NOT_SUPPORT = (100004, "workflow stream is not supported, reason: {error_msg}")
+    WORKFLOW_COMPONENT_RUNTIME_ERROR = (100005, "workflow component runtime error, reason: {error_msg}")
+    WORKFLOW_STATE_INVALID = (100006, "workflow state is invalid, reason: {error_msg}")
 
-    # Execution 100100–100199
-    WORKFLOW_EXECUTION_ERROR = (100100, "workflow execution error, reason: {error_msg}")
-    WORKFLOW_INVOKE_TIMEOUT = (100101, "workflow invocation timeout ({timeout}s)")
-    WORKFLOW_STREAM_TIMEOUT = (100102, "workflow stream timeout ({timeout}s)")
+    # Workflow: Execution 100100 - 100199
+    WORKFLOW_EXECUTION_RUNTIME_ERROR = (100100, "workflow execution runtime error, reason: {error_msg}")
+    WORKFLOW_INVOKE_TIMEOUT = (100101, "workflow invoke timeout ({timeout}s), reason: {error_msg}")
+    WORKFLOW_STREAM_EXECUTION_TIMEOUT = (100102, "workflow stream_execution timeout ({timeout}s), reason: {error_msg}")
 
-    # =========================
-    # Built-in Workflow Components 101000–109999
-    # =========================
+    # Workflow Component - Builtin-workflow Component 101000 - 109999
+    ## LLMComponent  101000 - 101049
+    COMPONENT_LLM_TEMPLATE_CONFIG_ERROR = (101000, "component llm_template config error, reason: {error_msg}")
+    COMPONENT_LLM_CONFIG_INVALID = (101001, "component llm_config is invalid, reason: {error_msg}")
+    COMPONENT_LLM_CONFIG_ERROR = (101002, "component llm config error, reason: {error_msg}")
+    COMPONENT_LLM_INVOKE_CALL_FAILED = (101003, "component llm_invoke call failed, reason: {error_msg}")
+    COMPONENT_LLM_EXECUTION_PROCESS_ERROR = (101004, "component llm_execution process error, reason: {error_msg}")
+    COMPONENT_LLM_INIT_FAILED = (101005, "component llm initialization failed, reason: {error_msg}")
+    COMPONENT_LLM_TEMPLATE_PROCESS_ERROR = (101006, "component llm_template process error, reason: {error_msg}")
+    COMPONENT_LLM_TEMPLATE_INVALID = (101007, "component llm_template is invalid, reason: {error_msg}")
 
-    # LLM Component 101000–101049
-    LLM_COMPONENT_TEMPLATE_CONFIG_ERROR = (101000, "llm component template config error, reason: {error_msg}")
-    LLM_COMPONENT_RESPONSE_FORMAT_CONFIG_ERROR = (
-        101001,
-        "llm component response format config error, reason: {error_msg}",
-    )
-    LLM_COMPONENT_OUTPUT_CONFIG_ERROR = (101002, "llm component output config error, reason: {error_msg}")
-    LLM_COMPONENT_CALL_FAILED = (101003, "llm component call failed, reason: {error_msg}")
-    LLM_COMPONENT_JSON_SCHEMA_OUTPUT_ERROR = (
-        101004,
-        "llm component json schema output error, reason: {error_msg}",
-    )
-    LLM_COMPONENT_INIT_FAILED = (101005, "llm component initialization failed, reason: {error_msg}")
-    LLM_COMPONENT_TEMPLATE_ASSEMBLE_ERROR = (
-        101006,
-        "llm component template assemble error, reason: {error_msg}",
-    )
-    PROMPT_JSON_SCHEMA_INVALID = (101007, "prompt json schema is invalid")
+    ## IntentDetectionComponent 101050 - 101069
+    COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR = (101050,
+        "component intent_detection_input parameter error, reason: {error_msg}")
+    COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED = (101051,
+        "component intent_detection_llm initialization failed, reason: {error_msg}")
+    COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED = (101052,
+                                                   "component intent_detection_invoke call failed, reason: {error_msg}")
 
-    # Intent Detection Component 101050–101069
-    INTENT_DETECTION_INPUT_INVALID = (101050, "intent detection input is invalid")
-    INTENT_DETECTION_INIT_FAILED = (101051, "intent detection initialization failed, reason: {error_msg}")
-    INTENT_DETECTION_CALL_FAILED = (101052, "intent detection llm call failed, reason: {error_msg}")
+    ## QuestionComponent 101070 - 101099
+    COMPONENT_QUESTIONER_INPUT_PARAM_ERROR = (101070,
+        "component questioner_input parameter error, reason: {error_msg}")
+    COMPONENT_QUESTIONER_CONFIG_ERROR = (101071, "component questioner config error, reason: {error_msg}")
+    COMPONENT_QUESTIONER_INPUT_INVALID = (101072, "component questioner_input is invalid, reason: {error_msg}")
+    COMPONENT_QUESTIONER_STATE_INIT_FAILED = (101073,
+        "component questioner_state initialization failed, reason: {error_msg}")
+    COMPONENT_QUESTIONER_RUNTIME_ERROR = (101074, "component questioner runtime error, reason: {error_msg}")
+    COMPONENT_QUESTIONER_INVOKE_CALL_FAILED = (101075, "component questioner_invoke call failed, reason: {error_msg}")
+    COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR = (101076,
+        "component questioner_execution process error, reason: {error_msg}")
 
-    # Question Component 101070–101099
-    QUESTION_INPUT_INVALID = (101070, "question input is invalid")
-    QUESTION_COMPONENT_CONFIG_ERROR = (101071, "question component config error, reason: {error_msg}")
-    QUESTION_EMPTY_IN_DIRECT_REPLY = (101072, "question is empty in direct reply mode")
-    QUESTION_STATE_INIT_FAILED = (101073, "question component state initialization failed")
-    QUESTION_RESPONSE_EXCEEDED = (101074, "question component response exceeded limit")
-    QUESTION_LLM_CALL_FAILED = (101075, "question component llm call failed, reason: {error_msg}")
-    QUESTION_RESPONSE_PARSE_ERROR = (101076, "question response parse error, reason: {error_msg}")
+    ## BranchComponent  101100 - 101119
+    COMPONENT_BRANCH_PARAM_ERROR = (101100, "component branch parameter error, reason: {error_msg}")
+    COMPONENT_BRANCH_EXECUTION_ERROR = (101101, "component branch execution error, reason: {error_msg}")
 
-    # Branch Component 101100–101119
-    BRANCH_ADD_FAILED = (101100, "branch add failed, reason: {error_msg}")
-    BRANCH_CONDITION_TYPE_INVALID = (101101, "branch condition type is invalid")
-    BRANCH_NOT_FOUND = (101102, "branch not found")
+    ## SetVariableComponent  101120 - 101139
+    COMPONENT_SET_VAR_INPUT_PARAM_ERROR = (101120, "component set_var_input parameter error, reason: {error_msg}")
+    COMPONENT_SET_VAR_INIT_FAILED = (101121, "component set_var initialization failed, reason: {error_msg}")
 
-    # Set Variable Component 101120–101139
-    SET_VARIABLE_MAPPING_ERROR = (101120, "set variable mapping error, reason: {error_msg}")
+    ## SubWorkflowComponent  101140 - 101149
+    COMPONENT_SUB_WORKFLOW_INIT_FAILED = (101140, "component sub_workflow initialization failed, reason: {error_msg}")
+    COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR = (101141, "component sub_workflow runtime error, reason: {error_msg}")
 
-    # Sub Workflow Component 101140–101149
-    SUB_WORKFLOW_INIT_FAILED = (101140, "sub workflow initialization failed, reason: {error_msg}")
-    SUB_WORKFLOW_EXECUTION_ERROR = (101141, "sub workflow execution error, reason: {error_msg}")
+    ## LoopComponent  101150 - 101159
+    COMPONENT_LOOP_NOT_SUPPORT = (101150, "component loop is not supported, reason: {error_msg}")
+    COMPONENT_LOOP_EXECUTION_ERROR = (101151, "component loop execution error, reason: {error_msg}")
+    COMPONENT_LOOP_INPUT_INVALID = (101152, "component loop_input is invalid, reason: {error_msg}")
+    COMPONENT_LOOP_CONFIG_ERROR = (101153, "component loop config error, reason: {error_msg}")
 
-    # Loop Component 101150–101159
-    LOOP_NESTED_NOT_SUPPORTED = (101150, "nested loop is not supported")
-    LOOP_EXECUTION_ERROR = (101151, "loop execution error, reason: {error_msg}")
-    LOOP_GROUP_EMPTY = (101152, "loop group is empty")
-    LOOP_INPUT_TYPE_INVALID = (101153, "loop input type is invalid")
-    LOOP_INPUT_KEY_MISSING = (101154, "loop input key is missing")
-    LOOP_TYPE_INVALID = (101155, "loop type is invalid")
-    LOOP_START_NODE_MISSING = (101156, "loop start node is missing")
-    LOOP_END_NODE_MISSING = (101157, "loop end node is missing")
+    ## BreakComponent  101180 - 101189
+    COMPONENT_BREAK_EXECUTION_ERROR = (101180, "component break execution error, reason: {error_msg}")
 
-    # Break Component 101180–101189
-    BREAK_COMPONENT_INIT_FAILED = (101180, "break component initialization failed")
+    ## ToolComponent  102000 - 102019
+    COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
+    COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
+    COMPONENT_TOOL_INIT_FAILED = (102002, "component tool initialization failed, reason: {error_msg}")
 
-    # Tool Component 102000–102019
-    TOOL_BIND_FAILED = (102000, "tool bind failed")
-    TOOL_INPUT_INVALID = (102001, "tool input is invalid")
-    TOOL_PARAM_INVALID = (102002, "tool parameter is invalid")
+    ## StartComponent  102100 - 102119
+    COMPONENT_START_INPUT_INVALID = (102100, "component start_input is invalid, reason: {error_msg}")
+    COMPONENT_START_CONFIG_ERROR = (102101, "component start config error, reason: {error_msg}")
+
+    ## EndComponent  102120 - 102149
+    COMPONENT_END_INIT_FAILED = (102120, "component end initialization failed, reason: {error_msg}")
 
     # =========================
     # Workflow Graph & Orchestration 110000–119999
@@ -203,26 +197,90 @@ class StatusCode(Enum):
     # MCPTool execution 160321-160399
     TOOL_MCP_EXECUTION_ERROR = (160321, "execute {interface} failed, reason={reason}, card={card}")
 
+
     # =========================
-    # Common Capabilities 180000–189999
+    # Optimization Toolchain 170000 - 179999
     # =========================
 
-    MODEL_PROVIDER_INVALID = (181000, "model provider is invalid")
+    # Optimization Toolchain - Prompt Self-optimization 170000 - 170999
+    TOOLCHAIN_AGENT_PARAM_ERROR = (
+        170000, "toolchain agent parameter error, reason: {error_msg}"
+    )
+    TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR = (
+        170001, "toolchain optimizer_backword execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR = (
+        170002, "toolchain optimizer_update execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_OPTIMIZER_PARAM_ERROR = (170003, "toolchain optimizer parameter error, reason: {error_msg}")
+    TOOLCHAIN_EVALUATOR_EXECUTION_ERROR = (170004, "toolchain evaluator execution error, reason: {error_msg}")
+    TOOLCHAIN_TRAINER_EXECUTION_ERROR = (170005, "toolchain trainer execution error, reason: {error_msg}")
+
+    # Optimization Toolchain - End-to-end Performance Optimization 171000 - 171999
+    # Optimization Toolchain - AgentRL 172000 - 172999
+
+    # Optimization Toolchain - Prompt Builder 173000 - 173999
+    TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR = (
+        173000, "toolchain meta_template execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR = (
+        173001, "toolchain feedback_template execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR = (
+        173002, "toolchain bad_case_template execution error, reason: {error_msg}"
+    )
+
+    # =========================
+    # Foundation 180000 – 189999
+    # =========================
+
+    # Foundation - Prompt Template 180000 - 180999
+    PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED = (180000,
+                                             "prompt assembler_variable initialization failed, reason: {error_msg}")
+    PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR = (
+        180001, "prompt assembler_template parameter error, reason: {error_msg}")
+    PROMPT_TEMPLATE_RUNTIME_ERROR = (180002, "prompt template runtime error, reason: {error_msg}")
+    PROMPT_TEMPLATE_NOT_FOUND = (180003, "prompt template not found, reason: {error_msg}")
+    PROMPT_TEMPLATE_INVALID = (180004, "prompt template is invalid, reason: {error_msg}")
+
+    # Foundation - Model API 181000 - 181999
+    MODEL_PROVIDER_INVALID = (181000, "model provider is invalid, reason: {error_msg}")
     MODEL_CALL_FAILED = (181001, "model call failed, reason: {error_msg}")
+    MODEL_SERVICE_CONFIG_ERROR = (181002, "model service config error, reason: {error_msg}")
+    MODEL_CONFIG_ERROR = (181003, "model config error, reason: {error_msg}")
+    MODEL_INVOKE_PARAM_ERROR = (181004, "model invoke parameter error, reason: {error_msg}")
+    MODEL_CLIENT_CONFIG_INVALID = (181005, "model client_config is invalid, reason: {error_msg}")
 
-    LOG_PATH_SENSITIVE = (183000, "log path is sensitive")
-    LOG_PATH_CREATE_FAILED = (183001, "log path create failed, reason: {error_msg}")
-    LOG_CONFIG_LOAD_FAILED = (183002, "log config load failed, reason: {error_msg}")
-    LOG_CONFIG_INVALID = (183003, "log config is invalid")
-    LOG_FILE_OPERATION_FAILED = (183004, "log file operation failed, reason: {error_msg}")
+    # Foundation - Tool Definition and Execution 182000 - 182999
+    PLUGIN_EXECUTION_RUNTIME_ERROR = (182000, "plugin execution runtime error, reason: {error_msg}")
+    PLUGIN_REQUEST_TIMEOUT = (182001, "plugin request timeout ({timeout}s), reason: {error_msg}")
+    PLUGIN_RESPONSE_PROCESS_ERROR = (182002, "plugin response process error, reason: {error_msg}")
+    PLUGIN_RESPONSE_INVALID = (182003,
+                               "plugin response is invalid, reason: {error_msg}")
+    PLUGIN_RESPONSE_CALL_FAILED = (182004, "plugin response call failed, reason: {error_msg}")
+    PLUGIN_INPUT_PARAM_ERROR = (182005, "plugin input parameter error, reason: {error_msg}")
+    PLUGIN_RESTFUL_API_NOT_SUPPORT = (182006,
+                                      "plugin restful_api is not supported, reason: {error_msg}")
 
-    SSL_CONTEXT_CREATE_FAILED = (188000, "ssl context create failed, reason: {error_msg}")
-    USER_CONFIG_LOAD_FAILED = (188001, "user config load failed, reason: {error_msg}")
-    JSON_LOAD_FAILED = (188002, "json load failed, reason: {error_msg}")
-    JSON_DUMP_FAILED = (188003, "json dump failed, reason: {error_msg}")
-    URL_INVALID = (188004, "url is invalid")
-    SSL_CERT_INVALID = (188005, "ssl certificate is invalid")
+    # Foundation - Logger 183000 - 183999
+    COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
+    COMMON_LOG_PATH_INIT_FAILED = (183001, "common log_path initialization failed, reason: {error_msg}")
+    COMMON_LOG_CONFIG_PROCESS_ERROR = (183002, "common log_config process error, reason: {error_msg}")
+    COMMON_LOG_CONFIG_INVALID = (183003, "common log_config is invalid, reason: {error_msg}")
+    COMMON_LOG_EXECUTION_RUNTIME_ERROR = (183004, "common log_execution runtime error, reason: {error_msg}")
 
+    # Foundation - Exception Handling 184000 - 184999
+    # Foundation - Support Mcp Tool 185000 - 185999
+
+    # Foundation - Common Utility 188000 - 188999
+    COMMON_SSL_CONTEXT_INIT_FAILED = (188000, "common ssl_context initialization failed, reason: {error_msg}")
+    COMMON_USER_CONFIG_PROCESS_ERROR = (188001, "common user_config process error, reason: {error_msg}")
+    COMMON_JSON_INPUT_PROCESS_ERROR = (188002, "common json_input process error, reason: {error_msg}")
+    COMMON_JSON_EXECUTION_PROCESS_ERROR = (188003, "common json_execution process error, reason: {error_msg}")
+    COMMON_URL_INPUT_INVALID = (188004, "common url_input is invalid, reason: {error_msg}")
+    COMMON_SSL_CERT_INVALID = (188005, "common ssl_cert is invalid, reason: {error_msg}")
+
+    # Foundation - Schema 189000 - 189999
     SCHEMA_VALIDATE_INVALID = (189001, "validate data with schema failed, reason={reason}, data={data}")
     SCHEMA_FORMAT_INVALID = (189002, "format data with schema failed, reason={reason}, data={data}")
 
