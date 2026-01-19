@@ -66,7 +66,9 @@ class HybridRetriever(Retriever):
         if score_threshold is not None and mode != "vector":
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID.code,
-                "score_threshold is only supported when mode='vector'",
+                StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID.errmsg.format(
+                    error_msg="score_threshold is only supported when mode='vector'"
+                ),
             )
 
         if mode == "hybrid":
@@ -87,7 +89,9 @@ class HybridRetriever(Retriever):
             if self.embed_model is None:
                 raise JiuWenBaseException(
                     StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.code,
-                    "embed_model is required for vector search",
+                    StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.errmsg.format(
+                        error_msg="embed_model is required for vector search"
+                    ),
                 )
 
             query_vector = await self.embed_model.embed_query(query)
@@ -110,7 +114,10 @@ class HybridRetriever(Retriever):
                 filters=None,
             )
         else:
-            raise JiuWenBaseException(StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT.code, f"Unsupported mode: {mode}")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT.code,
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT.errmsg.format(error_msg=f"Unsupported mode: {mode}"),
+            )
 
         # Convert to RetrievalResult
         retrieval_results = []

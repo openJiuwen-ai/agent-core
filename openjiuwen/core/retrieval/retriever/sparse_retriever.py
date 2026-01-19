@@ -56,7 +56,9 @@ class SparseRetriever(Retriever):
         if mode != "sparse":
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT.code,
-                f"SparseRetriever only supports 'sparse' mode, got {mode}",
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT.errmsg.format(
+                    error_msg=f"SparseRetriever only supports 'sparse' mode, got {mode}"
+                ),
             )
 
         # Execute sparse search

@@ -66,7 +66,11 @@ class TextChunker(Chunker):
                 if tiktoken is None:
                     raise JiuWenBaseException(
                         StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR.code,
-                        "chunk_unit='token' requires embed_model with tokenizer or tiktoken to be installed",
+                        StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR.errmsg.format(
+                            error_msg=(
+                                "chunk_unit='token' requires embed_model with tokenizer or tiktoken to be installed"
+                            )
+                        ),
                     )
                 try:
                     tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -74,7 +78,9 @@ class TextChunker(Chunker):
                 except Exception as exc:
                     raise JiuWenBaseException(
                         StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR.code,
-                        f"Failed to load tokenizer for token-based chunking: {exc}",
+                        StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR.errmsg.format(
+                            error_msg=f"Failed to load tokenizer for token-based chunking: {exc}"
+                        ),
                     ) from exc
 
             # Check if chunk_size needs adjustment
