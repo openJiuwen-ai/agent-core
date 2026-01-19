@@ -21,10 +21,10 @@ class BranchComponent(WorkflowComponent):
 
     def add_branch(self, condition: Union[str, Callable[[], bool], Condition], target: Union[str, list[str]],
                    branch_id: str = None):
-        self._validata_branch_param(condition)
-        self._validata_branch_param(target)
+        self._validate_branch_param(condition)
+        self._validate_branch_param(target)
         for item in target:
-            self._validata_branch_param(item)
+            self._validate_branch_param(item)
         self._router.add_branch(condition, target, branch_id=branch_id)
 
     def router(self) -> Callable[..., Union[Hashable, list[Hashable]]]:
@@ -41,7 +41,7 @@ class BranchComponent(WorkflowComponent):
     def skip_trace(self) -> bool:
         return True
 
-    def _validata_branch_param(self, param_value: Any):
+    def _validate_branch_param(self, param_value: Any):
         if not param_value:
             error_msg = f"{param_value} is invalid , can not be None or empty"
             raise JiuWenBaseException(
