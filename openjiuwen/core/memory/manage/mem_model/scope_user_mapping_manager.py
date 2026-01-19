@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Any
-from openjiuwen.core.memory.store.sql_db_store import SqlDbStore
+from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
 
 
 class ScopeUserMappingManager:

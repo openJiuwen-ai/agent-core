@@ -5,11 +5,11 @@ from typing import Optional, Any
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
-from openjiuwen.core.memory.manage.user_profile_manager import UserProfileManager
-from openjiuwen.core.memory.manage.variable_manager import VariableManager
-from openjiuwen.core.memory.mem_unit.memory_unit import MemoryType
-from openjiuwen.core.memory.store.user_mem_store import UserMemStore
+from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
+from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
+from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 
 
 class SearchParams(BaseModel):

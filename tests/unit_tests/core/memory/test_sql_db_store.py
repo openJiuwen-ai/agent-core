@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
-from openjiuwen.core.memory.store.sql_db_store import SqlDbStore
-from openjiuwen.core.memory.store.message import create_tables
+from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
+from openjiuwen.core.memory.manage.mem_model.message import create_tables
 
 logger = logging.getLogger(__name__)
 

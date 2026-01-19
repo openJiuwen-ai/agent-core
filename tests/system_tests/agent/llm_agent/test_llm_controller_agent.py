@@ -14,7 +14,6 @@ from openjiuwen.core.workflow import IntentDetectionComponent, IntentDetectionCo
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.memory.config.config import MemoryEngineConfig
-from openjiuwen.core.memory.embed_models import APIEmbedModel
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
 from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore as MilvusVectorStore
@@ -305,19 +304,11 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
 
     async def _create_memory_engine(self):
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        embed_model = APIEmbedModel(
-            base_url=os.getenv("EMBED_API_BASE"),
-            model_name=os.getenv("EMBED_MODEL_NAME"),
-            api_key=os.getenv("EMBED_API_KEY"),
-            timeout=int(os.getenv("EMBED_TIMEOUT", 60)),
-            max_retries=int(os.getenv("EMBED_MAX_RETRIES", 3)),
-        )
         semantic_store = MilvusSemanticStore(
             milvus_host=os.getenv("MILVUS_HOST"),
             milvus_port=os.getenv("MILVUS_PORT"),
             collection_name=os.getenv("MILVUS_COLLECTION_NAME"),
             embedding_dims=os.getenv("EMBEDDING_MODEL_DIMENTION", 1024),
-            embed_model=embed_model,
             token=os.getenv("MILVUS_TOKEN", None)
         )
         db_user = os.getenv("DB_USER")

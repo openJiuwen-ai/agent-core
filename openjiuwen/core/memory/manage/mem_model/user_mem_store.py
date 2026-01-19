@@ -4,7 +4,7 @@ import json
 from typing import Any
 from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.memory.mem_unit.memory_unit import MemoryType
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 
 
 class UserMemStore:

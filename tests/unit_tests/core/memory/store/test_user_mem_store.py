@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import shutil
 import struct
 import secrets
 import time
 from datetime import datetime, timezone
 import pytest
-from openjiuwen.core.memory.store.user_mem_store import UserMemStore
+from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from tests.unit_tests.core.memory.store.mock_kv_store import MockKVStore
 
 

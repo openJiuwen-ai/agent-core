@@ -9,27 +9,27 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.memory.common.distributed_lock import DistributedLock
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig, AgentMemoryConfig
-from openjiuwen.core.memory.generation.generation import Generator
-from openjiuwen.core.memory.manage.data_id_manager import DataIdManager
-from openjiuwen.core.memory.manage.message_manager import MessageManager, MessageAddRequest
-from openjiuwen.core.memory.manage.user_profile_manager import UserProfileManager
-from openjiuwen.core.memory.manage.variable_manager import VariableManager
-from openjiuwen.core.memory.manage.write_manager import WriteManager
-from openjiuwen.core.memory.mem_unit.memory_unit import BaseMemoryUnit, MemoryType
-from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
-from openjiuwen.core.memory.search.search_manager.search_manager import SearchManager, SearchParams
+from openjiuwen.core.memory.process.extract.generation import Generator
+from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
+from openjiuwen.core.memory.manage.mem_model.message_manager import MessageManager, MessageAddRequest
+from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
+from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
+from openjiuwen.core.memory.manage.index.write_manager import WriteManager
+from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, MemoryType
+from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.manage.search.search_manager import SearchManager, SearchParams
 from openjiuwen.core.memory.store.base_db_store import BaseDbStore
 from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
-from openjiuwen.core.memory.store.semantic_store import SemanticStore
-from openjiuwen.core.memory.store.message import create_tables
-from openjiuwen.core.memory.store.sql_db_store import SqlDbStore
-from openjiuwen.core.memory.store.user_mem_store import UserMemStore
+from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
+from openjiuwen.core.memory.manage.mem_model.message import create_tables
+from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
+from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.foundation.llm import UserMessage, BaseMessage, Model
 from openjiuwen.core.common.utils.singleton import Singleton
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.memory.manage.scope_user_mapping_manager import ScopeUserMappingManager
+from openjiuwen.core.memory.manage.mem_model.scope_user_mapping_manager import ScopeUserMappingManager
 
 
 class MemInfo(BaseModel):

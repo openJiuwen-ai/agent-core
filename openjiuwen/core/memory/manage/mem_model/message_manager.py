@@ -6,9 +6,9 @@ from typing import Dict, Any, Tuple, Optional
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
-from openjiuwen.core.memory.manage.data_id_manager import DataIdManager
-from openjiuwen.core.memory.store.sql_db_store import SqlDbStore
+from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
+from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
 from openjiuwen.core.foundation.llm import BaseMessage
 
 

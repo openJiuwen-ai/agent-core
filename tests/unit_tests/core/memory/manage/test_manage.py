@@ -9,13 +9,13 @@ import pytest
 from sqlalchemy import engine, text
 
 os.environ['HF_ENDPOINT'] = "https://hf-mirror.com"
-from openjiuwen.core.memory.manage.data_id_manager import DataIdManager
-from openjiuwen.core.memory.manage.user_profile_manager import UserProfileManager
-from openjiuwen.core.memory.manage.variable_manager import VariableManager
-from openjiuwen.core.memory.manage.write_manager import WriteManager
-from openjiuwen.core.memory.mem_unit.memory_unit import UserProfileUnit, VariableUnit, MemoryType
+from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
+from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
+from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
+from openjiuwen.core.memory.manage.index.write_manager import WriteManager
+from openjiuwen.core.memory.manage.mem_model.memory_unit import UserProfileUnit, VariableUnit, MemoryType
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.memory.store.user_mem_store import UserMemStore
+from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.memory.store.base_semantic_store import BaseSemanticStore
 from tests.unit_tests.core.memory.store.mock_kv_store import MockKVStore
 

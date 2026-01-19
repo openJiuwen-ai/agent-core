@@ -8,7 +8,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.common.crypto import encrypt, decrypt, NONCE_LENGTH, TAG_LENGTH
 
-from openjiuwen.core.memory.mem_unit.memory_unit import BaseMemoryUnit
+from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit
 
 
 class BaseMemoryManager(ABC):

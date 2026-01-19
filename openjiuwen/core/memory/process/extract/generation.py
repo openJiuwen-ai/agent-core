@@ -5,11 +5,12 @@ from dataclasses import dataclass
 from typing import Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.config.config import AgentMemoryConfig
-from openjiuwen.core.memory.generation.categorizer import Categorizer
-from openjiuwen.core.memory.generation.memory_info import ExtractedData
-from openjiuwen.core.memory.generation.user_profile_extractor import UserProfileExtractor
-from openjiuwen.core.memory.generation.variable_extractor import ComprehensionExtractor
-from openjiuwen.core.memory.mem_unit.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit, UserProfileUnit
+from openjiuwen.core.memory.process.extract.categorizer import Categorizer
+from openjiuwen.core.memory.process.extract.memory_info import ExtractedData
+from openjiuwen.core.memory.process.extract.user_profile_extractor import UserProfileExtractor
+from openjiuwen.core.memory.process.extract.variable_extractor import ComprehensionExtractor
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit, \
+    UserProfileUnit
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
 from openjiuwen.core.foundation.llm.model import Model
 

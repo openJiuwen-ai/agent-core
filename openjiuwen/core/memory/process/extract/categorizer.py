@@ -4,7 +4,7 @@ import json
 from typing import List, Tuple
 from openjiuwen.core.foundation.llm import BaseMessage, JsonOutputParser, Model
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.memory.generation.common import build_model_input
+from openjiuwen.core.memory.process.extract.common import build_model_input
 from openjiuwen.core.memory.prompt.categorizer import CATEGORIZATION_PROMPT
 
 

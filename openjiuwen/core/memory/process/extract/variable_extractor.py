@@ -4,8 +4,8 @@ from typing import Any, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.config.config import AgentMemoryConfig
-from openjiuwen.core.memory.generation.common import build_model_input
-from openjiuwen.core.memory.generation.memory_info import (
+from openjiuwen.core.memory.process.extract.common import build_model_input
+from openjiuwen.core.memory.process.extract.memory_info import (
     ExtractedData,
     ExtractedDataType
 )

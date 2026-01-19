@@ -8,12 +8,13 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.common.base import generate_idx_name, parse_memory_hit_infos
-from openjiuwen.core.memory.generation.conflict_resolution import ConflictResolution
-from openjiuwen.core.memory.manage.base_memory_manager import BaseMemoryManager
-from openjiuwen.core.memory.manage.data_id_manager import DataIdManager
-from openjiuwen.core.memory.mem_unit.memory_unit import UserProfileUnit, MemoryType, ConflictType, BaseMemoryUnit
-from openjiuwen.core.memory.store.semantic_store import SemanticStore
-from openjiuwen.core.memory.store.user_mem_store import UserMemStore
+from openjiuwen.core.memory.manage.update.conflict_resolution import ConflictResolution
+from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
+from openjiuwen.core.memory.manage.mem_model.memory_unit import UserProfileUnit, MemoryType, ConflictType, \
+    BaseMemoryUnit
+from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
+from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 
 
 class UserProfileSearchParams(BaseModel):
