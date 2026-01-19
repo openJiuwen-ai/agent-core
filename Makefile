@@ -81,6 +81,7 @@ ifeq ($(strip $(CHANGED_FILES)),)
 endif
 
 format: has-staged-changes
+	-@ruff check --select I $(CHANGED_FILES)
 	-@ruff format --check $(CHANGED_FILES)
 
 lint: has-staged-changes
@@ -93,6 +94,7 @@ spelling: has-staged-changes
 	-@codespell $(CHANGED_FILES)
 
 fix-format: has-staged-changes
+	-@ruff check --select I --fix $(CHANGED_FILES)
 	-@ruff format $(CHANGED_FILES)
 
 fix-lint: has-staged-changes
