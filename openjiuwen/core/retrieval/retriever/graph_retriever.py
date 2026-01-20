@@ -66,12 +66,20 @@ class GraphRetriever(Retriever):
         allowed = self._allowed_modes().get(self.index_type)
         if allowed is None:
             raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT.code, f"Unsupported index_type={self.index_type}"
+                StatusCode.RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT.code,
+                StatusCode.RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT.errmsg.format(
+                    error_msg=f"Unsupported index_type={self.index_type}"
+                ),
             )
         if mode not in allowed:
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID.code,
-                f"mode={mode} is incompatible with index_type={self.index_type}; allowed modes: {sorted(allowed)}",
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID.errmsg.format(
+                    error_msg=(
+                        f"mode={mode} is incompatible with index_type={self.index_type}; "
+                        f"allowed modes: {sorted(allowed)}"
+                    )
+                ),
             )
 
     def _retriever_supports_mode(self, retriever: Retriever, mode: str) -> bool:
@@ -114,8 +122,10 @@ class GraphRetriever(Retriever):
             if not self._retriever_supports_mode(fixed_retriever, mode):
                 raise JiuWenBaseException(
                     StatusCode.RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT.code,
-                    f"Provided {'chunk' if is_chunk else 'triple'} retriever "
-                    f"{fixed_retriever.__class__.__name__} does not support mode={mode}",
+                    StatusCode.RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT.errmsg.format(
+                        error_msg=f"Provided {'chunk' if is_chunk else 'triple'} retriever "
+                        f"{fixed_retriever.__class__.__name__} does not support mode={mode}"
+                    ),
                 )
             return fixed_retriever
 
@@ -123,7 +133,9 @@ class GraphRetriever(Retriever):
         if not self.vector_store:
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND.code,
-                "vector_store is required for dynamic retriever creation",
+                StatusCode.RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND.errmsg.format(
+                    error_msg="vector_store is required for dynamic retriever creation"
+                ),
             )
 
         collection_name = self.chunk_collection if is_chunk else self.triple_collection
@@ -132,7 +144,9 @@ class GraphRetriever(Retriever):
             collection_type = "chunk" if is_chunk else "triple"
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND.code,
-                f"{collection_type}_collection is required for dynamic retriever creation",
+                StatusCode.RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND.errmsg.format(
+                    error_msg=f"{collection_type}_collection is required for dynamic retriever creation"
+                ),
             )
 
         # Create corresponding retriever based on mode
@@ -141,7 +155,10 @@ class GraphRetriever(Retriever):
 
             if not self.embed_model:
                 raise JiuWenBaseException(
-                    StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.code, "embed_model is required for vector mode"
+                    StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.code,
+                    StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.errmsg.format(
+                        error_msg="embed_model is required for vector mode"
+                    ),
                 )
             retriever = VectorRetriever(
                 vector_store=self.vector_store,
@@ -191,7 +208,9 @@ class GraphRetriever(Retriever):
         if score_threshold is not None and mode != "vector":
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID.code,
-                "score_threshold is only supported when mode='vector'",
+                StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID.errmsg.format(
+                    error_msg="score_threshold is only supported when mode='vector'"
+                ),
             )
         effective_threshold = score_threshold
 

@@ -33,11 +33,16 @@ class AgenticRetriever(Retriever):
         if graph_retriever is None:
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_RETRIEVER_GRAPH_RETRIEVER_NOT_FOUND.code,
-                "graph_retriever is required for AgenticRetriever",
+                StatusCode.RETRIEVAL_RETRIEVER_GRAPH_RETRIEVER_NOT_FOUND.errmsg.format(
+                    error_msg="graph_retriever is required for AgenticRetriever"
+                ),
             )
         if llm_client is None:
             raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND.code, "llm_client is required for AgenticRetriever"
+                StatusCode.RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND.code,
+                StatusCode.RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND.errmsg.format(
+                    error_msg="llm_client is required for AgenticRetriever"
+                ),
             )
         self.graph_retriever = graph_retriever
         self.llm = llm_client
@@ -96,7 +101,10 @@ class AgenticRetriever(Retriever):
     ) -> List[RetrievalResult]:
         if top_k is None:
             raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_RETRIEVER_TOP_K_NOT_FOUND.code, "top_k is required for AgenticRetriever"
+                StatusCode.RETRIEVAL_RETRIEVER_TOP_K_NOT_FOUND.code,
+                StatusCode.RETRIEVAL_RETRIEVER_TOP_K_NOT_FOUND.errmsg.format(
+                    error_msg="top_k is required for AgenticRetriever"
+                ),
             )
         topk = top_k
         resolved_mode: Literal["vector", "sparse", "hybrid"] = mode if mode is not None else self._default_mode

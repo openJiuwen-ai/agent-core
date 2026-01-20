@@ -37,7 +37,10 @@ class ConfigManager:
         path_obj = Path(path)
         if not path_obj.exists():
             raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_UTILS_CONFIG_FILE_NOT_FOUND.code, f"Configuration file does not exist: {path}"
+                StatusCode.RETRIEVAL_UTILS_CONFIG_FILE_NOT_FOUND.code,
+                StatusCode.RETRIEVAL_UTILS_CONFIG_FILE_NOT_FOUND.errmsg.format(
+                    error_msg=f"Configuration file does not exist: {path}"
+                ),
             )
 
         suffix = path_obj.suffix.lower()
@@ -54,7 +57,9 @@ class ConfigManager:
         else:
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_UTILS_CONFIG_FORMAT_NOT_SUPPORT.code,
-                f"Unsupported configuration file format: {suffix}",
+                StatusCode.RETRIEVAL_UTILS_CONFIG_FORMAT_NOT_SUPPORT.errmsg.format(
+                    error_msg=f"Unsupported configuration file format: {suffix}"
+                ),
             )
 
         # Create configuration object based on data structure
@@ -65,7 +70,10 @@ class ConfigManager:
     def save_to_file(self, path: str) -> None:
         """Save configuration to file"""
         if "knowledge_base" not in self._configs:
-            raise JiuWenBaseException(StatusCode.RETRIEVAL_UTILS_CONFIG_NOT_FOUND.code, "No configuration to save")
+            raise JiuWenBaseException(
+                StatusCode.RETRIEVAL_UTILS_CONFIG_NOT_FOUND.code,
+                StatusCode.RETRIEVAL_UTILS_CONFIG_NOT_FOUND.errmsg.format(error_msg="No configuration to save"),
+            )
 
         kb_config: KnowledgeBaseConfig = self._configs["knowledge_base"]
         data = kb_config.model_dump()
@@ -85,7 +93,9 @@ class ConfigManager:
         else:
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_UTILS_CONFIG_FORMAT_NOT_SUPPORT.code,
-                f"Unsupported configuration file format: {suffix}",
+                StatusCode.RETRIEVAL_UTILS_CONFIG_FORMAT_NOT_SUPPORT.errmsg.format(
+                    error_msg=f"Unsupported configuration file format: {suffix}"
+                ),
             )
 
     def get_config(self, config_type: Type[T]) -> Optional[T]:
@@ -100,7 +110,10 @@ class ConfigManager:
         config = self._configs.get("knowledge_base")
         if not config:
             raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_UTILS_CONFIG_PROCESS_ERROR.code, "Knowledge base configuration not loaded"
+                StatusCode.RETRIEVAL_UTILS_CONFIG_PROCESS_ERROR.code,
+                StatusCode.RETRIEVAL_UTILS_CONFIG_PROCESS_ERROR.errmsg.format(
+                    error_msg="Knowledge base configuration not loaded"
+                ),
             )
         return config
 

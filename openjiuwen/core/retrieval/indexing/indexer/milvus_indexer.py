@@ -81,8 +81,7 @@ class MilvusIndexer(Indexer):
             raise JiuWenBaseException(
                 StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.code,
                 StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.errmsg.format(
-                    method_name="ChromaIndexer",
-                    argument="doc_index_callback",
+                    error_msg=f"doc_index_callback in MilvusIndexer must be a subclass of BaseCallback, got {type(doc_index_callback)}"
                 ),
             )
 
@@ -141,7 +140,9 @@ class MilvusIndexer(Indexer):
                 if not embed_model:
                     raise JiuWenBaseException(
                         StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND.code,
-                        "embed_model is required for vector/hybrid index type",
+                        StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND.errmsg.format(
+                            error_msg="embed_model is required for vector/hybrid index type"
+                        ),
                     )
                 texts = [chunk.text for chunk in chunks]
                 embeddings = await embed_model.embed_documents(texts, callback_cls=self.doc_index_callback)
@@ -382,7 +383,9 @@ class MilvusIndexer(Indexer):
             if dimension is None or dimension == 0:
                 raise JiuWenBaseException(
                     StatusCode.RETRIEVAL_INDEXING_DIMENSION_NOT_FOUND.code,
-                    "dimension is required for vector/hybrid index type",
+                    StatusCode.RETRIEVAL_INDEXING_DIMENSION_NOT_FOUND.errmsg.format(
+                        error_msg="dimension is required for vector/hybrid index type"
+                    ),
                 )
 
             schema.add_field(
