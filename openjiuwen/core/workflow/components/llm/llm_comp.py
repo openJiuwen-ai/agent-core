@@ -11,6 +11,7 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
+from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.context_engine import ModelContext
@@ -235,10 +236,16 @@ class OutputFormatter:
                 f"json response format, output config should contain at least one field")
 
         parsed_json = JsonParser.parse_json_content(response_content)
-        json_schema = SchemaGenerator.generate_json_schema(outputs_config)
-        OutputFormatter._validate_json_schema(parsed_json, json_schema, response_content)
 
-        return OutputFormatter._extract_configured_fields(parsed_json, outputs_config)
+        config_type = outputs_config.get("type")
+        if isinstance(config_type, str) and config_type == "object":
+            SchemaUtils.validate_with_schema(parsed_json, outputs_config)
+            return SchemaUtils.format_with_schema(parsed_json, outputs_config)
+        else:
+            json_schema = SchemaGenerator.generate_json_schema(outputs_config)
+            OutputFormatter._validate_json_schema(parsed_json, json_schema, response_content)
+
+            return OutputFormatter._extract_configured_fields(parsed_json, outputs_config)
 
     @staticmethod
     def _validate_json_schema(parsed_json: dict, json_schema: dict, original_content: str) -> None:
@@ -354,7 +361,11 @@ class LLMPromptFormatter:
             prompt = instruction.replace("${query}", query)
 
         elif res_type == "json":
-            json_schema = SchemaGenerator.generate_json_schema(output_config)
+            config_type = output_config.get("type")
+            if isinstance(config_type, str) and config_type == "object":
+                json_schema = output_config
+            else:
+                json_schema = SchemaGenerator.generate_json_schema(output_config)
             instruction = (
                     response_format.get("jsonInstruction")
                     or LLMPromptFormatter._DEFAULT_JSON_INSTRUCTION
@@ -438,6 +449,9 @@ class LLMExecutable(ComponentExecutable):
         if not output_config:
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_CONFIG_ERROR,
                                            "output config is empty")
+        config_type = output_config.get("type")
+        if isinstance(config_type, str) and config_type == "object":
+            return
         for param, value in output_config.items():
             if not param:
                 ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_CONFIG_ERROR,
