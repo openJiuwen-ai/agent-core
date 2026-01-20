@@ -5,6 +5,7 @@
 import pytest
 
 from openjiuwen.core.common.constants.enums import ControllerType
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
 from openjiuwen.core.application.workflow_agent import WorkflowAgent
@@ -20,9 +21,9 @@ class TestRunnerIntegration:
     @staticmethod
     def _build_workflow(name, id, version):
         workflow_card = WorkflowCard(
-                id=id,
-                version=version,
-                name=name,
+            id=id,
+            version=version,
+            name=name,
         )
         flow = Workflow(card=workflow_card)
         flow.set_start_comp("start", MockStartNode("start"),
@@ -68,17 +69,14 @@ class TestRunnerIntegration:
             client = RemoteAgent(agent_id="workflow-single_agent")
             Runner.resource_mgr.add_agent(AgentCard(id="remote-workflow-single_agent"), agent=client)
             response = await Runner.run_agent("remote-workflow-single_agent", {"query": "London"})
-            print(f"response: {response}")
+            logger.info(f"response: {response}")
             assert response['result_type'] == 'answer'
             assert response['output'].result == {'result': 'London'}
             assert response['output'].state.name == 'COMPLETED'
 
         finally:
             from openjiuwen.core.runner.runner import Runner
-            Runner.resource_mgr.remove_agent(id="remote-workflow-single_agent")
-            Runner.resource_mgr.remove_agent(id="workflow-single_agent")
+            Runner.resource_mgr.remove_agent(agent_id="remote-workflow-single_agent")
+            Runner.resource_mgr.remove_agent(agent_id="workflow-single_agent")
 
             await Runner.stop()
-
-
-

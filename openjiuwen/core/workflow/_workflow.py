@@ -29,6 +29,7 @@ from openjiuwen.core.common.schema.workflow_spec import CompIOConfig, NodeSpec
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.graph.graph import PregelGraph
 
+
 @dataclass
 class EdgeTopology:
     """Edge topology context for ability inference."""
@@ -46,15 +47,18 @@ class EdgeTopology:
                 set(self.target_stream_map.keys())
         )
 
+
 class ConnectionType(Enum):
     """Type of workflow connection."""
     CONNECTION = "connection"
     STREAM_CONNECTION = "stream_connection"
 
+
 class BaseWorkflow:
     def __init__(self, workflow_config: WorkflowConfig = None, new_graph: Graph = None):
         self._graph = new_graph if new_graph else PregelGraph()
-        self._workflow_config = workflow_config if workflow_config else WorkflowConfig(card=WorkflowCard(id=uuid.uuid4().hex))
+        self._workflow_config = workflow_config if workflow_config else WorkflowConfig(
+            card=WorkflowCard(id=uuid.uuid4().hex))
         self._workflow_spec = self._workflow_config.spec
         self._stream_actor = StreamGraph()
         self._session = ProxySession()
@@ -214,12 +218,12 @@ class BaseWorkflow:
                 raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.code,
                                           StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
                                               error_msg=f"main workflow config is not exit,"
-                                                     f" main workflow_id={session.main_workflow_id()}"))
+                                                        f" main workflow_id={session.main_workflow_id()}"))
             if session.workflow_nesting_depth() > main_workflow_config.workflow_max_nesting_depth:
                 raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.code,
                                           StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
                                               error_msg=f"workflow nesting hierarchy is too big, must <= "
-                                                     f"{main_workflow_config.workflow_max_nesting_depth}"))
+                                                        f"{main_workflow_config.workflow_max_nesting_depth}"))
         self._session.set_session(session)
         return self._graph.compile(session, context=context)
 

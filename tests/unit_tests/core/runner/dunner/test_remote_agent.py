@@ -56,7 +56,7 @@ class TestRunnerIntegration:
     async def test_agent_normal_lifecycle(self):
         """Test normal single_agent lifecycle: creation, invocation, deletion"""
         # Create and activate adapter
-        print("=== Test 0: Agent lifecycle ===")
+        logger.info("=== Test 0: Agent lifecycle ===")
         await Runner.start()
         weather_adapter = AgentAdapter(agent_id="weather-single_agent")
         weather_adapter.start()
@@ -84,7 +84,7 @@ class TestRunnerIntegration:
 
             # 3. Test single_agent removal
             logger.info("=== Testing single_agent removal ===")
-            Runner.resource_mgr.remove_agent(id="remote-weather-single_agent")
+            Runner.resource_mgr.remove_agent(agent_id="remote-weather-single_agent")
 
             # 4. Verify exception is thrown after deletion
             with pytest.raises(JiuWenBaseException) as e:
@@ -101,7 +101,7 @@ class TestRunnerIntegration:
 
     async def test_agent_request_cancellation(self):
         """Test request cancellation (triggering CancelledError) by sending message to a non-existent single_agent"""
-        print("=== Test 1: Manual task cancellation ===")
+        logger.info("=== Test 1: Manual task cancellation ===")
         await Runner.start()
 
         try:
@@ -133,7 +133,7 @@ class TestRunnerIntegration:
 
     async def test_agent_request_timeout(self):
         """Test request timeout (triggering TimeoutError) by sending message to a non-existent single_agent"""
-        print("=== Test 2: Request timeout ===")
+        logger.info("=== Test 2: Request timeout ===")
         await Runner.start()
         try:
             client = RemoteAgent(agent_id="slow-single_agent")
@@ -148,7 +148,7 @@ class TestRunnerIntegration:
 
     async def test_agent_runner_shutdown_cancels_clients(self):
         """Verify that unfinished client calls receive CancelledError when Runner is closed early"""
-        print("=== Test 3: Runner shutdown cancels clients ===")
+        logger.info("=== Test 3: Runner shutdown cancels clients ===")
         await Runner.start()
 
         try:
@@ -168,15 +168,18 @@ class TestRunnerIntegration:
             with pytest.raises(JiuWenBaseException) as e:
                 await task
             # 如果关闭太快，请求发的时候reply已经是close则会收到cancel异常，如果collector已经创建被取消则报错runner stop
-            assert e.value.error_code == StatusCode.RUNNER_STOPPED.code or e.value.error_code == StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.code
+            assert (e.value.error_code == StatusCode.RUNNER_STOPPED.code or
+                    e.value.error_code == StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.code)
 
             logger.info("Client received CancelledError as expected when Runner stopped")
         finally:
             pass
 
     async def test_agent_adapter_exception_propagation(self):
-        """Test that error information is correctly passed to the client when single_agent adapter returns an exception"""
-        print("=== Test 4: Adapter error propagation ===")
+        """Test that error information is correctly passed to the client when
+        single_agent adapter returns an exception.
+        """
+        logger.info("=== Test 4: Adapter error propagation ===")
         await Runner.start()
         original_handler = AgentAdapter._handle_invoke
 
@@ -208,7 +211,7 @@ class TestRunnerIntegration:
 
     async def test_agent_call_without_runner_start_should_raise_exception(self):
         """Verify that Runner should report an error if not started"""
-        print("=== Test 5: Runner not started ===")
+        logger.info("=== Test 5: Runner not started ===")
         try:
             client = RemoteAgent(agent_id="slow-single_agent")
             Runner.resource_mgr.add_agent(AgentCard(id="slow-single_agent"), agent=client)
@@ -226,7 +229,7 @@ class TestRunnerIntegration:
     @pytest.mark.skip(reason="Skip performance tests")
     async def test_concurrent_vs_sequential_performance_comparison(self):
         """Compare performance differences between concurrent and sequential calls"""
-        print("=== Test 6: Performance Comparison ===")
+        logger.info("=== Test 6: Performance Comparison ===")
         await Runner.start()
         # Create adapter and client
         weather_adapter = AgentAdapter(agent_id="perf-single_agent")
@@ -240,7 +243,7 @@ class TestRunnerIntegration:
             test_data = [{"city": f"City_{i}"} for i in range(10)]
 
             # 1. Sequential call test
-            print("Testing sequential calls...")
+            logger.info("Testing sequential calls...")
             start_time = time.time()
             sequential_results = []
             for data in test_data:
@@ -249,7 +252,7 @@ class TestRunnerIntegration:
             sequential_time = time.time() - start_time
 
             # 2. Concurrent call test - Using smaller concurrent batches
-            print("Testing concurrent calls...")
+            logger.info("Testing concurrent calls...")
             start_time = time.time()
             concurrent_results = await asyncio.gather(
                 *[Runner.run_agent("perf-single_agent", data) for data in test_data]
@@ -257,8 +260,8 @@ class TestRunnerIntegration:
             concurrent_time = time.time() - start_time
 
             # Performance comparison analysis
-            print(f"Sequential calls: {sequential_time:.3f}s for {len(test_data)} requests")
-            print(f"Concurrent calls: {concurrent_time:.3f}s for {len(test_data)} requests")
+            logger.info(f"Sequential calls: {sequential_time:.3f}s for {len(test_data)} requests")
+            logger.info(f"Concurrent calls: {concurrent_time:.3f}s for {len(test_data)} requests")
             # 验证结果正确性
             assert len(sequential_results) == len(test_data)
             assert len(concurrent_results) == len(test_data)
@@ -266,10 +269,11 @@ class TestRunnerIntegration:
 
             # If concurrent is indeed faster than sequential, record performance improvement
             if concurrent_time < sequential_time:
-                print(f"✓ Concurrent is {sequential_time / concurrent_time:.2f}x faster than sequential")
+                logger.info(f"✓ Concurrent is {sequential_time / concurrent_time:.2f}x faster than sequential")
             else:
-                print(
-                    f"⚠ Concurrent is {concurrent_time / sequential_time:.2f}x slower than sequential (within acceptable range)")
+                logger.info(
+                    f"⚠ Concurrent is {concurrent_time / sequential_time:.2f}x slower than sequential (within "
+                    f"acceptable range)")
 
         finally:
             await weather_adapter.stop()
@@ -277,8 +281,10 @@ class TestRunnerIntegration:
 
     @pytest.mark.skip(reason="Skip performance tests")
     async def test_concurrent_streaming(self):
-        """Test streaming calls 10 times, each call returns 5 chunks, performance comparison between concurrent and sequential calls"""
-        print("=== Test 9: Concurrent Streaming vs Regular Calls ===")
+        """ Test streaming calls 10 times, each call returns 5 chunks, performance comparison between
+        concurrent and sequential calls
+        """
+        logger.info("=== Test 9: Concurrent Streaming vs Regular Calls ===")
         await Runner.start()
 
         # Save original method
@@ -302,7 +308,7 @@ class TestRunnerIntegration:
             test_data = [{"city": f"StreamCity_{i}"} for i in range(10)]
 
             # 1. Sequential streaming call test
-            print("Testing sequential streaming calls...")
+            logger.info("Testing sequential streaming calls...")
             start_time = time.time()
             sequential_chunks = []
             for data in test_data:
@@ -313,7 +319,7 @@ class TestRunnerIntegration:
             sequential_time = time.time() - start_time
 
             # 2. Concurrent streaming call test
-            print("Testing concurrent streaming calls...")
+            logger.info("Testing concurrent streaming calls...")
 
             start_time = time.time()
 
@@ -336,11 +342,13 @@ class TestRunnerIntegration:
             total_concurrent_chunks = sum(len(result) for result in concurrent_results)
 
             # Performance comparison
-            print(
-                f"Sequential streaming: {sequential_time:.3f}s for {len(test_data)} requests, {total_sequential_chunks} chunks")
-            print(
-                f"Concurrent streaming: {concurrent_time:.3f}s for {len(test_data)} requests, {total_concurrent_chunks} chunks")
-            print(f"Performance improvement: {sequential_time / concurrent_time:.2f}x faster")
+            logger.info(
+                f"Sequential streaming: {sequential_time:.3f}s for {len(test_data)} requests, "
+                f"{total_sequential_chunks} chunks")
+            logger.info(
+                f"Concurrent streaming: {concurrent_time:.3f}s for {len(test_data)} requests, "
+                f"{total_concurrent_chunks} chunks")
+            logger.info(f"Performance improvement: {sequential_time / concurrent_time:.2f}x faster")
 
             # 验证结果正确性
             assert total_sequential_chunks == len(test_data) * 5  # Each request has 5 chunks

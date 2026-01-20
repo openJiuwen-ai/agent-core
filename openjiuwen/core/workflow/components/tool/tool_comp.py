@@ -96,7 +96,7 @@ class ToolComponent(ComponentComposable):
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INIT_FAILED,
                                            "tool_id in ToolComponentConfig is empty")
         from openjiuwen.core.runner import Runner
-        self._tool = Runner.resource_mgr.get_tool(id=tool_id)
+        self._tool = Runner.resource_mgr.get_tool(tool_id=tool_id)
         if self._tool is None:
             ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INIT_FAILED,
                                            f"{tool_id} is not found in runner")

@@ -1,6 +1,8 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+from typing import Optional, Union, Tuple
+
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
@@ -20,14 +22,12 @@ from openjiuwen.core.runner.resources_manager.base import (
     WorkflowProvider,
     ModelProvider)
 from openjiuwen.core.runner.resources_manager.resource_registry import ResourceRegistry
-
-from typing import Optional, Union, Tuple
-
 from openjiuwen.core.session import Session
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
-from openjiuwen.core.workflow.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
+from openjiuwen.core.workflow.workflow import Workflow
+
 
 class ResourceMgr:
     """
@@ -67,7 +67,7 @@ class ResourceMgr:
 
     async def remove_agent_group(self,
                                  *,
-                                 id: Optional[Union[str, list[str]]] = None,
+                                 agent_group_id: Optional[Union[str, list[str]]] = None,
                                  tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                                  tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                                  skip_if_not_exists: bool = False,
@@ -77,7 +77,7 @@ class ResourceMgr:
         Remove agent group(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of agent groups to remove.
+            agent_group_id: Single ID or list of IDs of agent groups to remove.
                 Cannot be used together with tag parameter.
             tag: Single tag or list of tags; removes all agent groups with matching tags.
                 Cannot be used together with id parameter.
@@ -92,14 +92,14 @@ class ResourceMgr:
                 Result object(s) containing the removed group card(s) or exception.
         """
         try:
-            await self._resource_registry.agent_group().remove_agent_group(agent_group_id=id)
-            return Ok(GroupCard(id=id))
+            await self._resource_registry.agent_group().remove_agent_group(agent_group_id=agent_group_id)
+            return Ok(GroupCard(id=agent_group_id))
         except Exception as e:
             return Error(e)
 
     async def get_agent_group(self,
                               *,
-                              id: str = None,
+                              agent_group_id: str = None,
                               tag: Optional[Tag] = None,
                               tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                               session: Optional[Session] = None
@@ -108,7 +108,7 @@ class ResourceMgr:
         Get an agent group instance by ID or tag.
 
         Args:
-            id: Unique identifier of the agent group. Either id or tag must be provided.
+            agent_group_id: Unique identifier of the agent group. Either id or tag must be provided.
             tag: Optional tag for filtering when id is provided,
                  or main lookup criteria when id is not provided.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
@@ -121,7 +121,7 @@ class ResourceMgr:
         Raises:
             ValueError: When neither id nor tag is provided.
         """
-        return self._resource_registry.agent_group().get_agent_group(agent_group_id=id, session=session)
+        return self._resource_registry.agent_group().get_agent_group(agent_group_id=agent_group_id, session=session)
 
     def add_agent(self,
                   card: AgentCard,
@@ -176,7 +176,7 @@ class ResourceMgr:
 
     def remove_agent(self,
                      *,
-                     id: Union[str, list[str]] = None,
+                     agent_id: Union[str, list[str]] = None,
                      tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                      tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                      skip_if_not_exists: bool = False,
@@ -185,7 +185,7 @@ class ResourceMgr:
         Remove agent(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of agents to remove.
+            agent_id: Single ID or list of IDs of agents to remove.
             tag: Single tag or list of tags; removes all agents with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             skip_if_not_exists: If True, skip non-existent resources.
@@ -195,15 +195,15 @@ class ResourceMgr:
                 Result object(s) containing the removed agent card(s) or exception(s).
 
         """
-        if isinstance(id, str):
+        if isinstance(agent_id, str):
             try:
-                self._resource_registry.agent().remove_agent(id)
-                return Ok(AgentCard(id=id))
+                self._resource_registry.agent().remove_agent(agent_id)
+                return Ok(AgentCard(id=agent_id))
             except Exception as e:
                 return Error(e)
         else:
             result = []
-            for agent_id in id:
+            for agent_id in agent_id:
                 try:
                     self._resource_registry.agent().remove_agent(agent_id)
                     result.append(Ok(AgentCard(id=agent_id)))
@@ -213,7 +213,7 @@ class ResourceMgr:
 
     async def get_agent(self,
                         *,
-                        id: Union[str, list[str]] = None,
+                        agent_id: Union[str, list[str]] = None,
                         tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                         tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                         session: Optional[Session] = None
@@ -222,7 +222,7 @@ class ResourceMgr:
         Get agent instance(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of agents to retrieve.
+            agent_id: Single ID or list of IDs of agents to retrieve.
             tag: Single tag or list of tags; returns all agents with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             session: Optional session context for the agents.
@@ -231,10 +231,10 @@ class ResourceMgr:
             BaseAgent or list[BaseAgent]: Agent instance(s) if found, None otherwise.
 
         """
-        if isinstance(id, str):
-            return self._resource_registry.agent().get_agent(agent_id=id)
+        if isinstance(agent_id, str):
+            return self._resource_registry.agent().get_agent(agent_id=agent_id)
         results = []
-        for agent_id in id:
+        for agent_id in agent_id:
             results.append(self._resource_registry.agent().get_agent(agent_id=agent_id))
         return results
 
@@ -290,7 +290,7 @@ class ResourceMgr:
 
     def remove_workflow(self,
                         *,
-                        id: Union[str, list[str]] = None,
+                        workflow_id: Union[str, list[str]] = None,
                         tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                         tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                         skip_if_not_exists: bool = False,
@@ -300,7 +300,7 @@ class ResourceMgr:
         Remove workflow(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of workflows to remove.
+            workflow_id: Single ID or list of IDs of workflows to remove.
             tag: Single tag or list of tags; removes all workflows with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             skip_if_not_exists: If True, skip non-existent workflows.
@@ -310,15 +310,15 @@ class ResourceMgr:
                 Result object(s) containing the removed workflow card(s) or exception(s).
 
         """
-        if isinstance(id, str):
+        if isinstance(workflow_id, str):
             try:
-                self._resource_registry.workflow().remove_workflow(workflow_id=id)
-                return Ok(WorkflowCard(id=id))
+                self._resource_registry.workflow().remove_workflow(workflow_id=workflow_id)
+                return Ok(WorkflowCard(id=workflow_id))
             except Exception as e:
                 return Error(e)
         else:
             results = []
-            for workflow_id in id:
+            for workflow_id in workflow_id:
                 try:
                     self._resource_registry.workflow().remove_workflow(workflow_id=workflow_id)
                     results.append(Ok(WorkflowCard(id=workflow_id)))
@@ -328,7 +328,7 @@ class ResourceMgr:
 
     async def get_workflow(self,
                            *,
-                           id: Union[str, list[str]] = None,
+                           workflow_id: Union[str, list[str]] = None,
                            tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                            tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                            session: Optional[Session] = None
@@ -337,7 +337,7 @@ class ResourceMgr:
         Get workflow instance(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of workflows to retrieve.
+            workflow_id: Single ID or list of IDs of workflows to retrieve.
             tag: Single tag or list of tags; returns all workflows with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             session: Optional session context for the workflows.
@@ -345,11 +345,11 @@ class ResourceMgr:
         Returns:
             Workflow or list[Workflow]: Workflow instance(s) if found, None otherwise.
         """
-        if isinstance(id, str):
-            return await self._resource_registry.workflow().get_workflow(workflow_id=id, session=session)
+        if isinstance(workflow_id, str):
+            return await self._resource_registry.workflow().get_workflow(workflow_id=workflow_id, session=session)
         else:
             results = []
-            for workflow_id in id:
+            for workflow_id in workflow_id:
                 results.append(
                     await self._resource_registry.workflow().get_workflow(workflow_id=workflow_id, session=session))
             return results
@@ -390,7 +390,7 @@ class ResourceMgr:
 
     def get_tool(self,
                  *,
-                 id: Union[str, list[str]] = None,
+                 tool_id: Union[str, list[str]] = None,
                  tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                  tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                  session: Optional[Session] = None
@@ -399,7 +399,7 @@ class ResourceMgr:
         Get tool(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of tools to retrieve.
+            tool_id: Single ID or list of IDs of tools to retrieve.
             tag: Single tag or list of tags; returns all tools with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             session: Optional session context for the tools.
@@ -407,17 +407,17 @@ class ResourceMgr:
         Returns:
             Tool or list[Tool]: Tool instance(s) if found, None otherwise.
         """
-        if isinstance(id, str):
-            return self._resource_registry.tool().get_tool(tool_id=id, session=session)
+        if isinstance(tool_id, str):
+            return self._resource_registry.tool().get_tool(tool_id=tool_id, session=session)
         else:
             results = []
-            for tool_id in id:
+            for tool_id in tool_id:
                 results.append(self._resource_registry.tool().get_tool(tool_id=tool_id, session=session))
             return results
 
     def remove_tool(self,
                     *,
-                    id: Union[str, list[str]] = None,
+                    tool_id: Union[str, list[str]] = None,
                     tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                     tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                     skip_if_not_exists: bool = False,
@@ -426,7 +426,7 @@ class ResourceMgr:
         Remove tool(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of tools to remove.
+            tool_id: Single ID or list of IDs of tools to remove.
             tag: Single tag or list of tags; removes all tools with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             skip_if_not_exists: If True, skip non-existent tools.
@@ -435,15 +435,15 @@ class ResourceMgr:
             Result[Optional[ToolCard], Exception] or list[Result[Optional[ToolCard], Exception]]:
                 Result object(s) containing the removed tool card(s) or exception(s).
         """
-        if isinstance(id, str):
+        if isinstance(tool_id, str):
             try:
-                self._resource_registry.tool().remove_tool(tool_id=id)
-                return Ok(ToolCard(id=id))
+                self._resource_registry.tool().remove_tool(tool_id=tool_id)
+                return Ok(ToolCard(id=tool_id))
             except Exception as e:
                 return Error(e)
         else:
             results = []
-            for tool_id in id:
+            for tool_id in tool_id:
                 try:
                     self._resource_registry.tool().remove_tool(tool_id=tool_id)
                     results.append(Ok(ToolCard(id=tool_id)))
@@ -452,7 +452,7 @@ class ResourceMgr:
             return results
 
     def add_model(self,
-                  id: str,
+                  model_id: str,
                   model: ModelProvider,
                   *,
                   tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
@@ -462,7 +462,7 @@ class ResourceMgr:
         Add a model to the resource manager.
 
         Args:
-            id: Unique identifier for the model.
+            model_id: Unique identifier for the model.
             model: Callable provider that creates or returns the model instance.
             tag: Optional tag(s) for categorizing and filtering the model.
             tag_update_strategy: Strategy for updating tags when model already exists.
@@ -472,8 +472,8 @@ class ResourceMgr:
 
         """
         try:
-            self._resource_registry.model().add_model(model_id=id, model=model)
-            return Ok(id)
+            self._resource_registry.model().add_model(model_id=model_id, model=model)
+            return Ok(model_id)
         except Exception as e:
             return Error(e)
 
@@ -497,12 +497,12 @@ class ResourceMgr:
         """
         results = []
         for id, model in models:
-            results.append(self.add_model(id=id, model=model, tag=tag, tag_update_strategy=tag_update_strategy))
+            results.append(self.add_model(model_id=id, model=model, tag=tag, tag_update_strategy=tag_update_strategy))
         return results
 
     def remove_model(self,
                      *,
-                     id: Union[str, list[str]] = None,
+                     model_id: Union[str, list[str]] = None,
                      tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                      tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                      skip_if_not_exists: bool = False,
@@ -511,7 +511,7 @@ class ResourceMgr:
         Remove model(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of models to remove.
+            model_id: Single ID or list of IDs of models to remove.
             tag: Single tag or list of tags; removes all models with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             skip_if_not_exists: If True, skip non-existent models.
@@ -520,15 +520,15 @@ class ResourceMgr:
             Result[str, Exception] or list[Result[str, Exception]]:
                 Result object(s) containing the model ID(s) or exception(s).
         """
-        if isinstance(id, str):
+        if isinstance(model_id, str):
             try:
-                self._resource_registry.model().remove_model(model_id=id)
-                return Ok(id)
+                self._resource_registry.model().remove_model(model_id=model_id)
+                return Ok(model_id)
             except Exception as e:
                 return Error(e)
         else:
             results = []
-            for model_id in id:
+            for model_id in model_id:
                 try:
                     self._resource_registry.model().remove_model(model_id=model_id)
                     results.append(Ok(model_id))
@@ -538,7 +538,7 @@ class ResourceMgr:
 
     async def get_model(self,
                         *,
-                        id: Union[str, list[str]] = None,
+                        model_id: Union[str, list[str]] = None,
                         tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                         tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                         session: Optional[Session] = None) \
@@ -547,7 +547,7 @@ class ResourceMgr:
         Get model instance(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of models to retrieve.
+            model_id: Single ID or list of IDs of models to retrieve.
             tag: Single tag or list of tags; returns all models with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             session: Optional session context for the models.
@@ -556,16 +556,16 @@ class ResourceMgr:
             Model or list[Model]: Model instance(s) if found, None otherwise.
 
         """
-        if isinstance(id, str):
-            return self._resource_registry.model().get_model(model_id=id, session=session)
+        if isinstance(model_id, str):
+            return self._resource_registry.model().get_model(model_id=model_id, session=session)
         else:
             results = []
-            for model_id in id:
+            for model_id in model_id:
                 results.append(self._resource_registry.model().get_model(model_id=model_id, session=session))
             return results
 
     def add_prompt(self,
-                   id: str,
+                   prompt_id: str,
                    template: "PromptTemplate",
                    *,
                    tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
@@ -575,7 +575,7 @@ class ResourceMgr:
         Add a prompt template to the resource manager.
 
         Args:
-            id: Unique identifier for the prompt template.
+            prompt_id: Unique identifier for the prompt template.
             template: PromptTemplate instance containing the prompt content and configuration.
             tag: Optional tag(s) for categorizing and filtering the prompt.
             tag_update_strategy: Strategy for updating tags when prompt already exists.
@@ -584,8 +584,8 @@ class ResourceMgr:
             Result[str, Exception]: Result object containing the prompt ID or an exception.
         """
         try:
-            self._resource_registry.prompt().add_prompt(template_id=id, template=template)
-            return Ok(id)
+            self._resource_registry.prompt().add_prompt(template_id=prompt_id, template=template)
+            return Ok(prompt_id)
         except Exception as e:
             return Error(e)
 
@@ -609,13 +609,13 @@ class ResourceMgr:
 
         """
         result = []
-        for id, prompt in prompts:
-            result.append(self.add_prompt(id, prompt, tag=tag, tag_update_strategy=tag_update_strategy))
+        for prompt_id, prompt in prompts:
+            result.append(self.add_prompt(prompt_id, prompt, tag=tag, tag_update_strategy=tag_update_strategy))
         return result
 
     def remove_prompt(self,
                       *,
-                      id: Union[str, list[str]] = None,
+                      prompt_id: Union[str, list[str]] = None,
                       tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                       tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                       skip_if_not_exists: bool = False,
@@ -624,7 +624,7 @@ class ResourceMgr:
         Remove prompt template(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of prompts to remove.
+            prompt_id: Single ID or list of IDs of prompts to remove.
             tag: Single tag or list of tags; removes all prompts with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             skip_if_not_exists: If True, skip non-existent prompts.
@@ -633,25 +633,25 @@ class ResourceMgr:
             Result[str, Exception] or list[Result[str, Exception]]:
                 Result object(s) containing the prompt ID(s) or exception(s).
         """
-        if isinstance(id, str):
+        if isinstance(prompt_id, str):
             try:
-                self._resource_registry.prompt().remove_prompt(template_id=id)
-                return Ok(id)
+                self._resource_registry.prompt().remove_prompt(template_id=prompt_id)
+                return Ok(prompt_id)
             except Exception as e:
                 return Error(e)
         else:
             results = []
-            for template_id in id:
+            for template_id in prompt_id:
                 try:
                     self._resource_registry.prompt().remove_prompt(template_id=template_id)
-                    results.append(Ok(id))
+                    results.append(Ok(prompt_id))
                 except Exception as e:
                     results.append(Error(e))
             return results
 
     def get_prompt(self,
                    *,
-                   id: Union[str, list[str]] = None,
+                   prompt_id: Union[str, list[str]] = None,
                    tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
                    tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                    ) -> Optional["PromptTemplate"] | list[Optional["PromptTemplate"]]:
@@ -659,35 +659,35 @@ class ResourceMgr:
         Get prompt template(s) by ID or tag.
 
         Args:
-            id: Single ID or list of IDs of prompts to retrieve.
+            prompt_id: Single ID or list of IDs of prompts to retrieve.
             tag: Single tag or list of tags; returns all prompts with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
 
         Returns:
             PromptTemplate or list[PromptTemplate]: Prompt template instance(s) if found, None otherwise.
         """
-        if isinstance(id, str):
-            return self._resource_registry.prompt().get_prompt(template_id=id)
+        if isinstance(prompt_id, str):
+            return self._resource_registry.prompt().get_prompt(template_id=prompt_id)
         else:
             results = []
-            for template_id in id:
+            for template_id in prompt_id:
                 results.append(self._resource_registry.prompt().get_prompt(template_id=template_id))
             return results
 
     async def get_tool_infos(self,
-                            *,
-                            id: Union[str, list[str]] = None,
-                            type: Union[str, list[str]] = None,
-                            tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
-                            tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                            ignore_exception: bool = False,
-                            ) -> Optional[ToolInfo] | list[Optional[ToolInfo]]:
+                             *,
+                             tool_id: Union[str, list[str]] = None,
+                             tool_type: Union[str, list[str]] = None,
+                             tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
+                             tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+                             ignore_exception: bool = False,
+                             ) -> Optional[ToolInfo] | list[Optional[ToolInfo]]:
         """
         Get tool information/metadata by ID, type, or tag.
 
         Args:
-            id: Single ID or list of IDs of tools to get info for.
-            type: Single type or list of types to filter tools by.
+            tool_id: Single ID or list of IDs of tools to get info for.
+            tool_type: Single type or list of types to filter tools by.
                 Common types: ["function", "mcp", "workflow"].
             tag: Single tag or list of tags; returns info for all tools with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
@@ -696,14 +696,14 @@ class ResourceMgr:
         Returns:
             ToolInfo or list[ToolInfo]: Tool information instance(s) if found, None otherwise.
         """
-        if isinstance(id, str):
-            tool_info = self._resource_registry.tool().get_tool_infos(tool_ids=id)
+        if isinstance(tool_id, str):
+            tool_info = self._resource_registry.tool().get_tool_infos(tool_ids=tool_id)
             if not tool_info:
-                tool_info = self._resource_registry.workflow().get_tool_infos(workflow_ids=id)
+                tool_info = self._resource_registry.workflow().get_tool_infos(workflow_ids=tool_id)
             return tool_info
-        elif isinstance(id, list):
+        elif isinstance(tool_id, list):
             results = []
-            for tool_id in id:
+            for tool_id in tool_id:
                 tool_info = self._resource_registry.tool().get_tool_infos(tool_ids=tool_id)
                 if not tool_info:
                     tool_info = self._resource_registry.workflow().get_tool_infos(workflow_ids=tool_id)
@@ -821,13 +821,13 @@ class ResourceMgr:
         pass
 
     async def get_mcp_tool_infos(self,
-                                *,
-                                name: Union[str, list[str]] = None,
-                                server_name: Union[str, list[str]] = None,
-                                tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
-                                tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                                ignore_exception: bool = False,
-                                ) -> Optional[ToolInfo] | list[Optional[ToolInfo]]:
+                                 *,
+                                 name: Union[str, list[str]] = None,
+                                 server_name: Union[str, list[str]] = None,
+                                 tag: Optional[Union[Tag, list[Tag]]] = GLOBAL,
+                                 tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+                                 ignore_exception: bool = False,
+                                 ) -> Optional[ToolInfo] | list[Optional[ToolInfo]]:
         """
         Get MCP tool information/metadata by name and server.
 
@@ -901,14 +901,14 @@ class ResourceMgr:
         pass
 
     def update_resource_tag(self,
-                            id: str,
+                            resource_id: str,
                             tag: Union[Tag, list[Tag]]
                             ) -> Result[list[Tag], Exception]:
         """
         Replace all tags on a resource with new tag(s).
 
         Args:
-            id: Resource identifier.
+            resource_id: Resource identifier.
             tag: New tag(s) to set on the resource.
 
         Returns:
@@ -918,14 +918,14 @@ class ResourceMgr:
         pass
 
     def add_resource_tag(self,
-                         id: str,
+                         resource_id: str,
                          tag: Union[Tag, list[Tag]]
                          ) -> Result[list[Tag], Exception]:
         """
         Add tag(s) to a resource.
 
         Args:
-            id: Resource identifier.
+            resource_id: Resource identifier.
             tag: Tag(s) to add to the resource.
 
         Returns:
@@ -934,7 +934,7 @@ class ResourceMgr:
         pass
 
     def remove_resource_tag(self,
-                            id: str,
+                            resource_id: str,
                             tag: Union[Tag, list[Tag]],
                             *,
                             ignore_if_not_exists: bool = False
@@ -943,7 +943,7 @@ class ResourceMgr:
         Remove specific tag(s) from a resource.
 
         Args:
-            id: Resource identifier.
+            resource_id: Resource identifier.
             tag: Tag(s) to remove from the resource.
             ignore_if_not_exists: If True, ignore non-existent tags.
 
@@ -952,24 +952,24 @@ class ResourceMgr:
         """
         pass
 
-    def get_resource_tag(self, id: str) -> Optional[list[Tag]]:
+    def get_resource_tag(self, resource_id: str) -> Optional[list[Tag]]:
         """
         Get all tags associated with a resource.
 
         Args:
-            id: Resource identifier.
+            resource_id: Resource identifier.
 
         Returns:
             List of tags associated with the resource, or None if resource not found.
         """
         pass
 
-    def resource_has_tag(self, id: str, tag: str) -> bool:
+    def resource_has_tag(self, resource_id: str, tag: str) -> bool:
         """
         Check if a specific resource is associated with the given tag.
 
         Args:
-            id: The unique identifier of the resource to check.
+            resource_id: The unique identifier of the resource to check.
             tag: The tag to verify association with the resource.
         Returns:
             True if the resource has the specified tag, False otherwise.

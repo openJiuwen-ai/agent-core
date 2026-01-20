@@ -10,8 +10,9 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.dmessage_queue.message import DmqRequestMessage, DMessageType
-from openjiuwen.core.runner.drunner.server_adapter.mq_message_utils import build_stream_response, build_final_response, \
-    build_batch_response, build_error_response
+from openjiuwen.core.runner.drunner.server_adapter.mq_message_utils import (build_stream_response,
+                                                                            build_final_response, \
+                                                                            build_batch_response, build_error_response)
 from openjiuwen.core.runner.message_queue_base import MessageQueueBase, SubscriptionBase
 
 

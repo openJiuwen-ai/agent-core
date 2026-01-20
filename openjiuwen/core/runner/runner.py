@@ -324,7 +324,7 @@ class Runner:
     async def _prepare_agent(self, agent: Union[str, BaseAgent], inputs: Any):
         session_id = inputs.get(self._AGENT_CONVERSATION_ID, self._DEFAULT_AGENT_SESSION_ID)
         if isinstance(agent, str):
-            agent_with_session = await self._resource_manager.get_agent(id=agent)
+            agent_with_session = await self._resource_manager.get_agent(agent_id=agent)
             if agent_with_session is None:
                 raise JiuWenBaseException(StatusCode.AGENT_NOT_FOUND.code,
                                           StatusCode.AGENT_NOT_FOUND.errmsg.format(agent))
@@ -353,14 +353,15 @@ class Runner:
 
         workflow_session = self._create_workflow_session(session)
         if isinstance(workflow, str):
-            workflow_instance = await self._resource_manager.get_workflow(id=workflow_key, session=workflow_session)
+            workflow_instance = await self._resource_manager.get_workflow(workflow_id=workflow_key,
+                                                                          session=workflow_session)
         else:
             workflow_instance = workflow
         return workflow_instance, workflow_session
 
     def _prepare_agent_group(self, agent_group: Union[str, BaseGroup]):
         if isinstance(agent_group, str):
-            return self._resource_manager.get_agent_group(id=agent_group)
+            return self._resource_manager.get_agent_group(agent_group_id=agent_group)
         return agent_group
 
 

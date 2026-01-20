@@ -29,6 +29,7 @@ class ComponentExecutable(Executable):
     This interface allows components to support different I/O patterns
     based on their capabilities and use cases.
     """
+
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if not isinstance(session, NodeSession):
             raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.code,
@@ -153,8 +154,7 @@ class ComponentExecutable(Executable):
                                   StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.errmsg.format(ability='Collect'))
 
     async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
-        """
-         Execute component with streaming input and streaming output.
+        """Execute component with streaming input and streaming output.
 
          Args:
              inputs: Streaming input data (async iterator)

@@ -29,10 +29,9 @@ class AgentMgr(AbstractManager[AgentWithSession]):
     def add_agent(self, agent_id: str, agent: Union[AgentProvider, RemoteAgent]) -> None:
         if get_runner_config().distributed_mode:
             if not isinstance(agent, RemoteAgent):
-                from openjiuwen.core.runner.drunner.server_adapter.agent_adapter import AgentAdapter
-                mqAgentAdapter = AgentAdapter(agent_id)
-                mqAgentAdapter.start()
-                self._add_agent(self._AGENT_ADAPTER + agent_id, mqAgentAdapter)
+                mq_agent_adapter = AgentAdapter(agent_id)
+                mq_agent_adapter.start()
+                self._add_agent(self._AGENT_ADAPTER + agent_id, mq_agent_adapter)
         self._add_agent(agent_id, agent)
 
     def _add_agent(self, agent_id: str, agent) -> None:
@@ -69,7 +68,7 @@ class AgentMgr(AbstractManager[AgentWithSession]):
 
     def _remove_agent(self, agent_id: str):
         self._validate_id(agent_id, StatusCode.SESSION_AGENT_REMOVE_FAILED, "single_agent")
-        self._remove_resource(agent_id, StatusCode.SESSION_AGENT_REMOVE_FAILED)
+        return self._remove_resource(agent_id, StatusCode.SESSION_AGENT_REMOVE_FAILED)
 
     def get_agent(self, agent_id: str) -> Optional[AgentWithSession | RemoteAgent]:
 

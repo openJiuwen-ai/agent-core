@@ -138,7 +138,8 @@ class MqRemoteClient(RemoteClient):
             await self.system_reply_sub.unregister_collector(message_id, self.remote_id)
 
     async def _send_stop_message(self, message_id: str):
-        """Send STOP message, message contains expiration time, no need to send STOP on timeout, only when closed early"""
+        """Send STOP message, message contains expiration time, no need to
+        send STOP on timeout, only when closed early"""
         try:
             stop_msg = DmqRequestMessage(
                 type=DMessageType.STOP,

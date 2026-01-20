@@ -5,6 +5,7 @@
 import pytest
 
 from openjiuwen.core.common.constants.constant import INTERACTION
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.dmessage_queue.message import DmqResponseMessage, DmqRequestMessage
 from openjiuwen.core.runner.drunner.dmessage_queue.message_serializer import serialize_message, deserialize_message
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
@@ -14,7 +15,8 @@ from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
 
 class TestMessageSerializer:
 
-    def test_output_schema(self):
+    @staticmethod
+    def test_output_schema():
         payload = OutputSchema(
             type=INTERACTION,
             index=0,
@@ -23,13 +25,14 @@ class TestMessageSerializer:
         msg = DmqResponseMessage(payload=payload)
 
         b = serialize_message(msg)
-        print(f"b:{b}")
+        logger.info(f"b:{b}")
         msg2 = deserialize_message(b)
-        print(f"msg2:{msg2}")
+        logger.info(f"msg2:{msg2}")
         assert isinstance(msg2.payload, OutputSchema)
         assert isinstance(msg2.payload.payload, InteractionOutput)
 
-    def test_list_of_output_schema(self):
+    @staticmethod
+    def test_list_of_output_schema():
         payload = [
             # Interrupt
             OutputSchema(type=INTERACTION, index=0,
@@ -94,7 +97,8 @@ class TestMessageSerializer:
         assert msg2.payload[3].payload.result == {'responseContent': '上海', 'output': {}}
         assert msg2.payload[3].payload.state == WorkflowExecutionState.COMPLETED
 
-    def test_customschema_with_workflow_output(self):
+    @staticmethod
+    def test_customschema_with_workflow_output():
         payload = CustomSchema(
             output=[["aaa"]],
             result_type='answer',
@@ -116,7 +120,8 @@ class TestMessageSerializer:
         assert msg2.payload.work.result == {'responseContent': '上海', 'output': {}}
         assert msg2.payload.work.state == WorkflowExecutionState.COMPLETED
 
-    def test_plain_dict_in_request(self):
+    @staticmethod
+    def test_plain_dict_in_request():
         payload = {"query": "你好"}
         msg = DmqRequestMessage(payload=payload)
 
@@ -127,7 +132,8 @@ class TestMessageSerializer:
         assert isinstance(msg2.payload, dict)
         assert msg2.payload["query"] == "你好"
 
-    def test_dict_response(self):
+    @staticmethod
+    def test_dict_response():
         """Test plain dict in DmqResponseMessage"""
         msg = DmqResponseMessage(payload={'output': '你好！', 'result_type': 'answer'})
 
@@ -137,7 +143,8 @@ class TestMessageSerializer:
         assert isinstance(msg2.payload, dict)
         assert msg2.payload['output'] == '你好！'
 
-    def test_dict_with_embedded_basemodel(self):
+    @staticmethod
+    def test_dict_with_embedded_basemodel():
         payload = {
             "output": WorkflowOutput(
                 result={'responseContent': '上海', 'output': {}},
@@ -153,22 +160,24 @@ class TestMessageSerializer:
         assert isinstance(msg2.payload, dict)
         assert isinstance(msg2.payload["output"], WorkflowOutput)
 
-    def test_workflow_output(self):
+    @staticmethod
+    def test_workflow_output():
         msg = DmqResponseMessage(payload=WorkflowOutput(
             result={'responseContent': '上海', 'output': {}},
             state=WorkflowExecutionState.COMPLETED
         ))
 
         data = serialize_message(msg)
-        print(f"data:{data}")
+        logger.info(f"data:{data}")
         msg2 = deserialize_message(data)
-        print(f"deserialize_message:{msg2}")
+        logger.info(f"deserialize_message:{msg2}")
 
         assert isinstance(msg2.payload, WorkflowOutput)
         assert msg2.payload.result == {'responseContent': '上海', 'output': {}}
         assert msg2.payload.state == WorkflowExecutionState.COMPLETED
 
-    def test_output_schema_in_workflow_output(self):
+    @staticmethod
+    def test_output_schema_in_workflow_output():
         list_output_schema = [
             # Interrupt
             OutputSchema(type=INTERACTION, index=0,
@@ -232,14 +241,16 @@ class TestMessageSerializer:
         assert msg2.payload.result[2].payload.result.payload["output"] == "456"
         assert msg2.payload.result[2].payload.result.payload["result_type"] == "answer"
 
-    def test_trace_schema_payload(self):
+    @staticmethod
+    def test_trace_schema_payload():
         import datetime
 
         payload = TraceSchema(
             type='tracer_agent',
             payload={
                 'traceId': '94884432-1558-40d3-aded-b09e1111e171',
-                'startTime': datetime.datetime(2025, 11, 18, 19, 22, 5, 728961),
+                'startTime': datetime.datetime(2025, 11, 18, 19, 22,
+                                               5, 728961),
                 'endTime': None,
                 'inputs': {
                     'inputs': [
@@ -282,7 +293,8 @@ class TestMessageSerializer:
         assert msg2.payload.payload['inputs']['inputs'][0]['role'] == 'user'
 
         # Time consistency checks
-        expected_start_time = datetime.datetime(2025, 11, 18, 19, 22, 5, 728961)
+        expected_start_time = datetime.datetime(2025, 11, 18, 19,
+                                                22, 5, 728961)
         assert msg2.payload.payload['startTime'] == expected_start_time
         assert msg2.payload.payload['endTime'] is None
         assert msg2.payload.payload['elapsedTime'] is None
@@ -296,7 +308,8 @@ class TestMessageSerializer:
         assert msg2.payload.payload['outputs'] is None
         assert msg2.payload.payload['error'] is None
 
-    def test_serialize_exceed_max_depth(self):
+    @staticmethod
+    def test_serialize_exceed_max_depth():
         """
         Test serialization of nested structures exceeding maximum recursion depth (10 levels),
         ensuring RecursionError is thrown.
@@ -315,7 +328,8 @@ class TestMessageSerializer:
         with pytest.raises(RecursionError):
             serialize_message(msg)
 
-    def test_serialize_large_list_should_pass(self):
+    @staticmethod
+    def test_serialize_large_list_should_pass():
         """
         Test serialization of a list containing 20 elements, each being an OutputSchema,
         ensuring recursion depth limit is not triggered.

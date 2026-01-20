@@ -70,7 +70,8 @@ class ReplyTopicSubscription():
             raise asyncio.CancelledError(f"ReplyTopicSubscription was cancelled")
         if len(self.collectors) >= get_runner_config().distributed_config.max_request_concurrency:
             raise RuntimeError(
-                f"[ReplyTopicSubscription] Too many collectors ({get_runner_config().distributed_config.max_request_concurrency})")
+                f"[ReplyTopicSubscription] Too many collectors "
+                f"({get_runner_config().distributed_config.max_request_concurrency})")
 
         key = self._make_key(remote_id, message_id, request_id)
         if key in self.collectors:

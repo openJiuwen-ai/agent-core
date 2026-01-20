@@ -42,14 +42,15 @@ def session():
     session_id = "session_id"
     return create_agent_session(None, AgentSession(session_id, config=config))
 
+
 @pytest.mark.asyncio
 class TestRunner:
     @staticmethod
     def _build_workflow(name, workflow_id, version):
         workflow_card = WorkflowCard(
-                id=workflow_id,
-                version=version,
-                name=name,
+            id=workflow_id,
+            version=version,
+            name=name,
 
         )
         flow = Workflow(card=workflow_card)
@@ -109,7 +110,7 @@ class TestRunner:
         name = "test_workflow"
         version = "1"
         workflow = self._build_workflow(name, workflow_id, version)
-        result = await Runner.run_workflow(workflow, inputs = {"query": "query workflow"}, session=session)
+        result = await Runner.run_workflow(workflow, inputs={"query": "query workflow"}, session=session)
         assert result == WorkflowOutput(result={"result": "query workflow"}, state=WorkflowExecutionState.COMPLETED)
 
     async def test_run_tool(self, session):

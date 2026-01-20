@@ -50,7 +50,8 @@ def decorate_workflow_with_trace(workflow, agent_session):
     if not _should_decorate(workflow, agent_session):
         return workflow
     wrapped_workflow = create_wrapper_class(workflow, "WrappedWorkflow")
-    metadata = dict(id=wrapped_workflow.card.id, name=wrapped_workflow.card.name, description=wrapped_workflow.card.description,
+    metadata = dict(id=wrapped_workflow.card.id, name=wrapped_workflow.card.name,
+                    description=wrapped_workflow.card.description,
                     version=wrapped_workflow.card.version) if wrapped_workflow else {}
     try:
         workflow_name = workflow.card.name
