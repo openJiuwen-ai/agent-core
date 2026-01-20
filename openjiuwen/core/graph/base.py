@@ -16,7 +16,7 @@ class ExecutableGraph(Executable[Input, Output]):
     async def stream(self, inputs: Input, session: BaseSession) -> AsyncIterator[Output]:
         pass
 
-    async def collect(self, inputs: AsyncIterator[Input], context: BaseSession) -> Output:
+    async def collect(self, inputs: AsyncIterator[Input], session: BaseSession) -> Output:
         pass
 
     async def transform(self, inputs: AsyncIterator[Input], session: BaseSession) -> AsyncIterator[Output]:

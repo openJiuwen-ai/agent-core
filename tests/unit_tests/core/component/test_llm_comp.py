@@ -37,7 +37,9 @@ from unittest.mock import patch, AsyncMock
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.workflow import LLMCompConfig, LLMComponent
 from openjiuwen.core.session import WorkflowSession, NodeSession
-from openjiuwen.core.session import WrappedNodeSession, TaskSession
+from openjiuwen.core.session.node import Session
+from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
@@ -52,7 +54,7 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 
 @pytest.fixture
 def fake_node_ctx():
-    return WrappedNodeSession(NodeSession(WorkflowSession(), "test"))
+    return Session(NodeSession(WorkflowSession(), "test"))
 
 
 @pytest.fixture
@@ -208,7 +210,7 @@ class TestLLMExecutableInvoke:
             fake_model_client_config
     ):
         """LLM 节点在完整工作流中的异步测试"""
-        session = WorkflowSession()
+        session = create_workflow_session()
 
         # 1. 打桩 LLM
         fake_llm = FakeModel(api_key="fake-key", api_base="http://fake.api.com")
@@ -280,7 +282,7 @@ class TestLLMExecutableInvoke:
         flow.add_connection("s", "llm")
         flow.add_connection("llm", "e")
 
-        context = WorkflowSession()
+        context = create_workflow_session()
         result = await flow.invoke(inputs={"query": "yzq test query"}, session=context)
         print(f"This is invoke result:{result}")
 
@@ -400,7 +402,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
         result = await flow.invoke(inputs={"query": "please write a 3-line poem"},
                                    session=workflow_session, context=workflow_context)
         print(f"invoke result >>> {result}")
@@ -451,7 +453,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
         result = await flow.invoke(
             inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"},
             session=workflow_session, context=workflow_context)
@@ -495,7 +497,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
         async for chunk in flow.stream(inputs={"query": "please write a 3-line poem"}, session=workflow_session, context=workflow_context):
             print(f"stream chunk >>> {chunk}")
 
@@ -546,7 +548,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
         async for chunk in flow.stream(inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"}, session=workflow_session,
                                        context=workflow_context):
             print(f"stream chunk >>> {chunk}")

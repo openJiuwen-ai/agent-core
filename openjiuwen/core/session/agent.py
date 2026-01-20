@@ -1,119 +1,69 @@
-# -*- coding: UTF-8 -*-
+# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from typing import Optional, AsyncIterator, Any
 
-from typing import Any
-
-from openjiuwen.core.session.agent_state import StateCollection
-from openjiuwen.core.session.config import Config
-from openjiuwen.core.session.interaction.base import Checkpointer
-from openjiuwen.core.session.base import get_default_inmemory_checkpointer
-from openjiuwen.core.session.callback_manager import CallbackManager
-
-from openjiuwen.core.session.session import BaseSession
-from openjiuwen.core.session.state import State, InMemoryCommitState
-from openjiuwen.core.session.workflow import WorkflowSession
-from openjiuwen.core.session.workflow_state import InMemoryState
-from openjiuwen.core.session.stream.emitter import StreamEmitter
-from openjiuwen.core.session.stream.manager import StreamWriterManager
-from openjiuwen.core.session.tracer.tracer import Tracer
+from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.session import BaseSession, Config
+from openjiuwen.core.session.interaction.interaction import SimpleAgentInteraction
+from openjiuwen.core.session.internal.agent import AgentSession
+from openjiuwen.core.session.internal.wrapper import StateSession
+from openjiuwen.core.session.tracer import Tracer
+from openjiuwen.core.session.workflow import Session as WorkflowSession
 
 
-class StaticAgentSession(BaseSession):
-    def __init__(self, config: Config = None, resource_mgr = None):
-        self._config = config if config is not None else Config()
-        if resource_mgr:
-            self._resource_manager = resource_mgr
+class Session(StateSession):
+    def __init__(self, session_id: str = None, inner: BaseSession = None):
+        if inner is None:
+            super().__init__(AgentSession(session_id, Config()))
         else:
-            from openjiuwen.core.runner import Runner
-            self._resource_manager = Runner.resource_mgr
-        self._checkpointer = get_default_inmemory_checkpointer()
+            super().__init__(inner)
+        self._interaction = None
 
-    def config(self) -> Config:
-        return self._config
-
-    def resource_manager(self) -> "ResourceMgr":
-        return self._resource_manager
-
-    def checkpointer(self) -> Checkpointer:
-        return self._checkpointer
-
-    def state(self) -> State:
+    async def trace(self, data: dict):
         pass
 
-    def tracer(self) -> Any:
+    async def trace_error(self, error: Exception):
         pass
 
-    def stream_writer_manager(self) -> StreamWriterManager:
-        pass
+    async def interact(self, value):
+        if self._interaction is None:
+            self._interaction = SimpleAgentInteraction(self._inner)
+        await self._interaction.wait_user_inputs(value)
 
-    def callback_manager(self) -> CallbackManager:
-        pass
+    # todo: all resource interaface will be deleted when resource_mgr supports tag feature
+    def get_prompt(self, template_id: str) -> PromptTemplate:
+        return self._inner.resource_manager()._resource_registry.prompt().get_prompt(template_id)
 
-    def session_id(self) -> str:
-        pass
+    def get_model(self, model_id: str) -> Model:
+        return self._inner.resource_manager()._resource_registry.model().get_model(model_id, session=self._inner)
 
-    async def create_agent_session(self, session_id: str, inputs=None) -> BaseSession:
-        session = AgentSession(session_id, self._config, self._resource_manager, self._checkpointer)
-        await self._checkpointer.pre_agent_execute(session, inputs)
-        return session
+    async def get_workflow(self, workflow_id: str) -> "Workflow":
+        return await self._inner.resource_manager()._resource_registry.workflow().get_workflow(workflow_id,
+                                                                                               session=self._inner)
 
+    def get_workflow_sync(self, workflow_id: str) -> Optional["Workflow"]:
+        return self._inner.resource_manager()._resource_registry.workflow().get_workflow_sync(workflow_id,
+                                                                                              session=self._inner)
 
-class AgentSession(BaseSession):
-    def __init__(
-            self,
-            session_id: str,
-            config: Config = None,
-            resource_manager: "ResourceMgr" = None,
-            checkpointer: Checkpointer | None = None):
-        self._session_id = session_id
-        self._config = config
-        if resource_manager:
-            self._resource_manager = resource_manager
-        else:
-            from openjiuwen.core.runner import Runner
-            self._resource_manager = Runner.resource_mgr
-        self._state = StateCollection()
-        self._stream_writer_manager = StreamWriterManager(StreamEmitter())
-        self._callback_manager = CallbackManager()
-        tracer = Tracer()
-        tracer.init(self._stream_writer_manager, self._callback_manager)
-        self._tracer = tracer
-        self._checkpointer = get_default_inmemory_checkpointer() if checkpointer is None else checkpointer
-        self._agent_span = self._tracer.tracer_agent_span_manager.create_agent_span() if self._tracer else None
+    def get_tool(self, tool_id: str) -> Tool:
+        return self._inner.resource_manager()._resource_registry.tool().get_tool(tool_id, session=self._inner)
 
-    def config(self) -> Config:
-        return self._config
+    def stream_iterator(self) -> AsyncIterator[Any]:
+        return self._inner.stream_writer_manager().stream_output()
 
-    def state(self) -> State:
-        return self._state
+    async def post_run(self):
+        if isinstance(self._inner, AgentSession):
+            await self._inner.stream_writer_manager().stream_emitter().close()
+            await self._inner.checkpointer().post_agent_execute(self._inner)
 
-    def tracer(self) -> Any:
-        return self._tracer
-
-    def span(self):
-        return self._agent_span
-
-    def stream_writer_manager(self) -> StreamWriterManager:
-        return self._stream_writer_manager
-
-    def callback_manager(self) -> CallbackManager:
-        return self._callback_manager
-
-    def session_id(self) -> str:
-        return self._session_id
-
-    def resource_manager(self) -> "ResourceMgr":
-        return self._resource_manager
-
-    def checkpointer(self) -> Checkpointer:
-        return self._checkpointer
+    def tracer(self) -> Tracer:
+        return self._inner.tracer()
 
     def create_workflow_session(self) -> WorkflowSession:
-        state = self._state.global_state
-        return WorkflowSession(
-            parent=self,
-            state=InMemoryState(InMemoryCommitState(state)),
-            session_id=self._session_id)
+        return WorkflowSession(parent=self, session_id=self.session_id())
 
-    def agent_id(self):
-        return self._config.get_agent_config().id
+
+def create_agent_session(trace_id: str = None, inner: BaseSession = None) -> Session:
+    return Session(trace_id, inner)

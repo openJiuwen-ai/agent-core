@@ -11,7 +11,7 @@ from openjiuwen.core.workflow import WorkflowComponent
 from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
-from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import BaseStreamMode, OutputSchema
 from openjiuwen.core.workflow import Workflow
 
@@ -44,7 +44,7 @@ class TestSubWorkflowComp:
         main_workflow.add_connection("start", 'fick_comp')
         main_workflow.add_connection('fick_comp', "end")
         with pytest.raises(JiuWenBaseException):
-            await main_workflow.invoke(inputs={}, session=WorkflowSession())
+            await main_workflow.invoke(inputs={}, session=create_workflow_session())
 
     def create_nesting_workflow(self, sub_workflow_depth=0, **kwargs):
         workflow = Workflow(**kwargs)
@@ -63,18 +63,18 @@ class TestSubWorkflowComp:
     async def test_sub_invoke(self):
         with pytest.raises(JiuWenBaseException) as err:
             main_workflow = self.create_nesting_workflow(3, workflow_max_nesting_depth=1)
-            await main_workflow.invoke(inputs={}, session=WorkflowSession())
+            await main_workflow.invoke(inputs={}, session=create_workflow_session())
         sub_workflow_err = StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
             error_msg="workflow nesting hierarchy is too big, must <= 1"
         )
         assert f"node_id: sub2, ability: invoke, error: [101141] {sub_workflow_err}" in err.value.message
         main_workflow = self.create_nesting_workflow(3, workflow_max_nesting_depth=3)
 
-        await main_workflow.invoke(inputs={}, session=WorkflowSession())
+        await main_workflow.invoke(inputs={}, session=create_workflow_session())
 
         main_workflow = self.create_nesting_workflow(0, workflow_max_nesting_depth=0)
 
-        await main_workflow.invoke(inputs={}, session=WorkflowSession())
+        await main_workflow.invoke(inputs={}, session=create_workflow_session())
 
     async def test_workflow(self):
         sub_workflow = Workflow()
@@ -101,7 +101,7 @@ class TestSubWorkflowComp:
             OutputSchema(type='end node stream', index=1, payload={'output': {'result': 'transform_stream_2'}}),
             OutputSchema(type='end node stream', index=2, payload={'output': {'result': 'transform_stream_3'}})]
 
-        async for chunk in main_workflow.stream(inputs={}, session=WorkflowSession(),
+        async for chunk in main_workflow.stream(inputs={}, session=create_workflow_session(),
                                                 stream_modes=[BaseStreamMode.OUTPUT]):
             chunks.append(chunk)
 

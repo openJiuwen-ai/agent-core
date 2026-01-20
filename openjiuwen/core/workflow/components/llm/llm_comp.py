@@ -15,7 +15,7 @@ from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.node import Session
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm import (
     BaseMessage, SystemMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
@@ -471,9 +471,9 @@ class LLMExecutable(ComponentExecutable):
         self._set_context(context)
         model_inputs = await self._prepare_model_inputs(inputs)
         if UserConfig.is_sensitive():
-            logger.info("[%s] model inputs", self._session.executable_id())
+            logger.info("[%s] model inputs", self._session.get_executable_id())
         else:
-            logger.info("[%s] model inputs %s", self._session.executable_id(), model_inputs)
+            logger.info("[%s] model inputs %s", self._session.get_executable_id(), model_inputs)
         response = ""
         try:
             llm_response = await self._llm.invoke(messages=model_inputs)
@@ -486,9 +486,9 @@ class LLMExecutable(ComponentExecutable):
                 ExceptionUtils.raise_exception(StatusCode.COMPONENT_LLM_INVOKE_CALL_FAILED, str(e), e)
 
         if UserConfig.is_sensitive():
-            logger.info("[%s] model outputs", self._session.executable_id())
+            logger.info("[%s] model outputs", self._session.get_executable_id())
         else:
-            logger.info("[%s] model outputs %s", self._session.executable_id(), response)
+            logger.info("[%s] model outputs %s", self._session.get_executable_id(), response)
         return self._create_output(response)
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
@@ -598,9 +598,9 @@ class LLMExecutable(ComponentExecutable):
     async def _invoke_for_json_format(self, inputs: Input) -> AsyncIterator[Output]:
         model_inputs = await self._prepare_model_inputs(inputs)
         if UserConfig.is_sensitive():
-            logger.info("[%s] model inputs", self._session.executable_id())
+            logger.info("[%s] model inputs", self._session.get_executable_id())
         else:
-            logger.info("[%s] model inputs %s", self._session.executable_id(), model_inputs)
+            logger.info("[%s] model inputs %s", self._session.get_executable_id(), model_inputs)
         llm_output = await self._llm.invoke(messages=model_inputs) # Add await if invoke is async
         llm_output_content = llm_output.content
         yield self._create_output(llm_output_content)

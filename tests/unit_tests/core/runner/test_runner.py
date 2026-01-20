@@ -8,9 +8,9 @@ from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.session.agent import AgentSession
+from openjiuwen.core.session.internal.agent import AgentSession
 from openjiuwen.core.session import Config
-from openjiuwen.core.session import TaskSession
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.foundation.tool import tool, ToolCard
 from openjiuwen.core.workflow import Workflow, WorkflowCard, WorkflowOutput, WorkflowExecutionState
 from openjiuwen.core.runner import Runner
@@ -40,7 +40,7 @@ def session():
     config = Config()
     config.set_agent_config(agent_config=workflow_config)
     session_id = "session_id"
-    return TaskSession(None, AgentSession(session_id, config=config))
+    return create_agent_session(None, AgentSession(session_id, config=config))
 
 @pytest.mark.asyncio
 class TestRunner:

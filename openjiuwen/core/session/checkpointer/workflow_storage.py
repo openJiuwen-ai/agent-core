@@ -3,9 +3,9 @@
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.interaction.storage import Storage
+from openjiuwen.core.session.checkpointer.storage import Storage
 from openjiuwen.core.session.session import BaseSession
-from openjiuwen.core.session.workflow import NodeSession
+from openjiuwen.core.session.internal.workflow import NodeSession
 from openjiuwen.core.graph.store import create_serializer, Serializer
 
 

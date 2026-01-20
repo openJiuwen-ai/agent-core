@@ -7,7 +7,8 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.workflow.components.condition.condition import Condition, FuncCondition
 from openjiuwen.core.workflow.components.condition.expression import ExpressionCondition
-from openjiuwen.core.session import Session, BaseSession
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session.node import Session
 from openjiuwen.core.session.tracer import TracerWorkflowUtils
 from openjiuwen.core.graph.visualization.drawable_edge import DrawableBranchRouter
 
@@ -71,7 +72,7 @@ class BranchRouter:
 
     def set_session(self, session: Union[Session, BaseSession]):
         if isinstance(session, Session):
-            self._session = session.base()
+            self._session = getattr(session, "_inner")
             return
         if isinstance(session, BaseSession):
             self._session = session

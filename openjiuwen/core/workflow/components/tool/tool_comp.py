@@ -12,7 +12,7 @@ from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.graph.executable import Executable, Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.node import Session
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 

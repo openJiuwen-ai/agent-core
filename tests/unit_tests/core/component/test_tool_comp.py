@@ -5,7 +5,9 @@ import pytest
 
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
 from openjiuwen.core.session import WorkflowSession, NodeSession
-from openjiuwen.core.session import WrappedNodeSession, TaskSession
+from openjiuwen.core.session.node import Session
+from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.foundation.tool import RestfulApi, ToolCard, RestfulApiCard
 from openjiuwen.core.foundation.tool import tool
 from openjiuwen.core.runner import Runner
@@ -19,7 +21,7 @@ from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode
 
 @pytest.fixture
 def fake_ctx():
-    return WrappedNodeSession(NodeSession(WorkflowSession(), "test"))
+    return Session(NodeSession(WorkflowSession(), "test"))
 
 
 @pytest.fixture()
@@ -123,7 +125,7 @@ async def test_tool_comp_in_workflow(mock_invoke, mock_tool, mock_tool_config, f
     flow.add_connection("s", "tool")
     flow.add_connection("tool", "e")
 
-    await flow.invoke({}, WorkflowSession(session_id="test"))
+    await flow.invoke({}, create_workflow_session(session_id="test"))
 
 
 class TestToolComponent:
@@ -160,6 +162,6 @@ class TestToolComponent:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="tool_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
         invoke_result = await flow.invoke({"query": "你好"}, workflow_session, workflow_context)
         assert invoke_result.result["responseContent"] == "{'res': '你好', 'info': 789}"

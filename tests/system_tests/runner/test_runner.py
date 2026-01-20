@@ -16,8 +16,8 @@ from openjiuwen.core.workflow import QuestionerComponent, FieldInfo, QuestionerC
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.workflow import generate_workflow_key
-from openjiuwen.core.session import BaseSession
-from openjiuwen.core.session import TaskSession
+from openjiuwen.core.workflow import Session
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.foundation.tool import SseClient, StdioClient, PlaywrightClient
@@ -131,7 +131,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
     def _create_end_component():
         return End({"responseTemplate": "{{output}}"})
 
-    def _build_interrupt_workflow(self) -> tuple[BaseSession, Workflow]:
+    def _build_interrupt_workflow(self) -> tuple[Session, Workflow]:
         """
         构建包含交互式组件的工作流，用于测试中断恢复功能。
 
@@ -149,7 +149,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(
             card=card
         )
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(trace_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()

@@ -23,7 +23,7 @@ class AgentGroupSession(AgentSession):
     """AgentGroup Session
 
     Inherits from AgentSession, reuses all capabilities including
-    TaskSession from pre_run().
+    Session from pre_run().
     """
 
     def __init__(

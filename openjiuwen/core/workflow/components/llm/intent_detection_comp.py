@@ -18,7 +18,7 @@ from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Output, Input
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.node import Session
 from openjiuwen.core.foundation.llm import (
     BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
 )
@@ -182,9 +182,9 @@ class IntentDetectionExecutable(ComponentExecutable):
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
         llm_output = await self._invoke_llm_and_get_result(current_inputs)
         if UserConfig.is_sensitive():
-            logger.info(f"[%s] intent detection", self._session.executable_id())
+            logger.info(f"[%s] intent detection", self._session.get_executable_id())
         else:
-            logger.info(f"[%s] intent detection output_inputs: %s", self._session.executable_id(), llm_output)
+            logger.info(f"[%s] intent detection output_inputs: %s", self._session.get_executable_id(), llm_output)
         intent_res = self._parse_detection_result(llm_output)
         return intent_res
 
@@ -280,9 +280,9 @@ class IntentDetectionExecutable(ComponentExecutable):
         """invoke llm and get result"""
         llm_inputs = self._default_config.intent_detection_template.format(current_inputs).to_messages()
         if UserConfig.is_sensitive():
-            logger.info(f"[%s] intent detection", self._session.executable_id())
+            logger.info(f"[%s] intent detection", self._session.get_executable_id())
         else:
-            logger.info(f"[%s] intent detection llm_inputs: %s", self._session.executable_id(), llm_inputs)
+            logger.info(f"[%s] intent detection llm_inputs: %s", self._session.get_executable_id(), llm_inputs)
         llm_output_content = ""
 
         if UserConfig.is_sensitive():

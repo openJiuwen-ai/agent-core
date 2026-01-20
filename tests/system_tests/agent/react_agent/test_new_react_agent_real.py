@@ -20,7 +20,7 @@
 
 - 工具先通过 Runner.resource_mgr.add_tool() 注册
 - 再通过 agent.add_ability() 添加工具能力
-- 最后调用 agent.invoke()，传入真实的 TaskSession
+- 最后调用 agent.invoke()，传入真实的 Session
 """
 import os
 import unittest
@@ -33,7 +33,7 @@ from openjiuwen.core.single_agent.agents.react_agent import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
-from openjiuwen.core.session import TaskSession
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.runner import Runner
 
 # API 配置
@@ -120,7 +120,7 @@ class TestNewReActAgentReal(unittest.IsolatedAsyncioTestCase):
         agent.configure(config)
 
         # 2. 创建真实的 Session
-        session = TaskSession(trace_id="test_chat_session")
+        session = create_agent_session(trace_id="test_chat_session")
 
         # 3. 调用 Agent
         result = await agent.invoke(
@@ -167,7 +167,7 @@ class TestNewReActAgentReal(unittest.IsolatedAsyncioTestCase):
         agent.add_ability(add_tool.card)
 
         # 5. 创建真实的 Session
-        session = TaskSession(trace_id="test_calc_session")
+        session = create_agent_session(trace_id="test_calc_session")
 
         # 6. 调用 Agent，使用更明确的 query
         query = "使用 add 工具计算 123 + 456 的结果"

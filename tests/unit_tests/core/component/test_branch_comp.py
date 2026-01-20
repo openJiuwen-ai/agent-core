@@ -10,7 +10,7 @@ from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
-from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowComponent
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, Node1
@@ -27,7 +27,8 @@ class MockSubWorkflowComponent(WorkflowComponent):
         results = []
         for i in range (0,8):
             workflow = self.sub_workflow()
-            results.append(await workflow.invoke({"a": "1", "b": 2}, session.base(), config=inputs.get(CONFIG_KEY), is_sub=True))
+            results.append(await workflow.invoke({"a": "1", "b": 2}, session, config=inputs.get(CONFIG_KEY),
+                                                 is_sub=True))
         output = {"results": results}
         print(output)
         return output
@@ -71,7 +72,7 @@ class TestBranchComponent:
         workflow.add_connection("sub_workflow", "e")
 
         inputs = {"data":'aaa'}
-        results = await workflow.invoke(inputs, WorkflowSession())
+        results = await workflow.invoke(inputs, create_workflow_session())
         print(results)
 
     async def test_add_branch_error(self):
@@ -101,7 +102,7 @@ class TestBranchComponent:
         workflow.add_connection("print_inputs", "end")
 
         inputs = {"data": value}
-        print(await workflow.invoke(inputs, WorkflowSession()))
+        print(await workflow.invoke(inputs, create_workflow_session()))
 
     async def test_expression_is_empty(self):
        await self.run_with_expression("is_empty(${start.input})", None)
@@ -167,4 +168,4 @@ class TestBranchComponent:
     #     workflow.add_connection("print_inputs", "end")
     #
     #     inputs = {"data4": {"k2": {"k": "v"}, "k3": {"k": True, "arr": [1]}}}
-    #     print(await workflow.invoke(inputs, WorkflowSession()))
+    #     print(await workflow.invoke(inputs, create_workflow_session()))

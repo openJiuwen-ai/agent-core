@@ -8,7 +8,7 @@ from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
-from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import BaseStreamMode, OutputSchema
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState
 from openjiuwen.core.workflow import ComponentAbility
@@ -43,7 +43,7 @@ async def test_simple_template_workflow():
                           "response_mode": "${start.response_node}"})
     flow.add_connection("start", "a")
     flow.add_connection("a", "end")
-    res = await flow.invoke({"a": 1, "b": "haha"}, WorkflowSession())
+    res = await flow.invoke({"a": 1, "b": "haha"}, create_workflow_session())
     assert res.result == {'responseContent': 'hello:haha'}
 
 
@@ -54,7 +54,7 @@ async def test_end_invoke_template():
     conf = {"responseTemplate": "渲染结果:{{param1}},{{param2}}"}
     flow.set_end_comp("e", End(conf=conf), inputs_schema={"param1": "${s.query}", "param2": "${s.content}"})
     flow.add_connection("s", "e")
-    res = await flow.invoke({"user_inputs": {"query": "你好", "content": "杭州"}}, WorkflowSession())
+    res = await flow.invoke({"user_inputs": {"query": "你好", "content": "杭州"}}, create_workflow_session())
 
     assert res.result == {'responseContent': '渲染结果:你好,杭州'}
 
@@ -66,7 +66,7 @@ async def test_end_invoke_no_template():
     conf = {}
     flow.set_end_comp("e", End(conf=conf), inputs_schema={"param1": "${s.query}", "param2": "${s.content}"})
     flow.add_connection("s", "e")
-    res = await flow.invoke({"user_inputs": {"query": "你好", "content": "杭州"}}, WorkflowSession())
+    res = await flow.invoke({"user_inputs": {"query": "你好", "content": "杭州"}}, create_workflow_session())
     assert res.result == {'output': {'param1': '你好', 'param2': '杭州'}}
 
 
@@ -78,7 +78,7 @@ async def test_end_stream_template():
     flow.set_end_comp("e", End(conf=conf), inputs_schema={"param1": "${s.query}", "param2": "${s.content}"},
                       response_mode="streaming")
     flow.add_connection("s", "e")
-    result = flow.stream(inputs={"user_inputs": {"query": "你好", "content": "杭州"}}, session=WorkflowSession(),
+    result = flow.stream(inputs={"user_inputs": {"query": "你好", "content": "杭州"}}, session=create_workflow_session(),
                          stream_modes=[BaseStreamMode.OUTPUT])
 
     expect_result = [OutputSchema(type=END_NODE_STREAM, index=0, payload={'answer': '渲染结果:'}),
@@ -102,7 +102,7 @@ async def test_end_stream_no_template():
     flow.set_end_comp("e", End(conf=conf), inputs_schema={"param1": "${s.query}", "param2": "${s.content}"},
                       response_mode="streaming")
     flow.add_connection("s", "e")
-    result = flow.stream(inputs={"user_inputs": {"query": "你好", "content": "杭州"}}, session=WorkflowSession(),
+    result = flow.stream(inputs={"user_inputs": {"query": "你好", "content": "杭州"}}, session=create_workflow_session(),
                          stream_modes=[BaseStreamMode.OUTPUT])
 
     expect_result = [
@@ -129,7 +129,7 @@ async def test_end_transform():
                       response_mode="streaming")
     flow.add_connection("s", "n")
     flow.add_stream_connection("n", "e")
-    result = flow.stream(inputs={"user_inputs": {"query": "你好", "content": "杭州"}}, session=WorkflowSession(),
+    result = flow.stream(inputs={"user_inputs": {"query": "你好", "content": "杭州"}}, session=create_workflow_session(),
                          stream_modes=[BaseStreamMode.OUTPUT])
     expect_result = [OutputSchema(type='end node stream', index=0, payload={'answer': '渲染结果:'}),
                      OutputSchema(type='end node stream', index=1, payload={'answer': '你好'}),
@@ -165,7 +165,7 @@ async def test_simple_output_schema_workflow():
                       )
     flow.add_connection("start", "a")
     flow.add_connection("a", "end")
-    res = await flow.invoke({"a": 1, "b": "haha"}, WorkflowSession())
+    res = await flow.invoke({"a": 1, "b": "haha"}, create_workflow_session())
     assert res.result == {'output': {'end_input': 'haha'}}
 
 
@@ -190,7 +190,8 @@ async def test_end_stream_workflow():
     actual_chunks = []
     expect_chunks = [OutputSchema(type='end node stream', index=0, payload={'answer': 'hello:'}),
                      OutputSchema(type='end node stream', index=1, payload={'answer': 1})]
-    async for chunk in flow.stream({"a": 1, "b": "haha"}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in flow.stream({"a": 1, "b": "haha"}, create_workflow_session(),
+                                   stream_modes=[BaseStreamMode.OUTPUT]):
         actual_chunks.append(chunk)
         index += 1
 
@@ -233,7 +234,7 @@ async def test_end_batch_stream_workflow():
 
     real_result = []
     async for chunk in flow.stream({"a": 1, "b": "haha"},
-                                   WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
+                                   create_workflow_session(), stream_modes=[BaseStreamMode.OUTPUT]):
         real_result.append(chunk)
 
     print(real_result)
@@ -255,7 +256,7 @@ async def test_end_no_streaming_no_template():
     workflow.add_stream_connection("stream", "end")
 
     user_input = {'user_input': {'a': 1, 'b': 2}}
-    result = await workflow.invoke(user_input, WorkflowSession())
+    result = await workflow.invoke(user_input, create_workflow_session())
     assert result.result == {'collect_output': [{'a': 1}, {'b': 2}], 'output': None}
 
 
@@ -284,7 +285,7 @@ async def test_end_template_001():
     flow.add_connection("custom", "end")
 
     user_input = {'user_input': {'a': 1, 'b': 2}}
-    result = await flow.invoke(user_input, WorkflowSession())
+    result = await flow.invoke(user_input, create_workflow_session())
     
     assert len(result.result) > 0, f"Expected non-empty result, got: {result.result}"
     assert result.state == WorkflowExecutionState.COMPLETED, f"Expected COMPLETED state, got: {result.state}"
@@ -321,7 +322,7 @@ async def test_end_template_002():
 
     user_input = {'user_input': {'a': 1, 'b': 2}}
     stream_chunks = []
-    async for chunk in flow.stream(user_input, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in flow.stream(user_input, create_workflow_session(), stream_modes=[BaseStreamMode.OUTPUT]):
         print(f"chunk: {chunk}")
         stream_chunks.append(chunk)
     
@@ -354,7 +355,7 @@ async def test_end_template_013():
     flow.add_connection("start", "custom")
     flow.add_connection("custom", "end")
 
-    result = await flow.invoke({"user_input": {"a": 1, "b": 2}}, WorkflowSession())
+    result = await flow.invoke({"user_input": {"a": 1, "b": 2}}, create_workflow_session())
     
     assert result.state == WorkflowExecutionState.COMPLETED, f"Expected COMPLETED state, got: {result.state}"
     assert result.result is not None, f"Expected non-None result, got: {result.result}"
@@ -388,7 +389,7 @@ async def test_end_template_014():
 
     stream_result = []
     async for chunk in flow.stream(
-            {"user_input": {"a": 1, "b": 2}}, WorkflowSession(),
+            {"user_input": {"a": 1, "b": 2}}, create_workflow_session(),
             stream_modes=[BaseStreamMode.OUTPUT]):
         stream_result.append(chunk)
 
@@ -431,7 +432,7 @@ async def test_end_template_017():
 
     stream_result = []
     async for chunk in flow.stream(
-            {"user_input": {"a": 1, "b": 2, "op": "+"}}, WorkflowSession(),
+            {"user_input": {"a": 1, "b": 2, "op": "+"}}, create_workflow_session(),
             stream_modes=[BaseStreamMode.OUTPUT]):
         stream_result.append(chunk)
 
@@ -471,7 +472,7 @@ async def test_end_template_019():
     flow.add_connection("start", "custom")
     flow.add_stream_connection("custom", "end")
 
-    result = await flow.invoke({"user_input": {"a": 1, "b": 2, "op": "+"}}, WorkflowSession())
+    result = await flow.invoke({"user_input": {"a": 1, "b": 2, "op": "+"}}, create_workflow_session())
 
     assert result.state == WorkflowExecutionState.COMPLETED, \
         f"Expected COMPLETED state, got: {result.state}"

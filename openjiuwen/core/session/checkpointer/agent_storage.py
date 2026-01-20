@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.interaction.storage import Storage
+from openjiuwen.core.session.checkpointer.storage import Storage
 from openjiuwen.core.session.session import BaseSession
 from openjiuwen.core.graph.store import create_serializer, Serializer
 

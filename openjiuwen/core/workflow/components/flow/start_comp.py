@@ -8,7 +8,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.workflow.components.component import WorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.node import Session
 
 
 class Start(WorkflowComponent):

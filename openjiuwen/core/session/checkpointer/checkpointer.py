@@ -8,7 +8,7 @@ from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.graph.store import Store
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
-from openjiuwen.core.session.interaction.base import Checkpointer
+from openjiuwen.core.session.checkpointer.base import Checkpointer
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.session import BaseSession
 
@@ -24,7 +24,7 @@ class InMemoryCheckpointer(Checkpointer):
     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
         logger.info(f"workflow: {session.workflow_id()} create or restore checkpoint from "
                     f"session: {session.session_id()}")
-        from openjiuwen.core.session.interaction.workflow_storage import WorkflowStorage
+        from openjiuwen.core.session.checkpointer.workflow_storage import WorkflowStorage
         workflow_store = self._workflow_stores.setdefault(session.session_id(), WorkflowStorage())
         self._session_to_workflow_ids.setdefault(session.session_id(), set())
         if isinstance(inputs, InteractiveInput):
@@ -78,7 +78,7 @@ class InMemoryCheckpointer(Checkpointer):
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
         logger.info(f"agent: {session.agent_id()} create or restore checkpoint from session: {session.session_id()}")
-        from openjiuwen.core.session.interaction.agent_storage import AgentStorage
+        from openjiuwen.core.session.checkpointer.agent_storage import AgentStorage
         agent_store = self._agent_stores.setdefault(session.session_id(), AgentStorage())
         agent_store.recover(session)
         if inputs is not None:

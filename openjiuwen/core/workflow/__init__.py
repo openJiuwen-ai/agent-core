@@ -53,6 +53,8 @@ from openjiuwen.core.workflow.components.condition.expression import ExpressionC
 from openjiuwen.core.workflow.components.condition.array import ArrayCondition
 from openjiuwen.core.workflow.components.condition.number import NumberCondition
 
+from openjiuwen.core.session.workflow import Session, create_workflow_session
+
 
 
 _WORKFLOW_CLASSES = [
@@ -117,6 +119,11 @@ _CONDITION_CLASSES = [
     "AlwaysTrue",
 ]
 
+_SESSION = [
+    "Session",
+    "create_workflow_session",
+]
+
 __all__ = (
         _WORKFLOW_CLASSES +
         _COMPONENTS_CLASSES +
@@ -125,5 +132,6 @@ __all__ = (
         _TOOL_RELATED_COMPONENTS +
         _RESOURCE_RELATED_COMPONENTS +
         _CONDITION_CLASSES +
-        _WORKFLOW_METHODS
+        _WORKFLOW_METHODS +
+        _SESSION
 )

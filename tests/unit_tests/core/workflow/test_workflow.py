@@ -22,7 +22,7 @@ from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowCo
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session import Session
-from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import BaseStreamMode, CustomSchema, TraceSchema
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
 from openjiuwen.core.workflow import ComponentAbility
@@ -36,23 +36,23 @@ pytestmark = pytest.mark.asyncio
 async def test_workflow_with_loop_number_condition():
     flow = await create_workflow()
 
-    # async for chunk in flow.stream({"input_number": 1, "loop_number": 3}, WorkflowSession()):
+    # async for chunk in flow.stream({"input_number": 1, "loop_number": 3}, create_workflow_session()):
     #     if isinstance(chunk, TraceSchema):
     #         print(chunk.model_dump_json(indent=4))
     #
-    # async for chunk in flow.stream({"input_number": 1, "loop_number": 3}, WorkflowSession()):
+    # async for chunk in flow.stream({"input_number": 1, "loop_number": 3}, create_workflow_session()):
     #     if isinstance(chunk, TraceSchema):
     #         print(chunk.model_dump_json(indent=4))
 
-    result = await flow.invoke({"input_number": 1, "loop_number": 3}, WorkflowSession())
+    result = await flow.invoke({"input_number": 1, "loop_number": 3}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11, 12], "user_var": 31},
                                     state=WorkflowExecutionState.COMPLETED)
 
-    result = await flow.invoke({"input_number": 2, "loop_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_number": 2, "loop_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11], "user_var": 22},
                                     state=WorkflowExecutionState.COMPLETED)
     flow = await create_workflow()
-    result = await flow.invoke({"input_number": 2, "loop_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_number": 2, "loop_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11], "user_var": 22},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -107,10 +107,10 @@ async def test_start_comp():
     flow.add_connection("s", "e")
     # 没有提供必选项
     with pytest.raises(JiuWenBaseException) as e:
-        await flow.invoke(inputs={"user_inputs": {}}, session=WorkflowSession())
+        await flow.invoke(inputs={"user_inputs": {}}, session=create_workflow_session())
         print(e)
 
-    result = await flow.invoke(inputs={"user_inputs": {"query": "hello"}}, session=WorkflowSession())
+    result = await flow.invoke(inputs={"user_inputs": {"query": "hello"}}, session=create_workflow_session())
     assert result.result == {"query": "hello", "param1": None, "param2": False}
 
 
@@ -132,7 +132,7 @@ async def test_simple_workflow():
                           "result": "${a.aa}"})
     flow.add_connection("start", "a")
     flow.add_connection("a", "end")
-    results = await flow.invoke(inputs={"a": 1, "b": "haha"}, session=WorkflowSession())
+    results = await flow.invoke(inputs={"a": 1, "b": "haha"}, session=create_workflow_session())
     assert results.result == {"result": 1}
 
     flow2 = Workflow()
@@ -150,7 +150,7 @@ async def test_simple_workflow():
     flow2.add_connection("start", "a2")
     flow2.add_connection("a1", "end")
     flow2.add_connection("a2", "end")
-    results = await flow2.invoke({"a1": 1, "a2": 2}, WorkflowSession())
+    results = await flow2.invoke({"a1": 1, "a2": 2}, create_workflow_session())
     assert results.result == {"b1": 1, "b2": 2}
 
 
@@ -180,9 +180,9 @@ async def test_simple_workflow_with_condition():
     flow.set_end_comp("end", MockEndNode("end"), {"result1": "${a.a}", "result2": "${b.b}"})
     flow.add_connection("a", "end")
     flow.add_connection("b", "end")
-    result = await flow.invoke({"a": 1}, WorkflowSession())
+    result = await flow.invoke({"a": 1}, create_workflow_session())
     assert result.result == {"result1": 1, "result2": None}
-    result = await flow.invoke({"b": "haha"}, WorkflowSession())
+    result = await flow.invoke({"b": "haha"}, create_workflow_session())
     assert result.result == {"result1": None, "result2": "haha"}
 
 
@@ -208,9 +208,9 @@ async def test_simple_workflow_with_branch_condition():
     flow.add_connection("a", "end")
     flow.add_connection("b", "end")
 
-    result = await flow.invoke({"a": 1}, WorkflowSession())
+    result = await flow.invoke({"a": 1}, create_workflow_session())
     assert result.result == {"result1": 1, "result2": None}
-    result = await flow.invoke({"b": "haha"}, WorkflowSession())
+    result = await flow.invoke({"b": "haha"}, create_workflow_session())
     assert result.result == {"result1": None, "result2": "haha"}
 
 
@@ -243,10 +243,10 @@ async def test_workflow_with_wait_for_all():
         flow.add_connection("d", "collect")
         flow.add_connection("collect", "end")
         if wait_for_all:
-            result = await flow.invoke({"a": 1, "b": 2, "c": 3, "d": 4}, WorkflowSession())
+            result = await flow.invoke({"a": 1, "b": 2, "c": 3, "d": 4}, create_workflow_session())
             assert result.result == {"result": 1}
         else:
-            result = await flow.invoke({"a": 1, "b": 2, "c": 3, "d": 4}, WorkflowSession())
+            result = await flow.invoke({"a": 1, "b": 2, "c": 3, "d": 4}, create_workflow_session())
             assert result.result == {"result": 2}
 
 
@@ -272,10 +272,10 @@ async def test_workflow_with_branch():
     flow.add_connection("a", "end")
     flow.add_connection("b", "end")
 
-    result = await flow.invoke({"a": 2}, WorkflowSession())
+    result = await flow.invoke({"a": 2}, create_workflow_session())
     assert result.result["b"] == 12
 
-    result = await flow.invoke({"a": 15}, WorkflowSession())
+    result = await flow.invoke({"a": 15}, create_workflow_session())
     assert result.result["a"] == 15
 
 
@@ -318,11 +318,11 @@ async def test_workflow_with_loop():
     flow.add_connection("l", "b")
     flow.add_connection("b", "e")
 
-    result = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, WorkflowSession())
+    result = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [11, 12, 13], "user_var": 31, "index": [0, 1, 2]},
                                     state=WorkflowExecutionState.COMPLETED)
 
-    result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [14, 15], "user_var": 22, "index": [0, 1]},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -365,11 +365,11 @@ async def test_workflow_with_loop_component():
     flow.add_connection("l", "b")
     flow.add_connection("b", "e")
 
-    result = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, WorkflowSession())
+    result = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [11, 12, 13], "user_var": 31, "index": [0, 1, 2]},
                                     state=WorkflowExecutionState.COMPLETED)
 
-    result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [14, 15], "user_var": 22, "index": [0, 1]},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -407,11 +407,11 @@ async def test_workflow_with_loop_component_number_condition():
     flow.add_connection("l", "b")
     flow.add_connection("b", "e")
 
-    result = await flow.invoke({"input_number": 2, "loop_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_number": 2, "loop_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11], "user_var": 22},
                                     state=WorkflowExecutionState.COMPLETED)
 
-    result = await flow.invoke({"input_number": 1, "loop_number": 3}, WorkflowSession())
+    result = await flow.invoke({"input_number": 1, "loop_number": 3}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11, 12], "user_var": 31},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -449,11 +449,11 @@ async def test_workflow_with_loop_component_expression_condition():
     flow.add_connection("l", "b")
     flow.add_connection("b", "e")
 
-    result = await flow.invoke({"input_number": 2, "loop_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_number": 2, "loop_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11], "user_var": 22},
                                     state=WorkflowExecutionState.COMPLETED)
 
-    result = await flow.invoke({"input_number": 1, "loop_number": 3}, WorkflowSession())
+    result = await flow.invoke({"input_number": 1, "loop_number": 3}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11, 12], "user_var": 31},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -504,11 +504,11 @@ async def test_workflow_with_loop_component_always_true():
     flow.add_connection("l", "b")
     flow.add_connection("b", "e")
 
-    result = await flow.invoke({"input_number": 2, "loop_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_number": 2, "loop_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11], "user_var": 22},
                                     state=WorkflowExecutionState.COMPLETED)
 
-    result = await flow.invoke({"input_number": 1, "loop_number": 3}, WorkflowSession())
+    result = await flow.invoke({"input_number": 1, "loop_number": 3}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [10, 11, 12], "user_var": 31},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -550,11 +550,11 @@ async def test_workflow_with_loop_component_break():
     flow.add_connection("l", "b")
     flow.add_connection("b", "e")
 
-    result = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, WorkflowSession())
+    result = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [11], "user_var": 11},
                                     state=WorkflowExecutionState.COMPLETED)
 
-    result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [14], "user_var": 12},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -596,11 +596,11 @@ async def test_workflow_with_loop_break():
     flow.add_connection("l", "b")
     flow.add_connection("b", "e")
 
-    result = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, WorkflowSession())
+    result = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [11], "user_var": 11},
                                     state=WorkflowExecutionState.COMPLETED)
 
-    result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, WorkflowSession())
+    result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, create_workflow_session())
     assert result == WorkflowOutput(result={"array_result": [14], "user_var": 12},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -630,7 +630,7 @@ async def test_simple_stream_workflow():
     flow.add_connection("a", "end")
 
     index = 0
-    async for chunk in flow.stream({"a": 1, "b": "haha"}, WorkflowSession()):
+    async for chunk in flow.stream({"a": 1, "b": "haha"}, create_workflow_session()):
         if not isinstance(chunk, CustomSchema):
             continue
         assert chunk == expected_datas_model[index]
@@ -680,7 +680,7 @@ async def test_seq_exec_stream_workflow():
         "b": node_b_expected_datas_model
     }
     index_dict = {key: 0 for key in expected_datas_model.keys()}
-    async for chunk in flow.stream({"a": 1, "b": "haha"}, WorkflowSession()):
+    async for chunk in flow.stream({"a": 1, "b": "haha"}, create_workflow_session()):
         if not isinstance(chunk, CustomSchema):
             continue
         node_id = chunk.node_id
@@ -733,7 +733,7 @@ async def test_parallel_exec_stream_workflow():
         "b": node_b_expected_datas_model
     }
     index_dict = {key: 0 for key in expected_datas_model.keys()}
-    async for chunk in flow.stream({"a": 1, "b": "haha"}, WorkflowSession()):
+    async for chunk in flow.stream({"a": 1, "b": "haha"}, create_workflow_session()):
         if not isinstance(chunk, CustomSchema):
             continue
         node_id = chunk.node_id
@@ -788,7 +788,7 @@ async def test_sub_stream_workflow():
     main_workflow.add_connection("a", "end")
 
     index = 0
-    async for chunk in main_workflow.stream({"a": 1, "b": "haha"}, WorkflowSession(),
+    async for chunk in main_workflow.stream({"a": 1, "b": "haha"}, create_workflow_session(),
                                             stream_modes=[BaseStreamMode.CUSTOM]):
         if isinstance(chunk, CustomSchema):
             assert chunk == expected_datas_model[index]
@@ -822,7 +822,7 @@ async def test_nested_workflow():
     flow1.add_connection("start", "composite")
     flow1.add_connection("a1", "end")
     flow1.add_connection("composite", "end")
-    result = await flow1.invoke({"a1": 1, "a2": 2}, WorkflowSession())
+    result = await flow1.invoke({"a1": 1, "a2": 2}, create_workflow_session())
     assert result.result == {"b1": 1, "b2": 2}
 
 
@@ -853,7 +853,7 @@ async def test_nested_workflow_same_node_id():
     flow1.add_connection("start", "composite")
     flow1.add_connection("composite", "a1")
     flow1.add_connection("a1", "end")
-    result = await flow1.invoke({"a1": 1, "a2": 2}, WorkflowSession())
+    result = await flow1.invoke({"a1": 1, "a2": 2}, create_workflow_session())
     assert result.result == {'output': {'b1': 1, 'b2': 2, 'b3': 2}}
 
 
@@ -886,7 +886,7 @@ async def test_nested_workflow_same_node_id_with_template():
     flow1.add_connection("start", "composite")
     flow1.add_connection("composite", "a1")
     flow1.add_connection("a1", "end")
-    result = await flow1.invoke({"a1": 1, "a2": 2}, WorkflowSession())
+    result = await flow1.invoke({"a1": 1, "a2": 2}, create_workflow_session())
     assert result.result == {'output': {'b1': 1, 'b2': '填充结果2', 'b3': '填充结果2'}}
 
 
@@ -904,7 +904,7 @@ async def test_stream_comp_workflow():
     flow.add_stream_connection("a", "b")
     flow.add_connection("b", "end")
     idx = 1
-    result = await flow.invoke({"a": idx}, WorkflowSession())
+    result = await flow.invoke({"a": idx}, create_workflow_session())
     assert result.result == {"result1": idx * sum(range(1, 3))}
 
 
@@ -929,7 +929,7 @@ async def test_transform_workflow():
     flow.add_stream_connection("b", "c")
     flow.add_connection("c", "end")
 
-    result = await flow.invoke({"a": 1}, WorkflowSession())
+    result = await flow.invoke({"a": 1}, create_workflow_session())
     assert result.result == {"result": 3}
 
 
@@ -974,7 +974,7 @@ async def test_five_transform_workflow():
     flow.add_stream_connection("f", "g")
     flow.add_connection("g", "end")
 
-    result = await flow.invoke({"a": 1}, WorkflowSession())
+    result = await flow.invoke({"a": 1}, create_workflow_session())
     assert result.result == {"result": 3}
 
 
@@ -994,7 +994,7 @@ async def test_auto_complete_abilities_detects_unregistered_edge_nodes():
     try:
         # _auto_complete_abilities is called during invoke/stream, which should detect the issue
         with pytest.raises(JiuWenBaseException) as context:
-            await flow.invoke({"a": 1}, WorkflowSession())
+            await flow.invoke({"a": 1}, create_workflow_session())
 
         error_msg = str(context.value.message)
         # Verify error message contains useful debug info
@@ -1017,7 +1017,7 @@ async def test_invoke_validates_unregistered_edge_nodes():
     flow1.add_connection("a", "unknown_target")  # No validation at add_connection time
 
     with pytest.raises(JiuWenBaseException) as context:
-        await flow1.invoke({"a": 1}, WorkflowSession())
+        await flow1.invoke({"a": 1}, create_workflow_session())
     error_msg = str(context.value.message)
     assert ("unknown_target" in error_msg)
     assert ("start" in error_msg)  # Should show registered components
@@ -1031,7 +1031,7 @@ async def test_invoke_validates_unregistered_edge_nodes():
     flow2.add_connection("a", "end")
 
     with pytest.raises(JiuWenBaseException) as context:
-        await flow2.invoke({"a": 1}, WorkflowSession())
+        await flow2.invoke({"a": 1}, create_workflow_session())
     error_msg = str(context.value.message)
     assert "unknown_source" in error_msg
 
@@ -1042,7 +1042,7 @@ async def test_invoke_validates_unregistered_edge_nodes():
     flow3.set_end_comp("end", MockEndNode("end"))
     flow3.add_connection("start", "a")
     flow3.add_connection("a", "end")
-    result = await flow3.invoke({"a": 1}, WorkflowSession())
+    result = await flow3.invoke({"a": 1}, create_workflow_session())
     assert result is not None
 
 
@@ -1106,7 +1106,7 @@ async def test_nested_loop():
 
     try:
         loop_indexes = []
-        async for chunk in main_workflow.stream(inputs, session=WorkflowSession()):
+        async for chunk in main_workflow.stream(inputs, session=create_workflow_session()):
             if isinstance(chunk, TraceSchema):
                 loop_index = chunk.payload.get("loopIndex")
                 if loop_index is not None and chunk.payload.get("invokeId") == "main_loop.sub.loop.loop_1":
@@ -1171,7 +1171,7 @@ async def test_workflow_with_branch_and_stream():
     workflow.add_connection("wait", "end")
     workflow.add_stream_connection("stream_comp", "end")
 
-    async for chunk in workflow.stream(inputs={"inputs": 'b', 'num': 5}, session=WorkflowSession(),
+    async for chunk in workflow.stream(inputs={"inputs": 'b', 'num': 5}, session=create_workflow_session(),
                                        stream_modes=[BaseStreamMode.OUTPUT]):
         print(chunk)
 
@@ -1179,13 +1179,13 @@ async def test_workflow_with_branch_and_stream():
 async def test_workflow_with_interrupt_recovery():
     workflow = create_workflow2()
     try:
-        async for chunk in workflow.stream(inputs={"inputs": 10}, session=WorkflowSession(session_id="123")):
+        async for chunk in workflow.stream(inputs={"inputs": 10}, session=create_workflow_session(session_id="123")):
             logger.info(chunk)
     except Exception as e:
         logger.error(f"failed call workflow, error: {e}")
     workflow2 = create_workflow2()
     try:
-        async for chunk in workflow2.stream(InteractiveInput(), session=WorkflowSession(session_id="123")):
+        async for chunk in workflow2.stream(InteractiveInput(), session=create_workflow_session(session_id="123")):
             logger.info(chunk)
     except Exception as e:
         logger.error(f"failed call workflow, error: {e}")
@@ -1219,7 +1219,7 @@ async def test_illegal_nested_workflow():
             nested_flow.set_start_comp("start", Start(), inputs_schema={"out": "${inputs}"})
             nested_flow.set_end_comp("end", End(), inputs_schema={"result": "${start.out}"})
             nested_flow.add_connection("start", "end")
-            result = await nested_flow.invoke(inputs, session.base(), is_sub=True)
+            result = await nested_flow.invoke(inputs, session, is_sub=True)
             return {"output": result}
 
     workflow = Workflow()
@@ -1233,7 +1233,7 @@ async def test_illegal_nested_workflow():
     workflow.add_connection("interaction_node", "end")
 
     with pytest.raises(JiuWenBaseException) as cm:
-        await workflow.invoke({"inputs": "hi"}, WorkflowSession())
+        await workflow.invoke({"inputs": "hi"}, create_workflow_session())
 
     assert cm.value.error_code == StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code
     assert cm.value.message == StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg
@@ -1272,7 +1272,7 @@ async def test_workflow_with_loop_component_multi_abilities():
     flow.add_connection("s", "l")
     flow.add_connection("l", "e")
 
-    result = await flow.invoke({"input_array": [1, 2, 3]}, WorkflowSession())
+    result = await flow.invoke({"input_array": [1, 2, 3]}, create_workflow_session())
     assert result == WorkflowOutput(result={"result1": [1, 2, 3], "result2": [1, 2, 3]},
                                     state=WorkflowExecutionState.COMPLETED)
 
@@ -1312,7 +1312,7 @@ async def test_sub_flow_multi_stream_output():
     flow.add_connection("sub_flow", "end")
 
     chunks = []
-    async for chunk in flow.stream({"query": "hello"}, WorkflowSession(), stream_modes=[BaseStreamMode.OUTPUT]):
+    async for chunk in flow.stream({"query": "hello"}, create_workflow_session(), stream_modes=[BaseStreamMode.OUTPUT]):
         chunks.append(chunk)
 
     assert len(chunks) == 1

@@ -19,6 +19,7 @@ from openjiuwen.core.single_agent.agents.react_agent import (
     ReActAgent,
     ReActAgentConfig
 )
+from openjiuwen.core.session.agent import Session, create_agent_session
 
 
 __all__ = [
@@ -26,4 +27,6 @@ __all__ = [
     "AgentCard",
     "ReActAgent",
     "ReActAgentConfig",
+    "Session",
+    "create_agent_session",
 ]
