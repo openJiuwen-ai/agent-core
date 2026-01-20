@@ -88,7 +88,7 @@ class ChromaVectorStore(VectorStore):
         return self._client
 
     @property
-    def collection(self):
+    def collection(self) -> chromadb.Collection:
         """Get ChromaDB collection"""
         return self._collection
 

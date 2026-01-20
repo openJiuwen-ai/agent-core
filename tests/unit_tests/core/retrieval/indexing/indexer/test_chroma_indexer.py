@@ -74,7 +74,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
-        mock_store.collection = MagicMock(get=MagicMock(return_value=[]))
+        mock_store.collection = MagicMock(get=MagicMock(return_value={}))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -100,7 +100,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
-        mock_store.collection = MagicMock(get=MagicMock(return_value=[]))
+        mock_store.collection = MagicMock(get=MagicMock(return_value={}))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -121,7 +121,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
-        mock_store.collection = MagicMock(get=MagicMock(return_value=[]))
+        mock_store.collection = MagicMock(get=MagicMock(return_value={}))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -146,7 +146,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
-        mock_store.collection = MagicMock(get=MagicMock(return_value=[]))
+        mock_store.collection = MagicMock(get=MagicMock(return_value={}))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
