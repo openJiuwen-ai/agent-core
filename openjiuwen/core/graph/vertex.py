@@ -6,6 +6,7 @@ from asyncio import CancelledError
 from typing import Any, Optional, AsyncIterator, Literal
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT, END_NODE_STREAM, INPUTS_KEY, CONFIG_KEY
+from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
@@ -172,7 +173,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     results = {key: value for key, value in results.items() if value is not None}
         else:
             results = outputs_transformer(results)
-        self._session.state().set_outputs(results)
+        if results is not None:
+            self._session.state().set_outputs(results)
         await self.__trace_component_outputs__(results)
         self._clear_interactive()
         return results

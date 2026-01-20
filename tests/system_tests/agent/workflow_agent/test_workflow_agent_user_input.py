@@ -107,11 +107,7 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _create_start_component():
-        return Start({
-            "inputs": [
-                {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-            ]
-        })
+        return Start()
 
     def _build_user_input_workflow(self) -> Workflow:
         """

@@ -329,7 +329,7 @@ class RealWorkflowTest(unittest.TestCase):
         context = create_agent_session(trace_id="test")
         flow = Workflow()
 
-        start = Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        start = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         llm_config = LLMCompConfig(

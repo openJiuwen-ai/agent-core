@@ -3,7 +3,9 @@
 import asyncio
 import re
 import string
-from typing import AsyncIterator, TypedDict, Union, AsyncGenerator, Any
+from typing import AsyncIterator, Union, AsyncGenerator, Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.core.common.constants.constant import END_NODE_STREAM
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
@@ -19,34 +21,41 @@ from openjiuwen.core.session import END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KE
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.session.stream import OutputSchema
 
-RESPONSE_TEMPLATE = "responseTemplate"
 
-
-class EndConfig(TypedDict):
-    responseTemplate: str
+class EndConfig(BaseModel):
+    response_template: str = Field(
+        alias="responseTemplate",
+        description="Response template for formatting the final output, format result {\"response\": \"...\"}",
+        examples=["Hello {{name}}", "Error: {{error_msg}}"],
+        min_length=1
+    )
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
 
 
 class End(WorkflowComponent):
     def __init__(self, conf: Union[EndConfig, dict] = None):
         super().__init__()
-        self.conf = conf
-        self.template = None
-        self._batch_template = None
-        self._mix = False
-        if conf is not None and conf.get(RESPONSE_TEMPLATE) is not None:
-            template = conf.get(RESPONSE_TEMPLATE)
-            if not isinstance(template, str):
+        if conf:
+            try:
+                self._conf = EndConfig.model_validate(conf)
+                self._template = TemplateProcessor(self._conf.response_template)
+            except Exception as e:
                 raise JiuWenBaseException(StatusCode.COMPONENT_END_INIT_FAILED.code,
                                           message=StatusCode.COMPONENT_END_INIT_FAILED.errmsg.format(
-                                              error_msg="`responseTemplate` type error, is not str"))
-            if template != "":
-                self.template = TemplateProcessor(template)
+                                              error_msg="`response_template` type error, is not str")) from e
+        else:
+            self._conf = None
+            self._template = None
+        self._batch_template = None
+        self._mix = False
 
     def set_mix(self):
         self._mix = True
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        if self.template is not None:
+        if self._template is not None:
             if inputs is None:
                 inputs = {}
             return await self._render(inputs, session.get_env(END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY))
@@ -56,7 +65,7 @@ class End(WorkflowComponent):
             else:
                 output = None
             logger.debug(f"end component invoke method output: {output}")
-            return {"output": output}
+            return {"output": output} if output is not None else output
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         logger.debug(f"end component stream method inputs: {inputs}")
@@ -64,16 +73,16 @@ class End(WorkflowComponent):
             logger.debug("end component stream method received None inputs, using empty dict")
             inputs = {}
         try:
-            if self.template is not None:
+            if self._template is not None:
                 logger.debug(f"end component has template, inputs: {inputs}")
-                generator = self.template.render_stream(inputs,
-                                                        session.get_env(END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY))
+                generator = self._template.render_stream(inputs,
+                                                         session.get_env(END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY))
                 frame_count = 0
                 async for frame in generator:
                     logger.debug(f"rendering stream frame: {frame}")
                     frame_count += 1
                     yield OutputSchema(type=END_NODE_STREAM, index=frame.get("index"),
-                                       payload=dict(answer=frame.get("data")))
+                                       payload=dict(response=frame.get("data")))
                 logger.debug(f"end component stream method yielded {frame_count} frames")
             else:
                 if isinstance(inputs, dict):
@@ -90,13 +99,13 @@ class End(WorkflowComponent):
 
     async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         logger.debug(f"end component transform method inputs: {inputs}")
-        if self.template is not None:
-            generator = self.template.render_stream(inputs,
-                                                    session.get_env(END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY))
+        if self._template is not None:
+            generator = self._template.render_stream(inputs,
+                                                     session.get_env(END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY))
             async for frame in generator:
                 logger.debug(f"rendering transform frame: {frame}")
                 yield OutputSchema(type=END_NODE_STREAM, index=frame.get("index"),
-                                   payload=dict(answer=frame.get("data")))
+                                   payload=dict(response=frame.get("data")))
         else:
             for (path, value) in extract_leaf_nodes(inputs):
                 if isinstance(value, AsyncGenerator):
@@ -107,7 +116,7 @@ class End(WorkflowComponent):
 
     async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         logger.debug(f"end component collect method inputs: {inputs}")
-        if self.template is not None:
+        if self._template is not None:
             return await self._render(inputs, session.get_env(END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY))
         else:
             chunks = []
@@ -119,12 +128,12 @@ class End(WorkflowComponent):
                     chunks.append({format_path(path): value})
             logger.debug(f"collect chunks: {chunks}")
             return {
-                "collect_output": chunks
+                "output": chunks
             }
 
     async def _render(self, inputs: Input, timeout: float = 0.2):
         if self._batch_template is None:
-            processor = TemplateBatchProcessor(self.template, inputs)
+            processor = TemplateBatchProcessor(self._template, inputs)
             self._batch_template = processor
             if self._mix:
                 async with self._batch_template.condition:
@@ -141,7 +150,7 @@ class End(WorkflowComponent):
             self._batch_template.condition.notify_all()
         self._batch_template = None
         return {
-            "responseContent": answer,
+            "response": answer,
         }
 
 

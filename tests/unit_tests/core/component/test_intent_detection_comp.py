@@ -114,13 +114,7 @@ class TestIntentDetectionComponent:
         name = "intent"
         flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         model_config = ModelConfig(model_provider=MODEL_PROVIDER,

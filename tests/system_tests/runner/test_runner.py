@@ -125,7 +125,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _create_start_component():
-        return Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        return Start()
 
     @staticmethod
     def _create_end_component():
@@ -258,7 +258,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(result2, dict, "第二次调用应该返回字典")
             self.assertEqual(result2['result_type'], 'answer', "应该返回answer类型")
             self.assertEqual(result2['output'].state.value, 'COMPLETED', "工作流应该完成")
-            self.assertEqual(result2['output'].result['responseContent'], '上海', "应该返回上海")
+            self.assertEqual(result2['output'].result['response'], '上海', "应该返回上海")
             print(f"✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
             return result, result2  # 返回结果用于比对
@@ -315,7 +315,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                         self.assertIsInstance(result2, dict, "第二次调用应该返回字典")
                         self.assertEqual(result2['result_type'], 'answer', "应该返回answer类型")
                         self.assertEqual(result2['output'].state.value, 'COMPLETED', "工作流应该完成")
-                        self.assertEqual(result2['output'].result['responseContent'], '上海', "应该返回上海")
+                        self.assertEqual(result2['output'].result['response'], '上海', "应该返回上海")
                         print("✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
                     except asyncio.TimeoutError:

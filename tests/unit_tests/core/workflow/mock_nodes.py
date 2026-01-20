@@ -22,7 +22,7 @@ class MockNodeBase(WorkflowComponent):
 
 class MockStartNode(Start):
     def __init__(self, node_id: str):
-        super().__init__({})
+        super().__init__()
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         return inputs
@@ -98,7 +98,7 @@ class StreamNodeWithSubWorkflow(MockNodeBase):
 
 class MockStartNode4Cp(Start):
     def __init__(self, node_id: str):
-        super().__init__({})
+        super().__init__()
         self.runtime = 0
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:

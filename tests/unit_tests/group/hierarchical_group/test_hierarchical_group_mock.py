@@ -170,16 +170,7 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(card=workflow_card)
 
         # Start 组件
-        start = Start({
-            "inputs": [
-                {
-                    "id": "query",
-                    "type": "String",
-                    "required": "true",
-                    "sourceType": "ref"
-                }
-            ]
-        })
+        start = Start()
 
         # Questioner 组件（会触发中断）
         key_fields = [

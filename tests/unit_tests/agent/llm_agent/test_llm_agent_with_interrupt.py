@@ -136,13 +136,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         model_config = self._create_model()
@@ -247,13 +241,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         model_config = ModelConfig(model_provider="OpenAI",
@@ -358,13 +346,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
 
@@ -460,13 +442,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
 

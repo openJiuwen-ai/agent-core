@@ -78,16 +78,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _create_start_component():
         """创建 Start 组件"""
-        return Start({
-            "inputs": [
-                {
-                    "id": "query",
-                    "type": "String",
-                    "required": "true",
-                    "sourceType": "ref"
-                }
-            ]
-        })
+        return Start()
 
     def _build_financial_workflow(
             self,
@@ -503,7 +494,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result2['output'].state.value, 'COMPLETED', "步骤2工作流应该完成"
         )
-        response_content = result2['output'].result.get('responseContent', '')
+        response_content = result2['output'].result.get('response', '')
         print(f"✅ 步骤2成功：转账工作流完成，返回: {response_content}")
 
         print("\n🎉 金融场景测试完成！")
@@ -658,7 +649,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(final_chunk2, "步骤2应该有 workflow_final chunk")
 
         payload2 = final_chunk2.payload
-        response_content = payload2.get('responseContent', '')
+        response_content = payload2.get('response', '')
         self.assertIn('200', response_content, "步骤2应该包含转账金额")
         print(f"✅ 步骤2成功：转账工作流完成，返回: {response_content}")
 
@@ -841,7 +832,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(final_chunk3, "步骤3应该有 workflow_final chunk")
         payload3 = final_chunk3.payload
-        response_content3 = payload3.get('responseContent', '')
+        response_content3 = payload3.get('response', '')
         self.assertIn('100', response_content3, "步骤3应该包含转账金额")
         print(f"✅ 步骤3成功：transfer_agent 恢复并完成，返回: {response_content3}")
 
@@ -878,7 +869,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(final_chunk4, "步骤4应该有 workflow_final chunk")
         payload4 = final_chunk4.payload
-        response_content4 = payload4.get('responseContent', '')
+        response_content4 = payload4.get('response', '')
         self.assertIn('稳健', response_content4, "步骤4应该包含理财产品名称")
         print(f"✅ 步骤4成功：invest_agent 恢复并完成，返回: {response_content4}")
 
@@ -1344,7 +1335,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result2['output'].state.value, 'COMPLETED', "步骤2工作流应该完成"
         )
-        response_content = result2['output'].result.get('responseContent', '')
+        response_content = result2['output'].result.get('response', '')
         self.assertIn("100", response_content, "应该包含转账金额100元")
         print(f"✅ 步骤2成功：转账工作流完成，返回: {response_content}")
 
@@ -1494,7 +1485,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # 验证结果包含关键信息
         if isinstance(final_payload, dict):
-            response_str = final_payload.get('responseContent', str(final_payload))
+            response_str = final_payload.get('response', str(final_payload))
         else:
             response_str = str(final_payload)
 

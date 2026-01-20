@@ -89,31 +89,6 @@ async def create_workflow():
     return flow
 
 
-async def test_start_comp():
-    flow = Workflow()
-    with pytest.raises(JiuWenBaseException):
-        Start(conf={"inputs": [{"required": True}]})
-
-    conf = {"inputs": [
-        {"id": "query", "required": True},
-        {"id": "param1", "required": False},
-        {"id": "param2", "required": False, "default_value": False}
-    ]}
-
-    flow.set_start_comp("s", Start(conf=conf), inputs_schema={"query": "${user_inputs.query}"})
-    flow.set_end_comp("e", Start(),
-                      inputs_schema={"query": "${s.query}", "param1": "${s.param1}", "param2": "${s.param2}"})
-
-    flow.add_connection("s", "e")
-    # 没有提供必选项
-    with pytest.raises(JiuWenBaseException) as e:
-        await flow.invoke(inputs={"user_inputs": {}}, session=create_workflow_session())
-        print(e)
-
-    result = await flow.invoke(inputs={"user_inputs": {"query": "hello"}}, session=create_workflow_session())
-    assert result.result == {"query": "hello", "param1": None, "param2": False}
-
-
 async def test_simple_workflow():
     # flow1: start -> a -> end
     flow = Workflow()
@@ -828,14 +803,14 @@ async def test_nested_workflow():
 
 async def test_nested_workflow_same_node_id():
     flow1 = Workflow()
-    flow1.set_start_comp("start", Start({}),
+    flow1.set_start_comp("start", Start(),
                          inputs_schema={
                              "a": "${a1}",
                              "b": "${a2}"})
 
     # start2->a2->end2
     flow2 = Workflow()
-    flow2.set_start_comp("start", Start({}), inputs_schema={"a1": "${input}"})
+    flow2.set_start_comp("start", Start(), inputs_schema={"a1": "${input}"})
     flow2.add_workflow_comp("a1", Node1("a1"), inputs_schema={"value": "${start.a1}"})
     flow2.set_end_comp("end", End({}), inputs_schema={"result": "${a1.value}"})
     flow2.add_connection("start", "a1")
@@ -859,14 +834,14 @@ async def test_nested_workflow_same_node_id():
 
 async def test_nested_workflow_same_node_id_with_template():
     flow1 = Workflow()
-    flow1.set_start_comp("start", Start({}),
+    flow1.set_start_comp("start", Start(),
                          inputs_schema={
                              "a": "${a1}",
                              "b": "${a2}"})
 
     # start2->a2->end2
     flow2 = Workflow()
-    flow2.set_start_comp("start", Start({}), inputs_schema={"a1": "${input}"})
+    flow2.set_start_comp("start", Start(), inputs_schema={"a1": "${input}"})
     flow2.add_workflow_comp("a1", Node1("a1"), inputs_schema={"value": "${start.a1}"})
     flow2.set_end_comp("end", End(conf={"responseTemplate": "填充结果{{result}}"}),
                        inputs_schema={"result": "${a1.value}"})
@@ -877,10 +852,10 @@ async def test_nested_workflow_same_node_id_with_template():
     flow1.add_workflow_comp("composite", SubWorkflowComponent(flow2),
                             inputs_schema={"input": "${start.b}"})
     flow1.add_workflow_comp("a1", Node1("a1"), inputs_schema={"value_different": "${start.a}",
-                                                              "value_different_result": "${composite.responseContent}"})
+                                                              "value_different_result": "${composite.response}"})
 
     flow1.set_end_comp("end", End({}),
-                       inputs_schema={"b1": "${a1.value_different}", "b2": "${composite.responseContent}",
+                       inputs_schema={"b1": "${a1.value_different}", "b2": "${composite.response}",
                                       "b3": "${a1.value_different_result}"})
 
     flow1.add_connection("start", "composite")
@@ -896,7 +871,7 @@ async def test_stream_comp_workflow():
     flow.set_start_comp("start", MockStartNode("start"), inputs_schema={"a": "${a}"})
     flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
                            comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
-    flow.add_workflow_comp("b", CollectCompNode("b"), inputs_schema={"value": "${a.value}"},
+    flow.add_workflow_comp("b", CollectCompNode("b"), inputs_schema={"value1": "${a.value}"},
                            stream_inputs_schema={"value": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
                            wait_for_all=True)
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result1": "${b.value}"})
@@ -916,11 +891,11 @@ async def test_transform_workflow():
     flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
                            comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
     # b: transform 2 frames to c
-    flow.add_workflow_comp("b", TransformCompNode("b"), inputs_schema={"value": "${a.value}"},
+    flow.add_workflow_comp("b", TransformCompNode("b"), inputs_schema={"value1": "${a.value}"},
                            stream_inputs_schema={"value": "${a.value}"}, comp_ability=[ComponentAbility.TRANSFORM],
                            wait_for_all=True)
     # c: value = sum(value of frames)
-    flow.add_workflow_comp("c", CollectCompNode("c"), inputs_schema={"value": "${b.value}"},
+    flow.add_workflow_comp("c", CollectCompNode("c"), inputs_schema={"value1": "${b.value}"},
                            stream_inputs_schema={"value": "${b.value}"}, comp_ability=[ComponentAbility.COLLECT],
                            wait_for_all=True)
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result": "${c.value}"})
@@ -941,27 +916,27 @@ async def test_five_transform_workflow():
     flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
                            comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
     # b: transform frame to c
-    flow.add_workflow_comp("b", TransformCompNode("b"), inputs_schema={"value": "${a.value}"},
+    flow.add_workflow_comp("b", TransformCompNode("b"), inputs_schema={"value1": "${a.value}"},
                            stream_inputs_schema={"value": "${a.value}"}, comp_ability=[ComponentAbility.TRANSFORM],
                            wait_for_all=True)
     # c: transform frame to d
-    flow.add_workflow_comp("c", TransformCompNode("c"), inputs_schema={"value": "${b.value}"},
+    flow.add_workflow_comp("c", TransformCompNode("c"), inputs_schema={"value1": "${b.value}"},
                            stream_inputs_schema={"value": "${b.value}"}, comp_ability=[ComponentAbility.TRANSFORM],
                            wait_for_all=True)
     # d: transform frame to e
-    flow.add_workflow_comp("d", TransformCompNode("d"), inputs_schema={"value": "${c.value}"},
+    flow.add_workflow_comp("d", TransformCompNode("d"), inputs_schema={"value1": "${c.value}"},
                            stream_inputs_schema={"value": "${c.value}"}, comp_ability=[ComponentAbility.TRANSFORM],
                            wait_for_all=True)
     # e: transform frame to f
-    flow.add_workflow_comp("e", TransformCompNode("e"), inputs_schema={"value": "${d.value}"},
+    flow.add_workflow_comp("e", TransformCompNode("e"), inputs_schema={"value1": "${d.value}"},
                            stream_inputs_schema={"value": "${d.value}"}, comp_ability=[ComponentAbility.TRANSFORM],
                            wait_for_all=True)
     # f: transform frame to g
-    flow.add_workflow_comp("f", TransformCompNode("f"), inputs_schema={"value": "${e.value}"},
+    flow.add_workflow_comp("f", TransformCompNode("f"), inputs_schema={"value1": "${e.value}"},
                            stream_inputs_schema={"value": "${e.value}"}, comp_ability=[ComponentAbility.TRANSFORM],
                            wait_for_all=True)
     # g: collect all frames
-    flow.add_workflow_comp("g", CollectCompNode("g"), inputs_schema={"value": "${f.value}"},
+    flow.add_workflow_comp("g", CollectCompNode("g"), inputs_schema={"value1": "${f.value}"},
                            stream_inputs_schema={"value": "${f.value}"}, comp_ability=[ComponentAbility.COLLECT],
                            wait_for_all=True)
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result": "${g.value}"})
@@ -1047,7 +1022,6 @@ async def test_invoke_validates_unregistered_edge_nodes():
 
 
 async def test_nested_loop():
-
     def create_sub_workflow():
         flow = Workflow()
         flow.set_start_comp("start", Start(), inputs_schema={"input_arr": "${array}", "input_num": "${num}"})
@@ -1100,7 +1074,6 @@ async def test_nested_loop():
 
     main_workflow.add_connection("main_start", "main_loop")
     main_workflow.add_connection("main_loop", "main_end")
-
 
     inputs = {"array": [4, 5, 6], "num": -3}
 
@@ -1207,7 +1180,6 @@ def create_workflow2() -> Workflow:
 
 
 async def test_illegal_nested_workflow():
-
     class InteractionNode(WorkflowComponent):
         async def invoke(self, inputs: Input, session: Session, context: ModelContext):
             res = await session.interact("value")

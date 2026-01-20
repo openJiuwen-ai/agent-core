@@ -135,7 +135,6 @@ class Runner:
                            *,
                            session: Optional[str | Session] = None,
                            context: ModelContext = None,
-                           user_id: Optional[str] = None,
                            envs: Optional[dict[str, Any]] = None):
         """
         Execute a workflow with given inputs.
@@ -145,7 +144,6 @@ class Runner:
             inputs: Input data for the workflow
             session: Existing session ID or Session instance for context persistence
             context: model context
-            user_id: User identifier for the execution
             envs: Environment variables or configuration overrides,
         """
         workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
@@ -158,7 +156,6 @@ class Runner:
                                      session: Optional[str | Session] = None,
                                      context: ModelContext = None,
                                      stream_modes: list[BaseStreamMode] = None,
-                                     user_id: Optional[str] = None,
                                      envs: Optional[dict[str, Any]] = None):
         """
         Execute a workflow with streaming output support.
@@ -169,7 +166,6 @@ class Runner:
             session: Existing session ID or Session instance for context persistence
             context: model context
             stream_modes: Types of streaming data to output
-            user_id: User identifier for the execution
             envs: Environment variables or configuration overrides
         """
         workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
@@ -183,7 +179,6 @@ class Runner:
                         *,
                         session: Optional[str | Session] = None,
                         context: ModelContext = None,
-                        user_id: Optional[str] = None,
                         envs: Optional[dict[str, Any]] = None,
                         ):
         """
@@ -194,7 +189,6 @@ class Runner:
             inputs: Input data for the agent
             session: Existing session ID or Session instance for context persistence
             context: model context
-            user_id: User identifier for the execution
             envs: Environment variables or configuration overrides
         """
         agent_instance, agent_session = await self._prepare_agent(agent, inputs)
@@ -215,7 +209,6 @@ class Runner:
                                   session: Optional[str | Session] = None,
                                   context: ModelContext = None,
                                   stream_modes: list[BaseStreamMode] = None,
-                                  user_id: Optional[str] = None,
                                   envs: Optional[dict[str, Any]] = None):
         """
            Execute a single agent with streaming output support.
@@ -226,10 +219,9 @@ class Runner:
                session: Existing session ID or Session instance for context persistence
                context: model context
                stream_modes: Types of streaming data to output
-               user_id: User identifier for the execution
                envs: Environment variables or configuration override
         """
-        agent_instance, agent_session = await self._prepare_agent(agent, inputs)
+        agent_instance, agent_session = await self._prepare_agent(agent, inputs, session)
         if isinstance(agent_instance, RemoteAgent):
             async for chunk in agent_instance.stream(inputs):
                 yield chunk
@@ -244,7 +236,6 @@ class Runner:
                               *,
                               session: Optional[str | Session] = None,
                               context: ModelContext = None,
-                              user_id: Optional[str] = None,
                               envs: Optional[dict[str, Any]] = None
                               ):
         """
@@ -254,8 +245,7 @@ class Runner:
             agent_group: AgentGroup name or instance to execute
             inputs: Input data for the agent group
             session: Existing session ID or Session instance for context persistence
-            context: model context
-            user_id: User identifier for the execution
+            context: model contex
             envs: Environment variables or configuration overrides
         """
         agent_group_instance = self._prepare_agent_group(agent_group)
@@ -268,7 +258,6 @@ class Runner:
                                         session: Optional[str | Session] = None,
                                         context: ModelContext = None,
                                         stream_modes: list[BaseStreamMode] = None,
-                                        user_id: Optional[str] = None,
                                         envs: Optional[dict[str, Any]] = None,
                                         ):
         """
@@ -280,7 +269,6 @@ class Runner:
             session: Existing session ID or Session instance for context persistence
             context: model context
             stream_modes: Types of streaming data to output
-            user_id: User identifier for the execution
             envs: Environment variables or configuration overrides
         """
         agent_group_instance = self._prepare_agent_group(agent_group)
@@ -315,14 +303,17 @@ class Runner:
         # Convert workflow session
         if not session:
             workflow_session = create_workflow_session()
+        elif isinstance(session, str):
+            workflow_session = create_workflow_session(session_id=session)
         elif isinstance(session, TaskSession):
             workflow_session = session.create_workflow_session()
         else:
             workflow_session = session
         return workflow_session
 
-    async def _prepare_agent(self, agent: Union[str, BaseAgent], inputs: Any):
-        session_id = inputs.get(self._AGENT_CONVERSATION_ID, self._DEFAULT_AGENT_SESSION_ID)
+    async def _prepare_agent(self, agent: Union[str, BaseAgent], inputs: Any, session: Optional[str | Session] = None):
+        session_id = inputs.get(self._AGENT_CONVERSATION_ID,
+                                session if isinstance(session, str) else self._DEFAULT_AGENT_SESSION_ID)
         if isinstance(agent, str):
             agent_with_session = await self._resource_manager.get_agent(agent_id=agent)
             if agent_with_session is None:
@@ -341,7 +332,7 @@ class Runner:
         return agent, task_session
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],
-                                session: Union[Session, WorkflowSession]) -> tuple[Workflow, WorkflowSession]:
+                                session: str | Session | WorkflowSession) -> tuple[Workflow, WorkflowSession]:
         if isinstance(workflow, str):
             workflow_key = workflow
         else:

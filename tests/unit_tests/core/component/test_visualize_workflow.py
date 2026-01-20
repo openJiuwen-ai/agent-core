@@ -72,7 +72,7 @@ def test_visualize_simple_stream_workflow():
     flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
                            comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
     flow.add_workflow_comp("b", CollectCompNode("b"), inputs_schema={"value": "${a.value}"},
-                           stream_inputs_schema={"value": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
+                           stream_inputs_schema={"value1": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
                            wait_for_all=True)
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result1": "${b.value}"})
     flow.add_connection("start", "a")
@@ -775,7 +775,7 @@ def test_visualize_simple_stream_workflow_animation():
     flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
                            comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
     flow.add_workflow_comp("b", CollectCompNode("b"), inputs_schema={"value": "${a.value}"},
-                           stream_inputs_schema={"value": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
+                           stream_inputs_schema={"value1": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
                            wait_for_all=True)
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result1": "${b.value}"})
     flow.add_connection("start", "a")

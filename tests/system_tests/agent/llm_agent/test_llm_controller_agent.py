@@ -229,7 +229,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _create_start_component():
-        return Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        return Start()
 
     @staticmethod
     def _create_end_component():
@@ -252,13 +252,12 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
                 id=id,
                 version=version,
                 description="根据天气生成对应文本",
-                inputs_schema=dict(
+                input_params=dict(
                 type="object",
                 properties={
                     "query": {
                         "type": "string",
                         "description": "用户输入",
-                        "required": True
                     }
                 },
                 required=['query']

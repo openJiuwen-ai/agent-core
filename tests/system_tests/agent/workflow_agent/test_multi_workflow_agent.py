@@ -96,7 +96,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _create_start_component():
-        return Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        return Start()
 
     def _build_prefixed_workflow(self, workflow_id: str, workflow_name: str, prefix: str) -> Workflow:
         """
@@ -313,7 +313,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["result_type"], "answer", "结果类型应该是answer")
 
         # 检查是否路由到了股票工作流（应该包含"stock:"前缀）
-        response_content = result["output"].result["responseContent"]
+        response_content = result["output"].result["response"]
         print(f"响应内容：{response_content}")
 
         self.assertIn("stock:", response_content, "应该路由到股票工作流")
@@ -439,7 +439,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result3, dict, "步骤3应该返回字典")
         self.assertEqual(result3['result_type'], 'answer', "步骤3应该返回answer类型")
         self.assertEqual(result3['output'].state.value, 'COMPLETED', "步骤3 workflow1应该完成")
-        response_content_3 = result3['output'].result.get('responseContent', '')
+        response_content_3 = result3['output'].result.get('response', '')
         print(f"[OK] 步骤3成功：workflow1 恢复并完成，返回: {response_content_3}")
 
         # ========== 步骤4: query4 -> 恢复 workflow2 ==========
@@ -459,7 +459,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result4, dict, "步骤4应该返回字典")
         self.assertEqual(result4['result_type'], 'answer', "步骤4应该返回answer类型")
         self.assertEqual(result4['output'].state.value, 'COMPLETED', "步骤4 workflow2应该完成")
-        response_content_4 = result4['output'].result.get('responseContent', '')
+        response_content_4 = result4['output'].result.get('response', '')
         print(f"[OK] 步骤4成功：workflow2 恢复并完成，返回: {response_content_4}")
 
         print("\n[SUCCESS] 所有步骤完成！多工作流跳转和恢复测试通过！")
@@ -597,7 +597,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             'COMPLETED',
             "步骤3 workflow2 应该完成"
         )
-        response_content_3 = result3['output'].result.get('responseContent', '')
+        response_content_3 = result3['output'].result.get('response', '')
         self.assertIn("AAPL", response_content_3, "步骤3 应该包含股票代码")
         print(f"✅ 步骤3成功：workflow2 恢复并完成，返回: {response_content_3}")
 
@@ -1064,7 +1064,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         )
 
         # 验证返回的是天气查询结果（包含 location 字段值）
-        response_content = result2['output'].result.get('responseContent', '')
+        response_content = result2['output'].result.get('response', '')
         print(f"步骤2 响应内容: {response_content}")
         self.assertIn(
             "北京", response_content,
@@ -1188,7 +1188,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result3['result_type'], 'answer', "步骤3应返回answer")
 
         # 验证返回的是天气查询结果（包含 location 字段值）
-        response_content = result3['output'].result.get('responseContent', '')
+        response_content = result3['output'].result.get('response', '')
         print(f"步骤3 响应内容: {response_content}")
         self.assertIn(
             "北京", response_content,
@@ -1218,7 +1218,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result4['result_type'], 'answer', "步骤4应返回answer")
 
         # 验证返回的是股票查询结果（包含 stock_code 字段值）
-        response_content_4 = result4['output'].result.get('responseContent', '')
+        response_content_4 = result4['output'].result.get('response', '')
         print(f"步骤4 响应内容: {response_content_4}")
         self.assertIn(
             "AAPL", response_content_4,
@@ -1397,7 +1397,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         )
 
         # 检查是否使用了第一个工作流（天气查询，前缀是 weather:）
-        response_content = result["output"].result["responseContent"]
+        response_content = result["output"].result["response"]
         print(f"响应内容：{response_content}")
         self.assertIn(
             "weather:", response_content,
@@ -1427,7 +1427,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
         验证：
         - 流式输出包含 workflow_final 帧
-        - workflow_final.payload.responseContent 等于配置的默认响应文本
+        - workflow_final.payload.response 等于配置的默认响应文本
         """
         print("=== 测试流式模式下意图识别失败时返回 workflow_final 帧 ===")
 
@@ -1501,12 +1501,12 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             "workflow_final.payload 应该是字典"
         )
         self.assertIn(
-            "responseContent", workflow_final_chunk.payload,
-            "workflow_final.payload 应该包含 responseContent"
+            "response", workflow_final_chunk.payload,
+            "workflow_final.payload 应该包含 response"
         )
         self.assertEqual(
-            workflow_final_chunk.payload["responseContent"], default_text,
-            f"responseContent 应该等于配置的默认响应文本: {default_text}"
+            workflow_final_chunk.payload["response"], default_text,
+            f"response 应该等于配置的默认响应文本: {default_text}"
         )
 
         print(f"workflow_final 帧内容: {workflow_final_chunk.payload}")
@@ -1599,7 +1599,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         
         output_1 = result2.get("output")
         self.assertIsNotNone(output_1)
-        response_content_1 = output_1.result.get("responseContent", "")
+        response_content_1 = output_1.result.get("response", "")
         self.assertIn("张三", response_content_1)
         
         print(f"[OK] 第一次调用完成，返回结果: {response_content_1}")
@@ -1656,7 +1656,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         
         output_4 = result4.get("output")
         self.assertIsNotNone(output_4)
-        response_content_4 = output_4.result.get("responseContent", "")
+        response_content_4 = output_4.result.get("response", "")
         self.assertIn("李四", response_content_4)
         
         # 关键验证：第二次结果应该是新输入的"李四"，而不是第一次的"张三"

@@ -3,6 +3,7 @@
 
 from typing import Union, Optional, Any, Callable, Self
 
+from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.session.state.base import State, CommitStateLike, DEFAULT_NODE_ID, DEFAULT_WORKFLOW_ID, \
     IO_STATE_KEY, GLOBAL_STATE_KEY, COMP_STATE_KEY, WORKFLOW_STATE_KEY, IO_STATE_UPDATES_KEY, \
     GLOBAL_STATE_UPDATES_KEY, COMP_STATE_UPDATES_KEY, WORKFLOW_STATE_UPDATES_KEY, InMemoryCommitState

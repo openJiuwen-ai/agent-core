@@ -157,13 +157,12 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
                 id=workflow_id,
                 version="1.0",
                 description=workflow_desc,
-                inputs_schema=dict(
+                input_params=dict(
                 type="object",
                 properties={
                     "query": {
                         "type": "string",
-                        "description": "天气查询用户输入",
-                        "required": True
+                        "description": "天气查询用户输入"
                     }
                 },
                 required=['query']
@@ -176,13 +175,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
 
         interactive = InteractiveConfirmComponent("interactive")
         end_component = End({"responseTemplate": "{{location}} | {{time}} | confirm={{confirm_result}}"})
@@ -230,7 +223,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
                 id="questioner_weather_workflow",
                 version="1.0",
                 description="天气查询",
-                inputs_schema=dict(
+                input_params=dict(
                 type="object",
                 properties={
                     "query": {
@@ -250,13 +243,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         model_config = ModelConfig(model_provider=MODEL_PROVIDER,

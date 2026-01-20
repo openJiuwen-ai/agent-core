@@ -572,7 +572,7 @@ class TestTraceWorkflow:
 
     async def test_workflow_strean_with_node_exception_with_tracer(self):
         flow = Workflow()
-        start = Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        start = Start()
         flow.set_start_comp("start", start,
                             inputs_schema={
                                 "query": "${a}",

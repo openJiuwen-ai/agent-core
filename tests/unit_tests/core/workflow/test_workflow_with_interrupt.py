@@ -645,7 +645,7 @@ async def test_collect_node_interactive_workflow():
     flow.add_workflow_comp(
         "b",
         InteractiveNode4Collect("b"),
-        inputs_schema={"aa": "${a.aa}", "ac": "${a.ac}"},
+        inputs_schema={"aa1": "${a.aa}", "ac1": "${a.ac}"},
         stream_inputs_schema={"aa": "${a.aa}", "ac": "${a.ac}"},
         wait_for_all=True,
         comp_ability=[ComponentAbility.COLLECT],

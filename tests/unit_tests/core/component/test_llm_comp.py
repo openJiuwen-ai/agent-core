@@ -256,13 +256,7 @@ class TestLLMExecutableInvoke:
 
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -296,13 +290,7 @@ class TestLLMExecutableInvokeNew:
         name = "poem"
         flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         model_config = ModelConfig(model_provider=MODEL_PROVIDER,
@@ -363,13 +351,7 @@ class TestLLMExecutableInvokeNew:
     async def test_real_workflow_invoke_start_llm_end_with_stream_writer(self):
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         model_config = ModelConfig(model_provider=MODEL_PROVIDER,
@@ -413,13 +395,7 @@ class TestLLMExecutableInvokeNew:
                                                 fake_model_config, fake_model_client_config):
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -465,13 +441,7 @@ class TestLLMExecutableInvokeNew:
                                                 fake_model_config, fake_model_client_config):
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -507,13 +477,7 @@ class TestLLMExecutableInvokeNew:
                                                                         fake_model_config, fake_model_client_config):
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -562,13 +526,7 @@ class TestLLMExecutableInvokeNew:
         name = "poem"
         flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(

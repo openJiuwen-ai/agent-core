@@ -55,7 +55,7 @@ class TestMessageSerializer:
                 type="workflow_final",
                 index=0,
                 payload=WorkflowOutput(
-                    result={'responseContent': '上海', 'output': {}},
+                    result={'response': '上海', 'output': {}},
                     state=WorkflowExecutionState.COMPLETED
                 ))
         ]
@@ -94,7 +94,7 @@ class TestMessageSerializer:
         assert isinstance(msg2.payload[3], OutputSchema)
         assert msg2.payload[3].type == "workflow_final"
         assert isinstance(msg2.payload[3].payload, WorkflowOutput)
-        assert msg2.payload[3].payload.result == {'responseContent': '上海', 'output': {}}
+        assert msg2.payload[3].payload.result == {'response': '上海', 'output': {}}
         assert msg2.payload[3].payload.state == WorkflowExecutionState.COMPLETED
 
     @staticmethod
@@ -104,7 +104,7 @@ class TestMessageSerializer:
             result_type='answer',
             aaa='{"aaa":"123"}',
             work=WorkflowOutput(
-                result={'responseContent': '上海', 'output': {}},
+                result={'response': '上海', 'output': {}},
                 state=WorkflowExecutionState.COMPLETED
             ),
         )
@@ -117,7 +117,7 @@ class TestMessageSerializer:
         assert isinstance(msg2.payload.output, list)
         assert isinstance(msg2.payload.output[0], list)
         assert isinstance(msg2.payload.work, WorkflowOutput)
-        assert msg2.payload.work.result == {'responseContent': '上海', 'output': {}}
+        assert msg2.payload.work.result == {'response': '上海', 'output': {}}
         assert msg2.payload.work.state == WorkflowExecutionState.COMPLETED
 
     @staticmethod
@@ -147,7 +147,7 @@ class TestMessageSerializer:
     def test_dict_with_embedded_basemodel():
         payload = {
             "output": WorkflowOutput(
-                result={'responseContent': '上海', 'output': {}},
+                result={'response': '上海', 'output': {}},
                 state=WorkflowExecutionState.COMPLETED
             ),
             "result_type": "answer"
@@ -163,7 +163,7 @@ class TestMessageSerializer:
     @staticmethod
     def test_workflow_output():
         msg = DmqResponseMessage(payload=WorkflowOutput(
-            result={'responseContent': '上海', 'output': {}},
+            result={'response': '上海', 'output': {}},
             state=WorkflowExecutionState.COMPLETED
         ))
 
@@ -173,7 +173,7 @@ class TestMessageSerializer:
         logger.info(f"deserialize_message:{msg2}")
 
         assert isinstance(msg2.payload, WorkflowOutput)
-        assert msg2.payload.result == {'responseContent': '上海', 'output': {}}
+        assert msg2.payload.result == {'response': '上海', 'output': {}}
         assert msg2.payload.state == WorkflowExecutionState.COMPLETED
 
     @staticmethod

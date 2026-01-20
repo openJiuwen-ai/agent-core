@@ -104,13 +104,7 @@ class TestQuestionComp:
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         questioner_config = QuestionerConfig(
@@ -133,7 +127,7 @@ class TestQuestionComp:
 
         result = self.invoke_workflow({"query": "查询杭州的天气"}, context, flow)
         assert result == WorkflowOutput(
-            result={'responseContent': "hangzhou | today"},
+            result={'response': "hangzhou | today"},
             state=WorkflowExecutionState.COMPLETED)
 
     @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
@@ -160,13 +154,7 @@ class TestQuestionComp:
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         questioner_config = QuestionerConfig(
@@ -202,7 +190,7 @@ class TestQuestionComp:
         workflow_context = Session(session_id=session_id).create_workflow_session()
         final_result = self.invoke_workflow_with_workflow_context(user_input, workflow_context,
                                                                   flow)  # workflow实例、session id保持一致
-        assert final_result.result.get("responseContent") == "hangzhou | today"
+        assert final_result.result.get("response") == "hangzhou | today"
 
     @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
            "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
@@ -239,13 +227,7 @@ class TestQuestionComp:
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         questioner_config = QuestionerConfig(
@@ -308,13 +290,7 @@ class TestQuestionerStream:
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         questioner_config = QuestionerConfig(
@@ -395,11 +371,7 @@ class TestQuestionerStream:
             FieldInfo(field_name="name", description="用户姓名", required=True),
         ]
         
-        start_component = Start({
-            "inputs": [
-                {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-            ]
-        })
+        start_component = Start()
         
         end_component = End({"responseTemplate": "{{name}}"})
 
@@ -444,7 +416,7 @@ class TestQuestionerStream:
         
         # 验证：第一次应该完成并返回 "张三"
         assert workflow_result_2.state == WorkflowExecutionState.COMPLETED
-        response_content_1 = workflow_result_2.result.get("responseContent", "")
+        response_content_1 = workflow_result_2.result.get("response", "")
         assert "张三" in response_content_1
         print(f"[OK] 第一次调用完成，返回结果: {response_content_1}")
         
@@ -474,7 +446,7 @@ class TestQuestionerStream:
         
         # 验证：第二次应该完成并返回 "李四"
         assert workflow_result_4.state == WorkflowExecutionState.COMPLETED
-        response_content_2 = workflow_result_4.result.get("responseContent", "")
+        response_content_2 = workflow_result_4.result.get("response", "")
         assert "李四" in response_content_2
         
         # 关键验证：第二次结果不应该包含第一次的数据
@@ -527,13 +499,9 @@ class TestQuestionerStream:
             FieldInfo(field_name="score", description="User score", type="number", required=True),
             FieldInfo(field_name="is_vip", description="VIP status", type="boolean", required=True),
         ]
-
-        start_component = Start({
-            "inputs": [
-                {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-            ]
-        })
-
+        
+        start_component = Start()
+        
         # Use responseTemplate to output all extracted fields
         end_component = End({"responseTemplate": "name={{name}},age={{age}},score={{score}},is_vip={{is_vip}}"})
 
@@ -571,7 +539,7 @@ class TestQuestionerStream:
         # Verify workflow completed successfully
         assert result.state == WorkflowExecutionState.COMPLETED
 
-        response_content = result.result.get("responseContent", "")
+        response_content = result.result.get("response", "")
         print(f"[INFO] Response content: {response_content}")
 
         # Verify all fields are present and correctly converted
@@ -630,13 +598,9 @@ class TestQuestionerStream:
             FieldInfo(field_name="name", description="User name", type="string", required=True),
             FieldInfo(field_name="age", description="User age", type="integer", required=True),
         ]
-
-        start_component = Start({
-            "inputs": [
-                {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-            ]
-        })
-
+        
+        start_component = Start()
+        
         end_component = End({"responseTemplate": "name={{name}},age={{age}}"})
 
         questioner_config = QuestionerConfig(
