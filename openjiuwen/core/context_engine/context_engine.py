@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from typing import List, Dict, Optional
+import datetime
+from datetime import timezone
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import BaseMessage
@@ -73,6 +75,13 @@ class ContextEngine:
         if full_context_id in self._context_pool:
             return self._context_pool.get(full_context_id)
 
+        if not history_messages and mem_scope_id:
+            history_messages = await self._load_context_from_memory(
+                session_id=session_id,
+                mem_scope_id=mem_scope_id,
+                message_num=self._config.memory_message_num
+            )
+
         context = SessionModelContext(
             context_id=context_id,
             session_id=session_id,
@@ -80,6 +89,7 @@ class ContextEngine:
             window_size_limit=self._config.default_window_message_num,
             token_counter=token_counter,
         )
+
         self._context_pool[full_context_id] = context
         return context
 
@@ -170,4 +180,41 @@ class ContextEngine:
                           contexts are additionally saved to long-term memory
                           with this ID.
         """
-        return
+        for context_id in context_ids:
+            session_id = session.session_id() if session else "default_session_id"
+            full_context_id = f"{session_id}_{context_id}"
+            context: SessionModelContext = self._context_pool.get(full_context_id)
+            if not context:
+                continue
+            if mem_scope_id:
+                new_messages = context.get_messages(with_history=False)
+                await self._save_context_to_memory(
+                    session_id=session_id,
+                    mem_scope_id=mem_scope_id,
+                    messages=new_messages
+                )
+            context.on_save()
+
+    @staticmethod
+    async def _load_context_from_memory(session_id: str, mem_scope_id: str, message_num: int) -> List[BaseMessage]:
+        from openjiuwen.core.memory import LongTermMemory
+        messages = await LongTermMemory().get_recent_messages(
+            scope_id=mem_scope_id,
+            session_id=session_id,
+            num=message_num
+        )
+        return messages
+
+    @staticmethod
+    async def _save_context_to_memory(session_id: str, mem_scope_id: str, messages: List[BaseMessage]):
+        if not messages:
+            return
+
+        from openjiuwen.core.memory import LongTermMemory, AgentMemoryConfig
+        await LongTermMemory().add_messages(
+            messages,
+            AgentMemoryConfig(),
+            timestamp=datetime.datetime.now(tz=timezone.utc),
+            scope_id=mem_scope_id,
+            session_id=session_id
+        )

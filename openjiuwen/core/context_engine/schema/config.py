@@ -24,6 +24,7 @@ class ContextEngineConfig(BaseModel):
         message-based truncation is requested. If None, truncation falls back to
         `default_window_message_num`.
     """
-    max_context_message_num: int = Field(default=None)
-    default_window_message_num: int = Field(default=20, gt=0)
-    default_window_token_num: Optional[int] = Field(default=None)
+    max_context_message_num: Optional[int] = Field(default=None, gt=0)
+    default_window_message_num: Optional[int] = Field(default=None, gt=0)
+    default_window_token_num: Optional[int] = Field(default=None, gt=0)
+    memory_message_num: int = Field(default=20, gt=0)
