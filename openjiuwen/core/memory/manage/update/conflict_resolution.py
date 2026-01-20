@@ -1,18 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
-from enum import Enum
 from typing import List, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.prompt.conflict_resolution import CONFLICT_RESOLUTION_PROMPT
 from openjiuwen.core.foundation.llm import Model, JsonOutputParser
-
-
-class ConflictType(Enum):
-    ADD = "ADD"
-    DELETE = "DELETE"
-    UPDATE = "UPDATE"
-    NONE = "NONE"
+from openjiuwen.core.memory.manage.mem_model.memory_unit import ConflictType
 
 
 def _get_message(old_messages: List[str], new_message: str) -> list[dict]:

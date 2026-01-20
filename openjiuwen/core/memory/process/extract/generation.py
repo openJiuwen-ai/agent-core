@@ -118,7 +118,6 @@ class Generator:
             variable_units.append(VariableUnit(
                 user_id=extract_memory_paras.user_id,
                 scope_id=extract_memory_paras.scope_id,
-                mem_type=MemoryType.VARIABLE,
                 variable_name=tmp_data.key,
                 variable_mem=tmp_data.value
             ))
@@ -147,7 +146,6 @@ class Generator:
                     scope_id=extract_memory_paras.scope_id,
                     profile_type=profile_type,
                     profile_mem=profile,
-                    mem_type=MemoryType.USER_PROFILE,
                     message_mem_id=message_mem_id,
                 ))
         return user_profile_data

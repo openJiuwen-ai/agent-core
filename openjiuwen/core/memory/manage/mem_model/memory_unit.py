@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
@@ -30,6 +30,7 @@ class BaseMemoryUnit:
 
 @dataclass
 class UserProfileUnit(BaseMemoryUnit):
+    mem_type: MemoryType = field(default=MemoryType.USER_PROFILE, init=False)
     profile_type: str
     profile_mem: str
     score: Optional[float] = None  # Relevance Scoring
@@ -42,6 +43,7 @@ class UserProfileUnit(BaseMemoryUnit):
 
 @dataclass
 class VariableUnit(BaseMemoryUnit):
+    mem_type: MemoryType = field(default=MemoryType.VARIABLE, init=False)
     variable_name: str
     variable_mem: str
     mem_id: str = ""
