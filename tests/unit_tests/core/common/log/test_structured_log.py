@@ -55,6 +55,15 @@ def logger_config(temp_log_dir):  # type: ignore
     }
 
 
+def safe_close_logger_handlers(logger: DefaultLogger):  # type: ignore
+    """Safely close logger handlers"""
+    inner_logger = logger.logger()
+    if inner_logger and inner_logger.handlers:
+        for h in list(inner_logger.handlers):
+            h.close()
+            inner_logger.removeHandler(h)
+
+
 @pytest.fixture
 def test_logger(logger_config):  # type: ignore
     """Create a test logger instance"""
@@ -62,6 +71,10 @@ def test_logger(logger_config):  # type: ignore
     yield logger
     # Cleanup
     LogManager.reset()
+    import sys
+    if sys.platform.startswith("win"):
+        # On Windows, logging handlers should be closed before deleting logging files
+        safe_close_logger_handlers(logger)
 
 
 def test_create_agent_event():

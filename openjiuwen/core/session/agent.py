@@ -64,6 +64,9 @@ class Session(StateSession):
     def create_workflow_session(self) -> WorkflowSession:
         return WorkflowSession(parent=self, session_id=self.session_id())
 
+    def get_envs(self):
+        return getattr(self._inner.config(), '_envs', {})
+
 
 def create_agent_session(trace_id: str = None, inner: BaseSession = None) -> Session:
     return Session(trace_id, inner)
