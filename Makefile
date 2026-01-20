@@ -1,9 +1,10 @@
 # Cross-platform Makefile (Windows-friendly)
-.PHONY: help install has-staged-changes format lint pylint spelling fix-format fix-lint type-check check fix
+.PHONY: help install update test has-staged-changes format lint pylint spelling fix-format fix-lint type-check check fix
 .DEFAULT_GOAL := help
 
 # Less noisy
 MAKEFLAGS += --no-print-directory
+TESTFLAGS ?= .
 
 LINESEP := ------------------------------------------------------------------
 DEPENDENCIES := "ruff>=0.11.2" "pylint>=3.0.0" "mypy>=1.12.0" "types-requests" "codespell>=2.2.4"
@@ -12,15 +13,19 @@ DEPENDENCIES := "ruff>=0.11.2" "pylint>=3.0.0" "mypy>=1.12.0" "types-requests" "
 ifeq ($(filter cmd.exe sh.exe,$(SHELL)),$(SHELL))
 	START := 
 	END := 
+	DQ := "
 	NULL := NUL
 	BLANK := & echo.
 	FAIL_CMD := exit /b 1
+	CURL ?= curl.exe
 else
 	START := "
 	END := "
+	DQ := \"
 	NULL := /dev/null
 	BLANK := ; echo ""
 	FAIL_CMD := exit 1
+	CURL ?= curl
 endif
 
 # Check last COMMITS commits if COMMITS > 0
@@ -47,7 +52,8 @@ help:
 	@echo Available targets:
 	@echo $(START)    help       - Show this help message$(END)
 	@echo $(START)    install    - Install dependencies via uv or pip: ruff, pylint, mypy, codespell$(END)
-	@echo $(START)    test       - Execute pytest$(END)
+	@echo $(START)    update     - Download latest version of this Makefile from gitcode.com/openJiuwen/agent-core$(END)
+	@echo $(START)    test       - Execute pytest, you can supply arguments via TESTFLAGS=$(DQ)...$(DQ)$(END)
 	@echo $(START)    format     - Check formatting of selected Python files via ruff$(END)
 	@echo $(START)    lint       - Check linting of selected Python files via ruff$(END)
 	@echo $(START)    pylint     - Check linting of selected Python files via pylint: more comprehensive$(END)
@@ -67,20 +73,30 @@ else
 	@python -m pip install $(DEPENDENCIES)
 endif
 
+
+update:
+	@echo Downloading latest version of this Makefile from gitcode.com/openJiuwen/agent-core...
+	@echo NOTE: If this did not work, try running
+	@echo $(START)  > make update CURL=path/to/your/curl_executable (curl.exe on Windows 10+)$(END)
+	@$(CURL) -fsSL https://raw.gitcode.com/openJiuwen/agent-core/raw/develop/Makefile -o Makefile
+
 test:
-	@pytest
+	@echo NOTE: To supply arguments to pytest (for example, to use pytest-xdist), try running
+	@echo $(START)  > make test TESTFLAGS=$(DQ)...$(DQ)$(END)
+	@pytest $(TESTFLAGS)
 
 # Sanity check - fails if there are no selected Python files
 has-staged-changes:
 ifeq ($(strip $(CHANGED_FILES)),)
 	@echo No Python files selected.
-	@echo Make sure you have used git add first, or have set COMMITS to a positive integer. $(BLANK)
+	@echo NOTE: Make sure you have used git add first, or have set COMMITS to a positive integer. $(BLANK)
 	@echo $(LINESEP) $(BLANK)
 	@$(MAKE) help
 	@$(FAIL_CMD)
 endif
 
 format: has-staged-changes
+	-@ruff check --select I $(CHANGED_FILES)
 	-@ruff format --check $(CHANGED_FILES)
 
 lint: has-staged-changes
@@ -93,6 +109,7 @@ spelling: has-staged-changes
 	-@codespell $(CHANGED_FILES)
 
 fix-format: has-staged-changes
+	-@ruff check --select I --fix $(CHANGED_FILES)
 	-@ruff format $(CHANGED_FILES)
 
 fix-lint: has-staged-changes
