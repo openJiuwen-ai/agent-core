@@ -9,7 +9,8 @@ from typing import Any, Optional, List, Dict, Union, Tuple, Literal
 
 from pydantic import BaseModel, Field, ConfigDict, ValidationError
 
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.common.security.user_config import UserConfig
@@ -249,8 +250,11 @@ class QuestionerUtils:
         try:
             return QuestionerInput.model_validate(inputs)
         except ValidationError as e:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INPUT_PARAM_ERROR,
-                                           ExceptionUtils.format_validation_error(e))
+            raise build_error(
+                StatusCode.COMPONENT_QUESTIONER_INPUT_PARAM_ERROR,
+                error_msg=ExceptionUtils.format_validation_error(e),
+                cause=e
+            ) from e
 
     @staticmethod
     def is_valid_value(input_value):
@@ -390,7 +394,10 @@ class QuestionerDirectReplyHandler:
                 self._update_questioner_states_question(output.question)
             self._state = self._state.handle_event(event)
         else:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INPUT_INVALID)
+            raise build_error(
+                StatusCode.COMPONENT_QUESTIONER_INPUT_INVALID,
+                error_msg="question_content is empty and no extractable fields are configured"
+            )
         return QuestionerUtils.format_questioner_output(output)
 
     async def _handle_user_interact_state(self, inputs, session: Session, context):
@@ -412,7 +419,10 @@ class QuestionerDirectReplyHandler:
                 self._update_questioner_states_question(output.question)
             self._state = self._state.handle_event(event)
         else:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INPUT_INVALID)
+            raise build_error(
+                StatusCode.COMPONENT_QUESTIONER_INPUT_INVALID,
+                error_msg="question_content is empty and no extractable fields are configured"
+            )
         return QuestionerUtils.format_questioner_output(output)
 
     def _handle_end_state(self, inputs, session, context):
@@ -489,8 +499,11 @@ class QuestionerDirectReplyHandler:
         try:
             response = (await self._model.invoke(messages=llm_inputs)).content
         except Exception as e:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
-                                           "failed to invoke llm for extraction", e)
+            raise build_error(
+                StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
+                error_msg="failed to invoke llm for extraction",
+                cause=e
+            ) from e
 
         if UserConfig.is_sensitive():
             logger.info("Success to invoke llm for extraction")
@@ -507,8 +520,10 @@ class QuestionerDirectReplyHandler:
             return result
 
         if not isinstance(result, dict):
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR,
-                                           "Failed to parse json from llm response")
+            raise build_error(
+                StatusCode.COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR,
+                error_msg="failed to parse json from llm response"
+            )
         result = {k: v for k, v in result.items() if QuestionerUtils.is_valid_value(v)}
         
         # Validate and convert field types based on FieldInfo.type
@@ -585,7 +600,10 @@ class QuestionerDirectReplyHandler:
                 output.question = QuestionerUtils.format_continue_ask_question(non_extracted_key_fields)
                 is_continue_ask = True
             else:
-                ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_RUNTIME_ERROR)
+                raise build_error(
+                    StatusCode.COMPONENT_QUESTIONER_RUNTIME_ERROR,
+                    error_msg=" max_response reached before all required fields were extracted"
+                )
         if is_continue_ask:
             output.key_fields.clear()
         else:
@@ -637,25 +655,33 @@ class QuestionerExecutable(ComponentExecutable):
     @staticmethod
     def _validate_max_response_num_config(max_response_num: int):
         if max_response_num <= 0:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
-                                           "max response must be greater than 0")
+            raise build_error(
+                StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
+                error_msg="max response must be greater than 0"
+            )
 
     @staticmethod
     def _validate_extract_key_fields_config(if_extract: bool, extract_key_fields: List[FieldInfo]):
         if if_extract and not extract_key_fields:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
-                                           "extracted key fields cannot be empty")
+            raise build_error(
+                StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
+                error_msg="extracted key fields cannot be empty"
+            )
         for item in extract_key_fields:
             if not item.field_name:
-                ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
-                                           "extracted key field name cannot be empty")
+                raise build_error(
+                    StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
+                    error_msg="extracted key field name cannot be empty"
+                )
 
     @staticmethod
     def _validate_response_type_config(response_type: str):
         response_type_values = [member.value for member in ResponseType]
         if response_type not in response_type_values:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
-                                           f"response type {response_type} is invalid")
+            raise build_error(
+                StatusCode.COMPONENT_QUESTIONER_CONFIG_ERROR,
+                error_msg=f"response type {response_type} is invalid"
+            )
 
     def state(self, state: QuestionerState):
         self._state = state
@@ -688,8 +714,10 @@ class QuestionerExecutable(ComponentExecutable):
     async def _create_llm_instance(self) -> Model:
         if self._config.model_id is None:
             if self._config.model_client_config is None or self._config.model_config is None:
-                ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
-                                               "Failed to create llm instance")
+                raise build_error(
+                    StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
+                    error_msg="failed to create llm instance"
+                )
             return Model(self._config.model_client_config, self._config.model_config)
         else:
             from openjiuwen.core.runner import Runner
@@ -701,8 +729,11 @@ class QuestionerExecutable(ComponentExecutable):
                 self._llm = await self._create_llm_instance()
                 self._initialized = True
             except Exception as e:
-                ExceptionUtils.raise_exception(StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
-                                               "Failed to initialize llm if needed.", e)
+                raise build_error(
+                    StatusCode.COMPONENT_QUESTIONER_INVOKE_CALL_FAILED,
+                    error_msg="failed to initialize llm if needed",
+                    cause=e
+                ) from e
 
     def _init_prompt(self) -> PromptTemplate:
         return PromptTemplate(content=self._default_config.prompt_template)
@@ -717,7 +748,6 @@ class QuestionerExecutable(ComponentExecutable):
     async def _handle_questioner_direct_reply_safe(
             self, inputs: Input, session: Session, context, current_state: QuestionerState
     ):
-        """并发安全版本：使用传入的 state 而不是实例变量"""
         handler = (QuestionerDirectReplyHandler()
                    .config(self._config).model(self._llm).state(current_state).prompt(self._prompt))
         result = await handler.handle(inputs, session, context)

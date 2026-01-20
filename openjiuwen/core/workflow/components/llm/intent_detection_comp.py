@@ -8,7 +8,8 @@ from typing import Optional, Union, Callable, List
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.workflow.components.base import ComponentConfig
@@ -205,11 +206,12 @@ class IntentDetectionExecutable(ComponentExecutable):
     async def _create_llm_instance(self) -> Model:
         if self._config.model_id is None:
             if self._config.model_client_config is None or self._config.model_config is None:
-                ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED,
-                                               "Failed to create llm instance")
+                raise build_error(
+                    StatusCode.COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED,
+                    error_msg="failed to create llm instance"
+                )
             return Model(self._config.model_client_config, self._config.model_config)
         else:
-            # 延迟导入，避免循环依赖
             from openjiuwen.core.runner import Runner
             return await Runner.resource_mgr.get_model(id=self._config.model_id)
 
@@ -219,8 +221,11 @@ class IntentDetectionExecutable(ComponentExecutable):
                 self._llm = await self._create_llm_instance()
                 self._initialized = True
             except Exception as e:
-                ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED,
-                                               "Failed to initialize llm if needed.", e)
+                raise build_error(
+                    StatusCode.COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED,
+                    error_msg="failed to initialize llm if needed",
+                    cause=e
+                ) from e
 
     def _prepare_detection_inputs(self, inputs, chat_history):
         current_inputs = {}
@@ -248,8 +253,11 @@ class IntentDetectionExecutable(ComponentExecutable):
                 intent_detection_input = IntentDetectionInput.model_validate(inputs)
                 current_inputs.update({INPUT: intent_detection_input.query or ""})
             except ValidationError as e:
-                ExceptionUtils.raise_exception(
-                    StatusCode.COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR, ExceptionUtils.format_validation_error(e))
+                raise build_error(
+                    StatusCode.COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR,
+                    error_msg=ExceptionUtils.format_validation_error(e),
+                    cause=e
+                ) from e
 
         current_inputs['global_intent_map'] = global_intent_map
 
@@ -294,8 +302,11 @@ class IntentDetectionExecutable(ComponentExecutable):
             llm_output = await self._llm.invoke(messages=llm_inputs)
             llm_output_content = llm_output.content
         except Exception as e:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED,
-                                           "Failed to invoke llm and get result", e)
+            raise build_error(
+                StatusCode.COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED,
+                error_msg="failed to invoke llm and get result",
+                cause=e
+            ) from e
         if UserConfig.is_sensitive():
             logger.info("Success to invoke llm for intent detection")
         else:

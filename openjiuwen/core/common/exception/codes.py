@@ -31,13 +31,13 @@ class StatusCode(Enum):
     # Workflow Component - Builtin-workflow Component 101000 - 109999
     ## LLMComponent  101000 - 101049
     COMPONENT_LLM_TEMPLATE_CONFIG_ERROR = (101000, "component llm_template config error, reason: {error_msg}")
-    COMPONENT_LLM_CONFIG_INVALID = (101001, "component llm_config is invalid, reason: {error_msg}")
+    COMPONENT_LLM_RESPONSE_CONFIG_INVALID = (101001, "component llm_response_config is invalid, reason: {error_msg}")
     COMPONENT_LLM_CONFIG_ERROR = (101002, "component llm config error, reason: {error_msg}")
     COMPONENT_LLM_INVOKE_CALL_FAILED = (101003, "component llm_invoke call failed, reason: {error_msg}")
     COMPONENT_LLM_EXECUTION_PROCESS_ERROR = (101004, "component llm_execution process error, reason: {error_msg}")
     COMPONENT_LLM_INIT_FAILED = (101005, "component llm initialization failed, reason: {error_msg}")
     COMPONENT_LLM_TEMPLATE_PROCESS_ERROR = (101006, "component llm_template process error, reason: {error_msg}")
-    COMPONENT_LLM_TEMPLATE_INVALID = (101007, "component llm_template is invalid, reason: {error_msg}")
+    COMPONENT_LLM_CONFIG_INVALID = (101007, "component llm_config is invalid, reason: {error_msg}")
 
     ## IntentDetectionComponent 101050 - 101069
     COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR = (101050,

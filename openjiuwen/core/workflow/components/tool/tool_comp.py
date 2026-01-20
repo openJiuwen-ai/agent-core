@@ -6,8 +6,9 @@ from typing import Union, Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.foundation.tool import Tool
@@ -52,12 +53,18 @@ class ToolExecutable(ComponentExecutable):
         try:
             return ToolComponentInput(**inputs).model_dump()
         except ValidationError as e:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INPUT_PARAM_ERROR,
-                                           ExceptionUtils.format_validation_error(e))
+            raise build_error(
+                StatusCode.COMPONENT_TOOL_INPUT_PARAM_ERROR,
+                error_msg=ExceptionUtils.format_validation_error(e),
+                cause=e
+            ) from e
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         if self._tool is None:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_EXECUTION_ERROR)
+            raise build_error(
+                StatusCode.COMPONENT_TOOL_EXECUTION_ERROR,
+                error_msg="tool is not initialized"
+            )
         tool_inputs = self._validate_inputs(inputs)
 
         try:
@@ -93,13 +100,17 @@ class ToolComponent(ComponentComposable):
         self._config = config
         tool_id = self._config.tool_id
         if tool_id is None:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INIT_FAILED,
-                                           "tool_id in ToolComponentConfig is empty")
+            raise build_error(
+                StatusCode.COMPONENT_TOOL_INIT_FAILED,
+                error_msg="tool_id in ToolComponentConfig is empty"
+            )
         from openjiuwen.core.runner import Runner
         self._tool = Runner.resource_mgr.get_tool(tool_id=tool_id)
         if self._tool is None:
-            ExceptionUtils.raise_exception(StatusCode.COMPONENT_TOOL_INIT_FAILED,
-                                           f"{tool_id} is not found in runner")
+            raise build_error(
+                StatusCode.COMPONENT_TOOL_INIT_FAILED,
+                error_msg=f"{tool_id} is not found in runner"
+            )
 
     def to_executable(self) -> Executable:
         return ToolExecutable(self._config).set_tool(self._tool)

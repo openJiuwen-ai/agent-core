@@ -9,8 +9,9 @@ from unittest.mock import Mock
 
 
 from openjiuwen.core.common.constants.enums import ControllerType
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.workflow import ComponentAbility, End, WorkflowCard
 from openjiuwen.core.workflow import Start
@@ -199,8 +200,8 @@ class TestLLMExecutableInvoke:
                                response_format={"type": "text"},)
         try:
             exe = LLMExecutable(config)
-        except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.COMPONENT_LLM_CONFIG_INVALID.code
+        except BaseError as e:
+            assert e.code == StatusCode.COMPONENT_LLM_RESPONSE_CONFIG_INVALID.code
 
     @pytest.mark.asyncio  # 新增
     async def test_llm_in_workflow(
@@ -279,6 +280,7 @@ class TestLLMExecutableInvoke:
         context = create_workflow_session()
         result = await flow.invoke(inputs={"query": "yzq test query"}, session=context)
         print(f"This is invoke result:{result}")
+
 
 class TestLLMExecutableInvokeNew:
     @unittest.skip("skip system test")
