@@ -148,7 +148,6 @@ class BaseMessageChunk(BaseMessage):
 
 class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
     def __add__(self, other: Any) -> "AssistantMessageChunk":
-        super().__init__(role=self.role, content=self.content, name=self.name)
         if not isinstance(other, AssistantMessageChunk):
             raise TypeError(f"Cannot add AssistantMessageChunk to {type(other)}")
 
@@ -180,11 +179,14 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                 # otherwise, push as a new tool_call
                 merged_tool_calls.append(incoming)
 
+        merged_finish_reason = other.finish_reason if other.finish_reason != "null" else self.finish_reason
+
         return AssistantMessageChunk(
             role=self.role,
             content=combined_content,
             tool_calls=merged_tool_calls if merged_tool_calls else None,
             usage_metadata=other.usage_metadata or self.usage_metadata,
+            finish_reason=merged_finish_reason,
             parser_content=other.parser_content or self.parser_content,
             reasoning_content=other.reasoning_content or self.reasoning_content
         )
