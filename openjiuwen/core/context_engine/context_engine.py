@@ -157,7 +157,7 @@ class ContextEngine:
         if full_context_id not in self._context_pool:
             logger.warning(f"Delete context failed, context {session_id} does not exist")
 
-        del self._context_pool[context_id]
+        del self._context_pool[full_context_id]
 
     async def save_contexts(self,
                             context_ids: List[str],
