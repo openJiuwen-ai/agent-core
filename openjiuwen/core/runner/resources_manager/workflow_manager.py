@@ -69,9 +69,10 @@ class WorkflowMgr(AbstractManager["Workflow"]):
                 workflow = await result
             else:
                 workflow = result
-            if not hasattr(workflow, "get_tool_info"):
-                raise TypeError(f"Workflow must have get_tool_info method")
-            self._workflow_tool_infos[workflow_id] = workflow.get_tool_info()
+            if hasattr(workflow, "card"):
+                self._workflow_tool_infos[workflow_id] = workflow.card.tool_info()
+            else:
+                raise TypeError(f"Workflow must have card")
             return decorate_workflow_with_trace(workflow, session)
         except Exception as e:
             self._handle_exception(e, StatusCode.SESSION_WORKFLOW_GET_FAILED, "get")
