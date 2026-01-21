@@ -3,8 +3,8 @@
 import os
 from typing import Callable, Union
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow.components.condition.condition import Condition, FuncCondition
 from openjiuwen.core.workflow.components.condition.expression import ExpressionCondition
 from openjiuwen.core.session import BaseSession
@@ -28,10 +28,10 @@ class Branch:
         elif isinstance(condition, Callable):
             self._condition = FuncCondition(condition)
         else:
-            raise JiuWenBaseException(StatusCode.COMPONENT_BRANCH_PARAM_ERROR.code,
-                                      StatusCode.COMPONENT_BRANCH_PARAM_ERROR.errmsg.format(
-                                          error_msg="branch condition type does not meet the requirements"
-                                      ))
+            raise build_error(
+                StatusCode.COMPONENT_BRANCH_PARAM_ERROR,
+                error_msg="branch condition type does not meet the requirements"
+            )
         self.target = target
 
     def evaluate(self, session: BaseSession) -> bool:
@@ -54,9 +54,10 @@ class BranchRouter:
     def add_branch(self, condition: Union[str, Callable[[], bool], Condition], target: Union[str, list[str]],
                    branch_id: str = None):
         if condition is None or target is None:
-            raise JiuWenBaseException(StatusCode.COMPONENT_BRANCH_PARAM_ERROR.code,
-                                      StatusCode.COMPONENT_BRANCH_PARAM_ERROR.errmsg.format(
-                                          error_msg="condition is None or target is None"))
+            raise build_error(
+                StatusCode.COMPONENT_BRANCH_PARAM_ERROR,
+                error_msg="condition is None or target is None"
+            )
         target = [target] if isinstance(target, str) else target
         if self._drawable_branch_router:
             branch_data = branch_id if branch_id else ""
@@ -77,9 +78,9 @@ class BranchRouter:
         if isinstance(session, BaseSession):
             self._session = session
             return
-        raise JiuWenBaseException(
-            StatusCode.COMPONENT_BRANCH_PARAM_ERROR.code,
-            StatusCode.COMPONENT_BRANCH_PARAM_ERROR.errmsg.format(error_msg="session type is wrong"),
+        raise build_error(
+            StatusCode.COMPONENT_BRANCH_PARAM_ERROR,
+            error_msg="session type is wrong"
         )
 
     async def __call__(self, *args, **kwargs) -> list[str]:
@@ -98,6 +99,7 @@ class BranchRouter:
                     await TracerWorkflowUtils.trace_component_outputs(session, {"branch_id": branch.branch_id})
                     await TracerWorkflowUtils.trace_component_done(session)
                 return branch.target
-        raise JiuWenBaseException(StatusCode.COMPONENT_BRANCH_EXECUTION_ERROR.code,
-                                  StatusCode.COMPONENT_BRANCH_EXECUTION_ERROR.errmsg.format(
-                                      error_msg="branch meeting the condition was not found"))
+        raise build_error(
+            StatusCode.COMPONENT_BRANCH_EXECUTION_ERROR,
+            error_msg="branch meeting the condition was not found"
+        )

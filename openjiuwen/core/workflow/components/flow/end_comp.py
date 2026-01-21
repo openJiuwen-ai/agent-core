@@ -8,8 +8,8 @@ from typing import AsyncIterator, Union, AsyncGenerator, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.core.common.constants.constant import END_NODE_STREAM
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.common.utils.dict_utils import extract_leaf_nodes, format_path
@@ -42,9 +42,11 @@ class End(WorkflowComponent):
                 self._conf = EndConfig.model_validate(conf)
                 self._template = TemplateProcessor(self._conf.response_template)
             except Exception as e:
-                raise JiuWenBaseException(StatusCode.COMPONENT_END_INIT_FAILED.code,
-                                          message=StatusCode.COMPONENT_END_INIT_FAILED.errmsg.format(
-                                              error_msg="`response_template` type error, is not str")) from e
+                raise build_error(
+                    StatusCode.COMPONENT_END_INIT_FAILED,
+                    error_msg="`response_template` type error, is not str",
+                    cause=e
+                ) from e
         else:
             self._conf = None
             self._template = None

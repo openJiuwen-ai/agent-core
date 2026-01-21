@@ -1,6 +1,7 @@
 import pytest
 
 from openjiuwen.core.common.constants.constant import CONFIG_KEY
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.workflow import Input, Output
@@ -77,15 +78,15 @@ class TestBranchComponent:
 
     async def test_add_branch_error(self):
         branch = BranchComponent()
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition=None, target="a", branch_id='')
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition="sss", target='', branch_id='')
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition="sss", target=None, branch_id='')
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition="sss", target=['', "xxx"], branch_id='')
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition="sss", target=["xxx", None], branch_id='')
 
 
@@ -131,7 +132,7 @@ class TestBranchComponent:
         with pytest.raises(JiuWenBaseException) as error:
             await self.run_with_expression("is_not_empty(${start.input})", None)
         print(error.value)
-        assert error.value.error_code == StatusCode.COMPONENT_BRANCH_EXECUTION_ERROR.code
+        assert error.value.error_code == StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code
 
         with pytest.raises(JiuWenBaseException) as error:
             await self.run_with_expression("is_not_empty(${start.input})", 1.2)

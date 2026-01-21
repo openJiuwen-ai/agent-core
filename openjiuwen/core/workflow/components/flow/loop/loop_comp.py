@@ -7,8 +7,9 @@ from typing import Self, Union, Callable, Any, Optional, Dict
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.constants.constant import INDEX, CONFIG_KEY, LOOP_ID, FINISH_INDEX
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow.components.component import ComponentComposable, WorkflowComponent
 from openjiuwen.core.workflow.components.condition.array import ArrayConditionInSession
 from openjiuwen.core.workflow.components.condition.condition import Condition, AlwaysTrue, FuncCondition
@@ -68,10 +69,10 @@ class LoopGroup(BaseWorkflow, Executable):
     ) -> Self:
         # Check for nested loop components
         if isinstance(workflow_comp, LoopComponent):
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_NOT_SUPPORT.code,
-                                      StatusCode.COMPONENT_LOOP_NOT_SUPPORT.errmsg.format(
-                                          error_msg="nested loops are not supported"
-                                      ))
+            raise build_error(
+                StatusCode.COMPONENT_LOOP_NOT_SUPPORT,
+                error_msg="nested loops are not supported"
+            )
         if isinstance(workflow_comp, LoopBreakComponent):
             self._break_components.append(workflow_comp)
         super().add_workflow_comp(comp_id, workflow_comp, wait_for_all=wait_for_all, inputs_schema=inputs_schema,
@@ -109,15 +110,15 @@ class LoopGroup(BaseWorkflow, Executable):
 
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if not self._start_nodes:
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_CONFIG_ERROR.code,
-                                      StatusCode.COMPONENT_LOOP_CONFIG_ERROR.errmsg.format(
-                                          error_msg="start_nodes haven't been configured"
-                                      ))
+            raise build_error(
+                StatusCode.COMPONENT_LOOP_CONFIG_ERROR,
+                error_msg="start_nodes haven't been configured"
+            )
         if not self._end_nodes:
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_CONFIG_ERROR.code,
-                                      StatusCode.COMPONENT_LOOP_CONFIG_ERROR.errmsg.format(
-                                          error_msg="end_nodes haven't been configured"
-                                      ))
+            raise build_error(
+                StatusCode.COMPONENT_LOOP_CONFIG_ERROR,
+                error_msg="end_nodes haven't been configured"
+            )
         self._auto_complete_abilities()
         actor_manager = ActorManager(self._workflow_spec, self._stream_actor, sub_graph=True, session=session)
         loop_session = SubWorkflowSession(session.parent(), self._workflow_config.card.id, actor_manager)
@@ -152,23 +153,24 @@ class LoopComponent(WorkflowComponent):
         self._loop_group = loop_group
         self._output_schema = output_schema
         if loop_group.is_empty:
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
-                                      StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(
-                                          error_msg="empty loop group has no components to execute"))
+            raise build_error(
+                StatusCode.COMPONENT_LOOP_EXECUTION_ERROR,
+                error_msg="empty loop group has no components to execute"
+            )
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         try:
             if not isinstance(inputs, dict):
-                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
-                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              error_msg=f"inputs must be a dictionary, got {type(inputs).__name__}"
-                                          ))
+                raise build_error(
+                    StatusCode.COMPONENT_LOOP_INPUT_INVALID,
+                    error_msg=f"inputs must be a dictionary, got {type(inputs).__name__}"
+                )
 
             if INPUTS_KEY not in inputs:
-                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
-                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              error_msg=f"missing required key {INPUTS_KEY}"
-                                          ))
+                raise build_error(
+                    StatusCode.COMPONENT_LOOP_INPUT_INVALID,
+                    error_msg=f"missing required key {INPUTS_KEY}"
+                )
 
             loop_input = LoopInput.model_validate(inputs.get(INPUTS_KEY))
             condition: Condition
@@ -182,13 +184,15 @@ class LoopComponent(WorkflowComponent):
                     max_loop_limit = LOOP_NUMBER_MAX_LIMIT_DEFAULT
 
                 if loop_input.loop_number is None:
-                    raise JiuWenBaseException(StatusCode.NUMBER_CONDITION_ERROR.code,
-                                              "loop_number variable not found or is None")
+                    raise build_error(
+                        StatusCode.NUMBER_CONDITION_ERROR,
+                        error_msg="loop_number variable not found or is None"
+                    )
 
                 if loop_input.loop_number > max_loop_limit:
-                    raise JiuWenBaseException(
-                        StatusCode.NUMBER_CONDITION_ERROR.code,
-                        f"loop_number exceeds maximum limit {max_loop_limit}"
+                    raise build_error(
+                        StatusCode.NUMBER_CONDITION_ERROR,
+                        error_msg=f"loop_number exceeds maximum limit {max_loop_limit}"
                     )
 
                 condition = NumberConditionInSession(loop_input.loop_number)
@@ -200,15 +204,16 @@ class LoopComponent(WorkflowComponent):
                 else:
                     condition = ExpressionCondition(loop_input.bool_expression)
             else:
-                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_INPUT_INVALID.code,
-                                          StatusCode.COMPONENT_LOOP_INPUT_INVALID.errmsg.format(
-                                              error_msg=f"invalid loop type '{loop_input.loop_type}' for LoopComponent"
-                                          ))
+                raise build_error(
+                    StatusCode.COMPONENT_LOOP_INPUT_INVALID,
+                    error_msg=f"invalid loop type '{loop_input.loop_type}' for LoopComponent"
+                )
 
             if self._loop_group.is_empty:
-                raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
-                                          StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(
-                                              error_msg="loop group is empty, no components to execute"))
+                raise build_error(
+                    StatusCode.COMPONENT_LOOP_EXECUTION_ERROR,
+                    error_msg="loop group is empty, no components to execute"
+                )
 
             output_callback = OutputCallback(self._output_schema)
             callbacks: list = [output_callback]
@@ -224,8 +229,11 @@ class LoopComponent(WorkflowComponent):
         except JiuWenBaseException:
             raise
         except Exception as e:
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
-                                      StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(error_msg=str(e))) from e
+            raise build_error(
+                StatusCode.COMPONENT_LOOP_EXECUTION_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     def graph_invoker(self) -> bool:
         return True
@@ -255,10 +263,10 @@ class LoopBreakComponent(ComponentComposable, Executable):
 
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if self._loop_controller is None:
-            raise JiuWenBaseException(StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.code,
-                                      StatusCode.COMPONENT_BREAK_EXECUTION_ERROR.errmsg.format(
-                                          error_msg="failed to initialize loop controller"
-                                      ))
+            raise build_error(
+                StatusCode.COMPONENT_BREAK_EXECUTION_ERROR,
+                error_msg="failed to initialize loop controller"
+            )
         self._loop_controller.break_loop()
         return {}
 
@@ -268,9 +276,10 @@ class LoopSetVariableComponent(WorkflowComponent):
     def __init__(self, variable_mapping: dict[str, Any]):
         super().__init__()
         if not variable_mapping:
-            raise JiuWenBaseException(StatusCode.COMPONENT_SET_VAR_INIT_FAILED.code,
-                                      StatusCode.COMPONENT_SET_VAR_INIT_FAILED.errmsg.format(
-                                          error_msg=f'variable_mapping is None or empty'))
+            raise build_error(
+                StatusCode.COMPONENT_SET_VAR_INIT_FAILED,
+                error_msg=f'variable_mapping is None or empty'
+            )
         self._variable_mapping = variable_mapping
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
@@ -280,9 +289,10 @@ class LoopSetVariableComponent(WorkflowComponent):
             keys = left_ref_str.split(NESTED_PATH_SPLIT)
 
             if len(keys) == 0:
-                raise JiuWenBaseException(StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.code,
-                                          StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR.errmsg.format(
-                                              error_msg=f'key[{left}] not supported format'))
+                raise build_error(
+                    StatusCode.COMPONENT_SET_VAR_INPUT_PARAM_ERROR,
+                    error_msg=f'key[{left}] not supported format'
+                )
 
             node_id = keys[0]
             node_session = NodeSession(root_session, node_id)
@@ -395,8 +405,11 @@ class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, Ato
         except Exception as e:
             if isinstance(e, JiuWenBaseException):
                 raise
-            raise JiuWenBaseException(StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code,
-                                      StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.errmsg.format(error_msg=str(e))) from e
+            raise build_error(
+                StatusCode.COMPONENT_LOOP_EXECUTION_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     def _condition_invoke(self, session: BaseSession) -> Output:
         index = session.state().get(INDEX)

@@ -3,7 +3,7 @@ from typing import AsyncIterator
 import pytest
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import LoopGroup, LoopComponent

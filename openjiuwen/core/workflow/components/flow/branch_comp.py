@@ -2,8 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Callable, Union, Hashable, Any
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow.components.component import WorkflowComponent
 from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter
 from openjiuwen.core.workflow.components.condition.condition import Condition
@@ -43,8 +43,7 @@ class BranchComponent(WorkflowComponent):
 
     def _validate_branch_param(self, param_value: Any):
         if not param_value:
-            error_msg = f"{param_value} is invalid , can not be None or empty"
-            raise JiuWenBaseException(
-                StatusCode.COMPONENT_BRANCH_PARAM_ERROR.code,
-                StatusCode.COMPONENT_BRANCH_PARAM_ERROR.errmsg.format(error_msg=error_msg),
+            raise build_error(
+                StatusCode.COMPONENT_BRANCH_PARAM_ERROR,
+                error_msg=f"{param_value} is invalid , can not be None or empty"
             )

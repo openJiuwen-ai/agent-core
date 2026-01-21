@@ -145,7 +145,7 @@ class StatusCode(Enum):
     EXPRESSION_SYNTAX_ERROR = (140000, "expression syntax error")
     EXPRESSION_EVAL_ERROR = (140001, "expression evaluation error, reason: {error_msg}")
     ARRAY_CONDITION_ERROR = (140002, "array condition error")
-    NUMBER_CONDITION_ERROR = (140003, "number condition error")
+    NUMBER_CONDITION_ERROR = (140003, "number condition error, reason: {error_msg}")
 
     # =========================
     # KnowledgeBase Retrieval 155000 - 157999
