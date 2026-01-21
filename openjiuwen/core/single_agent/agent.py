@@ -212,7 +212,7 @@ class AbilityKit:
             # Execute Tool - get instance from Runner.resource_mgr
             tool_card = self._tools[tool_name]
             tool_id = tool_card.id or tool_card.name
-            tool = Runner.resource_mgr.get_tool(id=tool_id)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_id)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)
