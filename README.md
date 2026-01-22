@@ -34,16 +34,13 @@ pip install -U openjiuwen
 ```python
 import os
 import asyncio
-from openjiuwen.core.workflow import Start
-from openjiuwen.core.workflow import End
-from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.workflow import Start, End, LLMComponent, LLMCompConfig
+from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.workflow import WorkflowConfig, WorkflowMetadata, WorkflowInputsSchema
-from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
 from openjiuwen.core.application.workflow_agent import WorkflowAgent
-from openjiuwen.core.single_agent.config import WorkflowAgentConfig
-from openjiuwen.core.single_agent.schema.schema import WorkflowSchema
+from openjiuwen.core.workflow import Workflow, WorkflowCard
+
 
 # TODO：请提供用户的大模型配置信息
 os.environ.setdefault("API_BASE", "your_api_base")
@@ -53,42 +50,53 @@ os.environ.setdefault("MODEL_NAME", "your_model_name")
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 
 # 创建大模型配置对象
-model_config = ModelConfig(
-    model_provider=os.getenv("MODEL_PROVIDER"),
-    model_info=BaseModelInfo(
-        api_key=os.getenv("API_KEY"),
-        api_base=os.getenv("API_BASE"),
-        model=os.getenv("MODEL_NAME"),
-    )
+model_client_config = ModelClientConfig(
+    client_provider=os.getenv("MODEL_PROVIDER"),
+    api_key=os.getenv("API_KEY"),
+    api_base=os.getenv("API_BASE"),
+    verify_ssl=os.getenv("VERIFY_SSL").lower() == "true"
+)
+model_config = ModelRequestConfig(
+    model=os.getenv("MODEL_NAME")
 )
 
 # 创建工作流配置
 workflow_card = WorkflowCard(
-        id="generate_text_workflow",
-        name="generate_text",
-        version="1.0",
-        description="根据用户输入生成文本"
-    ),
-    inputs_schema=WorkflowInputsSchema(
-        type="object",
-        properties={"query": {"type": "string", "description": "用户输入", "required": True}},
-        required=['query']
-    )
-
+    id="generate_text_workflow",
+    name="generate_text",
+    version="1.0",
+    description="根据用户输入生成文本",
+    input_params={
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "用户输入"}},
+            "required": ['query']
+    }
+)
 
 # 初始化工作流
 flow = Workflow(card=workflow_card)
 
 # 创建组件
-start = Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+start = Start()
 end = End({"responseTemplate": "工作流输出文本: {{output}}"})
 llm_config = LLMCompConfig(
-    model=model_config,
+    model_client_config=model_client_config,
+    model_config=model_config,
     template_content=[
         {"role": "system", "content": "你是一个AI助手，能够帮我完成任务。\n注意：请不要推理，直接输出结果就好了！"},
         {"role": "user", "content": "{{query}}"}],
-    response_format={"type": "text"},
-    output_config={"output": {"type": "string", "required": True}},
+    response_format={"type": "json"},
+    output_config={
+        "type": "object",
+        "description": "大模型输出schema",
+        "properties": {
+            "output": {
+                "type": "string",
+                "description": "大模型输出"
+            }
+        },
+        "required": ["output"]
+    }
 )
 llm = LLMComponent(llm_config)
 
@@ -109,7 +117,7 @@ schema = WorkflowSchema(
 )
 agent_config = WorkflowAgentConfig(
     id="hello_agent",
-    version="0.1.0",
+    version="0.1.1",
     description="第一个Agent",
     workflows=[schema],
 )
@@ -121,8 +129,7 @@ workflow_agent.bind_workflows([flow])
 async def main():
     invoke_result = await Runner.run_agent(workflow_agent, {"query": "你好,请生成一则笑话,不要超过20个字"})
     output_result = invoke_result.get("output").result
-    print(f"WorkflowAgent output result >>> {output_result.get('responseContent')}")
-
+    print(f"WorkflowAgent output result >>> {output_result.get('response')}")
 
 asyncio.run(main())
 ```
