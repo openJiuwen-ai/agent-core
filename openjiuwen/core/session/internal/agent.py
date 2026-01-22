@@ -64,7 +64,8 @@ class AgentSession(BaseSession):
             session_id: str,
             config: Config = None,
             resource_manager: "ResourceMgr" = None,
-            checkpointer: Checkpointer | None = None):
+            checkpointer: Checkpointer | None = None,
+            card=None):
         self._session_id = session_id
         self._config = config
         if resource_manager:
@@ -80,6 +81,7 @@ class AgentSession(BaseSession):
         self._tracer = tracer
         self._checkpointer = get_default_inmemory_checkpointer() if checkpointer is None else checkpointer
         self._agent_span = self._tracer.tracer_agent_span_manager.create_agent_span() if self._tracer else None
+        self._card = card
 
     def config(self) -> Config:
         return self._config
@@ -116,4 +118,7 @@ class AgentSession(BaseSession):
             session_id=self._session_id)
 
     def agent_id(self):
-        return self._config.get_agent_config().id
+        agent_config = self._config.get_agent_config()
+        if agent_config is not None:
+            return agent_config.id
+        return self._card.id

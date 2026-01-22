@@ -19,28 +19,8 @@ from tests.unit_tests.core.workflow.mock_nodes import MockEndNode, Node1, MockSt
 
 @pytest.fixture(scope="class")
 def session():
-    workflow_id = "test_workflow"
-    name = "test_workflow"
-    version = "1"
-    description = "test_workflow"
-    test_workflow_schema = WorkflowSchema(
-        id=workflow_id,
-        version=version,
-        name=name,
-        description=description,
-        inputs={"query": {
-            "type": "string",
-        }},
-    )
-    workflow_config = WorkflowAgentConfig(
-        workflows=[test_workflow_schema],
-        tools=["add"],
-        controller_type=ControllerType.WorkflowController
-    )
-    config = Config()
-    config.set_agent_config(agent_config=workflow_config)
     session_id = "session_id"
-    return create_agent_session(None, AgentSession(session_id, config=config))
+    return create_agent_session(session_id=session_id)
 
 
 @pytest.mark.asyncio
@@ -116,13 +96,3 @@ class TestRunner:
     async def test_run_tool(self, session):
         result = await self.add_function.invoke(inputs={"a": 1, "b": 2})
         assert result == 3
-
-    async def test_run_workflow_not_bound(self, session):
-        workflow_id = "test_workflow_not_bound"
-        name = "test_workflow"
-        version = "1"
-        workflow = self._build_workflow(name, workflow_id, version)
-        with pytest.raises(JiuWenBaseException) as exc_info:
-            await Runner.run_workflow(workflow, inputs={"query": "query workflow"}, session=session)
-        assert exc_info.value.error_code == StatusCode.WORKFLOW_NOT_BOUND_TO_AGENT.code
-        assert exc_info.value.message == StatusCode.WORKFLOW_NOT_BOUND_TO_AGENT.errmsg

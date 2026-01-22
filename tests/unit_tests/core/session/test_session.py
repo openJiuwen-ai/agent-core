@@ -258,8 +258,7 @@ class TestSession:
 
     @staticmethod
     def test_agent_session():
-        internal_agent_session = AgentSession("abc")
-        agent_session = Session(inner=internal_agent_session)
+        agent_session = getattr(Session(session_id="abc"), "_inner")
         data = {"data": {"a": 1}}
         agent_session.update_state({"result": data})
         assert agent_session.get_state("result") == {"data": {"a": 1}}

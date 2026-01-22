@@ -70,7 +70,7 @@ class ContextEngine:
         Returns:
             ModelContext: The newly created or cached context instance.
         """
-        session_id = session.session_id() if session else "default_session_id"
+        session_id = session.get_session_id() if session else "default_session_id"
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id in self._context_pool:
             return self._context_pool.get(full_context_id)
@@ -181,7 +181,7 @@ class ContextEngine:
                           with this ID.
         """
         for context_id in context_ids:
-            session_id = session.session_id() if session else "default_session_id"
+            session_id = session.get_session_id() if session else "default_session_id"
             full_context_id = f"{session_id}_{context_id}"
             context: SessionModelContext = self._context_pool.get(full_context_id)
             if not context:

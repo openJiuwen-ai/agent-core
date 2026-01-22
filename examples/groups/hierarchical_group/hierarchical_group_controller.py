@@ -12,8 +12,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 
-if TYPE_CHECKING:
-    from openjiuwen.core.multi_agent.legacy import AgentGroupSession
+from openjiuwen.core.session.agent import Session
 
 
 class HierarchicalGroupController(BaseGroupController):
@@ -52,7 +51,7 @@ class HierarchicalGroupController(BaseGroupController):
     async def handle_event(
         self,
         event: Event,
-        session: 'AgentGroupSession'
+        session: Session
     ) -> Any:
         """Handle message - Route based on simple rules
         

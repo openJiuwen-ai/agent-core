@@ -15,13 +15,13 @@ from openjiuwen.core.runner.drunner.dmessage_queue.message_queue_factory import 
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.runner_config import RunnerConfig, DEFAULT_RUNNER_CONFIG, set_runner_config, \
     get_runner_config
-from openjiuwen.core.session import StaticAgentSession
+
 from openjiuwen.core.session import get_default_inmemory_checkpointer
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 from openjiuwen.core.session import Session
 from openjiuwen.core.workflow import Session as WorkflowSession
 from openjiuwen.core.workflow import create_workflow_session
-from openjiuwen.core.single_agent import Session as TaskSession
+from openjiuwen.core.single_agent import Session as AgentSession, AgentCard
 from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.workflow import generate_workflow_key
@@ -199,7 +199,7 @@ class Runner:
             res = await agent_instance.invoke(inputs, session=None)
         else:
             res = await agent_instance.invoke(inputs, agent_session)
-            await agent_session.post_run()
+            await getattr(agent_session, "_inner").post_run()
         return res
 
     async def run_agent_streaming(self,
@@ -284,19 +284,9 @@ class Runner:
         """
         await get_default_inmemory_checkpointer().release(session_id)
 
-    def _check_is_agent_workflow(self, session, workflow_key) -> bool:
-        if not self._is_called_by_agent(session):
-            return True
-        agent_config: AgentConfig = session.get_agent_config()
-
-        for workflow_schema in agent_config.workflows:
-            if generate_workflow_key(workflow_schema.id, workflow_schema.version) == workflow_key:
-                return True
-        return False
-
     @classmethod
     def _is_called_by_agent(cls, session: Session) -> bool:
-        return session and isinstance(session, TaskSession)
+        return session and isinstance(session, AgentSession)
 
     @classmethod
     def _create_workflow_session(cls, session):
@@ -305,7 +295,7 @@ class Runner:
             workflow_session = create_workflow_session()
         elif isinstance(session, str):
             workflow_session = create_workflow_session(session_id=session)
-        elif isinstance(session, TaskSession):
+        elif isinstance(session, AgentSession):
             workflow_session = session.create_workflow_session()
         else:
             workflow_session = session
@@ -324,11 +314,26 @@ class Runner:
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
                 return agent_with_session, None
-            task_session = create_agent_session(
-                inner=(await agent_with_session.session.create_agent_session(session_id, inputs)))
+            if hasattr(agent_with_session.agent, "card"):
+                card = agent_with_session.agent.card
+            else:
+                # LegacyBaseAgent does not have card attribute
+                card = AgentCard(id=agent_with_session.agent.config().get_agent_config().id)
+            task_session = create_agent_session(session_id=session_id,
+                                                envs=getattr(agent_with_session.session.config(), "_env"), card=card)
+            await get_default_inmemory_checkpointer().pre_agent_execute(
+                getattr(getattr(task_session, "_inner"), "_inner"), inputs)
             return agent_with_session.agent, task_session
-        agent_session = StaticAgentSession(agent.config(), resource_mgr=self._resource_manager)
-        task_session = create_agent_session(inner=await agent_session.create_agent_session(session_id, inputs))
+
+        if hasattr(agent, "card"):
+            card = agent.card
+        else:
+            # LegacyBaseAgent does not have card attribute
+            card = AgentCard(id=agent.config().get_agent_config().id)
+        task_session = create_agent_session(session_id=session_id,
+                                            envs=getattr(agent.config(), "_env"), card=card)
+        await get_default_inmemory_checkpointer().pre_agent_execute(getattr(getattr(task_session, "_inner"), "_inner"),
+                                                                    inputs)
         return agent, task_session
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],
@@ -337,10 +342,6 @@ class Runner:
             workflow_key = workflow
         else:
             workflow_key = generate_workflow_key(workflow.card.id, workflow.card.version)
-
-        if not self._check_is_agent_workflow(session, workflow_key):
-            raise JiuWenBaseException(StatusCode.WORKFLOW_NOT_BOUND_TO_AGENT.code,
-                                      StatusCode.WORKFLOW_NOT_BOUND_TO_AGENT.errmsg)
 
         workflow_session = self._create_workflow_session(session)
         if isinstance(workflow, str):

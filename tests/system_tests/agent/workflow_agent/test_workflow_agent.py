@@ -248,7 +248,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(
             card=card
         )
-        context = create_agent_session(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -313,7 +313,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(
             card=card
         )
-        context = create_agent_session(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -370,7 +370,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         flow = Workflow(card=card)
-        context = create_agent_session(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()

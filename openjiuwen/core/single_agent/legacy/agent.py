@@ -15,6 +15,7 @@ from openjiuwen.core.single_agent.legacy.schema import PluginSchema
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.session import StaticAgentSession
 from openjiuwen.core.session import Config
+from openjiuwen.core.session.internal.wrapper import TaskSession
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session import (
     StaticWrappedSession,
@@ -47,13 +48,15 @@ class AgentSession(WrappedSession, StaticWrappedSession):
     async def write_stream(self, data: Union[dict, OutputSchema]):
         return await self.write_custom_stream(data)
 
-    async def pre_run(self, **kwargs) -> Session:
+    async def pre_run(self, **kwargs) -> TaskSession:
         session_id = kwargs.get("session_id")
         if session_id is None:
             session_id = kwargs.get("trace_id")
         inputs = kwargs.get("inputs")
-        inner = await self._session.create_agent_session(session_id, inputs)
-        return Session(inner=inner)
+        session = TaskSession(session_id=session_id, config=self._session.config(),
+                       resource_mgr=self._session.resource_manager())
+        await self._session.checkpointer().pre_agent_execute(getattr(session, "_inner"), inputs)
+        return session
 
     def resource_mgr(self):
         return self._inner.resource_manager()
@@ -629,7 +632,10 @@ class ControllerAgent(BaseAgent):
         if session is None:
             agent_session = await self._session.pre_run(session_id=session_id)
         else:
-            agent_session = session
+            if isinstance(session, Session):
+                agent_session = getattr(session, "_inner")
+            else:
+                agent_session = session
         await self.context_engine.create_context(session=agent_session)
         try:
             # Fully delegate to controller
@@ -670,7 +676,10 @@ class ControllerAgent(BaseAgent):
             need_cleanup = True
             own_stream = True  # Owns stream lifecycle
         else:
-            agent_session = session
+            if isinstance(session, Session):
+                agent_session = getattr(session, "_inner")
+            else:
+                agent_session = session
             need_cleanup = False
             own_stream = False  # External owns stream lifecycle
 

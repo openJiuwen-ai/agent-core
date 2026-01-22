@@ -532,7 +532,7 @@ class TestQuestionerStream:
 
         # Execute workflow
         session_id = "test_type_conversion"
-        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
 
         result = await flow.invoke({"query": "Extract user info with multiple types"}, workflow_session)
 
@@ -628,7 +628,7 @@ class TestQuestionerStream:
 
         # Execute workflow
         session_id = "test_type_validation_failure"
-        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
 
         result = await flow.invoke({"query": "My name is Bob, I am 3.14 years old"}, workflow_session)
 

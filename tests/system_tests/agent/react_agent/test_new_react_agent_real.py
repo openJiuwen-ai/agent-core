@@ -120,7 +120,7 @@ class TestNewReActAgentReal(unittest.IsolatedAsyncioTestCase):
         agent.configure(config)
 
         # 2. 创建真实的 Session
-        session = create_agent_session(trace_id="test_chat_session")
+        session = create_agent_session(session_id="test_chat_session")
 
         # 3. 调用 Agent
         result = await agent.invoke(
@@ -167,7 +167,7 @@ class TestNewReActAgentReal(unittest.IsolatedAsyncioTestCase):
         agent.add_ability(add_tool.card)
 
         # 5. 创建真实的 Session
-        session = create_agent_session(trace_id="test_calc_session")
+        session = create_agent_session(session_id="test_calc_session")
 
         # 6. 调用 Agent，使用更明确的 query
         query = "使用 add 工具计算 123 + 456 的结果"

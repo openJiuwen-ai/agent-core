@@ -95,6 +95,9 @@ class WorkflowSession(BaseSession):
         if self._actor_manager is not None:
             await self._actor_manager.shutdown()
 
+    def parent(self):
+        return self._parent
+
 
 def create_parent_id(session: BaseSession):
     return session.executable_id() if isinstance(session, NodeSession) else ''

@@ -386,7 +386,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         result = await flow.invoke(inputs={"query": "please write a 3-line poem"},
                                    session=workflow_session, context=workflow_context)
         print(f"invoke result >>> {result}")
@@ -431,7 +431,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         result = await flow.invoke(
             inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"},
             session=workflow_session, context=workflow_context)
@@ -469,7 +469,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         async for chunk in flow.stream(inputs={"query": "please write a 3-line poem"}, session=workflow_session, context=workflow_context):
             print(f"stream chunk >>> {chunk}")
 
@@ -514,7 +514,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = create_agent_session(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         async for chunk in flow.stream(inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"}, session=workflow_session,
                                        context=workflow_context):
             print(f"stream chunk >>> {chunk}")

@@ -14,10 +14,8 @@ from typing import Dict, AsyncIterator, Any
 from openjiuwen.core.single_agent.legacy import AgentConfig, LegacyBaseAgent
 from openjiuwen.core.multi_agent.legacy import (
     AgentGroupConfig,
-    AgentGroupSession,
     BaseGroup
 )
-from openjiuwen.core.session import Session
 from openjiuwen.core.runner import Runner
 
 
@@ -33,6 +31,8 @@ def build_current_date():
 
 
 class PlanningAgent(LegacyBaseAgent):
+    from openjiuwen.core.single_agent import Session
+
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
@@ -48,6 +48,8 @@ class PlanningAgent(LegacyBaseAgent):
 
 
 class ExecuteAgent(LegacyBaseAgent):
+    from openjiuwen.core.single_agent import Session
+
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
@@ -64,6 +66,8 @@ class ExecuteAgent(LegacyBaseAgent):
 
 
 class SummaryAgent(LegacyBaseAgent):
+    from openjiuwen.core.single_agent import Session
+
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
@@ -81,13 +85,15 @@ class SummaryAgent(LegacyBaseAgent):
 
 
 class CustomAgentGroup(BaseGroup):
+    from openjiuwen.core.multi_agent import Session
+
     async def invoke(self, inputs: Dict, session: Session = None) -> Dict:
         result_plan = await Runner.run_agent(self.agents["planner"], inputs)
         result_execute = await Runner.run_agent(self.agents["executor"], result_plan)
         result_summary = await Runner.run_agent(self.agents["reporter"], result_execute)
         return result_summary
 
-    async def stream(self, inputs: Dict, session: AgentGroupSession = None) -> AsyncIterator[Any]:
+    async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
 

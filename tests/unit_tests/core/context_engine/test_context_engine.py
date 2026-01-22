@@ -30,7 +30,7 @@ class TestContextEngine:
         context = await engine.create_context(context_id="ctx", session=session, history_messages=history)
 
         assert isinstance(context, SessionModelContext)
-        assert context.session_id() == session.session_id()
+        assert context.session_id() == session.get_session_id()
         assert context.context_id() == "ctx"
         assert context.get_messages() == history
 
@@ -82,26 +82,26 @@ class TestContextEngine:
 
         engine.clear_context()
 
-        assert engine.get_context(context_id="ctx1", session_id=session.session_id()) is None
-        assert engine.get_context(context_id="ctx2", session_id=session.session_id()) is None
+        assert engine.get_context(context_id="ctx1", session_id=session.get_session_id()) is None
+        assert engine.get_context(context_id="ctx2", session_id=session.get_session_id()) is None
 
     @pytest.mark.asyncio
     async def test_clear_context_by_session(self, engine, session, another_session):
         await engine.create_context(context_id="ctx1", session=session)
         await engine.create_context(context_id="ctx2", session=another_session)
 
-        engine.clear_context(session_id=session.session_id())
+        engine.clear_context(session_id=session.get_session_id())
 
-        assert engine.get_context(context_id="ctx1", session_id=session.session_id()) is None
-        assert engine.get_context(context_id="ctx2", session_id=another_session.session_id()) is not None
+        assert engine.get_context(context_id="ctx1", session_id=session.get_session_id()) is None
+        assert engine.get_context(context_id="ctx2", session_id=another_session.get_session_id()) is not None
 
     @pytest.mark.asyncio
     async def test_clear_context_by_session_and_context(self, engine, session, another_session):
         await engine.create_context(context_id="ctx1", session=session)
         await engine.create_context(context_id="ctx2", session=another_session)
 
-        engine.clear_context(session_id=session.session_id(), context_id="ctx1")
-        engine.clear_context(session_id=another_session.session_id(), context_id="ctx2")
+        engine.clear_context(session_id=session.get_session_id(), context_id="ctx1")
+        engine.clear_context(session_id=another_session.get_session_id(), context_id="ctx2")
 
-        assert engine.get_context(context_id="ctx1", session_id=session.session_id()) is None
-        assert engine.get_context(context_id="ctx2", session_id=another_session.session_id()) is None
+        assert engine.get_context(context_id="ctx1", session_id=session.get_session_id()) is None
+        assert engine.get_context(context_id="ctx2", session_id=another_session.get_session_id()) is None

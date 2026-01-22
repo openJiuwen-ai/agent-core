@@ -63,7 +63,8 @@ class InMemoryCheckpointer(Checkpointer):
                 logger.warning(f"workflow_store of workflow: {session.workflow_id()} dose not exist in "
                             f"session: {session.session_id()}")
 
-            if session.config().get_agent_config() is None:
+            from openjiuwen.core.session.internal.agent import AgentSession
+            if not isinstance(session.parent(), AgentSession):
                 logger.info(f"clear session: {session.session_id()}")
                 self._workflow_stores.pop(session.session_id(), None)
                 self._session_to_workflow_ids.pop(session.session_id(), None)

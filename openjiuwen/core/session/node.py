@@ -22,10 +22,10 @@ class Session:
     def get_workflow_id(self):
         return self._inner.workflow_id()
 
-    def get_node_id(self):
+    def get_component_id(self):
         return self._inner.node_id()
 
-    def get_node_type(self):
+    def get_component_type(self):
         return self._inner.node_type()
 
     async def trace(self, data: dict):

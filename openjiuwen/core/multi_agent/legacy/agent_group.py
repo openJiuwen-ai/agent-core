@@ -13,6 +13,7 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import Config
+from openjiuwen.core.session.agent_group import Session
 
 
 class AgentGroupSession(AgentSession):
@@ -115,7 +116,7 @@ class BaseGroup(ABC):
         return len(self.agents)
 
     @abstractmethod
-    async def invoke(self, message, session: AgentGroupSession = None) -> Any:
+    async def invoke(self, message, session: Session = None) -> Any:
         """
         Execute a synchronous operation on the single_agent group.
 
@@ -135,7 +136,7 @@ class BaseGroup(ABC):
         )
 
     @abstractmethod
-    async def stream(self, message, session: AgentGroupSession = None) -> AsyncIterator[Any]:
+    async def stream(self, message, session: Session = None) -> AsyncIterator[Any]:
         """
         Execute a streaming operation on the single_agent group.
 
@@ -204,7 +205,7 @@ class ControllerGroup(BaseGroup):
             )
         return message
 
-    async def invoke(self, message, session: AgentGroupSession = None) -> Any:
+    async def invoke(self, message, session: Session = None) -> Any:
         """Synchronous invocation - Fully delegated to group_controller
         
         Lifecycle: pre_run -> controller.invoke -> post_run
@@ -229,7 +230,10 @@ class ControllerGroup(BaseGroup):
             task_session = await self._session.pre_run(session_id=session_id)
             need_cleanup = True
         else:
-            task_session = session
+            if isinstance(session, Session):
+                task_session = getattr(session, "_inner")
+            else:
+                task_session = session
             need_cleanup = False
 
         try:
@@ -240,7 +244,7 @@ class ControllerGroup(BaseGroup):
             if need_cleanup:
                 await task_session.post_run()
 
-    async def stream(self, message, session: AgentGroupSession = None) -> AsyncIterator[Any]:
+    async def stream(self, message, session: Session = None) -> AsyncIterator[Any]:
         """Streaming invocation - real streaming output
         
         Design: 
@@ -272,7 +276,10 @@ class ControllerGroup(BaseGroup):
             task_session = await self._session.pre_run(session_id=session_id)
             need_cleanup = True
         else:
-            task_session = session
+            if isinstance(session, Session):
+                task_session = getattr(session, "_inner")
+            else:
+                task_session = session
             need_cleanup = False
 
         # Background task executes group_controller.invoke

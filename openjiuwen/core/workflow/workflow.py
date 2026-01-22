@@ -268,11 +268,14 @@ class Workflow:
         if kwargs.get("is_sub"):
             return await self._sub_invoke(inputs, session, context, **kwargs)
 
+        session.set_workflow_card(self._card)
         if self._card.input_params is not None:
             inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                     skip_validate=kwargs.get("skip_inputs_validate"))
 
         parent = session.get_parent()
+        if parent is not None and not hasattr(parent, "base"):
+            parent = getattr(parent, "_inner")
         workflow_session = WorkflowSession(workflow_id=self._card.id,
                                            parent=parent.base() if parent is not None else None,
                                            session_id=session.get_session_id(),
@@ -335,10 +338,14 @@ class Workflow:
             async for chunk in self._sub_stream(inputs, session, context, **kwargs):
                 yield chunk
             return
+
+        session.set_workflow_card(self._card)
         if self._card.input_params is not None:
             inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                     skip_validate=kwargs.get("skip_inputs_validate"))
         parent = session.get_parent()
+        if parent is not None and not hasattr(parent, "base"):
+            parent = getattr(parent, "_inner")
         workflow_session = WorkflowSession(workflow_id=self._card.id,
                                            parent=parent.base() if parent is not None else None,
                                            session_id=session.get_session_id(),

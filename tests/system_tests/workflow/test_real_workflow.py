@@ -236,7 +236,7 @@ class RealWorkflowTest(unittest.TestCase):
         # 2. 初始化工作流与上下文
         flow = Workflow(
         )
-        context = create_agent_session(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 3. 实例化各组件
         start = MockStartNode("start")
@@ -326,7 +326,7 @@ class RealWorkflowTest(unittest.TestCase):
         """
         测试LLM组件通过StreamWriter流出数据
         """
-        context = create_agent_session(trace_id="test")
+        context = create_agent_session(session_id="test")
         flow = Workflow()
 
         start = Start()

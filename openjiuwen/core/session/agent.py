@@ -1,72 +1,48 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Optional, AsyncIterator, Any
+import uuid
+from typing import Any, TYPE_CHECKING
 
-from openjiuwen.core.foundation.llm import Model
-from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.session import BaseSession, Config
-from openjiuwen.core.session.interaction.interaction import SimpleAgentInteraction
-from openjiuwen.core.session.internal.agent import AgentSession
-from openjiuwen.core.session.internal.wrapper import StateSession
-from openjiuwen.core.session.tracer import Tracer
+from openjiuwen.core.session import Config
+from openjiuwen.core.session.internal.wrapper import TaskSession
 from openjiuwen.core.session.workflow import Session as WorkflowSession
 
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent import AgentCard
 
-class Session(StateSession):
-    def __init__(self, session_id: str = None, inner: BaseSession = None):
-        if inner is None:
-            super().__init__(AgentSession(session_id, Config()))
-        else:
-            super().__init__(inner)
-        self._interaction = None
 
-    async def trace(self, data: dict):
-        pass
+class Session:
+    def __init__(self, session_id: str = None, envs: dict[str, Any] = None, card: "AgentCard" = None):
+        if session_id is None:
+            session_id = str(uuid.uuid4())
+        self._session_id = session_id
+        config = Config()
+        if envs is not None:
+            config.set_envs(envs)
+        self._inner = TaskSession(session_id=session_id, config=config, card=card)
+        self._card = card
 
-    async def trace_error(self, error: Exception):
-        pass
-
-    async def interact(self, value):
-        if self._interaction is None:
-            self._interaction = SimpleAgentInteraction(self._inner)
-        await self._interaction.wait_user_inputs(value)
-
-    # todo: all resource interaface will be deleted when resource_mgr supports tag feature
-    def get_prompt(self, template_id: str) -> PromptTemplate:
-        return self._inner.resource_manager()._resource_registry.prompt().get_prompt(template_id)
-
-    def get_model(self, model_id: str) -> Model:
-        return self._inner.resource_manager()._resource_registry.model().get_model(model_id, session=self._inner)
-
-    async def get_workflow(self, workflow_id: str) -> "Workflow":
-        return await self._inner.resource_manager()._resource_registry.workflow().get_workflow(workflow_id,
-                                                                                               session=self._inner)
-
-    def get_workflow_sync(self, workflow_id: str) -> Optional["Workflow"]:
-        return self._inner.resource_manager()._resource_registry.workflow().get_workflow_sync(workflow_id,
-                                                                                              session=self._inner)
-
-    def get_tool(self, tool_id: str) -> Tool:
-        return self._inner.resource_manager()._resource_registry.tool().get_tool(tool_id, session=self._inner)
-
-    def stream_iterator(self) -> AsyncIterator[Any]:
-        return self._inner.stream_writer_manager().stream_output()
-
-    async def post_run(self):
-        if isinstance(self._inner, AgentSession):
-            await self._inner.stream_writer_manager().stream_emitter().close()
-            await self._inner.checkpointer().post_agent_execute(self._inner)
-
-    def tracer(self) -> Tracer:
-        return self._inner.tracer()
-
-    def create_workflow_session(self) -> WorkflowSession:
-        return WorkflowSession(parent=self, session_id=self.session_id())
+    def get_session_id(self) -> str:
+        return self._session_id
 
     def get_envs(self):
-        return getattr(self._inner.config(), '_envs', {})
+        return self._inner.get_envs()
+
+    def get_agent_id(self):
+        return self._card.id
+
+    def get_agent_name(self):
+        return self._card.name
+
+    def get_agent_description(self):
+        return self._card.description
+
+    def create_workflow_session(self) -> WorkflowSession:
+        return WorkflowSession(parent=self, session_id=self.get_session_id())
+
+    async def interact(self, value):
+        await self._inner.interact(value)
 
 
-def create_agent_session(trace_id: str = None, inner: BaseSession = None) -> Session:
-    return Session(trace_id, inner)
+def create_agent_session(session_id: str = None, envs: dict[str, Any] = None, card: "AgentCard" = None) -> Session:
+    return Session(session_id=session_id, envs=envs, card=card)
