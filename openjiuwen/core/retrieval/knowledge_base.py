@@ -7,20 +7,20 @@ Provides a unified interface for knowledge bases as the top-level entry point.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Dict
+from typing import Any, Dict, List, Optional
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
-from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
-from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
+from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
+from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
 class KnowledgeBase(ABC):
@@ -46,17 +46,27 @@ class KnowledgeBase(ABC):
         self.extractor = extractor
         self.index_manager = index_manager
         self.llm_client = llm_client
-        if vector_store and index_manager:
-            for attr in ["database_name", "distance_metric"]:
-                vector_store_val = getattr(vector_store, attr, None)
-                index_manager_val = getattr(index_manager, attr, None)
-                if vector_store_val != index_manager_val:
-                    raise build_error(
-                        StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
-                        config_name=attr,
-                        error_msg=f'- Vector Store ({type(vector_store).__name__}) is using "{vector_store_val}"'
-                        f'\n- Index manager ({type(index_manager).__name__}) is using "{index_manager_val}"',
-                    )
+
+    def __setattr__(self, name: str, value: Any):
+        """Override setattr to perform additional check"""
+        super().__setattr__(name, value)
+        special_attrs = {"vector_store", "index_manager"}
+        if name in special_attrs and all(getattr(self, attr, None) for attr in special_attrs):
+            self.validate_index()
+
+    def validate_index(self):
+        """Validate vector store and index manager"""
+        data_fields = ["text_field", "vector_field", "sparse_vector_field", "metadata_field", "doc_id_field"]
+        for attr in ["database_name", "distance_metric", "index_type"] + data_fields:
+            vector_store_val = getattr(self.vector_store, attr, None)
+            index_manager_val = getattr(self.index_manager, attr, None)
+            if vector_store_val != index_manager_val:
+                raise build_error(
+                    StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
+                    config_name=attr,
+                    error_msg=f'\n- Vector Store ({type(self.vector_store).__name__}) is using "{vector_store_val}"'
+                    f'\n- Index manager ({type(self.index_manager).__name__}) is using "{index_manager_val}"',
+                )
 
     @abstractmethod
     async def parse_files(
@@ -74,7 +84,6 @@ class KnowledgeBase(ABC):
         Returns:
             List of Document objects
         """
-        pass
 
     @abstractmethod
     async def add_documents(
@@ -83,7 +92,6 @@ class KnowledgeBase(ABC):
         **kwargs: Any,
     ) -> List[str]:
         """Add documents to the knowledge base"""
-        pass
 
     @abstractmethod
     async def retrieve(
@@ -93,7 +101,6 @@ class KnowledgeBase(ABC):
         **kwargs: Any,
     ) -> List[RetrievalResult]:
         """Retrieve relevant documents"""
-        pass
 
     @abstractmethod
     async def delete_documents(
@@ -102,7 +109,6 @@ class KnowledgeBase(ABC):
         **kwargs: Any,
     ) -> bool:
         """Delete documents"""
-        pass
 
     @abstractmethod
     async def update_documents(
@@ -111,12 +117,10 @@ class KnowledgeBase(ABC):
         **kwargs: Any,
     ) -> List[str]:
         """Update documents"""
-        pass
 
     @abstractmethod
     async def get_statistics(self) -> Dict[str, Any]:
         """Get knowledge base statistics"""
-        pass
 
     async def close(self) -> None:
         """Close the knowledge base and release resources"""
