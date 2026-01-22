@@ -1077,8 +1077,8 @@ class WorkflowController(IntentDetectionController):
                         f"{chunk.payload.id if hasattr(chunk.payload, 'id') else 'unknown'}"
                     )
             else:
-                # 保留非 __interaction__ 类型的 chunk（如 tracer）
-                result.append(chunk)
+                if not isinstance(chunk, CustomSchema):  # filter custom stream data, avoid repeat output
+                    result.append(chunk)
         
         return result
 
