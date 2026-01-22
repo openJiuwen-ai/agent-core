@@ -158,6 +158,14 @@ class StatusCode(Enum):
     NUMBER_CONDITION_ERROR = (140003, "number condition error, reason: {error_msg}")
 
     # =========================
+    # ContextEngine 150000 - 154999
+    # =========================
+
+    CONTEXT_MESSAGE_PROCESS_ERROR = (153000, "context message process error, reason: {error_msg}")
+    CONTEXT_EXECUTION_ERROR = (153001, "context execution execution error, reason: {error_msg}")
+    CONTEXT_MESSAGE_INVALID = (153003, "context message is invalid, reason: {error_msg}")
+
+    # =========================
     # KnowledgeBase Retrieval 155000 - 157999
     # =========================
 

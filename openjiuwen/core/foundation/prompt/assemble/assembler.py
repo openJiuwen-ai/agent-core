@@ -3,8 +3,8 @@
 
 from typing import Union, List
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.prompt.assemble.variables.textable import TextableVariable
 from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variable
@@ -73,18 +73,14 @@ class PromptAssembler:
         input_keys = list(set(input_keys))
         for name, variable in variables.items():
             if name not in input_keys:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED.code,
-                    message=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED.errmsg.format(
-                        error_msg=f"variable {name} is not defined in the promptTemplate"
-                    )
+                raise build_error(
+                    StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
+                    error_msg=f"variable {name} is not defined in the promptTemplate"
                 )
             if not isinstance(variable, Variable):
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED.code,
-                    message=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED.errmsg.format(
-                        error_msg=f"variable {name} must be instantiated as a `variable` object"
-                    )
+                raise build_error(
+                    StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
+                    error_msg=f"variable {name} must be instantiated as a `variable` object"
                 )
         for placeholder in input_keys:
             if placeholder in variables:
@@ -115,19 +111,15 @@ class PromptAssembler:
         """Update the variables based on the arguments passed in as key-value pairs"""
         missing_keys = set(self.input_keys) - set(kwargs.keys())
         if missing_keys:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR.code,
-                message=StatusCode.PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR.errmsg.format(
-                    error_msg=f"missing keys for updating the prompt assembler: {list(missing_keys)}"
-                )
+            raise build_error(
+                StatusCode.PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR,
+                error_msg=f"missing keys for updating the prompt assembler: {list(missing_keys)}"
             )
         unexpected_keys = set(kwargs.keys()) - set(self.input_keys)
         if unexpected_keys:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR.code,
-                message=StatusCode.PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR.errmsg.format(
-                    error_msg=f"unexpected keys for updating the prompt assembler: {list(unexpected_keys)}"
-                )
+            raise build_error(
+                StatusCode.PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR,
+                error_msg=f"unexpected keys for updating the prompt assembler: {list(unexpected_keys)}"
             )
         for variable in self.variables.values():
             input_kwargs = {k: v for k, v in kwargs.items() if k in variable.input_keys}

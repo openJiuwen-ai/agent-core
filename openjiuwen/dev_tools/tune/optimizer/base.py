@@ -7,8 +7,8 @@ import threading
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -47,11 +47,9 @@ class BaseOptimizer:
             return
         for name, llm_call in parameters.items():
             if not llm_call:
-                raise JiuWenBaseException(
-                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.code,
-                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.errmsg.format(
-                        error_msg=f"cannot bind a None parameter of {name}"
-                    )
+                raise build_error(
+                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR,
+                    error_msg=f"cannot bind a None parameter of {name}"
                 )
             self._parameters[name] = TextualParameter(llm_call)
         self._history = OptimizeHistory()
@@ -67,12 +65,11 @@ class BaseOptimizer:
         except Exception as e:
             import traceback
             traceback.print_exc()
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"{str(e)}"
-                )
-            )
+            raise build_error(
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR,
+                error_msg=f"{str(e)}",
+                cause=e
+            ) from e
 
     def update(self):
         self._validate_parameters()
@@ -88,12 +85,11 @@ class BaseOptimizer:
             self._history.clear_history()
         except Exception as e:
             self._history.clear_history()
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"{str(e)}"
-                )
-            )
+            raise build_error(
+                StatusCode.TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR,
+                error_msg=f"{str(e)}",
+                cause=e
+            ) from e
 
     @abstractmethod
     def _update(self):
@@ -133,11 +129,9 @@ class BaseOptimizer:
 
     def _validate_parameters(self):
         if not self._parameters:
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.code,
-                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.errmsg.format(
-                    error_msg="cannot optimize empty parameters"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR,
+                error_msg="cannot optimize empty parameters"
             )
 
 

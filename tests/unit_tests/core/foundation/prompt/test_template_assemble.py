@@ -1,6 +1,6 @@
 import pytest
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage, ToolCall
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
@@ -15,7 +15,7 @@ class TestPromptAssemble:
 
     def test_textable_variable(self):
         # Test empty placeholder throws exception
-        pytest.raises(JiuWenBaseException, TextableVariable, text="{{}}")
+        pytest.raises(BaseError, TextableVariable, text="{{}}")
 
         # Test single placeholder
         var1 = TextableVariable(text="{{x}}")
@@ -31,7 +31,7 @@ class TestPromptAssemble:
 
     def test_textable_variables(self):
         # Duplicate test (can be retained or deleted) - retained and optimized here
-        pytest.raises(JiuWenBaseException, TextableVariable, text="{{}}")
+        pytest.raises(BaseError, TextableVariable, text="{{}}")
         var1 = TextableVariable(text="{{x}}")
         self.assert_equal(["x"], var1.input_keys)
         self.assert_equal("default", var1.name)
@@ -58,7 +58,7 @@ class TestPromptAssemble:
 
         # Test empty placeholder (<<>>) - need to specify corresponding prefix and suffix
         text = "Hello, <<>>!"
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             TextableVariable(text=text, prefix="<<", suffix=">>")  # Specify placeholder format
 
     def test_update(self):

@@ -3,8 +3,8 @@
 import copy
 from typing import List, Optional, AsyncGenerator, Literal
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.prompt import PromptTemplate
@@ -35,11 +35,9 @@ class MetaTemplateBuilder(BasePromptBuilder):
         elif isinstance(meta_template, PromptTemplate):
             template_to_reg = copy.deepcopy(meta_template)
         else:
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"failed to register meta-template: {name}"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"failed to register meta-template: {name}"
             )
         self._meta_template_manager.update({template_name: template_to_reg})
 
@@ -107,20 +105,16 @@ class MetaTemplateBuilder(BasePromptBuilder):
                                      tools: Optional[List[ToolInfo]] = None
                                      ):
         if not custom_meta_template_name:
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"failed to get custom meta-template, please provide template name"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"failed to get custom meta-template, please provide template name"
             )
         custom_meta_template_name = f"{META_TEMPLATE_NAME_PREFIX}{custom_meta_template_name}"
         custom_meta_template = self._meta_template_manager.get(custom_meta_template_name)
         if not custom_meta_template:
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"failed to get custom meta-template: {custom_meta_template_name}"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"failed to get custom meta-template: {custom_meta_template_name}"
             )
         return custom_meta_template.format(
             dict(instruction=prompt, tools=str(tools))
@@ -128,23 +122,17 @@ class MetaTemplateBuilder(BasePromptBuilder):
 
     def _is_valid_prompt(self, prompt: str, tools: List[ToolInfo]):
         if prompt is None:
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"prompt cannot be None"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"prompt cannot be None"
             )
         if not prompt.strip():
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"prompt cannot be empty"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"prompt cannot be empty"
             )
         if tools and any(not isinstance(tool, ToolInfo) for tool in tools):
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"each tool must be an instance of ToolInfo"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"each tool must be an instance of ToolInfo"
             )

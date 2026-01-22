@@ -10,8 +10,8 @@ import asyncio
 
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.foundation.prompt import PromptTemplate
@@ -53,12 +53,10 @@ class ExampleOptimizer(BaseOptimizer):
         super().__init__(parameters)
         self._model = Model(model_client_config, model_config)
         if num_examples < TuneConstant.MIN_EXAMPLE_NUM or num_examples > TuneConstant.MAX_EXAMPLE_NUM:
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.code,
-                StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.errmsg.format(
-                    error_msg=f"num_examples should be between {TuneConstant.MIN_EXAMPLE_NUM} "
-                              f"and {TuneConstant.MAX_EXAMPLE_NUM}"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR,
+                error_msg=f"num_examples should be between {TuneConstant.MIN_EXAMPLE_NUM} "
+                            f"and {TuneConstant.MAX_EXAMPLE_NUM}"
             )
         self._num_examples = num_examples
 

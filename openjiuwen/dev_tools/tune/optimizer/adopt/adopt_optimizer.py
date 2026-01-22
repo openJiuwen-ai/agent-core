@@ -13,8 +13,8 @@ from openjiuwen.dev_tools.tune.optimizer.base import BaseOptimizer
 from openjiuwen.dev_tools.tune.optimizer.base import TextualParameter
 from openjiuwen.dev_tools.tune.optimizer.instruction_optimizer import InstructionOptimizer
 from openjiuwen.dev_tools.tune.utils import TuneUtils
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.foundation.llm import BaseMessage, Model
@@ -55,11 +55,9 @@ class AdoptOptimizer(BaseOptimizer):
                                        f"retry {i}/{DEFAULT_MODEL_RETRY_NUM}")
                         continue
                 logger.error("Failed to invoke the model, please check if the model is available.")
-                return JiuWenBaseException(
-                    error_code=StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.code,
-                    message=StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR.errmsg.format(
-                        error_msg="Failed to invoke the model"
-                    )
+                return build_error(
+                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR,
+                    error_msg="Failed to invoke the model"
                 )
         self._model = ModelWithRetry(model)
         self._agent_description = kwargs.get("agent_description", "No description")
@@ -203,11 +201,9 @@ class AdoptOptimizer(BaseOptimizer):
     def _conclude_node(self, node_name: str) -> None:
         param = self._parameters.get(node_name)
         if not param:
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.code,
-                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR.errmsg.format(
-                    error_msg=f"Cannot find parameter: {node_name}"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR,
+                error_msg=f"Cannot find parameter: {node_name}"
             )
         system_prompt = param.llm_call.get_system_prompt()
         user_prompt = param.llm_call.get_user_prompt()
@@ -260,11 +256,9 @@ class PartialOptimizer(InstructionOptimizer):
                               tools: Optional[list] = None) -> str:
         local_gradients = self._calculate_textual_gradient_by_bad_cases(param, tools)
         if not local_gradients:
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"Calculate local gradient of parameter: {name} failed."
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR,
+                error_msg=f"Calculate local gradient of parameter: {name} failed."
             )
         return self._reduce_textual_gradient(param, local_gradients)
 

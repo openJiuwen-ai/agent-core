@@ -9,8 +9,8 @@ import pytest
 import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
 from openjiuwen.dev_tools.prompt_builder import MetaTemplateBuilder
 from openjiuwen.dev_tools.prompt_builder.builder.meta_template_builder import META_TEMPLATE_NAME_PREFIX
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
     ModelRequestConfig, ModelClientConfig, AssistantMessage, Model, BaseModelClient,
     BaseMessage, BaseOutputParser, AssistantMessageChunk
@@ -92,9 +92,9 @@ async def test_register_custom_template():
 
     # register invalid type template
     template = ("this is a invalid tuple meta template", )
-    with pytest.raises(JiuWenBaseException) as context:
+    with pytest.raises(BaseError) as context:
         builder.register_meta_template("custom_general", template)
-    assert context.value.error_code == StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code
+    assert context.value.code == StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code
 
 
 @pytest.mark.asyncio
@@ -130,15 +130,15 @@ async def test_build_with_custom_meta_template():
         ModelRequestConfig(model=""), ModelClientConfig(client_provider="MocKMetaTemplateLLM", api_base="", api_key="")
     )
     template = "you are a custom meta template"
-    with pytest.raises(JiuWenBaseException) as context:
+    with pytest.raises(BaseError) as context:
         response = await builder.build(prompt="你是一个旅行助手", template_type="other")
-    assert context.value.error_code == StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code
+    assert context.value.code == StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code
 
-    with pytest.raises(JiuWenBaseException) as context:
+    with pytest.raises(BaseError) as context:
         builder.register_meta_template("custom_general", template)
         response = await builder.build(prompt="你是一个旅行助手", template_type="other",
                                  custom_template_name="not_defined")
-    assert context.value.error_code == StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code
+    assert context.value.code == StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code
 
     response = await builder.build(prompt="你是一个旅行助手", template_type="other",
                              custom_template_name="custom_general")

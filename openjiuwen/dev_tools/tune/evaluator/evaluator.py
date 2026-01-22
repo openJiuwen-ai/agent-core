@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from tqdm import tqdm
 
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.dev_tools.tune.base import Case, EvaluatedCase, TuneConstant
@@ -31,11 +31,9 @@ class BaseEvaluator(ABC):
                        **kwargs
                        ) -> List[EvaluatedCase]:
         if len(cases) != len(predicts):
-            raise JiuWenBaseException(
-                StatusCode.TOOLCHAIN_EVALUATOR_EXECUTION_ERROR.code,
-                StatusCode.TOOLCHAIN_EVALUATOR_EXECUTION_ERROR.errmsg.format(
-                    error_msg=f"length of cases: {len(cases)} dose not equal with length of predicts: {len(predicts)} "
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_EVALUATOR_EXECUTION_ERROR,
+                error_msg=f"length of cases: {len(cases)} dose not equal with length of predicts: {len(predicts)} "
             )
 
         TuneUtils.validate_digital_parameter(kwargs.get("num_parallel", 1), "num_parallel",
