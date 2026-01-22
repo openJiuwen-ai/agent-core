@@ -130,20 +130,26 @@ class StatusCode(Enum):
     # Workflow - Exception Handling 111000 - 111999
     # Agent Orchestration 120000 - 129999
     # Agent Orchestration - ReAct Agent Orchestration And Execution 120000 - 120999
-    TOOL_NOT_FOUND_ERROR = (120000, "Tool not found error")
-    TOOL_EXECUTION_ERROR = (120001, "Tool execution error: {msg}")
-    TASK_NOT_SUPPORT_ERROR = (120002, "Get unknown task type: {msg}")
-    WORKFLOW_EXECUTION_ERROR = (120003, "Workflow execution error: {msg}")
-    PROMPT_PARAMS_CHECK_ERROR = (120004, "Prompt params check error: {msg}")
+    AGENT_TOOL_NOT_FOUND = (120000, "agent tool not found, reason: {error_msg}")
+    AGENT_TOOL_EXECUTION_ERROR = (120001, "agent tool execution error, reason: {error_msg}")
+    AGENT_TASK_NOT_SUPPORT = (120002, "agent task is not supported, reason: {error_msg}")
+    AGENT_WORKFLOW_EXECUTION_ERROR = (120003, "agent workflow execution error, reason: {error_msg}")
+    AGENT_PROMPT_PARAM_ERROR = (120004, "agent prompt parameter error, reason: {error_msg}")
     # Agent Orchestration - Workflow Agent Orchestration And Execution 121000 - 121999
     # Agent Orchestration - Custom Agent Interface 122000 - 122999
     # Agent Controller 123000 - 123999
-    CONTROLLER_INVOKE_LLM_FAILED = (123000, "Controller failed to call model, the reason is {error_msg}")
-    AGENT_SUB_TASK_TYPE_ERROR = (123001, "SubTask type {msg} is not supported")
-    CONTROLLER_HANDLE_USER_INPUT_ERROR = (123002, "ReAct Agent failed to handle user input, the reason is {error_msg}")
-    CONTROLLER_RUNTIME_ERROR = (123003, "Controller runtime error, the reason is {error_msg}")
-    CONTROLLER_SEND_STREAM_FAILED = (123004, "Controller failed to send stream, the reason is {error_msg}")
-    CONTROLLER_PARSE_TOOL_CALL_ERROR = (123005, "Controller failed to parse tool call, the reason is {error_msg}")
+    AGENT_CONTROLLER_INVOKE_CALL_FAILED = (123000, "agent controller_invoke call failed, reason: {error_msg}")
+    AGENT_SUB_TASK_TYPE_NOT_SUPPORT = (123001, "agent sub_task_type is not supported, reason: {error_msg}")
+    AGENT_CONTROLLER_USER_INPUT_PROCESS_ERROR = (
+        123002,
+        "agent controller_user_input process error, reason: {error_msg}")
+    AGENT_CONTROLLER_RUNTIME_ERROR = (123003, "agent controller runtime error, reason: {error_msg}")
+    AGENT_CONTROLLER_EXECUTION_CALL_FAILED = (
+        123004,
+        "agent controller_execution call failed, reason: {error_msg}")
+    AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR = (
+        123005,
+        "agent controller_tool_execution process error, reason: {error_msg}")
 
     # Multi-Agent Orchestration 130000 - 139999
     # Multi-Agent Orchestration - Multi-Agent Communication  130000 - 130999

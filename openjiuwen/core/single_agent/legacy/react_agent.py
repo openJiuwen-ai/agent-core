@@ -104,8 +104,8 @@ class LegacyReActAgent(BaseAgent):
                 messages.append(prompt_dict)
         except ValidationError as e:
             raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_PARAMS_CHECK_ERROR.code,
-                message=StatusCode.PROMPT_PARAMS_CHECK_ERROR.errmsg.format(msg=str(e))
+                error_code=StatusCode.AGENT_PROMPT_PARAM_ERROR.code,
+                message=StatusCode.AGENT_PROMPT_PARAM_ERROR.errmsg.format(msg=str(e))
             ) from e
 
         for msg in chat_history:

@@ -111,19 +111,29 @@ class StatusCode(Enum):
     # Agent Orchestration 120000–129999
     # =========================
 
-    TOOL_NOT_FOUND = (120000, "tool not found")
-    TOOL_EXECUTION_ERROR = (120001, "tool execution error, reason: {error_msg}")
-    TASK_TYPE_NOT_SUPPORTED = (120002, "task type is not supported")
+    # Agent Orchestration - ReAct Agent Orchestration And Execution 120000 - 120999
+    AGENT_TOOL_NOT_FOUND = (120000, "agent tool not found, reason: {error_msg}")
+    AGENT_TOOL_EXECUTION_ERROR = (120001, "agent tool execution error, reason: {error_msg}")
+    AGENT_TASK_NOT_SUPPORT = (120002, "agent task is not supported, reason: {error_msg}")
     AGENT_WORKFLOW_EXECUTION_ERROR = (120003, "agent workflow execution error, reason: {error_msg}")
-    PROMPT_PARAM_INVALID = (120004, "prompt parameter is invalid")
+    AGENT_PROMPT_PARAM_ERROR = (120004, "agent prompt parameter error, reason: {error_msg}")
 
-    # Agent Controller 123000–123999
-    CONTROLLER_LLM_CALL_FAILED = (123000, "controller llm call failed, reason: {error_msg}")
-    AGENT_SUB_TASK_TYPE_NOT_SUPPORTED = (123001, "agent sub task type is not supported")
-    CONTROLLER_INPUT_HANDLE_ERROR = (123002, "controller input handle error, reason: {error_msg}")
-    CONTROLLER_RUNTIME_ERROR = (123003, "controller runtime error, reason: {error_msg}")
-    CONTROLLER_STREAM_SEND_FAILED = (123004, "controller stream send failed, reason: {error_msg}")
-    CONTROLLER_TOOL_CALL_PARSE_ERROR = (123005, "controller tool call parse error, reason: {error_msg}")
+    # Agent Orchestration - Workflow Agent Orchestration And Execution 121000 - 121999
+    # Agent Orchestration - Custom Agent Interface 122000 - 122999
+
+    # Agent Controller 123000 - 123999
+    AGENT_CONTROLLER_INVOKE_CALL_FAILED = (123000, "agent controller_invoke call failed, reason: {error_msg}")
+    AGENT_SUB_TASK_TYPE_NOT_SUPPORT = (123001, "agent sub_task_type is not supported, reason: {error_msg}")
+    AGENT_CONTROLLER_USER_INPUT_PROCESS_ERROR = (
+        123002,
+        "agent controller_user_input process error, reason: {error_msg}")
+    AGENT_CONTROLLER_RUNTIME_ERROR = (123003, "agent controller runtime error, reason: {error_msg}")
+    AGENT_CONTROLLER_EXECUTION_CALL_FAILED = (
+        123004,
+        "agent controller_execution call failed, reason: {error_msg}")
+    AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR = (
+        123005,
+        "agent controller_tool_execution process error, reason: {error_msg}")
 
     # =========================
     # Runner / Distributed 134000–134999

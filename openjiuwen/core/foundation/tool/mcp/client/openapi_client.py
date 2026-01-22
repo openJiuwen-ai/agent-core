@@ -48,7 +48,7 @@ class ToolManager:
             return await tool.run(arguments)
         except Exception as e:
             raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_EXECUTION_ERROR.code, message=f"call tool {key} failed: {e}"
+                error_code=StatusCode.AGENT_TOOL_EXECUTION_ERROR.code, message=f"call tool {key} failed: {e}"
             ) from e
 
 

@@ -137,7 +137,7 @@ class BaseController(ABC):
             current_loop = asyncio.get_running_loop()
         except RuntimeError as e:
             logger.error("No running event loop")
-            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_RUNTIME_ERROR, "no running event loop", e)
+            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, "no running event loop", e)
         
         if self._msg_queue_loop is not current_loop:
             # Event loop changed or first time - (re)start message queue
@@ -217,7 +217,7 @@ class BaseController(ABC):
             if isinstance(e, JiuWenBaseException):
                 raise e
             else:
-                ExceptionUtils.raise_exception(StatusCode.CONTROLLER_RUNTIME_ERROR, str(e), e)
+                ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, str(e), e)
 
     # ===== Abstract methods (developers must implement) =====
     @abstractmethod

@@ -91,12 +91,12 @@ class MessageHandlerUtils:
                     except Exception as e:
                         if UserConfig.is_sensitive():
                             logger.error("LLM Agent parse tool call workflow's arguments error")
-                            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_PARSE_TOOL_CALL_ERROR,
+                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
                                                            "LLM-generated workflow arguments are invalid", e)
                         else:
                             logger.error(f"LLM Agent parse tool call workflow({tool_name})'s arguments error: "
                                          f"{tool_call.arguments}")
-                            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_PARSE_TOOL_CALL_ERROR,
+                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
                                                            f"LLM-generated workflow ({tool_name}) arguments "
                                                            f"are invalid: {tool_call.arguments}", e)
 
@@ -119,12 +119,12 @@ class MessageHandlerUtils:
                     except Exception as e:
                         if UserConfig.is_sensitive():
                             logger.error("LLM Agent parse tool call plugin's arguments error")
-                            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_PARSE_TOOL_CALL_ERROR,
+                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
                                                            "LLM-generated plugin arguments are invalid", e)
                         else:
                             logger.error(f"LLM Agent parse tool call plugin({tool_name})'s arguments error: "
                                          f"{tool_call.arguments}")
-                            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_PARSE_TOOL_CALL_ERROR,
+                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
                                                            f"LLM-generated plugin ({tool_name}) arguments "
                                                            f"are invalid: {tool_call.arguments}", e)
                     result.append(Task(
@@ -138,8 +138,8 @@ class MessageHandlerUtils:
                     break
         if not result:
             raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_NOT_FOUND_ERROR.code,
-                message=StatusCode.TOOL_NOT_FOUND_ERROR.errmsg
+                error_code=StatusCode.AGENT_TOOL_NOT_FOUND.code,
+                message=StatusCode.AGENT_TOOL_NOT_FOUND.errmsg
             )
         return result
 
@@ -153,7 +153,7 @@ class MessageHandlerUtils:
             if tool_name == plugin.name:
                 return TaskType.PLUGIN
 
-        raise JiuWenBaseException(StatusCode.TOOL_NOT_FOUND_ERROR.code, f"not find tool call type: {tool_name}")
+        raise JiuWenBaseException(StatusCode.AGENT_TOOL_NOT_FOUND.code, f"not find tool call type: {tool_name}")
 
     @staticmethod
     def is_interaction_result(exec_result: Any) -> bool:

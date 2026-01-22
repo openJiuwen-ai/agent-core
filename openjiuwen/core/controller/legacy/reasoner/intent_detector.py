@@ -229,7 +229,7 @@ class IntentDetector:
             llm_output_content = llm_output.content.strip()
         except Exception as e:
             ExceptionUtils.raise_exception(
-                StatusCode.CONTROLLER_INVOKE_LLM_FAILED, str(e), e
+                StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED, str(e), e
             )
 
         return llm_output_content

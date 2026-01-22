@@ -96,7 +96,7 @@ class LLMController(BaseController):
         """
         if event.event_type != EventType.USER_INPUT:
             logger.warning(f"Unexpected event type: {event.event_type}, expected USER_INPUT")
-            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_HANDLE_USER_INPUT_ERROR.code,
+            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_USER_INPUT_PROCESS_ERROR.code,
                                            f"{event.event_type} is unexpected event type, should be USER_INPUT")
 
         try:
@@ -106,7 +106,7 @@ class LLMController(BaseController):
             if isinstance(e, JiuWenBaseException):
                 raise e
             else:
-                ExceptionUtils.raise_exception(StatusCode.CONTROLLER_RUNTIME_ERROR, str(e), e)
+                ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, str(e), e)
 
     async def _handle_user_input(self, event: Event, session: Session) -> Optional[Dict]:
         """Handle user input - ReAct core: LLM reasoning to generate plan
@@ -510,8 +510,8 @@ class LLMController(BaseController):
             else:
                 logger.warning(f"Unknown task type: {task.task_type}")
                 raise JiuWenBaseException(
-                    error_code=StatusCode.TASK_NOT_SUPPORT_ERROR.code,
-                    message=StatusCode.TASK_NOT_SUPPORT_ERROR.errmsg.format(msg=str(task.task_type))
+                    error_code=StatusCode.AGENT_TASK_NOT_SUPPORT.code,
+                    message=StatusCode.AGENT_TASK_NOT_SUPPORT.errmsg.format(msg=str(task.task_type))
                 )
         except Exception as e:
             logger.error(f"Error executing task {task.task_id}: {e}")
@@ -598,14 +598,14 @@ class LLMController(BaseController):
         except JiuWenBaseException as e:
             logger.error(f"Error executing workflow task {task.input.target_name}: {e}")
             raise JiuWenBaseException(
-                error_code=StatusCode.WORKFLOW_EXECUTION_ERROR.code,
+                error_code=StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR.code,
                 message=e.message
             )
         except Exception as e:
             logger.error(f"Error executing workflow {task.input.target_name}: {e}")
             raise JiuWenBaseException(
-                error_code=StatusCode.WORKFLOW_EXECUTION_ERROR.code,
-                message=StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(msg=str(e))
+                error_code=StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR.code,
+                message=StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR.errmsg.format(msg=str(e))
             )
 
     async def _execute_plugin_task(self, task: Task, session: Session) -> TaskResult:
@@ -614,8 +614,8 @@ class LLMController(BaseController):
         if not tool:
             logger.error("Tool not found")
             raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_NOT_FOUND_ERROR.code,
-                message=StatusCode.TOOL_NOT_FOUND_ERROR.errmsg
+                error_code=StatusCode.AGENT_TOOL_NOT_FOUND.code,
+                message=StatusCode.AGENT_TOOL_NOT_FOUND.errmsg
             )
         try:
             result = await tool.invoke(task.input.arguments)
@@ -638,14 +638,14 @@ class LLMController(BaseController):
         except JiuWenBaseException as e:
             logger.error(f"Error executing plugin task {task.input.target_name}: {e}")
             raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_EXECUTION_ERROR.code,
+                error_code=StatusCode.AGENT_TOOL_EXECUTION_ERROR.code,
                 message=e.message
             )
         except Exception as e:
             logger.error(f"Error executing plugin task {task.input.target_name}: {e}")
             raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_EXECUTION_ERROR.code,
-                message=StatusCode.TOOL_EXECUTION_ERROR.errmsg.format(msg=str(e))
+                error_code=StatusCode.AGENT_TOOL_EXECUTION_ERROR.code,
+                message=StatusCode.AGENT_TOOL_EXECUTION_ERROR.errmsg.format(msg=str(e))
             )
 
     async def _generate_plan_from_llm(self, event: Event, session: Session):
@@ -685,7 +685,7 @@ class LLMController(BaseController):
             if isinstance(e, JiuWenBaseException):
                 raise e
             else:
-                ExceptionUtils.raise_exception(StatusCode.CONTROLLER_INVOKE_LLM_FAILED, str(e), e)
+                ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED, str(e), e)
 
         return tasks, llm_output
 
@@ -751,7 +751,7 @@ class LLMController(BaseController):
 
             # Check for empty response
             if accumulated_chunk is None:
-                ExceptionUtils.raise_exception(StatusCode.CONTROLLER_INVOKE_LLM_FAILED,
+                ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED,
                                                "LLM returned empty response")
 
             # Convert accumulated chunk to AIMessage
@@ -1116,7 +1116,7 @@ class LLMController(BaseController):
             return final_stream
         except Exception as e:
             logger.error(f"Failed to send final stream data: {e}")
-            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_SEND_STREAM_FAILED, str(e), e)
+            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_EXECUTION_CALL_FAILED, str(e), e)
 
     async def _send_error_stream(self, error_msg: str, session: Session):
         """Send error result stream and return OutputSchema"""
@@ -1134,7 +1134,7 @@ class LLMController(BaseController):
             return error_stream
         except Exception as e:
             logger.error(f"Failed to send error stream: {e}")
-            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_SEND_STREAM_FAILED, str(e), e)
+            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_EXECUTION_CALL_FAILED, str(e), e)
 
     def _unwrap_result(self, result):
         """Unwrap result - unify return format"""
