@@ -13,7 +13,7 @@ import openai
 import pytest
 from openai.types import Embedding
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import EmbeddingConfig, OpenAIEmbedding
 
 
@@ -124,7 +124,7 @@ class TestOpenAIEmbedding:
     async def test_embed_query_empty_text(self, embedding_config):
         """Test embedding empty text"""
         model = OpenAIEmbedding(timeout=1, config=embedding_config)
-        with pytest.raises(JiuWenBaseException, match="Empty text provided"):
+        with pytest.raises(BaseError, match="Empty text provided"):
             await model.embed_query("   ")
 
     @pytest.mark.asyncio
@@ -153,7 +153,7 @@ class TestOpenAIEmbedding:
         model.async_client.embeddings.create.side_effect = openai.APIConnectionError(
             message="Connection error", request=mock_request
         )
-        with pytest.raises(JiuWenBaseException, match="reason: Connection error"):
+        with pytest.raises(BaseError, match="reason: Connection error"):
             await model.embed_query("test query")
         assert model.async_client.embeddings.create.call_count == 2
 
@@ -164,7 +164,7 @@ class TestOpenAIEmbedding:
 
         model = OpenAIEmbedding(timeout=1, config=embedding_config)
         model.async_client.embeddings.create = AsyncMock(return_value=mock_response)
-        with pytest.raises(JiuWenBaseException, match="No embeddings in response"):
+        with pytest.raises(BaseError, match="No embeddings in response"):
             await model.embed_query("test query")
 
     @pytest.mark.asyncio
@@ -212,21 +212,21 @@ class TestOpenAIEmbedding:
     async def test_embed_documents_empty_list(self, embedding_config):
         """Test embedding empty list"""
         model = OpenAIEmbedding(timeout=1, config=embedding_config)
-        with pytest.raises(JiuWenBaseException, match="Empty texts list provided"):
+        with pytest.raises(BaseError, match="Empty texts list provided"):
             await model.embed_documents([])
 
     @pytest.mark.asyncio
     async def test_embed_documents_with_empty_texts(self, embedding_config):
         """Test list containing empty texts"""
         model = OpenAIEmbedding(timeout=1, config=embedding_config)
-        with pytest.raises(JiuWenBaseException, match="chunks are empty"):
+        with pytest.raises(BaseError, match="chunks are empty"):
             await model.embed_documents(["text 1", "   ", "text 2"])
 
     @pytest.mark.asyncio
     async def test_embed_documents_all_empty(self, embedding_config):
         """Test all texts are empty"""
         model = OpenAIEmbedding(timeout=1, config=embedding_config)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             await model.embed_documents(["   ", "  ", ""])
 
     @pytest.mark.asyncio

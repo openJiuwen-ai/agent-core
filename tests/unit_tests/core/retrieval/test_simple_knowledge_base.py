@@ -11,7 +11,7 @@ from openjiuwen.core.retrieval import SimpleKnowledgeBase, retrieve_multi_kb, re
 from openjiuwen.core.retrieval import KnowledgeBaseConfig
 from openjiuwen.core.retrieval import Document, TextChunk
 from openjiuwen.core.retrieval import RetrievalResult
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -101,7 +101,7 @@ class TestSimpleKnowledgeBase:
     async def test_parse_files_without_parser(self, mock_config):
         """Test parsing files without parser"""
         kb = SimpleKnowledgeBase(config=mock_config)
-        with pytest.raises(JiuWenBaseException, match="parser is required"):
+        with pytest.raises(BaseError, match="parser is required"):
             await kb.parse_files(["test.txt"])
 
     @pytest.mark.asyncio
@@ -118,7 +118,7 @@ class TestSimpleKnowledgeBase:
     ):
         """Test different database_name in vector store and index manager raises expected error"""
         setattr(mock_index_manager, "database_name", "different_name")
-        with pytest.raises(JiuWenBaseException, match="incompatible database_name configs"):
+        with pytest.raises(BaseError, match="incompatible database_name configs"):
             kb = SimpleKnowledgeBase(
                 config=mock_config,
                 vector_store=mock_vector_store,
@@ -151,14 +151,14 @@ class TestSimpleKnowledgeBase:
     async def test_add_documents_without_chunker(self, mock_config):
         """Test adding documents without chunker"""
         kb = SimpleKnowledgeBase(config=mock_config)
-        with pytest.raises(JiuWenBaseException, match="chunker is required"):
+        with pytest.raises(BaseError, match="chunker is required"):
             await kb.add_documents([Document(text="Test")])
 
     @pytest.mark.asyncio
     async def test_add_documents_without_index_manager(self, mock_config, mock_chunker):
         """Test adding documents without index manager"""
         kb = SimpleKnowledgeBase(config=mock_config, chunker=mock_chunker)
-        with pytest.raises(JiuWenBaseException, match="index_manager is required"):
+        with pytest.raises(BaseError, match="index_manager is required"):
             await kb.add_documents([Document(text="Test")])
 
     @pytest.mark.asyncio
@@ -173,7 +173,7 @@ class TestSimpleKnowledgeBase:
             index_manager=mock_index_manager,
             embed_model=mock_embed_model,
         )
-        with pytest.raises(JiuWenBaseException, match="Failed to build index"):
+        with pytest.raises(BaseError, match="Failed to build index"):
             await kb.add_documents([Document(text="Test")])
 
     @pytest.mark.asyncio
@@ -188,7 +188,7 @@ class TestSimpleKnowledgeBase:
     async def test_retrieve_without_retriever_or_vector_store(self, mock_config):
         """Test retrieval without retriever or vector store"""
         kb = SimpleKnowledgeBase(config=mock_config)
-        with pytest.raises(JiuWenBaseException, match="vector_store or retriever is required"):
+        with pytest.raises(BaseError, match="vector_store or retriever is required"):
             await kb.retrieve("test query")
 
     @pytest.mark.asyncio
@@ -203,7 +203,7 @@ class TestSimpleKnowledgeBase:
     async def test_delete_documents_without_index_manager(self, mock_config):
         """Test deleting documents without index manager"""
         kb = SimpleKnowledgeBase(config=mock_config)
-        with pytest.raises(JiuWenBaseException, match="index_manager is required"):
+        with pytest.raises(BaseError, match="index_manager is required"):
             await kb.delete_documents(["doc_1"])
 
     @pytest.mark.asyncio

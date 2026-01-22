@@ -11,8 +11,8 @@ import itertools
 from typing import Any, List, Optional, Dict, Literal
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
@@ -65,21 +65,17 @@ class GraphRetriever(Retriever):
             return
         allowed = self._allowed_modes().get(self.index_type)
         if allowed is None:
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT.code,
-                StatusCode.RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT.errmsg.format(
-                    error_msg=f"Unsupported index_type={self.index_type}"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT,
+                error_msg=f"Unsupported index_type={self.index_type}"
             )
         if mode not in allowed:
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID.code,
-                StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID.errmsg.format(
-                    error_msg=(
-                        f"mode={mode} is incompatible with index_type={self.index_type}; "
-                        f"allowed modes: {sorted(allowed)}"
-                    )
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID,
+                error_msg=(
+                    f"mode={mode} is incompatible with index_type={self.index_type}; "
+                    f"allowed modes: {sorted(allowed)}"
+                )
             )
 
     def _retriever_supports_mode(self, retriever: Retriever, mode: str) -> bool:
@@ -120,33 +116,27 @@ class GraphRetriever(Retriever):
         fixed_retriever = self.chunk_retriever if is_chunk else self.triple_retriever
         if fixed_retriever:
             if not self._retriever_supports_mode(fixed_retriever, mode):
-                raise JiuWenBaseException(
-                    StatusCode.RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT.code,
-                    StatusCode.RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT.errmsg.format(
-                        error_msg=f"Provided {'chunk' if is_chunk else 'triple'} retriever "
-                        f"{fixed_retriever.__class__.__name__} does not support mode={mode}"
-                    ),
+                raise build_error(
+                    StatusCode.RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT,
+                    error_msg=f"Provided {'chunk' if is_chunk else 'triple'} retriever "
+                    f"{fixed_retriever.__class__.__name__} does not support mode={mode}"
                 )
             return fixed_retriever
 
         # Dynamically create retriever
         if not self.vector_store:
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND.code,
-                StatusCode.RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND.errmsg.format(
-                    error_msg="vector_store is required for dynamic retriever creation"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND,
+                error_msg="vector_store is required for dynamic retriever creation"
             )
 
         collection_name = self.chunk_collection if is_chunk else self.triple_collection
         self.vector_store.collection_name = collection_name
         if not collection_name:
             collection_type = "chunk" if is_chunk else "triple"
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND.code,
-                StatusCode.RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND.errmsg.format(
-                    error_msg=f"{collection_type}_collection is required for dynamic retriever creation"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND,
+                error_msg=f"{collection_type}_collection is required for dynamic retriever creation"
             )
 
         # Create corresponding retriever based on mode
@@ -154,11 +144,9 @@ class GraphRetriever(Retriever):
             from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
 
             if not self.embed_model:
-                raise JiuWenBaseException(
-                    StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.code,
-                    StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND.errmsg.format(
-                        error_msg="embed_model is required for vector mode"
-                    ),
+                raise build_error(
+                    StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND,
+                    error_msg="embed_model is required for vector mode"
                 )
             retriever = VectorRetriever(
                 vector_store=self.vector_store,
@@ -206,11 +194,9 @@ class GraphRetriever(Retriever):
         graph_hops = kwargs.get("graph_hops", 1)
         # GraphRetriever always performs graph expansion by default, caller doesn't need to pass graph_expansion flag
         if score_threshold is not None and mode != "vector":
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID.code,
-                StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID.errmsg.format(
-                    error_msg="score_threshold is only supported when mode='vector'"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID,
+                error_msg="score_threshold is only supported when mode='vector'"
             )
         effective_threshold = score_threshold
 

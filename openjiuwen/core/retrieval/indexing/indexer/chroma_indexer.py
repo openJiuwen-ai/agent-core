@@ -11,8 +11,8 @@ from typing import Any, List, Literal, Optional, Dict
 import chromadb
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error, BaseError
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback, TqdmCallback
 from openjiuwen.core.retrieval.common.config import IndexConfig
@@ -53,11 +53,9 @@ class ChromaIndexer(Indexer):
             doc_index_callback: class of callback object to use, must be subclass of BaseCallback
         """
         if not chroma_path or not chroma_path.strip():
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_INDEXING_PATH_NOT_FOUND.code,
-                StatusCode.RETRIEVAL_INDEXING_PATH_NOT_FOUND.errmsg.format(
-                    error_msg="chroma_path is required and cannot be empty"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_PATH_NOT_FOUND,
+                error_msg="chroma_path is required and cannot be empty"
             )
 
         self.chroma_path = chroma_path
@@ -75,19 +73,18 @@ class ChromaIndexer(Indexer):
             case "dot":
                 self._distance_metric = "ip"
             case _:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID.code,
-                    message=StatusCode.RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID.errmsg.format(
-                        error_msg=f'expecting one of ["cosine", "euclidean", "dot"], but got "{distance_metric}"'
-                    ),
+                raise build_error(
+                    StatusCode.RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID,
+                    error_msg=f'expecting one of ["cosine", "euclidean", "dot"], but got "{distance_metric}"'
                 )
         self.doc_index_callback = doc_index_callback
         if not isinstance(doc_index_callback, type) or not issubclass(doc_index_callback, BaseCallback):
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.code,
-                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.errmsg.format(
-                    error_msg=f"doc_index_callback in ChromaIndexer must be a subclass of BaseCallback, got {type(doc_index_callback)}"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID,
+                error_msg=(
+                    f"doc_index_callback in ChromaIndexer must be a subclass of BaseCallback, "
+                    f"got {type(doc_index_callback)}"
+                )
             )
 
         self._client = ChromaVectorStore.create_client(
@@ -137,23 +134,19 @@ class ChromaIndexer(Indexer):
                 if doc_id not in filter_values and collection.get(where={self.doc_id_field: doc_id}).get("ids"):
                     duplicate_doc_ids.append(doc_id)
             if duplicate_doc_ids:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR.code,
-                    message=StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR.errmsg.format(
-                        error_msg="some documents with same doc_id already exist, if they are the same documents, "
-                        f"please consider updating instead of adding. {duplicate_doc_ids=}"
-                    ),
+                raise build_error(
+                    StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR,
+                    error_msg="some documents with same doc_id already exist, if they are the same documents, "
+                    f"please consider updating instead of adding. {duplicate_doc_ids=}"
                 )
 
             # If vector index is needed, generate embeddings
             embeddings = None
             if config.index_type in ("vector", "hybrid"):
                 if not embed_model:
-                    raise JiuWenBaseException(
-                        StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND.code,
-                        StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND.errmsg.format(
-                            error_msg="embed_model is required for vector/hybrid index type"
-                        ),
+                    raise build_error(
+                        StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND,
+                        error_msg="embed_model is required for vector/hybrid index type"
                     )
                 texts = [chunk.text for chunk in chunks]
                 embeddings = await embed_model.embed_documents(texts, callback_cls=self.doc_index_callback)
@@ -181,8 +174,12 @@ class ChromaIndexer(Indexer):
         except Exception as e:
             # Stored data could be damaged with runtime errors ignored, therefore it is raised
             should_raise = [StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR.code]
-            if isinstance(e, JiuWenBaseException) and getattr(e, "error_code", None) in should_raise:
+            # Re-raise all BaseError exceptions to preserve error information
+            # This includes embedding errors, configuration errors, and runtime errors
+            if isinstance(e, BaseError) and getattr(e, "code", None) in should_raise:
                 raise e
+            # For non-BaseError exceptions (e.g., from third-party libraries),
+            # log and return False to avoid breaking the process
             logger.error(f"Failed to build index: {e}")
             return False
 

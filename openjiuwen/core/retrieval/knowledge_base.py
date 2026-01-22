@@ -9,7 +9,7 @@ Provides a unified interface for knowledge bases as the top-level entry point.
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Dict
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document
@@ -51,13 +51,11 @@ class KnowledgeBase(ABC):
                 vector_store_val = getattr(vector_store, attr, None)
                 index_manager_val = getattr(index_manager, attr, None)
                 if vector_store_val != index_manager_val:
-                    raise JiuWenBaseException(
-                        error_code=StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID.code,
-                        message=StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID.errmsg.format(
-                            config_name=attr,
-                            error_msg=f'- Vector Store ({type(vector_store).__name__}) is using "{vector_store_val}"'
-                            f'\n- Index manager ({type(index_manager).__name__}) is using "{index_manager_val}"',
-                        ),
+                    raise build_error(
+                        StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
+                        config_name=attr,
+                        error_msg=f'- Vector Store ({type(vector_store).__name__}) is using "{vector_store_val}"'
+                        f'\n- Index manager ({type(index_manager).__name__}) is using "{index_manager_val}"',
                     )
 
     @abstractmethod

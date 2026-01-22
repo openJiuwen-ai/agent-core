@@ -10,7 +10,7 @@ import pytest
 from openjiuwen.core.retrieval import ChromaIndexer
 from openjiuwen.core.retrieval import IndexConfig
 from openjiuwen.core.retrieval import TextChunk
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -39,13 +39,13 @@ class TestChromaIndexer:
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
     def test_init_with_empty_path(self, mock_client_class):
         """Test initialization with empty path"""
-        with pytest.raises(JiuWenBaseException, match="chroma_path is required"):
+        with pytest.raises(BaseError, match="chroma_path is required"):
             ChromaIndexer(chroma_path="")
 
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
     def test_init_with_whitespace_path(self, mock_client_class):
         """Test initialization with whitespace-only path"""
-        with pytest.raises(JiuWenBaseException, match="chroma_path is required"):
+        with pytest.raises(BaseError, match="chroma_path is required"):
             ChromaIndexer(chroma_path="   ")
 
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
@@ -183,7 +183,7 @@ class TestChromaIndexer:
         chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
-        with pytest.raises(JiuWenBaseException, match="some documents with same doc_id already exist"):
+        with pytest.raises(BaseError, match="some documents with same doc_id already exist"):
             await indexer.build_index(chunks, config)
 
     @pytest.mark.asyncio

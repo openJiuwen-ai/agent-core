@@ -11,8 +11,8 @@ from typing import Any, List, Optional
 import requests
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
@@ -81,19 +81,16 @@ class OllamaEmbedding(Embedding):
             model_names = [model["name"] for model in models]
 
             if self.model_name not in model_names:
-                raise JiuWenBaseException(
-                    StatusCode.RETRIEVAL_EMBEDDING_MODEL_NOT_FOUND.code,
-                    StatusCode.RETRIEVAL_EMBEDDING_MODEL_NOT_FOUND.errmsg.format(
-                        error_msg=f"Model '{self.model_name}' not found in available models: {model_names}. "
-                        f"Make sure to pull the model first: ollama pull {self.model_name}"
-                    ),
+                raise build_error(
+                    StatusCode.RETRIEVAL_EMBEDDING_MODEL_NOT_FOUND,
+                    error_msg=f"Model '{self.model_name}' not found in available models: {model_names}. "
+                    f"Make sure to pull the model first: ollama pull {self.model_name}"
                 )
         except requests.exceptions.RequestException as e:
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_EMBEDDING_CALL_FAILED.code,
-                StatusCode.RETRIEVAL_EMBEDDING_CALL_FAILED.errmsg.format(
-                    error_msg=f"Could not connect to Ollama at {self.base_url}. Is Ollama running?"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_CALL_FAILED,
+                error_msg=f"Could not connect to Ollama at {self.base_url}. Is Ollama running?",
+                cause=e
             ) from e
 
     @property
@@ -121,11 +118,9 @@ class OllamaEmbedding(Embedding):
 
     async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
         if not text.strip():
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.code,
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.errmsg.format(
-                    error_msg="Empty text provided for embedding"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
+                error_msg="Empty text provided for embedding"
             )
 
         embeddings = await self._get_ollama_embedding(text, **kwargs)
@@ -138,38 +133,32 @@ class OllamaEmbedding(Embedding):
         **kwargs: Any,
     ) -> List[List[float]]:
         if not texts:
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.code,
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.errmsg.format(error_msg="Empty texts list provided"),
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
+                error_msg="Empty texts list provided"
             )
         callback_cls = kwargs.pop("callback_cls", BaseCallback)
         if not isinstance(callback_cls, type) or not issubclass(callback_cls, BaseCallback):
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.code,
-                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID.errmsg.format(
-                    error_msg=(
-                        f"callback_cls in OllamaEmbedding.embed_documents must be a subclass of "
-                        f"BaseCallback, got {type(callback_cls)}"
-                    )
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID,
+                error_msg=(
+                    f"callback_cls in OllamaEmbedding.embed_documents must be a subclass of "
+                    f"BaseCallback, got {type(callback_cls)}"
+                )
             )
 
         # Filter out empty texts
         non_empty_texts = [text for text in texts if text.strip()]
         if len(non_empty_texts) != len(texts):
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.code,
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.errmsg.format(
-                    error_msg=f"{len(texts) - len(non_empty_texts)} chunks are empty while embedding"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
+                error_msg=f"{len(texts) - len(non_empty_texts)} chunks are empty while embedding"
             )
 
         if not non_empty_texts:
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.code,
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.errmsg.format(
-                    error_msg="All texts are empty after filtering"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
+                error_msg="All texts are empty after filtering"
             )
 
         # Process in batches if batch_size is specified
@@ -196,11 +185,9 @@ class OllamaEmbedding(Embedding):
         import asyncio
 
         if not text:
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.code,
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID.errmsg.format(
-                    error_msg="Empty text or list provided for embedding"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
+                error_msg="Empty text or list provided for embedding"
             )
 
         payload = {
@@ -222,28 +209,23 @@ class OllamaEmbedding(Embedding):
                 response.raise_for_status()
                 result = response.json()
                 if "embeddings" not in result:
-                    raise JiuWenBaseException(
-                        StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID.code,
-                        StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID.errmsg.format(
-                            error_msg=f"No embeddings in response: {result}"
-                        ),
+                    raise build_error(
+                        StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID,
+                        error_msg=f"No embeddings in response: {result}"
                     )
 
                 return result["embeddings"]
 
             except requests.exceptions.RequestException as e:
                 if attempt == self.max_retries - 1:
-                    raise JiuWenBaseException(
-                        StatusCode.RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED.code,
-                        StatusCode.RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED.errmsg.format(
-                            error_msg=f"Failed to get embedding after {self.max_retries} attempts"
-                        ),
+                    raise build_error(
+                        StatusCode.RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED,
+                        error_msg=f"Failed to get embedding after {self.max_retries} attempts",
+                        cause=e
                     ) from e
                 logger.warning(f"Attempt {attempt + 1} failed, retrying: {e}")
 
-        raise JiuWenBaseException(
-            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED.code,
-            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED.errmsg.format(
-                error_msg="This should never be reached"
-            ),
+        raise build_error(
+            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED,
+            error_msg="This should never be reached"
         )

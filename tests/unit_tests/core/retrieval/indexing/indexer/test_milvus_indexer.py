@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import MilvusIndexer
 from openjiuwen.core.retrieval import IndexConfig
 from openjiuwen.core.retrieval import TextChunk
@@ -150,7 +150,7 @@ class TestMilvusIndexer:
         chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
-        with pytest.raises(JiuWenBaseException, match="some documents with same doc_id already exist"):
+        with pytest.raises(BaseError, match="some documents with same doc_id already exist"):
             await indexer.build_index(chunks, config)
 
     @pytest.mark.asyncio

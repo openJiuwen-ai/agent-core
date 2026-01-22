@@ -11,8 +11,8 @@ import os
 from typing import Dict, List, Any, Type, Callable
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.common.document import Document
 
@@ -85,9 +85,9 @@ class AutoFileParser(Parser):
             ValueError: Unsupported file format
         """
         if not os.path.exists(doc):
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_INDEXING_FILE_NOT_FOUND.code,
-                StatusCode.RETRIEVAL_INDEXING_FILE_NOT_FOUND.errmsg.format(error_msg=f"File {doc} does not exist"),
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FILE_NOT_FOUND,
+                error_msg=f"File {doc} does not exist"
             )
 
         # Get file extension
@@ -95,11 +95,9 @@ class AutoFileParser(Parser):
 
         # Check if format is supported
         if file_ext not in _PARSER_REGISTRY:
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_INDEXING_FORMAT_NOT_SUPPORT.code,
-                StatusCode.RETRIEVAL_INDEXING_FORMAT_NOT_SUPPORT.errmsg.format(
-                    error_msg=f"Unsupported format: {file_ext}, only {list(_PARSER_REGISTRY.keys())} are supported"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FORMAT_NOT_SUPPORT,
+                error_msg=f"Unsupported format: {file_ext}, only {list(_PARSER_REGISTRY.keys())} are supported"
             )
 
         # Get corresponding parser instance

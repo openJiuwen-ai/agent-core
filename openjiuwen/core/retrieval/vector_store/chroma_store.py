@@ -14,8 +14,8 @@ import chromadb
 from chromadb.config import DEFAULT_DATABASE, Settings
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult, RetrievalResult
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
@@ -53,11 +53,9 @@ class ChromaVectorStore(VectorStore):
         """
         # Validate chroma_path
         if not chroma_path or not chroma_path.strip():
-            raise JiuWenBaseException(
-                StatusCode.RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND.code,
-                StatusCode.RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND.errmsg.format(
-                    error_msg="chroma_path is required and cannot be empty"
-                ),
+            raise build_error(
+                StatusCode.RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND,
+                error_msg="chroma_path is required and cannot be empty"
             )
 
         self.config = config

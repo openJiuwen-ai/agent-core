@@ -15,7 +15,7 @@ from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import
     _PARSER_REGISTRY,
 )
 from openjiuwen.core.retrieval import Parser
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 class TestRegisterParser:
@@ -137,7 +137,7 @@ class TestAutoFileParser:
         """Test parsing non-existent file"""
         parser = AutoFileParser()
 
-        with pytest.raises(JiuWenBaseException, match="does not exist"):
+        with pytest.raises(BaseError, match="does not exist"):
             await parser.parse("nonexistent.txt", doc_id="doc_1")
 
     @pytest.mark.asyncio
@@ -150,7 +150,7 @@ class TestAutoFileParser:
             temp_path = f.name
 
         try:
-            with pytest.raises(JiuWenBaseException, match="Unsupported format"):
+            with pytest.raises(BaseError, match="Unsupported format"):
                 await parser.parse(temp_path, doc_id="doc_1")
         finally:
             os.unlink(temp_path)

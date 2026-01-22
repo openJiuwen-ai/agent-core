@@ -9,7 +9,7 @@ import pytest
 
 from openjiuwen.core.retrieval import GraphRetriever
 from openjiuwen.core.retrieval import RetrievalResult
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -101,7 +101,7 @@ class TestGraphRetriever:
         """Test using score threshold in non-vector mode"""
         retriever = GraphRetriever(chunk_retriever=mock_chunk_retriever)
 
-        with pytest.raises(JiuWenBaseException, match="score_threshold is only supported"):
+        with pytest.raises(BaseError, match="score_threshold is only supported"):
             await retriever.retrieve("test query", top_k=5, mode="sparse", score_threshold=0.8)
 
     @pytest.mark.asyncio
