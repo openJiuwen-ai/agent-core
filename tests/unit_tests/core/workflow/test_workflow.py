@@ -21,7 +21,7 @@ from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import BaseStreamMode, CustomSchema, TraceSchema
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
@@ -1290,3 +1290,81 @@ async def test_sub_flow_multi_stream_output():
     assert len(chunks) == 1
     assert chunks[0].payload["output"]["result"]["stream"] == [{"output": {"result_b": "hello"}},
                                                                {"output": {"result_a": "hello"}}]
+
+
+async def test_sub_flow_stream_output():
+    class CustomComponent(WorkflowComponent):
+        async def invoke(self, inputs: Input, session: Session, context: ModelContext):
+            exec_id = session.get_executable_id()
+            logger.info(f"exec_id: {exec_id}， invoke start")
+            a = inputs.get("a")
+            if a is None:
+                a = 0
+            b = inputs.get("b")
+            logger.info(f"exec_id: {exec_id}， invoke done")
+            return {"result": int(a) + int(b)}
+
+        async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+            exec_id = session.get_executable_id()
+            logger.info(f"exec_id: {exec_id}， stream start")
+            inputs_a = inputs.get("a")
+            import asyncio
+            if isinstance(inputs_a, list):
+                await asyncio.sleep(0.1)
+                yield {"b": inputs.get("b")}
+                await asyncio.sleep(0.1)
+                yield {"op": "+"}
+                for a in inputs_a:
+                    yield {"a": a}
+                    await asyncio.sleep(0.1)
+                    yield {"result": int(a) + int(inputs.get("b"))}
+            else:
+                await asyncio.sleep(0.1)
+                logger.info("stream step: 1")
+                yield {"a": inputs_a}
+                await asyncio.sleep(0.1)
+                logger.info("stream step: 2")
+                yield {"op": "+"}
+                await asyncio.sleep(0.1)
+                logger.info("stream step: 3")
+                yield {"b": inputs.get("b")}
+                await asyncio.sleep(0.1)
+                logger.info("stream step: 4")
+                yield {"result": int(inputs_a) + int(inputs.get("b"))}
+            logger.info(f"exec_id: {exec_id}， stream done")
+
+    # sub_start --> +--> custom_comp - - +
+    #               |                    +--> sub_end
+    #               +--> custom_comp1 - -+
+    sub_flow = Workflow()
+    sub_flow.set_start_comp("sub_start", Start(),
+                            inputs_schema={"a": "${user_inputs.a}", "b": "${user_inputs.b}"})
+    sub_flow.add_workflow_comp("custom_comp", CustomComponent(),
+                               inputs_schema={"a": "${sub_start.a}", "b": "${sub_start.b}"},
+                               wait_for_all=True, comp_ability=[ComponentAbility.STREAM])
+    sub_flow.add_workflow_comp("custom_comp1", CustomComponent(),
+                               inputs_schema={"a": "${sub_start.a}", "b": "${sub_start.b}"})
+
+    sub_flow.set_end_comp("sub_end",
+                          End({"responseTemplate": "输出:{{a}}{{op}}{{b}}={{result}};输出1:{{result1}}"}),
+                          response_mode="streaming",
+                          stream_inputs_schema={"op": "${custom_comp.op}", "a": "${custom_comp.a}",
+                                                "b": "${custom_comp.b}", "result": "${custom_comp.result}"},
+                          inputs_schema={"result1": "${custom_comp1.result}"})
+    sub_flow.add_connection("sub_start", "custom_comp")
+    sub_flow.add_connection("sub_start", "custom_comp1")
+    sub_flow.add_stream_connection("custom_comp", "sub_end")
+    sub_flow.add_connection("custom_comp1", "sub_end")
+
+    flow = Workflow()
+    flow.set_start_comp("start", Start(), inputs_schema={"data": "${inputs}"})
+    flow.add_workflow_comp("sub_flow", SubWorkflowComponent(sub_flow), inputs_schema={"user_inputs": "${start.data}"})
+    flow.set_end_comp("end", End(), stream_inputs_schema={"result": "${sub_flow.response}"})
+    flow.add_connection("start", "sub_flow")
+    flow.add_stream_connection("sub_flow", "end")
+
+    result = await flow.invoke({"inputs": {"a": 1, "b": 2}}, create_workflow_session())
+    assert result.result == {
+        "output": [{"result": "输出:"}, {"result": 1}, {"result": "+"}, {"result": 2}, {"result": "="},
+    {"result": 3}, {"result": ";输出1:"}, {"result": 3}]}
+    assert result.state == WorkflowExecutionState.COMPLETED

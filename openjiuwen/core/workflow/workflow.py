@@ -269,6 +269,8 @@ class Workflow:
         if kwargs.get("is_sub"):
             return await self._sub_invoke(inputs, session, context, **kwargs)
 
+        self._install_asyncio_exception_handler()
+
         session.set_workflow_card(self._card)
         if self._card.input_params is not None:
             inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
@@ -339,6 +341,8 @@ class Workflow:
             async for chunk in self._sub_stream(inputs, session, context, **kwargs):
                 yield chunk
             return
+
+        self._install_asyncio_exception_handler()
 
         session.set_workflow_card(self._card)
         if self._card.input_params is not None:
@@ -659,3 +663,20 @@ class Workflow:
                         error_msg=f"duplicate key both exist in outputs_schema with stream_outputs_schema, "
                                   f"key={key}"
                     )
+
+    @staticmethod
+    def _install_asyncio_exception_handler():
+        """Install a global exception handler for asyncio tasks to handle unhandled exception."""
+
+        def loop_exception_handler(_, context):
+            """Handle unhandled exceptions in asyncio tasks."""
+            exception = context.get("exception")
+            if exception:
+                import traceback
+                traceback_info = ''.join(traceback.format_exception(type(exception), exception,
+                                                                    exception.__traceback__))
+                logger.error(f"unhandled exception: {traceback_info}")
+
+        loop = asyncio.get_event_loop()
+        loop.set_exception_handler(loop_exception_handler)
+
