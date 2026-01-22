@@ -272,7 +272,7 @@ class Workflow:
         self._install_asyncio_exception_handler()
 
         session.set_workflow_card(self._card)
-        if self._card.input_params is not None:
+        if self._card.input_params is not None and not isinstance(inputs, InteractiveInput):
             inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                     skip_validate=kwargs.get("skip_inputs_validate"))
 
@@ -345,7 +345,7 @@ class Workflow:
         self._install_asyncio_exception_handler()
 
         session.set_workflow_card(self._card)
-        if self._card.input_params is not None:
+        if self._card.input_params is not None and not isinstance(inputs, InteractiveInput):
             inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                     skip_validate=kwargs.get("skip_inputs_validate"))
         parent = session.get_parent()

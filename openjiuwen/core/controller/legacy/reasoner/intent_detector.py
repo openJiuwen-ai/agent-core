@@ -220,8 +220,8 @@ class IntentDetector:
             llm_inputs: Union[List[BaseMessage], str]
     ) -> str:
         try:
-            model = ReasonerUtils.get_model(
-                self.agent_config.model, self.session
+            model = await ReasonerUtils.get_model(
+                self.agent_config.model
             )
             llm_output = await model.ainvoke(
                 self.agent_config.model.model_info.model_name, llm_inputs

@@ -6,6 +6,7 @@ from enum import Enum
 class StatusCode(Enum):
     """Status code enum"""
 
+    TAG_REMOVE_ERROR = None
     SUCCESS = (0, "success")
     ERROR = (-1, "error")
 
@@ -407,14 +408,23 @@ class StatusCode(Enum):
     SESSION_TOOL_GET_FAILED = (190101, "failed to get tool, reason: {reason}")
     SESSION_TOOL_ADD_FAILED = (190102, "failed to add tool, reason: {reason}")
     SESSION_TOOL_TOOL_INFO_GET_FAILED = (190103, "failed to get toolInfo of tool, reason: {reason}")
+    SESSION_TOOL_REMOVED_FAILED = (190104, "failed to remove tool, reason: {reason}")
 
     SESSION_PROMPT_GET_FAILED = (190201, "failed to get prompt template, reason: {reason}")
     SESSION_PROMPT_ADD_FAILED = (190202, "failed to add prompt template, reason: {reason}")
+    SESSION_PROMPT_REMOVED_FAILED = (190203, "failed to remove prompt template, reason: {reason}")
 
     SESSION_MODEL_GET_FAILED = (190301, "failed to get model, reason: {reason}")
     SESSION_MODEL_ADD_FAILED = (190302, "failed to add model, reason: {reason}")
+    SESSION_MODEL_REMOVED_FAILED = (190303, "failed to remove model, reason: {reason}")
+
+    SESSION_MCP_SERVER_GET_FAILED = (190401, "failed to get mcp server, reason: {reason}")
+    SESSION_MCP_SERVER_ADD_FAILED = (190402, "failed to add mcp server, reason: {reason}")
+    SESSION_MCP_SERVER_REMOVED_FAILED = (190403, "failed to remove mcp server, reason: {reason}")
 
     SESSION_TAG_MANAGE_FAILED = (190401, "failed to manage tag, reason: {reason}")
+
+    SESSION_RESOURCE_REGISTRY_FAILED = (190501, "failed to registry resource, reason: {reason}")
 
     # Session - Tracer 191000 - 191999
     SESSION_TRACE_ERROR_FAILED = (191001, "failed to record error trace info, reason: {reason}")

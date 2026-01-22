@@ -293,7 +293,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
             # 绑定 workflow
             Runner.resource_mgr.add_workflow(
                 WorkflowCard(id=generate_workflow_key(flow.card.id, flow.card.version)),
-                flow
+                lambda: flow
             )
             
             # ==================== 第一次调用：触发中断 ====================

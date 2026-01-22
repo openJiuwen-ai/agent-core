@@ -1,14 +1,15 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import time
 from copy import deepcopy
-from typing import List, Optional, Tuple, Union, Callable
+from dataclasses import dataclass
+from typing import Any, List, Optional
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner.resources_manager.abstract_manager import AbstractManager
 from openjiuwen.core.session.tracer import decorate_tool_with_trace
-from openjiuwen.core.foundation.tool import Tool, ToolInfo
+from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import McpToolCard, MCPTool, McpServerConfig
 from openjiuwen.core.foundation.tool import (
     McpClient,
@@ -17,182 +18,71 @@ from openjiuwen.core.foundation.tool import (
     PlaywrightClient
 )
 
-ToolProvider = Callable[[], Tool]
+
+@dataclass
+class McpServerResource:
+    config: McpServerConfig
+    client: McpClient
+    tool_ids: list[str]
+    last_update_time: Any
+    expiry_time: Optional[float] = None
 
 
-class ToolMgr(AbstractManager[Tool]):
+class ToolMgr:
     def __init__(self) -> None:
-        super().__init__()
-        self._tool_infos: dict[str, ToolInfo] = {}
-        self._server_tool_infos: dict[str, List[McpToolCard]] = {}
-        self._server_configs: dict[str, McpServerConfig] = {}
-        self._mcp_clients: dict[str, McpClient] = {}
+        self._tools: dict[str, Tool] = {}
+        self._mcp_server_name_to_ids: dict[str, list[str]] = {}
+        self._mcp_server_resources: dict[str, McpServerResource] = {}
 
-    def add_tool(self, tool_id: str, tool: Union[Tool, ToolProvider]) -> None:
-        self._validate_id(tool_id, StatusCode.SESSION_TOOL_GET_FAILED, "tool")
-        self._validate_resource(tool, StatusCode.SESSION_TOOL_GET_FAILED, "tool is invalid, can not be None")
-
-        # Define validation function for non-callable tools
-        def validate_tool(tool_obj):
-            # Store tool info
-            if hasattr(tool_obj, "card"):
-                self._tool_infos[tool_id] = tool_obj.card.tool_info()
-            else:
-                logger.warning(f"Tool {tool_id} does not have a get_tool_info method, add tool failed")
-            return tool_obj
-
-        self._add_resource(tool_id, tool, StatusCode.SESSION_TOOL_GET_FAILED, validate_tool)
-
-    def add_tools(self, tools: List[Tuple[str, Union[Tool, ToolProvider]]]):
-        if not tools:
-            return
-        for tool_id, tool in tools:
-            self.add_tool(tool_id, tool)
-
-    def _get_all_tool_ids(self, name: str):
-        yield name
-        for server_name in self._server_configs.keys():
-            if name.startswith(server_name) and len(name) > len(server_name):
-                new_tool_key = server_name + "." + name[len(server_name) + 1:]
-                yield new_tool_key
-
-    def _find_tool_by_name(self, name: str) -> Optional[Tool]:
-        self._validate_id(name, StatusCode.SESSION_TOOL_GET_FAILED, "name")
-
-        # Define function to create tool from provider
-        def create_tool_from_provider(provider):
-            tool = provider()
-            # Store tool info
-            if hasattr(tool, "card"):
-                if tool.card.tool_info() is None:
-                    logger.warn(f"add a tool without tool_info, tool_name={name}")
-                else:
-                    self._tool_infos[name] = tool.card.tool_info()
-            else:
-                self._tool_infos[name] = ToolInfo()
-            return tool
-
-        for tool_id in self._get_all_tool_ids(name):
-            resource = self._get_resource(tool_id, StatusCode.SESSION_TOOL_GET_FAILED, create_tool_from_provider)
-            if resource:
-                return resource
-        return None
+    def add_tool(self, tool_id: str, tool: Tool) -> None:
+        if self._tools.get(tool_id) is not None:
+            raise ValueError(f"already exist tool {tool_id}")
+        self._tools[tool_id] = tool
 
     def get_tool(self, tool_id: str, session=None) -> Optional[Tool]:
-        # Validate ID using base class method
-        self._validate_id(tool_id, StatusCode.SESSION_TOOL_GET_FAILED, "tool")
+        tool = self._tools.get(tool_id)
+        return decorate_tool_with_trace(tool, session)
 
-        try:
-            tool = self._find_tool_by_name(tool_id)
-            return decorate_tool_with_trace(tool, session)
-        except JiuWenBaseException:
-            raise
-        except Exception as e:
-            self._handle_exception(e, StatusCode.SESSION_TOOL_GET_FAILED, "get")
+    def get_mcp_tool(self, tool_name: str, server_id: str, session):
+        resource = self._mcp_server_resources.get(server_id)
+        if resource:
+            tool_id = self.generate_mcp_tool_id(server_id, resource.config.server_name, tool_name)
+            return self.get_tool(tool_id, session)
+        return None
+
+    def get_mcp_tool_id(self, server_id: str, tool_name):
+        resource = self._mcp_server_resources.get(server_id)
+        if resource:
+            tool_id = self.generate_mcp_tool_id(server_id, resource.config.server_name, tool_name)
+            return tool_id
+        else:
             return None
 
     def remove_tool(self, tool_id: str) -> Optional[Tool]:
-        if tool_id is None:
-            return None
+        return self._tools.pop(tool_id, None)
 
+    @staticmethod
+    def generate_mcp_tool_id(server_id, server_name, tool_name):
+        return f'{server_id}.{server_name}.{tool_name}'
+
+    async def add_tool_server(self, server_config: McpServerConfig, expiry_time: Optional[float] = None) -> List[
+        McpToolCard]:
+        if self._mcp_server_resources.get(server_config.server_id) is not None:
+            raise build_error(StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, server_config=server_config,
+                              reason="server_id is already exist")
+        client = self._create_client(server_config)
         try:
-            tool = self._remove_resource(tool_id, StatusCode.SESSION_TOOL_GET_FAILED)
-            self._tool_infos.pop(tool_id, None)
-            return tool
+            connected = await client.connect()
+            if not connected:
+                raise build_error(StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR, server_config=server_config,
+                                  reason="")
+            return await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
         except Exception as e:
-            self._handle_exception(e, StatusCode.SESSION_TOOL_GET_FAILED, "remove")
-            return None
+            raise build_error(StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=e, server_config=server_config,
+                              reason=str(e))
 
-    def get_tool_infos(
-        self, tool_ids: str | List[str] = None, *, tool_server_name: str = None, name_delimiter: str = None
-    ) -> Optional[ToolInfo | McpToolCard | List[Union[ToolInfo, McpToolCard]]]:
-        try:
-            delimiter = self._normalize_delimiter(name_delimiter, default_delimiter=".")
-            if tool_server_name:
-                server_tools = self._server_tool_infos.get(tool_server_name)
-                if server_tools:
-                    result = []
-
-                    for tool in server_tools:
-                        result.append(self._normalize_mcp_tool_info(tool, delimiter))
-                    return result
-                else:
-                    return None
-            if tool_ids is not None and not isinstance(tool_ids, str) and not isinstance(tool_ids, list):
-                raise JiuWenBaseException(
-                    StatusCode.SESSION_TOOL_TOOL_INFO_GET_FAILED.code,
-                    StatusCode.SESSION_TOOL_TOOL_INFO_GET_FAILED.errmsg.format(
-                        reason=f"tool_ids must be a list, got {type(tool_ids).__name__}"
-                    )
-                )
-            if not tool_ids:
-                return [self._normalize_mcp_tool_info(info, delimiter) for info in self._tool_infos.values() if
-                        info is not None]
-
-            if isinstance(tool_ids, str):
-                self._validate_id(tool_ids, StatusCode.SESSION_TOOL_TOOL_INFO_GET_FAILED, "tool")
-                return self._normalize_mcp_tool_info(self._tool_infos.get(tool_ids), delimiter)
-
-            infos = []
-            for tool_id in tool_ids:
-                self._validate_id(tool_id, StatusCode.SESSION_TOOL_TOOL_INFO_GET_FAILED, "tool")
-                infos.append(self._normalize_mcp_tool_info(self._tool_infos.get(tool_id), delimiter))
-            return infos
-        except JiuWenBaseException:
-            raise
-        except Exception as e:
-            self._handle_exception(e, StatusCode.SESSION_TOOL_TOOL_INFO_GET_FAILED, "get_tool_info")
-            return None
-
-    async def add_tool_servers(self, server_config: Union[McpServerConfig, List[McpServerConfig]]) -> List[bool]:
-        """
-        注册 MCP 服务器（同步连接、阻塞至完成）。
-        返回：与传入顺序一一对应的注册结果列表，True=成功。
-        """
-        configs = [server_config] if isinstance(server_config, McpServerConfig) else (server_config or [])
-        if not configs:
-            return []
-
-        results: List[bool] = []
-        for cfg in configs:
-            try:
-                if self._server_configs.get(cfg.server_name) is not None:
-                    results.append(False)
-                    logger.exception(f"Register MCP server {cfg.server_name} failed: already added")
-                    continue
-                result = await self._connect_and_register_server(cfg)
-                results.append(result)
-            except Exception as e:
-                logger.exception(f"Register MCP server {cfg.server_name} failed: {e}")
-                results.append(False)
-        return results
-
-    async def _connect_and_register_server(self, config: McpServerConfig) -> bool:
-        client = self._create_client(config)
-        connected = await client.connect()
-        if not connected:
-            logger.error(f"Failed to connect to MCP server: {config.server_name}")
-            return connected
-
-        self._mcp_clients[config.server_name] = client
-        self._server_configs[config.server_name] = config
-
-        tools = await client.list_tools()
-        self._server_tool_infos[config.server_name] = tools
-
-        for mcp_tool_info in tools:
-            tool_id = f'{config.server_name}.{mcp_tool_info.name}'
-            mcp_tool_info.server_name = config.server_name
-            mcp_tool = MCPTool(
-                mcp_client=client,
-                tool_info=mcp_tool_info
-            )
-            # 注册到 ToolMgr
-            self.add_tool(tool_id, mcp_tool)
-            logger.info(f"Registered MCP tool: {tool_id}")
-        return True
-
-    def _create_client(self, config: McpServerConfig) -> McpClient:
+    @staticmethod
+    def _create_client(config: McpServerConfig) -> McpClient:
         if config.client_type == "sse":
             return SseClient(config.server_path, config.server_name,
                              config.auth_headers, config.auth_query_params)
@@ -206,45 +96,76 @@ class ToolMgr(AbstractManager[Tool]):
         else:
             raise ValueError(f"Unsupported MCP client type: {config.client_type}")
 
-    async def remove_tool_server(self, tool_server_name: str):
-        """移除 MCP 服务器"""
-        if tool_server_name not in self._mcp_clients:
-            logger.warning(f"MCP server '{tool_server_name}' not found.")
+    def get_mcp_server_ids(self, server_name: str):
+        return self._mcp_server_name_to_ids.get(server_name, [])
+
+    async def remove_tool_server(self, server_id: str, ignore_not_exist: bool = True) -> list[str]:
+        mcp_server_resource = self._mcp_server_resources.pop(server_id, None)
+        if not mcp_server_resource:
+            if not ignore_not_exist:
+                raise build_error(StatusCode.RESOURCE_MCP_SERVER_REMOVE_ERROR, server_id=server_id,
+                                  reason="server is not exist")
+            else:
+                return []
+        try:
+            await mcp_server_resource.client.disconnect()
+        except Exception as e:
+            logger.warn(f"remove tool server discount {str(e)}, server_id={server_id}")
+        finally:
+            self._inner_remove_mcp_tools(mcp_server_resource.tool_ids)
+            ids = self._mcp_server_name_to_ids.get(mcp_server_resource.config.server_name)
+            if ids and server_id in ids:
+                ids.remove(server_id)
+        return mcp_server_resource.tool_ids
+
+    async def refresh_tool_server(self, server_id: str, skip_not_exist: bool = False, force: bool = False) -> list[
+        McpToolCard]:
+        mcp_resource = self._mcp_server_resources.get(server_id)
+        if not mcp_resource:
+            if not skip_not_exist:
+                raise build_error(StatusCode.RESOURCE_MCP_SERVER_REFRESH_ERROR, server_id=server_id,
+                                  reason="server is not exist")
+            return []
+        need_refresh = force
+        if not force:
+            if time.time() - mcp_resource.last_update_time >= mcp_resource.expiry_time:
+                need_refresh = True
+
+        if need_refresh:
+            return await self._inner_refresh_mcp_tools(mcp_resource.client, mcp_resource.config,
+                                                       mcp_resource.expiry_time)
+        else:
+            return []
+
+    async def _inner_refresh_mcp_tools(self, client, server_config, expiry_time):
+        connected = await client.connect()
+        if not connected:
+            raise build_error(StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR, server_config=server_config, reason="")
+        mcp_cards = await client.list_tools()
+        mcp_cards = mcp_cards if mcp_cards else []
+        for card in mcp_cards:
+            card.id = self.generate_mcp_tool_id(server_config.server_id, server_config.server_name, card.name)
+            self.add_tool(card.id, MCPTool(mcp_client=client, tool_info=deepcopy(card)))
+        mcp_ids = [card.id for card in mcp_cards]
+        self._mcp_server_resources[server_config.server_id] = McpServerResource(config=server_config,
+                                                                                expiry_time=expiry_time,
+                                                                                client=client,
+                                                                                last_update_time=time.time(),
+                                                                                tool_ids=deepcopy(mcp_ids))
+        return mcp_cards
+
+    def _inner_remove_mcp_tools(self, tools):
+        if not tools:
             return
-
-        # 移除该服务器下的所有工具
-        tools = self._server_tool_infos.pop(tool_server_name, [])
-        for tool_info in tools:
-            tool_id = f"{tool_server_name}.{tool_info.name}"
-            self.remove_tool(tool_id)
-
-        # 断开客户端连接 - 直接调用，不创建新任务
-        client = self._mcp_clients.pop(tool_server_name)
-        await client.disconnect()  # 直接 await，确保在同一个任务中
-        self._server_configs.pop(tool_server_name, None)
-        logger.info(f"Removed MCP server: {tool_server_name}")
-
-    @staticmethod
-    def _normalize_delimiter(raw_delimiter: str | None, *, default_delimiter: str = "."):
-        normalized_delimiter = raw_delimiter if raw_delimiter else default_delimiter
-        if len(normalized_delimiter) > 1:
-            logger.warning(f"Invalid delimiter '{raw_delimiter}', expected single character,"
-                           f" using default {default_delimiter}")
-            normalized_delimiter = default_delimiter
-        return normalized_delimiter
-
-    @staticmethod
-    def _normalize_mcp_tool_info(tool_info: ToolInfo, delimiter: str):
-        if not isinstance(tool_info, McpToolCard):
-            return tool_info
-
-        copy_tool_info = deepcopy(tool_info)
-        copy_tool_info.name = f'{tool_info.server_name}{delimiter}{tool_info.name}'
-        return copy_tool_info
+        for tool_id in tools:
+            try:
+                self.remove_tool(tool_id)
+            except Exception:
+                continue
 
     async def release(self):
-        for client in self._mcp_clients.values():
+        for res in self._mcp_server_resources.values():
             try:
-                await client.disconnect()
+                await res.client.disconnect()
             except Exception:
                 continue

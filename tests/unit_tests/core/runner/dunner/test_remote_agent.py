@@ -213,11 +213,11 @@ class TestRunnerIntegration:
         """Verify that Runner should report an error if not started"""
         logger.info("=== Test 5: Runner not started ===")
         try:
-            client = RemoteAgent(agent_id="slow-single_agent")
-            Runner.resource_mgr.add_agent(AgentCard(id="slow-single_agent"), agent=client)
+            client = RemoteAgent(agent_id="slow-single_agent-2")
+            Runner.resource_mgr.add_agent(AgentCard(id="slow-single_agent-2"), agent=client)
 
             async def long_running_request():
-                return await Runner.run_agent("slow-single_agent", {"city": "Berlin"})
+                return await Runner.run_agent("slow-single_agent-2", {"city": "Berlin"})
 
             task = asyncio.create_task(long_running_request())
             with pytest.raises(JiuWenBaseException) as e:

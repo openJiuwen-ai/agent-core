@@ -22,14 +22,11 @@ class WorkflowSession(BaseSession):
             if self._session_id is None:
                 self._session_id = parent.session_id()
             self._config = parent.config()
-            self._resource_manager = parent.resource_manager()
             self._tracer = parent.tracer()
         else:
             if self._session_id is None:
                 self._session_id = uuid.uuid4().hex
             self._config = Config()
-            from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
-            self._resource_manager = ResourceMgr()
             self._tracer = None
 
         self._state = state if state is not None else InMemoryState()
@@ -75,9 +72,6 @@ class WorkflowSession(BaseSession):
 
     def session_id(self) -> str:
         return self._session_id
-
-    def resource_manager(self) -> "ResourceMgr":
-        return self._resource_manager
 
     def checkpointer(self):
         return self._parent.checkpointer()
@@ -167,8 +161,6 @@ class NodeSession(BaseSession):
     def session_id(self) -> str:
         return self._session.session_id()
 
-    def resource_manager(self):
-        return self._session.resource_manager()
 
     def checkpointer(self):
         pass

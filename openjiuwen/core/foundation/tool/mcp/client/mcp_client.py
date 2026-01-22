@@ -11,7 +11,7 @@ class McpClient(ABC):
         self._server_path = server_path
 
     @abstractmethod
-    async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
+    async def connect(self, *, retry_times: int = 1, timeout: float = NO_TIMEOUT) -> bool:
         pass
 
     @abstractmethod

@@ -877,7 +877,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
         # 使用新的 add_workflows 方法，传入装饰器包装的 WorkflowFactory
         agent.add_workflows([create_interrupt_workflow_instance])
-        toolinfos = Runner.resource_mgr.get_tool_infos(
+        toolinfos = await Runner.resource_mgr.get_tool_infos(
             id=[generate_workflow_key(workflow_id="test_provider_workflow", workflow_version="1.0")])
         print(toolinfos)
 

@@ -186,7 +186,7 @@ class SuperReActAgent(BaseAgent):
                 card=ToolCard(
                     name=info.name,
                     description=getattr(info, "description", "") or f"MCP tool {info.name} from {server_name}",
-                    parameters=schema,
+                    input_params=schema,
                 ),
                 func=async_func,
             )
@@ -264,7 +264,7 @@ class SuperReActAgent(BaseAgent):
         # tools = session.get_tool_info()
         
         # === 从 session 拿到所有工具 ===
-        all_tools = session.get_tool_info()
+        all_tools = await Runner.resource_mgr.get_tool_infos()
         tools = all_tools
 
         # === 计算当前 single_agent 允许使用的工具名集合 ===

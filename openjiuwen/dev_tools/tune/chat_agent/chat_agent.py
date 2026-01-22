@@ -5,6 +5,7 @@ ChatAgent - simplest llm chat single_agent
 """
 from typing import Dict, Any, List, AsyncIterator
 
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent, LLMCallConfig
 from openjiuwen.dev_tools.tune.chat_agent.chat_config import ChatAgentConfig
 from openjiuwen.core.common.utils.hash_util import generate_key
@@ -81,7 +82,7 @@ class ChatAgent(BaseAgent):
             inputs=inputs,
             session=agent_session,
             history=agent_context.get_messages(),
-            tools=self._session.get_tool_info()
+            tools=await Runner.resource_mgr.get_tool_infos()
         )
         if session is None:
             await agent_session.post_run()
@@ -103,7 +104,7 @@ class ChatAgent(BaseAgent):
             inputs=inputs,
             session=agent_session,
             history=agent_context.get_messages(),
-            tools=self._session.get_tool_info()
+            tools=await Runner.resource_mgr.get_tool_infos()
         )
         if session is None:
             await agent_session.post_run()

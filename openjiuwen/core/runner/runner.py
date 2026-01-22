@@ -305,25 +305,25 @@ class Runner:
         session_id = inputs.get(self._AGENT_CONVERSATION_ID,
                                 session if isinstance(session, str) else self._DEFAULT_AGENT_SESSION_ID)
         if isinstance(agent, str):
-            agent_with_session = await self._resource_manager.get_agent(agent_id=agent)
-            if agent_with_session is None:
+            agent_instance = await self._resource_manager.get_agent(agent_id=agent)
+            if agent_instance is None:
                 raise JiuWenBaseException(StatusCode.AGENT_NOT_FOUND.code,
                                           StatusCode.AGENT_NOT_FOUND.errmsg.format(agent))
-            if isinstance(agent_with_session, RemoteAgent):
+            if isinstance(agent_instance, RemoteAgent):
                 # Remote single_agent does not add session, keep sessionId in input
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
-                return agent_with_session, None
-            if hasattr(agent_with_session.agent, "card"):
-                card = agent_with_session.agent.card
+                return agent_instance, None
+            if hasattr(agent_instance, "card"):
+                card = agent_instance.card
             else:
                 # LegacyBaseAgent does not have card attribute
-                card = AgentCard(id=agent_with_session.agent.config().get_agent_config().id)
+                card = AgentCard(id=agent_instance.config().get_agent_config().id)
             task_session = create_agent_session(session_id=session_id,
-                                                envs=getattr(agent_with_session.session.config(), "_env"), card=card)
+                                                envs=getattr(agent_instance.config(), "_env"), card=card)
             await get_default_inmemory_checkpointer().pre_agent_execute(
                 getattr(getattr(task_session, "_inner"), "_inner"), inputs)
-            return agent_with_session.agent, task_session
+            return agent_instance, task_session
 
         if hasattr(agent, "card"):
             card = agent.card
@@ -359,7 +359,7 @@ class Runner:
 
     def _prepare_agent_group(self, agent_group: Union[str, BaseGroup]):
         if isinstance(agent_group, str):
-            return self._resource_manager.get_agent_group(agent_group_id=agent_group)
+            return self._resource_manager.get_agent_group(group_id=agent_group)
         return agent_group
 
 

@@ -5,6 +5,7 @@ import copy
 from typing import List, Dict, Any, Optional
 
 from openjiuwen.core.common.constants.enums import TaskType
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.controller.legacy.event.event import Event
 from openjiuwen.core.controller.legacy.task.task import Task, TaskInput
@@ -255,7 +256,7 @@ class MessageHandlerUtils:
 
     @staticmethod
     async def add_workflow_message_to_chat_history(message: BaseMessage, workflow_id: str,
-                                             context_engine: ContextEngine, session: Session):
+                                                   context_engine: ContextEngine, session: Session):
         """Add message to workflow chat history"""
         workflow_context = context_engine.get_context(
             context_id=workflow_id,
@@ -274,7 +275,7 @@ class ReasonerUtils:
         return chat_history[-2 * chat_history_max_turn:]
 
     @staticmethod
-    def get_model(model_config: ModelConfig, session: Session):
+    async def get_model(model_config: ModelConfig):
         """Get model instance by config"""
         model_id = generate_key(
             model_config.model_info.api_key,
@@ -282,7 +283,7 @@ class ReasonerUtils:
             model_config.model_provider
         )
 
-        model = session.get_model(model_id=model_id)
+        model = await Runner.resource_mgr.get_model(model_id=model_id)
 
         if model is None:
             model_client_config = ModelClientConfig(
@@ -299,7 +300,10 @@ class ReasonerUtils:
                 temperature=model_config.model_info.temperature,
                 top_p=model_config.model_info.top_p,
             )
-            model = Model(model_client_config=model_client_config, model_config=model_request_config)
-            session.add_model(model_id=model_id, model=model)
+
+            def create_model():
+                return Model(model_client_config=model_client_config, model_config=model_request_config)
+
+            Runner.resource_mgr.add_model(model_id=model_id, model=create_model)
 
         return model

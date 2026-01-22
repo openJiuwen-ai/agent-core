@@ -402,7 +402,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             assert ok_list == [True]
 
             # -------------------- 工具列表校验 --------------------
-            server_tools = Runner.resource_mgr.get_tool_infos(tool_server_name="browser-use-server")
+            server_tools = await Runner.resource_mgr.get_tool_infos(tool_server_name="browser-use-server")
             assert len(server_tools) == 2
             assert server_tools[0].name == "browser-use-server.browser_navigate"
 

@@ -19,20 +19,13 @@ from openjiuwen.core.session.tracer.tracer import Tracer
 
 
 class StaticAgentSession(BaseSession):
-    def __init__(self, config: Config = None, resource_mgr=None):
+    def __init__(self, config: Config = None):
         self._config = config if config is not None else Config()
-        if resource_mgr:
-            self._resource_manager = resource_mgr
-        else:
-            from openjiuwen.core.runner import Runner
-            self._resource_manager = Runner.resource_mgr
         self._checkpointer = get_default_inmemory_checkpointer()
 
     def config(self) -> Config:
         return self._config
 
-    def resource_manager(self) -> "ResourceMgr":
-        return self._resource_manager
 
     def checkpointer(self) -> Checkpointer:
         return self._checkpointer
@@ -53,7 +46,7 @@ class StaticAgentSession(BaseSession):
         pass
 
     async def create_agent_session(self, session_id: str, inputs=None) -> BaseSession:
-        session = AgentSession(session_id, self._config, self._resource_manager, self._checkpointer)
+        session = AgentSession(session_id, self._config, self._checkpointer)
         await self._checkpointer.pre_agent_execute(session, inputs)
         return session
 
@@ -63,16 +56,10 @@ class AgentSession(BaseSession):
             self,
             session_id: str,
             config: Config = None,
-            resource_manager: "ResourceMgr" = None,
             checkpointer: Checkpointer | None = None,
             card=None):
         self._session_id = session_id
         self._config = config
-        if resource_manager:
-            self._resource_manager = resource_manager
-        else:
-            from openjiuwen.core.runner import Runner
-            self._resource_manager = Runner.resource_mgr
         self._state = StateCollection()
         self._stream_writer_manager = StreamWriterManager(StreamEmitter())
         self._callback_manager = CallbackManager()
@@ -103,9 +90,6 @@ class AgentSession(BaseSession):
 
     def session_id(self) -> str:
         return self._session_id
-
-    def resource_manager(self) -> "ResourceMgr":
-        return self._resource_manager
 
     def checkpointer(self) -> Checkpointer:
         return self._checkpointer

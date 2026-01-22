@@ -618,7 +618,7 @@ class LLMController(BaseController):
 
     async def _execute_plugin_task(self, task: Task, session: Session) -> TaskResult:
         """Execute plugin task - return result dictionary"""
-        tool = session.get_tool(task.input.target_name)
+        tool = Runner.resource_mgr.get_tool(task.input.target_name)
         if not tool:
             logger.error("Tool not found")
             raise build_error(
@@ -662,7 +662,7 @@ class LLMController(BaseController):
         """Call LLM to generate plan - ReAct core method"""
         inputs = event.get_display_content()
         user_id = event.source.user_id
-        tools = session.get_tool_info()
+        tools = await Runner.resource_mgr.get_tool_infos()
         logger.info(f"Loaded {len(tools)} Tool(s) for generating plans")
         system_prompt_keywords = await self._get_system_prompt_keywords(inputs, user_id)
         chat_history = MessageUtils.get_chat_history(self._context_engine, session, self.config)
@@ -674,7 +674,7 @@ class LLMController(BaseController):
             logger.info(f"React llm inputs: {llm_inputs}")
 
         try:
-            model = self._get_model(session)
+            model = await self._get_model()
             llm_output = await self._call_llm_get_output(
                 model,
                 self.config.model.model_info.model_name,
@@ -785,7 +785,7 @@ class LLMController(BaseController):
             logger.error(f"Failed to stream LLM output: {e}")
             raise
 
-    def _get_model(self, session: Session):
+    async def _get_model(self):
         """Get model instance"""
         model_id = generate_key(
             self.config.model.model_info.api_key,
@@ -793,7 +793,7 @@ class LLMController(BaseController):
             self.config.model.model_provider
         )
 
-        model = session.get_model(model_id=model_id)
+        model = await Runner.resource_mgr.get_model(model_id=model_id)
 
         if model is None:
             model_client_config = ModelClientConfig(
@@ -810,10 +810,13 @@ class LLMController(BaseController):
                 temperature=self.config.model.model_info.temperature,
                 top_p=self.config.model.model_info.top_p,
             )
-            model = Model(model_client_config=model_client_config, model_config=model_request_config)
-            session.add_model(model_id=model_id, model=model)
 
-        return session.get_model(model_id=model_id)
+            def model_provider():
+                return Model(model_client_config=model_client_config, model_config=model_request_config)
+
+            Runner.resource_mgr.add_model(model_id=model_id, model=model_provider)
+
+        return await Runner.resource_mgr.get_model(model_id=model_id)
 
     def _get_workflow_id_from_schema(self, workflow_name: str) -> Optional[str]:
         """Get workflow_id from workflow schema by name
@@ -964,7 +967,7 @@ class LLMController(BaseController):
             Workflow object, None if not found
         """
         try:
-            workflow = await session.get_workflow(workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id)
             return workflow
         except Exception as e:
             logger.error(f"Failed to find workflow {workflow_id}: {e}")

@@ -4,12 +4,11 @@
 import asyncio
 import inspect
 from abc import ABC, abstractmethod
-from copy import deepcopy
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Tuple, Union
 
 from pydantic import BaseModel
 
-from openjiuwen.core.workflow import WorkflowCard as WorkflowSchema
+from openjiuwen.core.workflow import WorkflowCard as WorkflowSchema, WorkflowCard
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.legacy.schema import PluginSchema
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
@@ -22,8 +21,7 @@ from openjiuwen.core.session import (
     WrappedSession
 )
 from openjiuwen.core.session.stream import OutputSchema, CustomSchema
-from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.tool import Tool, ToolInfo
 from openjiuwen.core.workflow import Workflow, generate_workflow_key
 
 if TYPE_CHECKING:
@@ -35,13 +33,8 @@ class AgentSession(WrappedSession, StaticWrappedSession):
     deprecated
     """
 
-    def __init__(self, config: Config = None, resource_mgr: "ResourceMgr" = None):
-        if resource_mgr:
-            inner = StaticAgentSession(config, resource_mgr=resource_mgr)
-        else:
-            from openjiuwen.core.runner import Runner
-            inner = StaticAgentSession(config, resource_mgr=Runner.resource_mgr)
-
+    def __init__(self, config: Config = None):
+        inner = StaticAgentSession(config)
         super().__init__(inner)
         self._session = inner
 
@@ -53,13 +46,9 @@ class AgentSession(WrappedSession, StaticWrappedSession):
         if session_id is None:
             session_id = kwargs.get("trace_id")
         inputs = kwargs.get("inputs")
-        session = TaskSession(session_id=session_id, config=self._session.config(),
-                       resource_mgr=self._session.resource_manager())
+        session = TaskSession(session_id=session_id, config=self._session.config())
         await self._session.checkpointer().pre_agent_execute(getattr(session, "_inner"), inputs)
         return session
-
-    def resource_mgr(self):
-        return self._inner.resource_manager()
 
     async def release(self, session_id: str):
         await self._session.checkpointer().release(session_id)
@@ -102,46 +91,11 @@ class WorkflowFactory:
             factory: Factory function that returns a new Workflow instance on each call
         """
         self._factory = factory
-        self.id = workflow_id
-        self.version = workflow_version
-        self.name = workflow_name
-        self.input_schema = input_schema if input_schema else {}
-        self.workflow_description = workflow_description
-        if self.name and self.input_schema:
-            workflow_input_schema = self.input_schema
-            self._tool_info = self._convert_to_tool_info(workflow_input_schema)
-            from openjiuwen.core.runner import Runner
-            Runner.resource_mgr._resource_registry.workflow()._workflow_tool_infos[
-                generate_workflow_key(workflow_id, workflow_version)] = self._convert_to_tool_info(
-                workflow_input_schema)
-        else:
-            self._tool_info = None
+        self._workflow_card = WorkflowCard(id=workflow_id, name=workflow_name, description=workflow_description,
+                                           version=workflow_version, input_params=input_schema)
 
-    def _register_tool_info(self, session: AgentSession):
-        if self._tool_info and session:
-            session.resource_mgr()._resource_registry.workflow()._workflow_tool_infos[
-                generate_workflow_key(self.id, self.version)] = deepcopy(self._tool_info)
-
-    def _convert_to_tool_info(self, workflow_input_schema) -> ToolInfo:
-        if isinstance(workflow_input_schema, BaseModel):
-            parameters = {
-                "type": workflow_input_schema.type,
-                "properties": workflow_input_schema.properties,
-                "required": workflow_input_schema.required,
-            }
-        elif isinstance(workflow_input_schema, dict):
-            parameters = {
-                "type": workflow_input_schema.get("type", ""),
-                "properties": workflow_input_schema.get("properties", {}),
-                "required": workflow_input_schema.get("required", []),
-            }
-        else:
-            parameters = {}
-        return ToolInfo(
-            name=self.name,
-            description=self.workflow_description,
-            parameters=parameters,
-        )
+    def card(self):
+        return self._workflow_card
 
     def __call__(self):
         """Return a new workflow instance on each call, with metadata auto-set.
@@ -206,8 +160,7 @@ class BaseAgent(ABC):
         self._config = self._config_wrapper  # Unified interface
 
         # 2. Create Session
-        from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
-        self._session = AgentSession(config=self._config, resource_mgr=ResourceMgr())
+        self._session = AgentSession(config=self._config)
 
         # 3. Create ContextEngine
         self._context_engine = self._create_context_engine()
@@ -325,9 +278,9 @@ class BaseAgent(ABC):
             existing_tool_names = {t.card.name for t in self._tools}
             if tool.card.name not in existing_tool_names:
                 self._tools.append(tool)
-
+            from openjiuwen.core.runner import Runner
             # 4. Sync to session (auto register)
-            self._session.add_tools([(tool.card.name, tool)])
+            Runner.resource_mgr.add_tool([tool])
 
     def add_workflows(
             self,
@@ -372,27 +325,20 @@ class BaseAgent(ABC):
 
         for item in workflows:
             # Extract workflow_id, workflow_version, and provider/workflow
-            workflow_id = None
-            workflow_version = None
-            workflow_name = None
-            workflow_description = None
-
+            workflow_card = None
+            provider = None
+            is_provider = True
             if isinstance(item, WorkflowFactory):
                 # WorkflowFactory object: use id/version attributes
                 provider = item
-                workflow_id = provider.id
-                workflow_version = provider.version
-                item._register_tool_info(self._session)
-                is_provider = True
+                workflow_card = provider.card()
             elif callable(item) and hasattr(item, 'id') and hasattr(item, 'version'):
                 # Callable with id/version attributes (preferred way for async providers)
                 provider = item
-                workflow_id = getattr(item, 'id')
-                workflow_version = getattr(item, 'version')
-                # Optional: get name and description if available
-                workflow_name = getattr(item, 'name', None)
-                workflow_description = getattr(item, 'description', None)
-                is_provider = True
+                workflow_card = WorkflowCard(id=getattr(item, 'id'),
+                                             name=getattr(item, 'name', None),
+                                             description=getattr(item, 'description', None),
+                                             version=getattr(item, 'version'))
             elif callable(item):
                 # Bare callable without id/version: error
                 raise ValueError(
@@ -401,16 +347,11 @@ class BaseAgent(ABC):
                 )
             else:
                 # Workflow instance: use directly
-                workflow = item
-                workflow_card = workflow.card
-                workflow_id = workflow_card.id
-                workflow_version = workflow_card.version
-                workflow_name = workflow_card.name
-                workflow_description = workflow_card.description
-                provider = None
+                provider = lambda: item
+                workflow_card = item.card
                 is_provider = False
 
-            workflow_key = generate_workflow_key(workflow_id, workflow_version)
+            workflow_key = generate_workflow_key(workflow_card.id, workflow_card.version)
 
             # Check if already exists
             existing_keys = {
@@ -426,24 +367,25 @@ class BaseAgent(ABC):
             if workflow_key not in existing_keys:
                 # 1. Update config.workflows
                 workflow_schema = WorkflowSchema(
-                    id=workflow_id,
-                    name=workflow_name or workflow_id,
-                    version=workflow_version,
-                    description=workflow_description or "",
+                    id=workflow_card.id,
+                    name=workflow_card.name,
+                    version=workflow_card.version,
+                    description=workflow_card.description or "",
                     inputs={}
                 )
+
                 self.agent_config.workflows.append(workflow_schema)
 
             # 2. Sync to session (provider or instance)
-            to_register = provider if is_provider else workflow
-            self._session.add_workflows([(workflow_key, to_register)])
+            to_register = provider
 
             # 3. Also add to global resource_mgr (for cross-session access)
             try:
                 logger.info(f"Adding workflow {'provider' if is_provider else 'instance'} "
                             f"{workflow_key} to global resource_mgr")
                 from openjiuwen.core.runner import Runner
-                Runner.resource_mgr.add_workflow(workflow_key, to_register)
+                workflow_card.id = workflow_key
+                Runner.resource_mgr.add_workflow(workflow_card, to_register)
                 logger.info(f"Successfully added workflow {'provider' if is_provider else 'instance'} {workflow_key}")
             except Exception as e:
                 logger.error(f"Failed to add workflow to global resource_mgr: {e}")
@@ -482,10 +424,6 @@ class BaseAgent(ABC):
             ]
             removed_from_config = original_count - len(self.agent_config.workflows)
             logger.info(f"Removed {removed_from_config} workflow schema(s) from config")
-
-            # 2. Remove from session
-            self._session.remove_workflow(workflow_key)
-            logger.info(f"Removed workflow {workflow_key} from session")
 
             # 3. Remove from global resource_mgr
             try:
@@ -694,19 +632,12 @@ class ControllerAgent(BaseAgent):
 
             # Sync single_agent's tools to external session
             # When external session is provided, single_agent's tools need to be registered
+            from openjiuwen.core.runner import Runner
             if self._tools:
-                tools_to_add = [(tool.name, tool) for tool in self._tools]
-                agent_session.add_tools(tools_to_add)
+                tools_to_add = [(tool.card.name, tool) for tool in self._tools]
+                Runner.resource_mgr.add_tool(tools_to_add)
             # Sync agent's workflows to external session
             # When external session is provided, agent's workflows need to be registered
-            try:
-                agent_workflow_mgr = self._session.resource_mgr()._resource_registry.workflow()
-                # Sync workflow instances and providers
-                for workflow_id, workflow in agent_workflow_mgr.get_all_workflows().items():
-                    agent_session.add_workflow(workflow_id, workflow)
-                    logger.debug(f"Synced workflow {workflow_id} to external session")
-            except Exception as e:
-                logger.warning(f"Failed to sync workflows to external session: {e}")
         # Store final result for send_to_agent
         final_result_holder = {"result": None}
         await self.context_engine.create_context(session=agent_session)

@@ -45,19 +45,19 @@ class StatusCode(Enum):
     COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED = (101051,
         "component intent_detection_llm initialization failed, reason: {error_msg}")
     COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED = (101052,
-                                                   "component intent_detection_invoke call failed, reason: {error_msg}")
+        "component intent_detection_invoke call failed, reason: {error_msg}")
 
     ## QuestionComponent 101070 - 101099
     COMPONENT_QUESTIONER_INPUT_PARAM_ERROR = (101070,
-        "component questioner_input parameter error, reason: {error_msg}")
+                                              "component questioner_input parameter error, reason: {error_msg}")
     COMPONENT_QUESTIONER_CONFIG_ERROR = (101071, "component questioner config error, reason: {error_msg}")
     COMPONENT_QUESTIONER_INPUT_INVALID = (101072, "component questioner_input is invalid, reason: {error_msg}")
     COMPONENT_QUESTIONER_STATE_INIT_FAILED = (101073,
-        "component questioner_state initialization failed, reason: {error_msg}")
+                                              "component questioner_state initialization failed, reason: {error_msg}")
     COMPONENT_QUESTIONER_RUNTIME_ERROR = (101074, "component questioner runtime error, reason: {error_msg}")
     COMPONENT_QUESTIONER_INVOKE_CALL_FAILED = (101075, "component questioner_invoke call failed, reason: {error_msg}")
     COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR = (101076,
-        "component questioner_execution process error, reason: {error_msg}")
+                                                    "component questioner_execution process error, reason: {error_msg}")
 
     ## BranchComponent  101100 - 101119
     COMPONENT_BRANCH_PARAM_ERROR = (101100, "component branch parameter error, reason: {error_msg}")
@@ -147,6 +147,35 @@ class StatusCode(Enum):
     RUNNER_STOPPED = (134007, "runner is stopped")
     REMOTE_AGENT_REQUEST_CANCELLED = (134008, "remote agent request cancelled")
     REMOTE_AGENT_PROCESS_ERROR = (134009, "remote agent process error, reason: {error_msg}")
+
+    # ResourceMgr 134200-134300
+    # param validate
+    RESOURCE_ID_VALUE_INVALID = (134201, "resource_id is invalid, resource_id={resource_id}, reason={reason}")
+    RESOURCE_TAG_VALUE_INVALID = (134202, "tag is invalid, tag={tag}, reason={reason}")
+    RESOURCE_CARD_VALUE_INVALID = (134203, "card is invalid, card={card}, reason={reason}")
+    RESOURCE_PROVIDER_INVALID = (134204, "resource provider is invalid, card={card}, reason={reason}")
+    RESOURCE_VALUE_INVALID = (134205, "resource value is invalid, reason={reason}")
+
+    RESOURCE_ADD_ERROR = (134250, "resource add failed, card={card}, reason={reason}")
+
+    RESOURCE_MCP_SERVER_PARAM_INVALID = (134301, "server param is invalid, param='{param}', reason={reason}")
+    RESOURCE_MCP_SERVER_CONNECTION_ERROR = (134302,
+                                            "mcp server connect failed, server_config={server_config}, reason={reason}")
+    RESOURCE_MCP_SERVER_ADD_ERROR = (134303, "mcp server add failed, server_config={server_config}, reason={reason}")
+    RESOURCE_MCP_SERVER_REFRESH_ERROR = (134304, "mcp server refresh failed, server_id={server_id}, reason={reason}")
+    RESOURCE_MCP_SERVER_REMOVE_ERROR = (134305, "mcp server remove failed, server_id={server_id}, reason={reason}")
+    RESOURCE_MCP_TOOL_GET_ERROR = (134306, "mcp server tool get failed, server_id={server_id}, reason={reason}")
+
+    # tag manager
+    RESOURCE_TAG_REMOVE_TAG_ERROR = (134401, "tag is invalid, tag={tag}, reason={reason}")
+    RESOURCE_TAG_ADD_RESOURCE_TAG_ERROR = (134402,
+        "add tag failed, resource_id={resource_id}, tag={tag}, reason='{reason}'")
+    RESOURCE_TAG_REMOVE_RESOURCE_TAG_ERROR = (134403,
+        "remove resource tag failed, resource_id={resource_id}, tags={tags}, reason='{reason}'")
+    RESOURCE_TAG_REPLACE_RESOURCE_TAG_ERROR = (134404,
+        "replace resource tag failed, resource_id={resource_id}, tags={tags}, reason='{reason}'")
+    RESOURCE_TAG_FIND_RESOURCE_ERROR = (134405,
+        "replace resource tag failed, resource_id={resource_id}, tags={tags}, reason='{reason}'")
 
     # =========================
     # Graph Engine 140000–149999
@@ -296,12 +325,12 @@ class StatusCode(Enum):
     TOOL_RESTFUL_API_CARD_CONFIG_INVALID = (160100, "config failed, {reason}")
     # RestfulApiCard Execution 160121 - 160199
     TOOL_RESTFUL_API_TIMEOUT = (160121,
-        "execute {interface} failed, request is timeout, timeout={timeout}s, card=[{card}]")
+                                "execute {interface} failed, request is timeout, timeout={timeout}s, card=[{card}]")
     TOOL_RESTFUL_API_RESPONSE_SIZE_EXCEED_LIMIT = (160122,
-        "execute {interface} failed, response is too big,"
-        " max_size={max_length}b, actual={actual_length}b, card=[{card}]")
+                                                   "execute {interface} failed, response is too big,"
+                                                   " max_size={max_length}b, actual={actual_length}b, card=[{card}]")
     TOOL_RESTFUL_API_RESPONSE_ERROR = (160123,
-        "execute {interface} failed, response error, code={code}, reason={reason}")
+                                       "execute {interface} failed, response error, code={code}, reason={reason}")
     TOOL_RESTFUL_API_EXECUTION_ERROR = (160124, "RestfulApi execute {interface} failed,"
                                                 " reason={reason}, card=[{card}]")
 
@@ -318,7 +347,6 @@ class StatusCode(Enum):
 
     # MCPTool execution 160321-160399
     TOOL_MCP_EXECUTION_ERROR = (160321, "execute {interface} failed, reason={reason}, card={card}")
-
 
     # =========================
     # Optimization Toolchain 170000 - 179999

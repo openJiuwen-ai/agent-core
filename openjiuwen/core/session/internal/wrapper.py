@@ -65,70 +65,6 @@ class WrappedSession(Session, ABC):
     def __init__(self, inner: BaseSession):
         self._inner = inner
 
-    # todo: alll session's resource_mgr interfaces will be deleted when resource_mgr supports tag features
-    def add_prompt(self, template_id: str, template: PromptTemplate):
-        self._inner.resource_manager()._resource_registry.prompt().add_prompt(template_id, template)
-
-    def add_prompts(self, templates: List[Tuple[str, PromptTemplate]]):
-        self._inner.resource_manager()._resource_registry.prompt().add_prompts(templates)
-
-    def remove_prompt(self, template_id: str):
-        self._inner.resource_manager()._resource_registry.prompt().remove_prompt(template_id)
-
-    def get_prompt(self, template_id: str) -> PromptTemplate:
-        return self._inner.resource_manager()._resource_registry.prompt().get_prompt(template_id)
-
-    def add_model(self, model_id: str, model: Model):
-        self._inner.resource_manager()._resource_registry.model().add_model(model_id, model)
-
-    def add_models(self, models: List[Tuple[str, Model]]):
-        self._inner.resource_manager()._resource_registry.model().add_models(models)
-
-    def remove_model(self, model_id: str):
-        self._inner.resource_manager()._resource_registry.model().remove_model(model_id)
-
-    def get_model(self, model_id: str) -> Model:
-        return self._inner.resource_manager()._resource_registry.model().get_model(model_id, self._inner)
-
-    def add_workflow(self, workflow_id: str, workflow: "Workflow"):
-        self._inner.resource_manager()._resource_registry.workflow().add_workflow(workflow_id, workflow)
-
-    def add_workflows(self, workflows: List[Tuple[str, "Workflow"]]):
-        self._inner.resource_manager()._resource_registry.workflow().add_workflows(workflows)
-
-    def remove_workflow(self, workflow_id: str):
-        self._inner.resource_manager()._resource_registry.workflow().remove_workflow(workflow_id)
-
-    async def get_workflow(self, workflow_id: str) -> "Workflow":
-        return await self._inner.resource_manager()._resource_registry.workflow().get_workflow(workflow_id, self._inner)
-
-    def get_workflow_sync(self, workflow_id: str) -> Optional["Workflow"]:
-        return self._inner.resource_manager()._resource_registry.workflow().get_workflow_sync(workflow_id, self._inner)
-
-    def add_tool(self, tool_id: str, tool: Tool):
-        self._inner.resource_manager()._resource_registry.tool().add_tool(tool_id, tool)
-
-    def add_tools(self, tools: List[Tuple[str, Tool]]):
-        self._inner.resource_manager()._resource_registry.tool().add_tools(tools)
-
-    def remove_tool(self, tool_id: str):
-        self._inner.resource_manager()._resource_registry.tool().remove_tool(tool_id)
-
-    def get_tool(self, tool_id: str) -> Tool:
-        return self._inner.resource_manager()._resource_registry.tool().get_tool(tool_id, self._inner)
-
-    def get_tool_info(self, tool_id: List[str] = None, workflow_id: List[str] = None) -> List[ToolInfo]:
-        infos = []
-        if tool_id is None and workflow_id is None:
-            infos.extend(self._inner.resource_manager()._resource_registry.tool().get_tool_infos(tool_id))
-            infos.extend(self._inner.resource_manager()._resource_registry.workflow().get_tool_infos(workflow_id))
-            return infos
-        if tool_id is not None:
-            infos.extend(self._inner.resource_manager()._resource_registry.tool().get_tool_infos(tool_id))
-        if workflow_id is not None:
-            infos.extend(self._inner.resource_manager()._resource_registry.workflow().get_tool_infos(workflow_id))
-        return infos
-
     def get_workflow_config(self, workflow_id):
         return self._inner.config().get_workflow_config(workflow_id)
 
@@ -211,60 +147,6 @@ class RouterSession(StateSession):
         pass
 
     def update_state(self, data: dict):
-        pass
-
-    def add_prompt(self, template_id: str, template: PromptTemplate):
-        pass
-
-    def add_prompts(self, templates: List[Tuple[str, PromptTemplate]]):
-        pass
-
-    def remove_prompt(self, template_id: str):
-        pass
-
-    def get_prompt(self, template_id: str) -> PromptTemplate:
-        pass
-
-    def add_model(self, model_id: str, model: Model):
-        pass
-
-    def add_models(self, models: List[Tuple[str, Model]]):
-        pass
-
-    def remove_model(self, model_id: str):
-        pass
-
-    def get_model(self, model_id: str) -> Model:
-        pass
-
-    def add_workflow(self, workflow_id: str, workflow: "Workflow"):
-        pass
-
-    def add_workflows(self, workflows: List[Tuple[str, "Workflow"]]):
-        pass
-
-    def remove_workflow(self, workflow_id: str):
-        pass
-
-    async def get_workflow(self, workflow_id: str) -> "Workflow":
-        pass
-
-    def get_workflow_sync(self, workflow_id: str) -> Optional["Workflow"]:
-        pass
-
-    def add_tool(self, tool_id: str, tool: Tool):
-        pass
-
-    def add_tools(self, tools: List[Tuple[str, Tool]]):
-        pass
-
-    def remove_tool(self, tool_id: str):
-        pass
-
-    def get_tool(self, tool_id: str) -> Tool:
-        pass
-
-    def get_tool_info(self, tool_id: List[str] = None, workflow_id: List[str] = None) -> List[ToolInfo]:
         pass
 
     def get_workflow_config(self, workflow_id):

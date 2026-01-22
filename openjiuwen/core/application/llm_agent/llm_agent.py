@@ -7,6 +7,8 @@ from datetime import timezone
 from typing import Dict, List, Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.constants.enums import ControllerType
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner.resources_manager.base import WorkflowProvider
 from openjiuwen.core.single_agent.legacy import (
     ControllerAgent,
     PluginSchema,
@@ -177,17 +179,9 @@ class LLMAgent(ControllerAgent):
             # When external session is provided, agent's tools need to be registered
             if self._tools:
                 tools_to_add = [(tool.name, tool) for tool in self._tools]
-                agent_session.add_tools(tools_to_add)
+                Runner.resource_mgr.add_tools(tools_to_add)
             # Sync agent's workflows to external session
             # When external session is provided, agent's workflows need to be registered
-            try:
-                agent_workflow_mgr = self._session.resource_manager().workflow()
-                # Sync workflow instances and providers
-                for workflow_id, workflow in agent_workflow_mgr.get_all_workflows().items():
-                    agent_session.add_workflow(workflow_id, workflow)
-                    logger.debug(f"Synced workflow {workflow_id} to external session")
-            except Exception as e:
-                logger.warning(f"Failed to sync workflows to external session: {e}")
 
         # Store final result for send_to_agent
         final_result_holder = {"result": None}

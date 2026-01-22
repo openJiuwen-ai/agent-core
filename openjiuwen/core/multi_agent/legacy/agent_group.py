@@ -28,7 +28,7 @@ class AgentGroupSession(AgentSession):
     3. Session from pre_run() has stream_iterator()
     """
 
-    def __init__(self, config: Config = None, resource_mgr=None):
+    def __init__(self, config: Config = None):
         """Initialize AgentGroupSession
         
         Args:
@@ -44,7 +44,7 @@ class AgentGroupSession(AgentSession):
             config.set_agent_config(agent_config)
 
         # Call parent constructor
-        super().__init__(config, resource_mgr)
+        super().__init__(config)
 
     # write_stream() already implemented in parent AgentSession
     # No need to redefine
@@ -183,8 +183,7 @@ class ControllerGroup(BaseGroup):
         self.group_controller = group_controller
 
         # Initialize session (like BaseAgent)
-        from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
-        self._session = AgentGroupSession(resource_mgr=ResourceMgr())
+        self._session = AgentGroupSession()
 
         # Auto-configure group_controller
         if self.group_controller is not None:

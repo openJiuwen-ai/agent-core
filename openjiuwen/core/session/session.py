@@ -41,10 +41,6 @@ class BaseSession(ABC):
         ...
 
     @abstractmethod
-    def resource_manager(self) -> "ResourceMgr":
-        ...
-
-    @abstractmethod
     def checkpointer(self):
         ...
 
@@ -112,77 +108,6 @@ class Session(ABC):
         pass
 
     @abstractmethod
-    def add_prompt(self, template_id: str, template: PromptTemplate):
-        pass
-
-    @abstractmethod
-    def add_prompts(self, templates: List[Tuple[str, PromptTemplate]]):
-        pass
-
-    @abstractmethod
-    def remove_prompt(self, template_id: str) -> Optional[PromptTemplate]:
-        pass
-
-    @abstractmethod
-    def get_prompt(self, template_id: str) -> Optional[PromptTemplate]:
-        pass
-
-    @abstractmethod
-    def add_model(self, model_id: str, model: Model):
-        pass
-
-    @abstractmethod
-    def add_models(self, models: List[Tuple[str, Model]]):
-        pass
-
-    @abstractmethod
-    def remove_model(self, model_id: str) -> Optional[Model]:
-        pass
-
-    @abstractmethod
-    def get_model(self, model_id: str) -> Optional[Model]:
-        pass
-
-    @abstractmethod
-    def add_workflow(self, workflow_id: str, workflow: "Workflow"):
-        pass
-
-    @abstractmethod
-    def add_workflows(self, workflows: List[Tuple[str, "Workflow"]]):
-        pass
-
-    @abstractmethod
-    def remove_workflow(self, workflow_id: str) -> Optional["Workflow"]:
-        pass
-
-    @abstractmethod
-    async def get_workflow(self, workflow_id: str) -> Optional["Workflow"]:
-        pass
-
-    def get_workflow_sync(self, workflow_id: str) -> Optional["Workflow"]:
-        pass
-
-    @abstractmethod
-    def add_tool(self, tool_id: str, tool: Tool) -> Optional[Tool]:
-        pass
-
-    @abstractmethod
-    def add_tools(self, tools: List[Tuple[str, Tool]]):
-        pass
-
-    @abstractmethod
-    def remove_tool(self, tool_id: str) -> Optional[Tool]:
-        pass
-
-    @abstractmethod
-    def get_tool(self, tool_id: str) -> Optional[Tool]:
-        pass
-
-    @abstractmethod
-    def get_tool_info(self, tool_id: List[str] = None, workflow_id: List[str] = None) -> List[ToolInfo]:
-        pass
-
-    @abstractmethod
     def get_workflow_config(self, workflow_id):
         pass
 
@@ -229,9 +154,6 @@ class ProxySession(BaseSession):
 
     def callback_manager(self) -> CallbackManager:
         return self._stub.callback_manager()
-
-    def resource_manager(self):
-        return self._stub.resource_manager()
 
     def session_id(self) -> str:
         return self._stub.session_id()
