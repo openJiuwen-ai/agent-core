@@ -137,6 +137,7 @@ class SiliconFlowModelClient(BaseModelClient):
         Returns:
             AssistantMessage: Model response
         """
+        tracer_record_data = kwargs.pop("tracer_record_data", None)
         params = self._build_and_sanitize_params(
             messages=messages,
             tools=tools,
@@ -148,6 +149,8 @@ class SiliconFlowModelClient(BaseModelClient):
             stream=False,
             **kwargs
         )
+        if tracer_record_data:
+            await tracer_record_data(llm_params=params)
         logger.info(f"Request params: {params}")
 
         try:
@@ -201,6 +204,8 @@ class SiliconFlowModelClient(BaseModelClient):
         Yields:
             AssistantMessageChunk: Streaming response chunk
         """
+        tracer_record_data = kwargs.pop("tracer_record_data", None)
+
         params = self._build_and_sanitize_params(
             messages=messages,
             tools=tools,
@@ -212,6 +217,9 @@ class SiliconFlowModelClient(BaseModelClient):
             stream=True,
             **kwargs
         )
+
+        if tracer_record_data:
+            await tracer_record_data(llm_params=params)
 
         try:
             async with self._apost(params, timeout=timeout) as response:

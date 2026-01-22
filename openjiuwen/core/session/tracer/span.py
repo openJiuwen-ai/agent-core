@@ -18,6 +18,10 @@ class Span(BaseModel):
     parent_invoke_id: Optional[str] = Field(default=None, alias="parentInvokeId")
     child_invokes_id: Optional[List[str]] = Field(default=None, alias="childInvokes")
     model_config = ConfigDict(populate_by_name=True)
+    # module status
+    status: Optional[str] = Field(default=None, alias="status")
+    # Recording intermediate process information for the current module's execution time
+    on_invoke_data: Optional[List[dict]] = Field(default=None, alias="onInvokeData")
 
     def update(self, data: dict):
         for attr_name, value in data.items():
@@ -51,8 +55,6 @@ class TraceWorkflowSpan(Span):
     # for loop component
     loop_node_id: Optional[str] = Field(default=None, alias="loopNodeId")
     loop_index: Optional[int] = Field(default=None, alias="loopIndex")
-    # node status
-    status: Optional[str] = Field(default=None, alias="status")
     # for llm invoke data
     llm_invoke_data: Optional[Dict[str, dict]] = Field(default=None, exclude=True)  # model data
     # for subworkflow
@@ -60,8 +62,7 @@ class TraceWorkflowSpan(Span):
     stream_inputs: Optional[list] = Field(default=None, alias="streamInputs")
     # for component stream output
     stream_outputs: Optional[list] = Field(default=None, alias="streamOutputs")
-    # Recording intermediate process information for the current component's execution time
-    on_invoke_data: Optional[List[dict]] = Field(default=None, alias="onInvokeData")
+
 
     def append_stream_output(self, chunk):
         if self.stream_outputs is None:

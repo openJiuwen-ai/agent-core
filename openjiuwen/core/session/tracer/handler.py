@@ -62,6 +62,15 @@ class TraceBaseHandler(BaseHandler):
             return f"{ms:.0f}ms"
         return f"{(ms / 1000):.2f}s"
 
+    def _get_node_status(self, span: Span) -> str:
+        if span.error:
+            return NodeStatus.ERROR.value
+        if span.on_invoke_data:
+            return NodeStatus.RUNNING.value if not span.end_time else NodeStatus.FINISH.value
+        if span.end_time:
+            return NodeStatus.FINISH.value
+        return NodeStatus.START.value
+
 
 class TraceAgentHandler(TraceBaseHandler):
     def __init__(self, owner, stream_writer_manager, spanManager):
@@ -71,6 +80,7 @@ class TraceAgentHandler(TraceBaseHandler):
         return TracerHandlerName.TRACE_AGENT.value
 
     def _format_data(self, span: TraceAgentSpan) -> dict:
+        span.status = self._get_node_status(span)
         return {"type": self.event_name(), "payload": span.model_dump(by_alias=True)}
 
     def _get_tracer_agent_span(self, invoke_id: str) -> TraceAgentSpan:
@@ -127,6 +137,13 @@ class TraceAgentHandler(TraceBaseHandler):
             update_data["elapsed_time"] = elapsed_time
         self._span_manager.update_span(span, update_data)
 
+    def _update_running_trace_data(self, span: TraceAgentSpan, **kwargs):
+        if not isinstance(span.on_invoke_data, list):
+            span.on_invoke_data = []
+        span.on_invoke_data.append(kwargs)
+
+        self._span_manager.update_span(span, {})
+
     @trigger_event
     async def on_chain_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.CHAIN.value, span=span, inputs=inputs,
@@ -147,6 +164,11 @@ class TraceAgentHandler(TraceBaseHandler):
     async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.LLM.value, span=span, inputs=inputs,
                                       instance_info=instance_info, **kwargs)
+        await self._send_data(span)
+
+    @trigger_event
+    async def on_llm_request(self, span: TraceAgentSpan, **kwargs):
+        self._update_running_trace_data(span=span, **kwargs)
         await self._send_data(span)
 
     @trigger_event
@@ -253,14 +275,6 @@ class TraceWorkflowHandler(TraceBaseHandler):
         return {"type": self.event_name(),
                 "payload": result}
 
-    def _get_node_status(self, span: TraceWorkflowSpan) -> str:
-        if span.error:
-            return NodeStatus.ERROR.value
-        if span.on_invoke_data:
-            return NodeStatus.RUNNING.value if not span.end_time else NodeStatus.FINISH.value
-        if span.end_time:
-            return NodeStatus.FINISH.value
-        return NodeStatus.START.value
 
     def _get_tracer_workflow_span(self, invoke_id: str) -> TraceWorkflowSpan:
         span = self._span_manager.get_span(invoke_id)

@@ -101,6 +101,32 @@ class MockModel(BaseModelClient):
         model_request_config = ModelRequestConfig(model="Qwen/Qwen3-32B")
         super().__init__(model_request_config, model_client_config)
 
+    def _build_request_params(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            stop: Union[Optional[str], None],
+            max_tokens: Optional[int],
+            stream: bool,
+            **kwargs
+    ) -> Dict[str, Any]:
+        mock_params = {
+            "messages": messages,
+            "tools": tools,
+            "temperature": temperature,
+            "top_p": top_p,
+            "model": model,
+            "stop": stop,
+            "max_tokens": max_tokens,
+            "stream": stream
+        }
+        return mock_params
+
+
     async def invoke(self,
             messages: Union[str, List[BaseMessage], List[dict]],
             *,
@@ -113,7 +139,23 @@ class MockModel(BaseModelClient):
             output_parser: Optional[BaseOutputParser] = None,
             timeout: float = None,
             **kwargs):
+        tracer_record_data = kwargs.pop("tracer_record_data", None)
         logger.info(f"begin to invoke, inputs={messages}")
+        params = self._build_request_params(
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+            max_tokens=max_tokens,
+            stream=False,
+            **kwargs
+        )
+        if tracer_record_data:
+            await tracer_record_data(llm_params=params)
+        logger.info(f"Request params: {params}")
+
         return messages
 
     async def stream(self,
@@ -128,7 +170,22 @@ class MockModel(BaseModelClient):
             output_parser: Optional[BaseOutputParser] = None,
             timeout: float = None,
             **kwargs):
+        tracer_record_data = kwargs.pop("tracer_record_data", None)
         logger.info(f"begin to stream, inputs={messages}")
+        params = self._build_request_params(
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+            max_tokens=max_tokens,
+            stream=True,
+            **kwargs
+        )
+        if tracer_record_data:
+            await tracer_record_data(llm_params=params)
+        logger.info(f"Request params: {params}")
         yield messages
 
 
@@ -242,8 +299,12 @@ class TestDecator:
 
         for item in results:
             print(item)
-        assert len(results) == 2
+        assert len(results) == 3
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "Qwen/Qwen3-32B"
+        assert results[1][2].get("llm_params", {}) == {'max_tokens': None,
+                                                       'messages': [BaseMessage(role='aa', content='', name=None)],
+                                                       'model': 'a', 'stop': None, 'stream': False, 'temperature': None,
+                                                       'tools': None, 'top_p': None}
 
         results.clear()
         async for item in mocked_model.stream(model="a", messages=[BaseMessage(role="aa")]):
@@ -251,13 +312,21 @@ class TestDecator:
 
         for item in results:
             print(item)
-        assert len(results) == 2
+        assert len(results) == 3
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "Qwen/Qwen3-32B"
+        assert results[1][2].get("llm_params", {}) == {'max_tokens': None,
+                                                   'messages': [BaseMessage(role='aa', content='', name=None)],
+                                                   'model': 'a', 'stop': None, 'stream': True, 'temperature': None,
+                                                   'tools': None, 'top_p': None}
 
         results.clear()
         await mocked_model.invoke(model="a", messages=[BaseMessage(role="aa")])
 
         for item in results:
             print(item)
-        assert len(results) == 2
+        assert len(results) == 3
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "Qwen/Qwen3-32B"
+        assert results[1][2].get("llm_params", {}) == {'max_tokens': None,
+                                                       'messages': [BaseMessage(role='aa', content='', name=None)],
+                                                       'model': 'a', 'stop': None, 'stream': False, 'temperature': None,
+                                                       'tools': None, 'top_p': None}
