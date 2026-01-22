@@ -8,8 +8,9 @@ from collections import OrderedDict
 from typing import Self, Union, AsyncIterator, List, Tuple
 
 from openjiuwen.core.common.constants.constant import INTERACTION
+from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.utils.dict_utils import flatten_dict
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
@@ -459,8 +460,12 @@ class Workflow:
         try:
             return await asyncio.wait_for(task, timeout=timeout if (timeout and timeout > 0) else None)
         except asyncio.TimeoutError as e:
-            raise JiuWenBaseException(status_code.code, status_code.errmsg.format
-            (error_msg="timeout", timeout=timeout)) from e
+            raise build_error(
+                status_code,
+                error_msg="timeout",
+                timeout=timeout,
+                cause=e
+            ) from e
         except JiuWenBaseException as e:
             raise e
         except Exception as e:
@@ -468,12 +473,19 @@ class Workflow:
                 if isinstance(task.exception(), JiuWenBaseException):
                     raise task.exception()
                 else:
-                    raise JiuWenBaseException(StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
-                                              StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                                                  error_msg=task.exception())) from e
+                    raise build_error(
+                        StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR,
+                        error_msg=task.exception(),
+                        timeout=timeout,
+                        cause=e
+                    ) from e
             else:
-                raise JiuWenBaseException(StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
-                                          StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(error_msg=e)) from e
+                raise build_error(
+                    StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR,
+                    error_msg=str(e),
+                    timeout=timeout,
+                    cause=e
+                ) from e
         finally:
             if not task.done():
                 task.cancel()
@@ -568,9 +580,11 @@ class Workflow:
         except JiuWenBaseException as e:
             raise e
         except Exception as e:
-            raise JiuWenBaseException(
-                StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
-                StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(error=e),
+            raise build_error(
+                StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR,
+                error_msg=str(e),
+                timeout=timeout,
+                cause=e
             ) from e
 
         finally:
@@ -630,14 +644,18 @@ class Workflow:
             flatten_stream_inputs_schema = flatten_dict(stream_inputs_schema)
             for key in flatten_inputs_schema.keys():
                 if key in flatten_stream_inputs_schema.keys():
-                    raise JiuWenBaseException(StatusCode.WORKFLOW_INPUT_INVALID.code,
-                        StatusCode.WORKFLOW_INPUT_INVALID.errmsg.format(
-                        error_msg=f"duplicate key both exist in inputs_schema with stream_inputs_schema, key={key}"))
+                    raise build_error(
+                        StatusCode.WORKFLOW_INPUT_INVALID,
+                        error_msg=f"duplicate key both exist in inputs_schema with stream_inputs_schema, "
+                                  f"key={key}"
+                    )
         if isinstance(outputs_schema, dict) and isinstance(stream_outputs_schema, dict):
             flatten_outputs_schema = flatten_dict(outputs_schema)
             flatten_stream_outputs_schema = flatten_dict(stream_outputs_schema)
             for key in flatten_outputs_schema.keys():
                 if key in flatten_stream_outputs_schema.keys():
-                    raise JiuWenBaseException(StatusCode.WORKFLOW_INPUT_INVALID.code,
-                        StatusCode.WORKFLOW_INPUT_INVALID.errmsg.format(
-                        error_msg=f"duplicate key both exist in outputs_schema with stream_outputs_schema, key={key}"))
+                    raise build_error(
+                        StatusCode.WORKFLOW_INPUT_INVALID,
+                        error_msg=f"duplicate key both exist in outputs_schema with stream_outputs_schema, "
+                                  f"key={key}"
+                    )

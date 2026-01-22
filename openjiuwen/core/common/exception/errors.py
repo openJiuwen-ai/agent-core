@@ -80,6 +80,18 @@ class BaseError(Exception):
     def __str__(self) -> str:
         return f"[{self.code}] {self._template_message} {self.message}"
 
+    @classmethod
+    def _reconstruct(cls, status, msg, details, cause, params):
+        params = params or {}
+        return cls(status, msg=msg, details=details, cause=cause, **params)
+
+    def __reduce__(self):
+        return (
+            self.__class__._reconstruct,
+            (self.status, self.message, self.details, self.cause, self.params),
+            None,
+        )
+
 
 class _SafeDict(dict):
     """
