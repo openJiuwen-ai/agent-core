@@ -123,11 +123,20 @@ class WorkflowFactory:
                 generate_workflow_key(self.id, self.version)] = deepcopy(self._tool_info)
 
     def _convert_to_tool_info(self, workflow_input_schema) -> ToolInfo:
-        parameters = {
-            "type": workflow_input_schema.type,
-            "properties": workflow_input_schema.properties,
-            "required": workflow_input_schema.required,
-        }
+        if isinstance(workflow_input_schema, BaseModel):
+            parameters = {
+                "type": workflow_input_schema.type,
+                "properties": workflow_input_schema.properties,
+                "required": workflow_input_schema.required,
+            }
+        elif isinstance(workflow_input_schema, dict):
+            parameters = {
+                "type": workflow_input_schema.get("type", ""),
+                "properties": workflow_input_schema.get("properties", {}),
+                "required": workflow_input_schema.get("required", []),
+            }
+        else:
+            parameters = {}
         return ToolInfo(
             name=self.name,
             description=self.workflow_description,
