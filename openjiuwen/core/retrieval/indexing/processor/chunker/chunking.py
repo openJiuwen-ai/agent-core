@@ -2,21 +2,21 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import uuid
-from typing import List, Optional, Any, Dict
+from typing import Any, Dict, List, Optional
 
 import tiktoken
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
+from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.text_preprocessor import (
     PreprocessingPipeline,
     URLEmailRemover,
     WhitespaceNormalizer,
 )
-from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.tokenizer_chunker import TokenizerChunker
 
 
@@ -109,14 +109,16 @@ class TextChunker(Chunker):
             doc_text = self.pipeline(doc.text)
             texts = self.chunker.chunk_text(doc_text)
             for i, text in enumerate(texts):
+                uid = str(uuid.uuid4())
                 chunk = TextChunk(
-                    id_=str(uuid.uuid4()),
+                    id_=uid,
                     text=text,
                     doc_id=doc.id_,
                     metadata={
                         **doc.metadata,
                         "chunk_index": i,
                         "total_chunks": len(texts),
+                        "chunk_id": uid,
                     },
                 )
                 chunks.append(chunk)

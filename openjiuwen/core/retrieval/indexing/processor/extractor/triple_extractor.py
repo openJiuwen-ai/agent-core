@@ -6,16 +6,16 @@ Triple Extractor Implementation
 Uses LLM for triple extraction.
 """
 
-from typing import List, Any, Optional
-import json
 import asyncio
+import json
+from typing import Any, List
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.common.triple import Triple
+from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
 
 
 class TripleExtractor(Extractor):
@@ -72,14 +72,13 @@ class TripleExtractor(Extractor):
                     messages = [{"role": "user", "content": prompt}]
 
                     # Call LLM
-                    completion = await self.llm_client.ainvoke(
-                        model_name=self.model_name,
+                    completion = await self.llm_client.invoke(
                         messages=messages,
                         temperature=self.temperature,
                     )
 
                     # Parse result
-                    triples, parse_success = self._parse_triples(completion.content, chunk.doc_id)
+                    triples, parse_success = self._parse_triples(completion.content, chunk.doc_id, chunk.id_)
                     return triples, parse_success
 
                 except Exception as e:
@@ -145,7 +144,7 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
 """
         return prompt_template.format(passage=passage, title=title or "Untitled")
 
-    def _parse_triples(self, content: str, doc_id: str) -> tuple[List[Triple], bool]:
+    def _parse_triples(self, content: str, doc_id: str, chunk_id: str) -> tuple[List[Triple], bool]:
         """Parse triples returned by LLM
 
         Returns:
@@ -190,7 +189,7 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
                         predicate=str(triple_data[1]),
                         object=str(triple_data[2]),
                         confidence=float(triple_data[3]) if len(triple_data) > 3 else None,
-                        metadata={"doc_id": doc_id},
+                        metadata={"doc_id": doc_id, "chunk_id": chunk_id},
                     )
                     triples.append(triple)
 

@@ -12,10 +12,10 @@ from typing import Any, List, Optional
 from pymilvus import AnnSearchRequest, MilvusClient, RRFRanker
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
+from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
+from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
 class MilvusVectorStore(VectorStore):
@@ -139,7 +139,7 @@ class MilvusVectorStore(VectorStore):
         **kwargs: Any,
     ) -> List[SearchResult]:
         """Vector search"""
-        output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
+        output_fields = [self.text_field, self.metadata_field, self.doc_id_field, "chunk_id"]
 
         # Build filter expression
         filter_expr = None

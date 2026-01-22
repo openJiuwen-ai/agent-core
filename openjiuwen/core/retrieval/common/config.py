@@ -6,7 +6,7 @@ Configuration Classes
 All configuration classes are unified in this file.
 """
 
-from typing import Optional, Literal, Dict, Any
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -53,5 +53,5 @@ class EmbeddingConfig(BaseModel):
     """Embedding model configuration"""
 
     model_name: str = Field(..., description="Model name")
+    base_url: str = Field(..., description="API Base URL")
     api_key: Optional[str] = Field(None, description="API Key")
-    base_url: Optional[str] = Field(None, description="API Base URL")

@@ -6,8 +6,7 @@ Vector Retriever Implementation
 Retriever implementation based on vector store.
 """
 
-from typing import Any, List, Optional, Dict
-from typing import Literal
+from typing import Any, List, Literal, Optional
 
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
@@ -100,7 +99,7 @@ class VectorRetriever(Retriever):
                 score=result.score,
                 metadata=result.metadata,
                 doc_id=result.metadata.get("doc_id"),
-                chunk_id=result.id,
+                chunk_id=result.metadata.get("chunk_id"),
             )
             retrieval_results.append(retrieval_result)
 

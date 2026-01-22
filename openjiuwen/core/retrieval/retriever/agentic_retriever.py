@@ -7,16 +7,15 @@ Agentic Retriever: Adds LLM query rewriting/multi-round fusion on top of graph r
 from __future__ import annotations
 
 import asyncio
-from typing import Any, List, Optional, Literal
+from typing import Any, List, Literal, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-
-from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
-from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
+from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
+from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 
 
 class AgenticRetriever(Retriever):
@@ -57,23 +56,12 @@ class AgenticRetriever(Retriever):
     def _log(self, msg: str, *args) -> None:
         logger.debug(msg, *args)
 
-    def _llm_call(self, prompt: str) -> str:
-        resp = self.llm.invoke(
-            model_name=self.llm_model_name,
+    async def _llm_call_async(self, prompt: str) -> str:
+        resp = await self.llm.invoke(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
         )
         return resp.content if hasattr(resp, "content") else str(resp)
-
-    async def _llm_call_async(self, prompt: str) -> str:
-        if hasattr(self.llm, "ainvoke"):
-            resp = await self.llm.ainvoke(
-                model_name=self.llm_model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-            )
-            return resp.content if hasattr(resp, "content") else str(resp)
-        return await asyncio.to_thread(self._llm_call, prompt)
 
     async def _rewrite(self, query: str, passages: List[RetrievalResult]) -> Optional[str]:
         context = "\n\n".join(p.text for p in passages[:5])

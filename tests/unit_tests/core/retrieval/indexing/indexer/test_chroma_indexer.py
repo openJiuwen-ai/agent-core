@@ -7,10 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval import ChromaIndexer
-from openjiuwen.core.retrieval import IndexConfig
-from openjiuwen.core.retrieval import TextChunk
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.retrieval import ChromaIndexer, IndexConfig, TextChunk
 
 
 @pytest.fixture
@@ -74,7 +72,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
-        mock_store.collection = MagicMock(get=MagicMock(return_value={}))
+        mock_store.collection = MagicMock(get=MagicMock(return_value={"ids": [], "documents": []}))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -100,7 +98,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
-        mock_store.collection = MagicMock(get=MagicMock(return_value={}))
+        mock_store.collection = MagicMock(get=MagicMock(return_value={"ids": [], "documents": []}))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -121,7 +119,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
-        mock_store.collection = MagicMock(get=MagicMock(return_value={}))
+        mock_store.collection = MagicMock(get=MagicMock(return_value={"ids": [], "documents": []}))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
@@ -146,7 +144,7 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
-        mock_store.collection = MagicMock(get=MagicMock(return_value={}))
+        mock_store.collection = MagicMock(get=MagicMock(return_value={"ids": [], "documents": []}))
         mock_store_class.return_value = mock_store
 
         indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")

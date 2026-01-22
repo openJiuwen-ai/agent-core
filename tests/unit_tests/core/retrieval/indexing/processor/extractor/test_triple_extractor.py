@@ -8,11 +8,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.extractor.triple_extractor import TripleExtractor
-from openjiuwen.core.retrieval.common.document import TextChunk
-from openjiuwen.core.retrieval.common.triple import Triple
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.retrieval.common.document import TextChunk
+from openjiuwen.core.retrieval.indexing.processor.extractor.triple_extractor import TripleExtractor
 
 
 @pytest.fixture
@@ -63,7 +62,7 @@ class TestTripleExtractor:
     @pytest.mark.asyncio
     async def test_extract_multiple_chunks(self, mock_llm_client, mock_completion):
         """Test extracting multiple chunks"""
-        mock_llm_client.ainvoke = AsyncMock(return_value=mock_completion)
+        mock_llm_client.invoke = AsyncMock(return_value=mock_completion)
 
         extractor = TripleExtractor(
             llm_client=mock_llm_client,
@@ -76,7 +75,7 @@ class TestTripleExtractor:
         ]
         triples = await extractor.extract(chunks)
         # Should extract triples for each chunk
-        assert mock_llm_client.ainvoke.call_count == 2
+        assert mock_llm_client.invoke.call_count == 2
 
     @pytest.mark.asyncio
     async def test_extract_with_exception(self, mock_llm_client):

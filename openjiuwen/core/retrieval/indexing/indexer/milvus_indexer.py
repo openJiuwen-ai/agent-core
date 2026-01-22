@@ -7,20 +7,19 @@ Responsible for building, updating and deleting Milvus indices.
 """
 
 import asyncio
-from typing import Any, List, Literal, Optional, Dict
+from typing import Any, Dict, List, Literal, Optional
 
 from pymilvus import DataType, Function, FunctionType, MilvusClient, MilvusException
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback, TqdmCallback
-from openjiuwen.core.retrieval.common.config import IndexConfig
+from openjiuwen.core.retrieval.common.config import IndexConfig, VectorStoreConfig
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
-from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 
 
 class MilvusIndexer(Indexer):
@@ -159,6 +158,7 @@ class MilvusIndexer(Indexer):
             for idx, chunk in enumerate(chunks):
                 meta = chunk.metadata or {}
                 item = {
+                    "chunk_id": meta.get("chunk_id", chunk.id_),
                     self.doc_id_field: chunk.doc_id,
                     self.text_field: chunk.text,
                     self.metadata_field: meta,
@@ -329,6 +329,19 @@ class MilvusIndexer(Indexer):
             datatype=DataType.INT64,
             is_primary=True,
             auto_id=True,
+        )
+
+        # Chunk ID field
+        schema.add_field(
+            field_name="chunk_id",
+            datatype=DataType.VARCHAR,
+            max_length=256,
+        )
+
+        # Add scalar index on document_id for fast deletion/filtering
+        index_params.add_index(
+            field_name="chunk_id",
+            index_type="INVERTED",  # Inverted index for VARCHAR
         )
 
         # Text content field (enable analyzer for BM25)

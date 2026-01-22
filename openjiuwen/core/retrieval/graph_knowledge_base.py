@@ -7,8 +7,8 @@ Knowledge base implementation supporting graph indexing and retrieval.
 """
 
 import json
-from typing import Any, List, Optional, Dict
 import uuid
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.errors import build_error
@@ -17,16 +17,17 @@ from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
 from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
-from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
-from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
+from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
+from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
+from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
+from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
-from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 from openjiuwen.core.retrieval.simple_knowledge_base import retrieve_multi_kb, retrieve_multi_kb_with_source
+from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
 class GraphKnowledgeBase(KnowledgeBase):
@@ -173,7 +174,7 @@ class GraphKnowledgeBase(KnowledgeBase):
                     # Convert triple to text format
                     triple_text = f"{triple.subject} {triple.predicate} {triple.object}"
                     chunk = TextChunk(
-                        id_=f"triple_{i}",
+                        id_=str(uuid.uuid4()),
                         text=triple_text,
                         doc_id=triple.metadata.get("doc_id", ""),
                         metadata={
@@ -181,6 +182,7 @@ class GraphKnowledgeBase(KnowledgeBase):
                             "triple": json.dumps([triple.subject, triple.predicate, triple.object]),
                             "confidence": triple.confidence if triple.confidence else 0,
                             "chunk_index": i,
+                            "chunk_id": triple.metadata.get("chunk_id", ""),
                         },
                     )
                     triple_chunks.append(chunk)
