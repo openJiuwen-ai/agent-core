@@ -330,8 +330,14 @@ class Runner:
         else:
             # LegacyBaseAgent does not have card attribute
             card = AgentCard(id=agent.config().get_agent_config().id)
+
+        if callable(getattr(agent, "config", None)):
+            config_obj = agent.config()
+        else:
+            config_obj = agent.config
+
         task_session = create_agent_session(session_id=session_id,
-                                            envs=getattr(agent.config(), "_env"), card=card)
+                                            envs=getattr(config_obj, "_env", None), card=card)
         await get_default_inmemory_checkpointer().pre_agent_execute(getattr(getattr(task_session, "_inner"), "_inner"),
                                                                     inputs)
         return agent, task_session
