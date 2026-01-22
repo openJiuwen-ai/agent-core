@@ -117,6 +117,7 @@ class AutoFileParser(Parser):
         for document in documents:
             document.metadata.update(
                 {
+                    "doc_id": doc_id,
                     "title": file_name,
                     "file_path": doc,
                     "file_ext": file_ext,
