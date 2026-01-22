@@ -15,11 +15,11 @@ from typing import Dict, Any, AsyncIterator, List
 
 from pydantic import ValidationError
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.single_agent.legacy.agent import BaseAgent
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.legacy.config import (
     LegacyReActAgentConfig,
@@ -103,9 +103,10 @@ class LegacyReActAgent(BaseAgent):
                 prompt_dict = prompt.model_dump(exclude_none=True)
                 messages.append(prompt_dict)
         except ValidationError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.AGENT_PROMPT_PARAM_ERROR.code,
-                message=StatusCode.AGENT_PROMPT_PARAM_ERROR.errmsg.format(msg=str(e))
+            raise build_error(
+                StatusCode.AGENT_PROMPT_PARAM_ERROR,
+                error_msg=str(e),
+                cause=e
             ) from e
 
         for msg in chat_history:

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from typing import Dict, Optional, List, Any
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.single_agent.legacy import (
     LegacyReActAgentConfig as ReActAgentConfig,
 )
@@ -14,10 +15,9 @@ from openjiuwen.core.controller import BaseController, Event, EventType, Task, T
 from openjiuwen.core.controller.legacy.utils import MessageHandlerUtils
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.common.constants.enums import TaskType
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.common.security.json_utils import JsonUtils
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.security.user_config import UserConfig
@@ -96,8 +96,10 @@ class LLMController(BaseController):
         """
         if event.event_type != EventType.USER_INPUT:
             logger.warning(f"Unexpected event type: {event.event_type}, expected USER_INPUT")
-            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_USER_INPUT_PROCESS_ERROR.code,
-                                           f"{event.event_type} is unexpected event type, should be USER_INPUT")
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_USER_INPUT_PROCESS_ERROR,
+                error_msg=f"{event.event_type} is unexpected event type, should be USER_INPUT"
+            )
 
         try:
             return await self._handle_user_input(event, session)
@@ -106,7 +108,11 @@ class LLMController(BaseController):
             if isinstance(e, JiuWenBaseException):
                 raise e
             else:
-                ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, str(e), e)
+                raise build_error(
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                    error_msg=str(e),
+                    cause=e
+                ) from e
 
     async def _handle_user_input(self, event: Event, session: Session) -> Optional[Dict]:
         """Handle user input - ReAct core: LLM reasoning to generate plan
@@ -509,9 +515,9 @@ class LLMController(BaseController):
                 return await self._execute_plugin_task(task, session)
             else:
                 logger.warning(f"Unknown task type: {task.task_type}")
-                raise JiuWenBaseException(
-                    error_code=StatusCode.AGENT_TASK_NOT_SUPPORT.code,
-                    message=StatusCode.AGENT_TASK_NOT_SUPPORT.errmsg.format(msg=str(task.task_type))
+                raise build_error(
+                    StatusCode.AGENT_TASK_NOT_SUPPORT,
+                    error_msg=str(task.task_type)
                 )
         except Exception as e:
             logger.error(f"Error executing task {task.task_id}: {e}")
@@ -597,25 +603,27 @@ class LLMController(BaseController):
                 )
         except JiuWenBaseException as e:
             logger.error(f"Error executing workflow task {task.input.target_name}: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR.code,
-                message=e.message
-            )
+            raise build_error(
+                StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR,
+                error_msg=e.message,
+                cause=e
+            ) from e
         except Exception as e:
             logger.error(f"Error executing workflow {task.input.target_name}: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR.code,
-                message=StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR.errmsg.format(msg=str(e))
-            )
+            raise build_error(
+                StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def _execute_plugin_task(self, task: Task, session: Session) -> TaskResult:
         """Execute plugin task - return result dictionary"""
         tool = session.get_tool(task.input.target_name)
         if not tool:
             logger.error("Tool not found")
-            raise JiuWenBaseException(
-                error_code=StatusCode.AGENT_TOOL_NOT_FOUND.code,
-                message=StatusCode.AGENT_TOOL_NOT_FOUND.errmsg
+            raise build_error(
+                StatusCode.AGENT_TOOL_NOT_FOUND,
+                error_msg=f"tool '{task.input.target_name}' is not registered in session"
             )
         try:
             result = await tool.invoke(task.input.arguments)
@@ -637,16 +645,18 @@ class LLMController(BaseController):
             )
         except JiuWenBaseException as e:
             logger.error(f"Error executing plugin task {task.input.target_name}: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.AGENT_TOOL_EXECUTION_ERROR.code,
-                message=e.message
-            )
+            raise build_error(
+                StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+                error_msg=e.message,
+                cause=e
+            ) from e
         except Exception as e:
             logger.error(f"Error executing plugin task {task.input.target_name}: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.AGENT_TOOL_EXECUTION_ERROR.code,
-                message=StatusCode.AGENT_TOOL_EXECUTION_ERROR.errmsg.format(msg=str(e))
-            )
+            raise build_error(
+                StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def _generate_plan_from_llm(self, event: Event, session: Session):
         """Call LLM to generate plan - ReAct core method"""
@@ -685,7 +695,11 @@ class LLMController(BaseController):
             if isinstance(e, JiuWenBaseException):
                 raise e
             else:
-                ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED, str(e), e)
+                raise build_error(
+                    StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED,
+                    error_msg=str(e),
+                    cause=e
+                ) from e
 
         return tasks, llm_output
 
@@ -751,8 +765,10 @@ class LLMController(BaseController):
 
             # Check for empty response
             if accumulated_chunk is None:
-                ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED,
-                                               "LLM returned empty response")
+                raise build_error(
+                    StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED,
+                    error_msg="LLM returned empty response"
+                )
 
             # Convert accumulated chunk to AIMessage
             return AssistantMessage(
@@ -1116,7 +1132,11 @@ class LLMController(BaseController):
             return final_stream
         except Exception as e:
             logger.error(f"Failed to send final stream data: {e}")
-            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_EXECUTION_CALL_FAILED, str(e), e)
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_EXECUTION_CALL_FAILED,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def _send_error_stream(self, error_msg: str, session: Session):
         """Send error result stream and return OutputSchema"""
@@ -1134,7 +1154,11 @@ class LLMController(BaseController):
             return error_stream
         except Exception as e:
             logger.error(f"Failed to send error stream: {e}")
-            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_EXECUTION_CALL_FAILED, str(e), e)
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_EXECUTION_CALL_FAILED,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     def _unwrap_result(self, result):
         """Unwrap result - unify return format"""
