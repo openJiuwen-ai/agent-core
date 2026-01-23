@@ -28,7 +28,10 @@ from openjiuwen.core.single_agent.legacy import (
     DefaultResponse,
 )
 from openjiuwen.core.application.workflow_agent import WorkflowAgent
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import (
+    ModelConfig, BaseModelInfo, ModelClientConfig, ModelRequestConfig
+)
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
 from openjiuwen.core.workflow import QuestionerComponent, QuestionerConfig, FieldInfo
@@ -92,6 +95,27 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                 top_p=0.9,
                 timeout=120,
             ),
+        )
+
+    @staticmethod
+    def _create_model_client_config() -> ModelClientConfig:
+        """创建模型客户端配置。"""
+        return ModelClientConfig(
+            client_provider=MODEL_PROVIDER,
+            api_key=API_KEY,
+            api_base=API_BASE,
+            timeout=120,
+            max_retries=3,
+            verify_ssl=False
+        )
+
+    @staticmethod
+    def _create_model_request_config() -> ModelRequestConfig:
+        """创建模型请求配置。"""
+        return ModelRequestConfig(
+            model=MODEL_NAME,
+            temperature=0.7,
+            top_p=0.9
         )
 
     @staticmethod
@@ -160,9 +184,11 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         key_fields = [
             FieldInfo(field_name=question_field, description=question_desc, required=True),
         ]
-        model_config = self._create_model_config()
+        model_client_config = self._create_model_client_config()
+        model_request_config = self._create_model_request_config()
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             question_content=f"请提供{question_desc}",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -228,10 +254,12 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         )
 
         # 提问器组件
-        model_config = self._create_model_config()
+        model_client_config = self._create_model_client_config()
+        model_request_config = self._create_model_request_config()
         field_descs = ", ".join([f.description for f in question_fields])
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             question_content=f"请提供以下信息：{field_descs}",
             extract_fields_from_response=True,
             field_names=question_fields,
@@ -335,13 +363,13 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
         # 创建两个带提问器的工作流
         weather_workflow = self._build_questioner_workflow(
-            workflow_id="weather_flow",
+            workflow_id="weather_flow_jump",
             workflow_name="天气查询",
             question_field="location",
             question_desc="地点"
         )
         stock_workflow = self._build_questioner_workflow(
-            workflow_id="stock_flow",
+            workflow_id="stock_flow_jump",
             workflow_name="股票查询",
             question_field="stock_code",
             question_desc="股票代码"
@@ -485,13 +513,13 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         # - weather_workflow: 带提问器（会慢速执行）
         # - stock_workflow: 带提问器（会中断）
         weather_workflow = self._build_questioner_workflow(
-            workflow_id="weather_flow",
+            workflow_id="weather_flow_cancel",
             workflow_name="天气查询",
             question_field="location",
             question_desc="地点"
         )
         stock_workflow = self._build_questioner_workflow(
-            workflow_id="stock_flow",
+            workflow_id="stock_flow_cancel",
             workflow_name="股票查询",
             question_field="stock_code",
             question_desc="股票代码"
@@ -631,9 +659,11 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         start = self._create_start_component()
 
         # LLM 组件 (会被 mock)
-        model_config = self._create_model_config()
+        model_client_config = self._create_model_client_config()
+        model_request_config = self._create_model_request_config()
         llm_config = LLMCompConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             template_content=[
                 {"role": "user", "content": "请回答: {{query}}"}
             ],
@@ -665,9 +695,9 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skip("skip system test")
     @patch(
-        "openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model"
+        "openjiuwen.core.foundation.llm.model.Model.invoke"
     )
-    async def test_end_batch_output_should_have_workflow_final(self, mock_get_model):
+    async def test_end_batch_output_should_have_workflow_final(self, mock_invoke):
         """
         测试 End 节点批输出模式：应该只收到 workflow_final 帧。
         
@@ -680,9 +710,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 End 节点批输出模式 ===")
 
         # Mock LLM 返回
-        mock_model = AsyncMock()
-        mock_model.invoke = AsyncMock(return_value="这是LLM的回答")
-        mock_get_model.return_value = mock_model
+        mock_invoke.return_value = AssistantMessage(content="这是LLM的回答")
 
         # 构建批输出工作流（不传 response_mode）
         workflow = self._build_start_llm_end_workflow(
@@ -751,14 +779,14 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skip("skip system test")
     @patch(
-        "openjiuwen.core.foundation.llm.model_utils.model_factory.ModelFactory.get_model"
+        "openjiuwen.core.foundation.llm.model.Model.invoke"
     )
     async def test_end_stream_output_should_have_end_node_stream(
-            self, mock_get_model
+            self, mock_invoke
     ):
         """
         测试 End 节点流输出模式：应该收到 end node stream 帧，不应该收到 workflow_final 帧。
-        
+
         场景：
         - 构建 start -> llm -> end 工作流
         - End 组件配置 response_mode="streaming"（流输出）
@@ -768,9 +796,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 End 节点流输出模式 ===")
 
         # Mock LLM 返回
-        mock_model = AsyncMock()
-        mock_model.invoke = AsyncMock(return_value="这是LLM的流式回答")
-        mock_get_model.return_value = mock_model
+        mock_invoke.return_value = AssistantMessage(content="这是LLM的流式回答")
 
         # 构建流输出工作流
         workflow = self._build_start_llm_end_workflow(
@@ -853,7 +879,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             FieldInfo(field_name="temperature", description="温度", required=True),
         ]
         weather_workflow = self._build_questioner_workflow_with_delay(
-            workflow_id="weather_flow",
+            workflow_id="weather_flow_invoke002",
             workflow_name="城市天气温度查询",
             question_fields=weather_fields,
             sleep=3  # 关键：3秒延迟让打断有足够时间窗口
@@ -867,7 +893,7 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             FieldInfo(field_name="amount", description="具体金额", required=True),
         ]
         cash_workflow = self._build_questioner_workflow_with_delay(
-            workflow_id="cash_access_flow",
+            workflow_id="cash_flow_invoke002",
             workflow_name="银行存取钱",
             question_fields=cash_fields,
             sleep=0  # 无延迟
@@ -969,13 +995,13 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
         # 创建两个带提问器的工作流
         weather_workflow = self._build_questioner_workflow(
-            workflow_id="weather_flow",
+            workflow_id="weather_flow_skip",
             workflow_name="天气查询",
             question_field="location",
             question_desc="地点"
         )
         stock_workflow = self._build_questioner_workflow(
-            workflow_id="stock_flow",
+            workflow_id="stock_flow_skip",
             workflow_name="股票查询",
             question_field="stock_code",
             question_desc="股票代码"
@@ -1094,14 +1120,14 @@ class MultiWorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
         # 创建两个带提问器的工作流，使用不同的 questioner_id 以区分
         weather_workflow = self._build_questioner_workflow(
-            workflow_id="weather_flow",
+            workflow_id="weather_flow_resume",
             workflow_name="天气查询",
             question_field="location",
             question_desc="地点",
             questioner_id="weather_questioner"
         )
         stock_workflow = self._build_questioner_workflow(
-            workflow_id="stock_flow",
+            workflow_id="stock_flow_resume",
             workflow_name="股票查询",
             question_field="stock_code",
             question_desc="股票代码",

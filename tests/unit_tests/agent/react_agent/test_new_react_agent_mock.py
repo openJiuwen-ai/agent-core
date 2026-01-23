@@ -642,9 +642,27 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
         )
 
     def _create_mock_session(self):
-        """创建 mock session"""
+        """创建 mock session，模拟真实 Session 的 write_stream/stream_iterator 行为"""
+        import asyncio
         mock_session = MagicMock()
-        mock_session.write_stream = AsyncMock()
+        data_queue = asyncio.Queue()
+
+        async def mock_write_stream(data):
+            await data_queue.put(data)
+
+        async def mock_post_run():
+            await data_queue.put(None)  # 发送结束信号
+
+        async def mock_stream_iterator():
+            while True:
+                data = await data_queue.get()
+                if data is None:
+                    break
+                yield data
+
+        mock_session.write_stream = mock_write_stream
+        mock_session.post_run = mock_post_run
+        mock_session.stream_iterator = mock_stream_iterator
         return mock_session
 
     @pytest.mark.asyncio
@@ -689,10 +707,12 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
 
         # 验证有结果返回
         self.assertGreater(len(results), 0)
-        # 验证最终结果
+        # 验证最终结果是 OutputSchema（新版本行为）
         final_result = results[-1]
-        self.assertIsInstance(final_result, dict)
-        self.assertEqual(final_result['result_type'], 'answer')
+        from openjiuwen.core.session.stream.base import OutputSchema
+        self.assertIsInstance(final_result, OutputSchema)
+        self.assertEqual(final_result.type, 'answer')
+        self.assertEqual(final_result.payload['result_type'], 'answer')
 
 
 class TestNewReActAgentGetToolInfo(unittest.IsolatedAsyncioTestCase):

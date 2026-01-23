@@ -847,7 +847,7 @@ class WorkflowController(IntentDetectionController):
     ) -> Task:
         """Create new workflow task
         
-        Extract query from message and filter parameters based on workflow.inputs
+        Extract query from message and filter parameters based on workflow.input_params
         """
         # Get query
         query = event.content.get_query() if hasattr(event.content, 'get_query') else ""
@@ -856,7 +856,7 @@ class WorkflowController(IntentDetectionController):
         user_data = {"query": query}
         user_data.update(event.content.extensions or {})
         filtered_inputs = self._filter_workflow_inputs(
-            workflow.inputs or {},
+            workflow.input_params or {},
             user_data
         )
 

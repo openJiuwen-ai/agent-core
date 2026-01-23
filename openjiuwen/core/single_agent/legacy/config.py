@@ -1,11 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Config of Agent"""
-from typing import List, Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any, Literal, Union
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.single_agent.legacy.schema import WorkflowSchema
+from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, ModelConfig
 from openjiuwen.core.memory.config.config import MemoryScopeConfig, AgentMemoryConfig
@@ -16,7 +17,7 @@ class AgentConfig(BaseModel):
     version: str = Field(default="")
     description: str = Field(default="")
     controller_type: ControllerType = Field(default=ControllerType.Undefined)
-    workflows: List[WorkflowSchema] = Field(default_factory=list)
+    workflows: List[Union[WorkflowSchema, WorkflowCard]] = Field(default_factory=list)
     model: Optional[ModelConfig] = Field(default=None)
     tools: List[str] = Field(default_factory=list)
 

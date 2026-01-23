@@ -444,20 +444,13 @@ class ReActAgent(BaseAgent):
         """Stream execute ReAct process
 
         Args:
-            inputs: User input, supports the following formats:
-                - dict (legacy): {"query": "...", "conversation_id": "..."}
-                - dict (new): {"user_input": "...", "session_id": "..."}
-                - str: Used directly as user_input
-            session: Session object (optional)
+            inputs: User input (required in new version)
+            session: Session object (required in new version)
             stream_modes: Stream output modes (optional)
 
         Yields:
-            Legacy compatible format - OutputSchema objects or final result dict
+            OutputSchema objects from stream_iterator
         """
-        # Determine if we own the stream
-        own_stream = session is None
-
-        # Store final result for yielding
         final_result_holder = {"result": None}
 
         async def stream_process():
@@ -480,20 +473,19 @@ class ReActAgent(BaseAgent):
                     "output": str(e),
                     "result_type": "error"
                 }
+            finally:
+                # Close stream
+                if session is not None and hasattr(session, 'post_run'):
+                    await session.post_run()
 
         task = asyncio.create_task(stream_process())
 
-        # If we own the stream, read from session's stream iterator
-        if own_stream and session is not None:
-            if hasattr(session, 'stream_iterator'):
-                async for result in session.stream_iterator():
-                    yield result
+        # Read from stream_iterator and yield
+        if session is not None and hasattr(session, 'stream_iterator'):
+            async for result in session.stream_iterator():
+                yield result
 
         await task
-
-        # Yield final result
-        if final_result_holder["result"] is not None:
-            yield final_result_holder["result"]
 
 
 __all__ = [

@@ -28,7 +28,12 @@ from examples.groups.hierarchical_group.agents.main_controller import Hierarchic
 from openjiuwen.core.controller import Event
 from openjiuwen.core.common.constants import constant as const
 from openjiuwen.core.workflow import WorkflowComponent, WorkflowCard
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import (
+    ModelConfig,
+    BaseModelInfo,
+    ModelClientConfig,
+    ModelRequestConfig
+)
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import (
     FieldInfo,
@@ -121,8 +126,25 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         model_config = self._create_model_config()
+        # client_provider 需要使用正确的大小写格式 (OpenAI, SiliconFlow)
+        provider = model_config.model_provider
+        if provider and provider.lower() == 'openai':
+            provider = 'OpenAI'
+        elif provider and provider.lower() == 'siliconflow':
+            provider = 'SiliconFlow'
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_client_config=ModelClientConfig(
+                client_provider=provider,
+                api_key=model_config.model_info.api_key,
+                api_base=model_config.model_info.api_base,
+                timeout=model_config.model_info.timeout,
+                verify_ssl=False,
+            ),
+            model_config=ModelRequestConfig(
+                model=model_config.model_info.model_name,
+                temperature=model_config.model_info.temperature,
+                top_p=model_config.model_info.top_p,
+            ),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -232,8 +254,25 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # 创建 Questioner 组件
         model_config = self._create_model_config()
+        # client_provider 需要使用正确的大小写格式 (OpenAI, SiliconFlow)
+        provider = model_config.model_provider
+        if provider and provider.lower() == 'openai':
+            provider = 'OpenAI'
+        elif provider and provider.lower() == 'siliconflow':
+            provider = 'SiliconFlow'
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_client_config=ModelClientConfig(
+                client_provider=provider,
+                api_key=model_config.model_info.api_key,
+                api_base=model_config.model_info.api_base,
+                timeout=model_config.model_info.timeout,
+                verify_ssl=False,
+            ),
+            model_config=ModelRequestConfig(
+                model=model_config.model_info.model_name,
+                temperature=model_config.model_info.temperature,
+                top_p=model_config.model_info.top_p,
+            ),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -357,7 +396,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         return agent
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_financial_workflow_with_interrupt_invoke(self):
         """
         金融场景完整用例：HierarchicalGroup + 工作流中断恢复
@@ -499,7 +538,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n🎉 金融场景测试完成！")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_financial_workflow_with_interrupt_stream(self):
         """
         金融场景 Stream 用例：HierarchicalGroup.stream + 工作流中断恢复
@@ -655,7 +694,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n🎉 金融场景 Stream 测试完成！")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_multi_agent_jump_and_recovery_stream(self):
         """
         多子Agent跳转恢复测试：HierarchicalGroup.stream + 多Agent中断跳转恢复
@@ -877,7 +916,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         print("   - transfer_agent: 中断 -> 跳转 -> 恢复 -> 完成")
         print("   - invest_agent: 中断 -> 恢复 -> 完成")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_hierarchical_main_controller_001(self):
         """
         不指定路由，由leader_agent做意图识别
@@ -990,11 +1029,11 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n[PASS] HierarchicalMainController 意图识别测试完成！")
 
-    @unittest.skip("skip system test - requires network")
     @patch(
         "openjiuwen.core.application.groups.hierarchical_group.agents.main_controller."
         "HierarchicalMainController._detect_intent"
     )
+    @unittest.skip("skip system test")
     async def test_hierarchical_with_react_agent_only(self, mock_detect_intent):
         """
         测试 HierarchicalGroup 中只有 React Agent 的场景
@@ -1058,11 +1097,11 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n[PASS] HierarchicalGroup + React Agent Only 测试完成！")
 
-    @unittest.skip("skip system test - requires network")
     @patch(
         "openjiuwen.core.application.groups.hierarchical_group.agents.main_controller."
         "HierarchicalMainController._detect_intent"
     )
+    @unittest.skip("skip system test")
     async def test_hierarchical_with_llm_agent_only(self, mock_detect_intent):
         """
         测试 HierarchicalGroup 中只有 LLM Agent 的场景
@@ -1133,11 +1172,11 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n[PASS] HierarchicalGroup + LLM Agent Only 测试完成！")
 
-    @unittest.skip("skip system test - requires network")
     @patch(
         "openjiuwen.core.application.groups.hierarchical_group.agents.main_controller."
         "HierarchicalMainController._detect_intent"
     )
+    @unittest.skip("skip system test")
     async def test_hierarchical_with_llm_agent_with_tools(self, mock_detect_intent):
         """
         测试 HierarchicalGroup 中 LLM Agent 使用工具的场景
@@ -1210,7 +1249,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n[PASS] HierarchicalGroup + LLM Agent with Tools 测试完成！")
 
-    @unittest.skip("require network")
+    @unittest.skip("skip system test")
     async def test_financial_workflow_with_interrupt_invoke_interactive_input(self):
         """
         金融场景完整用例：HierarchicalGroup + 工作流中断恢复
@@ -1341,7 +1380,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n🎉 金融场景测试完成！")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_hierarchical_group_014(self):
         """
         # @CaseID: test_hierarchical_group_014
@@ -1544,8 +1583,25 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
             FieldInfo(field_name="amount", description="金额（数字）", required=True),
         ]
         model_config = self._create_model_config()
+        # client_provider 需要使用正确的大小写格式 (OpenAI, SiliconFlow)
+        provider = model_config.model_provider
+        if provider and provider.lower() == 'openai':
+            provider = 'OpenAI'
+        elif provider and provider.lower() == 'siliconflow':
+            provider = 'SiliconFlow'
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_client_config=ModelClientConfig(
+                client_provider=provider,
+                api_key=model_config.model_info.api_key,
+                api_base=model_config.model_info.api_base,
+                timeout=model_config.model_info.timeout,
+                verify_ssl=False,
+            ),
+            model_config=ModelRequestConfig(
+                model=model_config.model_info.model_name,
+                temperature=model_config.model_info.temperature,
+                top_p=model_config.model_info.top_p,
+            ),
             question_content="请您提供明确用户操作：存钱 还是 取钱, 具体金额相关的信息",
             extract_fields_from_response=True,
             field_names=key_fields,

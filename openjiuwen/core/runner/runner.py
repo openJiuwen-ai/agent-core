@@ -248,7 +248,7 @@ class Runner:
             context: model contex
             envs: Environment variables or configuration overrides
         """
-        agent_group_instance = self._prepare_agent_group(agent_group)
+        agent_group_instance = await self._prepare_agent_group(agent_group)
         return await agent_group_instance.invoke(inputs)
 
     async def run_agent_group_streaming(self,
@@ -271,7 +271,7 @@ class Runner:
             stream_modes: Types of streaming data to output
             envs: Environment variables or configuration overrides
         """
-        agent_group_instance = self._prepare_agent_group(agent_group)
+        agent_group_instance = await self._prepare_agent_group(agent_group)
         async for chunk in agent_group_instance.stream(inputs):
             yield chunk
 
@@ -357,9 +357,11 @@ class Runner:
             workflow_instance = workflow
         return workflow_instance, workflow_session
 
-    def _prepare_agent_group(self, agent_group: Union[str, BaseGroup]):
+    async def _prepare_agent_group(self, agent_group: Union[str, BaseGroup]):
         if isinstance(agent_group, str):
-            return self._resource_manager.get_agent_group(group_id=agent_group)
+            return await self._resource_manager.get_agent_group(
+                group_id=agent_group
+            )
         return agent_group
 
 

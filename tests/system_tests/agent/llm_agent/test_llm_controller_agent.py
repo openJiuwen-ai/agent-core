@@ -2,13 +2,11 @@ import asyncio
 import os
 import unittest
 from datetime import datetime
-from pathlib import Path
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from openjiuwen.core.memory import DefaultKVStore, MemoryChromaVectorStore
 from openjiuwen.core.retrieval import EmbeddingConfig
-from openjiuwen.core.single_agent.legacy import PluginSchema, WorkflowSchema
 from openjiuwen.core.application.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
 from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo, ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.workflow import End, WorkflowCard
@@ -18,7 +16,6 @@ from openjiuwen.core.workflow import Start
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig, AgentMemoryConfig
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
-from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore as MilvusVectorStore
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.foundation.tool import LocalFunction
 from openjiuwen.core.foundation.tool import RestfulApi, ToolCard, RestfulApiCard
@@ -35,6 +32,7 @@ os.environ.setdefault("LLM_SSL_VERIFY", "false")
 def build_current_date():
     current_datetime = datetime.now()
     return current_datetime.strftime("%Y-%m-%d")
+
 
 class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -120,52 +118,6 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         return LLMAgentTest.add_function
 
     @staticmethod
-    def _create_function_tool_schema():
-        tool_info = PluginSchema(
-            name='add',
-            description='加法',
-            inputs={
-                "type": "object",
-                "properties": {
-                    "a": {
-                        "type": "number",
-                        "description": "加数",
-                        "required": True
-                    },
-                    "b": {
-                        "type": "number",
-                        "description": "被加数",
-                        "required": True
-                    }
-                }
-            }
-        )
-        return tool_info
-
-    @staticmethod
-    def _create_tool_schema():
-        tool_info = PluginSchema(
-            name='WeatherReporter',
-            description='天气查询插件',
-            inputs={
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "天气查询的地点。\n注意：地点名称必须为英文",
-                        "required": True
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "天气查询的时间，格式为YYYY-MM-DD",
-                        "required": True
-                    }
-                }
-            }
-        )
-        return tool_info
-
-    @staticmethod
     def _create_prompt_template():
         system_prompt = "你是一个AI助手，在适当的时候调用合适的工具，帮助我完成任务！今天的日期为：{}\n注意：1. 如果用户请求中未指定具体时间，则默认为今天。"
         return [
@@ -204,7 +156,15 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         config = IntentDetectionCompConfig(
             user_prompt="请判断用户意图",
             category_name_list=["天气是晴天", "天气不是晴天"],
-            model=LLMAgentTest._create_model_config(),
+            model_client_config=ModelClientConfig(
+                client_provider=MODEL_PROVIDER,
+                api_key=API_KEY,
+                api_base=API_BASE,
+                verify_ssl=False
+            ),
+            model_config=ModelRequestConfig(
+                model=MODEL_NAME
+            ),
         )
 
         component = IntentDetectionComponent(config)
@@ -217,7 +177,15 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
 
     def _create_llm_component(self, user_prompt) -> LLMComponent:
         config = LLMCompConfig(
-            model=self._create_model_config(),
+            model_client_config=ModelClientConfig(
+                client_provider=MODEL_PROVIDER,
+                api_key=API_KEY,
+                api_base=API_BASE,
+                verify_ssl=False
+            ),
+            model_config=ModelRequestConfig(
+                model=MODEL_NAME
+            ),
             template_content=[{"role": "system", "content": "你是一个AI助手。"},
                               {"role": "user", "content": user_prompt}],
             response_format={"type": "text"},
@@ -248,11 +216,11 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         version = "1.0"
         name = "weather_generation_text"
         card = WorkflowCard(
-                name=name,
-                id=id,
-                version=version,
-                description="根据天气生成对应文本",
-                input_params=dict(
+            name=name,
+            id=id,
+            version=version,
+            description="根据天气生成对应文本",
+            input_params=dict(
                 type="object",
                 properties={
                     "query": {
@@ -280,27 +248,6 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         flow.add_connection("llm_2", "end")
 
         return flow
-
-    @staticmethod
-    def _create_workflow_schema():
-        workflow_info = WorkflowSchema(
-            id="weather_generation_text_workflow",
-            name='weather_generation_text',
-            version='1.0',
-            description='根据天气生成不同风格文本的工作流',
-            inputs={
-                "type": "object",
-                "properties": {
-                    "weather_condition": {
-                        "type": "string",
-                        "description": "工作流输入：天气查询结果",
-                        "required": True
-                    }
-                }
-            }
-        )
-
-        return workflow_info
 
     async def _create_memory_engine(self):
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -346,11 +293,10 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    @unittest.skip("require network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_invoke_with_real_plugin(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
-        tools_schema = [self._create_tool_schema()]
         model_config = self._create_model_config()
         prompt_template = self._create_prompt_template()
 
@@ -358,7 +304,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             agent_id="react_agent_123",
             agent_version="0.0.1",
             description="AI助手",
-            plugins=tools_schema,
+            plugins=[],
             workflows=[],
             model=model_config,
             prompt_template=prompt_template,
@@ -378,11 +324,10 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         result = await llm_agent.invoke({"query": "查询杭州的天气"})
         print(f"LLMAgent 输出结果：{result}")
 
-    @unittest.skip("require network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_stream_with_real_plugin(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
-        tools_schema = [self._create_tool_schema()]
         model_config = self._create_model_config()
         prompt_template = self._create_prompt_template()
 
@@ -390,7 +335,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             agent_id="react_agent_123",
             agent_version="0.0.1",
             description="AI助手",
-            plugins=tools_schema,
+            plugins=[],
             workflows=[],
             model=model_config,
             prompt_template=prompt_template,
@@ -412,7 +357,6 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
     async def test_llm_agent_invoke_with_real_function_plugin(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
-        tools_schema = [self._create_function_tool_schema()]
         model_config = self._create_model_config()
         prompt_template = self._create_function_prompt_template()
 
@@ -420,7 +364,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             agent_id="react_agent_1234",
             agent_version="0.0.2",
             description="AI计算助手",
-            plugins=tools_schema,
+            plugins=[],
             workflows=[],
             model=model_config,
             prompt_template=prompt_template,
@@ -442,7 +386,6 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         """测试使用tool注解装饰的函数作为工具"""
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
-        tools_schema = [self._create_function_tool_schema()]
         model_config = self._create_model_config()
         prompt_template = self._create_function_prompt_template()
 
@@ -450,7 +393,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             agent_id="react_agent_1235",
             agent_version="0.0.3",
             description="AI计算助手（使用注解）",
-            plugins=tools_schema,
+            plugins=[],
             workflows=[],
             model=model_config,
             prompt_template=prompt_template,
@@ -468,7 +411,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         result = await llm_agent.invoke({"query": "计算1+2"})
         print(f"LLMAgent 最终输出结果：{result}")
 
-    @unittest.skip("skip system test require llm")
+    @unittest.skip("skip system test")
     async def test_llm_agent_invoke_with_workflow(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
@@ -479,10 +422,9 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         llm_agent_config = create_llm_agent_config(
             agent_id="react_agent_123",
             agent_version="0.0.1",
-
             description="AI助手",
             plugins=[],
-            workflows=[self._create_workflow_schema()],
+            workflows=[],
             model=model_config,
             prompt_template=prompt_template
         )
@@ -495,7 +437,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         result = await llm_agent.invoke({"query": "今天上海天气很差，请生成一段文本"})
         print(f"LLMAgent 最终输出结果：{result}")
 
-    @unittest.skip("skip system test require llm")
+    @unittest.skip("skip system test")
     async def test_llm_agent_stream_with_workflow(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
@@ -523,8 +465,8 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         async for i in result:
             print("LLMAgent 输出结果：", i)
 
-    @unittest.skip("skip system test require llm")
     # This ut should be at the bottom, singleton memory engine is created from this ut
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_memory(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
@@ -565,10 +507,10 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         print(f"LLMAgent 输出结果：{result}")
         await asyncio.sleep(20)
         result = await memory_engine.search_user_mem(user_id=user_id, scope_id=scope_id, query="我叫什么名字", num=1)
-        self.assertEqual(len(result), 1) # may be [] is llm_agent.invoke return too fast
+        self.assertEqual(len(result), 1)  # may be [] is llm_agent.invoke return too fast
         print("memory result:", result[0])
 
-    @unittest.skip("skip system test require llm")
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_multi_memory(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
@@ -602,8 +544,8 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         querys = ["我叫张明", "我喜欢运动", "我今年20岁", "我的工作是软件工程师", "我来自杭州"]
         for query in querys:
             result = await llm_agent.invoke({"query": query,
-                                         "user_id": user_id,
-                                         "scope_id": scope_id})
+                                             "user_id": user_id,
+                                             "scope_id": scope_id})
             print(f"LLMAgent 输出结果：{result}")
         await asyncio.sleep(30)
         result = await memory_engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id, page_size=4, page_idx=1)

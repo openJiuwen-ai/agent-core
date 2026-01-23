@@ -15,7 +15,9 @@ from typing import List
 
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, workflow_provider
 from openjiuwen.core.single_agent import create_agent_session
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import (
+    ModelConfig, BaseModelInfo, ModelClientConfig, ModelRequestConfig
+)
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import IntentDetectionComponent, IntentDetectionCompConfig
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
@@ -136,13 +138,36 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
+    def _create_model_client_config() -> ModelClientConfig:
+        """创建模型客户端配置。"""
+        return ModelClientConfig(
+            client_provider=MODEL_PROVIDER,
+            api_key=API_KEY,
+            api_base=API_BASE,
+            timeout=120,
+            max_retries=3,
+            verify_ssl=False
+        )
+
+    @staticmethod
+    def _create_model_request_config() -> ModelRequestConfig:
+        """创建模型请求配置。"""
+        return ModelRequestConfig(
+            model=MODEL_NAME,
+            temperature=0.7,
+            top_p=0.9
+        )
+
+    @staticmethod
     def _create_intent_detection_component() -> IntentDetectionComponent:
         """创建意图识别组件。"""
-        model_config = WorkflowAgentTest._create_model_config()
+        model_client_config = WorkflowAgentTest._create_model_client_config()
+        model_request_config = WorkflowAgentTest._create_model_request_config()
         config = IntentDetectionCompConfig(
             user_prompt="请判断用户意图，识别是否为天气查询请求",
             category_name_list=["查询某地天气"],
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
         )
         component = IntentDetectionComponent(config)
         # 分支配置：
@@ -155,7 +180,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _create_llm_component() -> LLMComponent:
         """创建 LLM 组件，提取结构化字段（location/date）并改写query。"""
-        model_config = WorkflowAgentTest._create_model_config()
+        model_client_config = WorkflowAgentTest._create_model_client_config()
+        model_request_config = WorkflowAgentTest._create_model_request_config()
         current_date = build_current_date()
         user_prompt = (
                 "\n原始query为：{{query}}\n\n"
@@ -165,7 +191,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                                                                                              "3. query: 改写后的完整query（地名改为英文，保留其他中文信息）\n"
         )
         config = LLMCompConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             template_content=[{"role": "user", "content": user_prompt}],
             response_format={"type": "json"},
             output_config={
@@ -188,9 +215,11 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                 default_value="today",
             ),
         ]
-        model_config = WorkflowAgentTest._create_model_config()
+        model_client_config = WorkflowAgentTest._create_model_client_config()
+        model_request_config = WorkflowAgentTest._create_model_request_config()
         config = QuestionerConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -204,6 +233,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         tool_config = ToolComponentConfig(tool_id="weather_tool")
         weather_tool = RestfulApi(
             card=RestfulApiCard(
+                id="weather_tool",
                 name="WeatherReporter",
                 description="天气查询插件",
                 input_params={
@@ -219,7 +249,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                 method="GET",
             ),
         )
-        Runner.resource_mgr.add_tool("weather_tool", weather_tool)
+        Runner.resource_mgr.add_tool(weather_tool)
         return ToolComponent(tool_config)
 
     @staticmethod
@@ -474,7 +504,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.invoke 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置30秒超时）
@@ -528,7 +559,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.stream 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置50秒超时）
@@ -612,7 +644,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.stream 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置50秒超时）
@@ -696,7 +729,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.invoke 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置30秒超时）
@@ -750,7 +784,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.stream 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置50秒超时）
@@ -878,7 +913,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         # 使用新的 add_workflows 方法，传入装饰器包装的 WorkflowFactory
         agent.add_workflows([create_interrupt_workflow_instance])
         toolinfos = await Runner.resource_mgr.get_tool_infos(
-            id=[generate_workflow_key(workflow_id="test_provider_workflow", workflow_version="1.0")])
+            tool_id=[generate_workflow_key(workflow_id="test_provider_workflow", workflow_version="1.0")])
         print(toolinfos)
 
         # 验证注册到了 _providers
@@ -1069,7 +1104,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         _, workflow = self.build_multiple_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
             WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
-            workflow
+            lambda: workflow
         )
         agent = self._create_agent(workflow)
 
@@ -1214,7 +1249,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         _, workflow = self.build_multiple_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
             WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
-            workflow
+            lambda: workflow
         )
         agent = self._create_agent(workflow)
 

@@ -223,8 +223,9 @@ class IntentDetector:
             model = await ReasonerUtils.get_model(
                 self.agent_config.model
             )
-            llm_output = await model.ainvoke(
-                self.agent_config.model.model_info.model_name, llm_inputs
+            llm_output = await model.invoke(
+                llm_inputs,
+                model=self.agent_config.model.model_info.model_name
             )
             llm_output_content = llm_output.content.strip()
         except Exception as e:

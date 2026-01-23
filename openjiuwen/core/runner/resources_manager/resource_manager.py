@@ -127,8 +127,10 @@ class ResourceMgr:
         Raises:
             ValueError: When neither id nor tag is provided.
         """
-        return await self._inner_get_resources_by_provider(resource_id=group_id, tag=tag,
-                                                           tag_match_strategy=tag_match_strategy, session=session,
+        return await self._inner_get_resources_by_provider(resource_id=group_id,
+                                                           tag=tag,
+                                                           tag_match_strategy=tag_match_strategy,
+                                                           session=session,
                                                            resource_type="group")
 
     def add_agent(self,

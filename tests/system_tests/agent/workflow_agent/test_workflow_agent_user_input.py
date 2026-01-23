@@ -30,7 +30,7 @@ from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.common.logging import logger
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
@@ -118,7 +118,16 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
                 name="用户输入工作流",
                 id="user_input_flow",
                 version="1.0",
-                description="测试dict格式中断的工作流"
+                description="测试dict格式中断的工作流",
+                input_params=dict(
+                    type="object",
+                    properties={
+                        "query": {
+                            "type": "string",
+                            "description": "用户输入"
+                        }
+                    }
+                )
         )
         flow = Workflow(card=workflow_card)
 
@@ -169,7 +178,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         # 1. 创建工作流和agent
         workflow = self._build_user_input_workflow()
         agent_config = WorkflowAgentConfig(
-            name="测试Agent",
+            id="test_dict_interrupt_agent",
+            version="0.1.0",
             description="测试dict中断逻辑",
             workflows=[]  # 初始为空
         )
@@ -249,16 +259,18 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
             QuestionerComponent, QuestionerConfig, FieldInfo)
 
         # 创建模型配置
-        model_config = ModelConfig(
-            model_provider=MODEL_PROVIDER,
-            model_info=BaseModelInfo(
-                model=MODEL_NAME,
-                api_base=API_BASE,
-                api_key=API_KEY,
-                temperature=0.7,
-                top_p=0.9,
-                timeout=120,
-            ),
+        model_client_config = ModelClientConfig(
+            client_provider=MODEL_PROVIDER,
+            api_key=API_KEY,
+            api_base=API_BASE,
+            timeout=120,
+            max_retries=3,
+            verify_ssl=False
+        )
+        model_request_config = ModelRequestConfig(
+            model=MODEL_NAME,
+            temperature=0.7,
+            top_p=0.9
         )
 
         # 1. 构建包含Questioner的工作流
@@ -272,7 +284,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
 
         start = self._create_start_component()
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             question_content="请您提供地点相关的信息",
             field_names=[
                 FieldInfo(field_name="location", description="地点")
@@ -298,16 +311,18 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
             QuestionerComponent, QuestionerConfig, FieldInfo)
 
         # 创建模型配置
-        model_config = ModelConfig(
-            model_provider=MODEL_PROVIDER,
-            model_info=BaseModelInfo(
-                model=MODEL_NAME,
-                api_base=API_BASE,
-                api_key=API_KEY,
-                temperature=0.7,
-                top_p=0.9,
-                timeout=120,
-            ),
+        model_client_config = ModelClientConfig(
+            client_provider=MODEL_PROVIDER,
+            api_key=API_KEY,
+            api_base=API_BASE,
+            timeout=120,
+            max_retries=3,
+            verify_ssl=False
+        )
+        model_request_config = ModelRequestConfig(
+            model=MODEL_NAME,
+            temperature=0.7,
+            top_p=0.9
         )
 
         workflow_card = WorkflowCard(
@@ -320,7 +335,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
 
         start = self._create_start_component()
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             question_content="请您提供地点相关的信息",
             field_names=[
                 FieldInfo(field_name="location", description="地点")
@@ -354,7 +370,8 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
 
         # 2. 创建agent
         agent_config = WorkflowAgentConfig(
-            name="测试Agent",
+            id="test_str_interrupt_agent",
+            version="0.1.0",
             description="测试str中断逻辑",
             workflows=[]  # 初始为空
         )
@@ -477,7 +494,6 @@ class WorkflowAgentUserInputTest(unittest.IsolatedAsyncioTestCase):
         agent_config = WorkflowAgentConfig(
             id="test_workflow_jump_agent",
             version="0.1.0",
-            name="测试Agent",
             description="测试工作流跳转和混合中断",
             workflows=[],  # 初始为空
             model=model_config  # 配置意图识别模型
