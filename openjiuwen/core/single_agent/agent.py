@@ -313,6 +313,9 @@ class BaseAgent(ABC):
         pass
 
     # ========== Ability Management Interface ==========
+    @property
+    def ability_kit(self) -> AbilityKit:
+        return self._ability_kit
 
     def add_ability(self, ability: Union[Ability, List[Ability]]) -> 'BaseAgent':
         """Add an ability
