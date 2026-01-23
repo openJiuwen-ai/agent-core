@@ -12,8 +12,12 @@ Note: Legacy classes have been moved to the legacy submodule.
 Please use 'from openjiuwen.core.single_agent.legacy import ...' for
 legacy classes like LegacyReActAgent, AgentConfig, etc.
 """
+from typing import Union
 
+# Legacy classes
+from openjiuwen.core.single_agent.legacy import LegacyBaseAgent
 # New classes (current API)
+from openjiuwen.core.single_agent.agent import BaseAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.agents.react_agent import (
     ReActAgent,
@@ -21,6 +25,7 @@ from openjiuwen.core.single_agent.agents.react_agent import (
 )
 from openjiuwen.core.session.agent import Session, create_agent_session
 
+BaseAgentAlias = Union[BaseAgent, LegacyBaseAgent]
 
 __all__ = [
     # New classes
@@ -29,4 +34,6 @@ __all__ = [
     "ReActAgentConfig",
     "Session",
     "create_agent_session",
+    # For compatibility
+    "BaseAgentAlias",
 ]
