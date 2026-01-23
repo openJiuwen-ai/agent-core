@@ -13,9 +13,9 @@ from typing import Any, Dict, List, Literal, Optional
 import numpy as np
 from pymilvus import MilvusClient
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
 from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
 from openjiuwen.core.retrieval.retriever.base import Retriever
@@ -33,8 +33,7 @@ class TripleBeamSearch:
     ) -> None:
         if max_length < 1:
             raise build_error(
-                StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID,
-                error_msg=f"expect max_length >= 1; got {max_length=}"
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID, error_msg=f"expect max_length >= 1; got {max_length=}"
             )
 
         self.retriever = retriever
@@ -79,7 +78,7 @@ class TripleBeamSearch:
         if not self.embed_model:
             raise build_error(
                 StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND,
-                error_msg="embed_model is required for beam search"
+                error_msg="embed_model is required for beam search",
             )
 
         texts = [x.text for x in triples] + [query]
@@ -251,15 +250,14 @@ class GraphRetriever(Retriever):
         if allowed is None:
             raise build_error(
                 StatusCode.RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT,
-                error_msg=f"Unsupported index_type={self.index_type}"
+                error_msg=f"Unsupported index_type={self.index_type}",
             )
         if mode not in allowed:
             raise build_error(
                 StatusCode.RETRIEVAL_RETRIEVER_MODE_INVALID,
                 error_msg=(
-                    f"mode={mode} is incompatible with index_type={self.index_type}; "
-                    f"allowed modes: {sorted(allowed)}"
-                )
+                    f"mode={mode} is incompatible with index_type={self.index_type}; allowed modes: {sorted(allowed)}"
+                ),
             )
 
     def _retriever_supports_mode(self, retriever: Retriever, mode: str) -> bool:
@@ -303,7 +301,7 @@ class GraphRetriever(Retriever):
                 raise build_error(
                     StatusCode.RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT,
                     error_msg=f"Provided {'chunk' if is_chunk else 'triple'} retriever "
-                    f"{fixed_retriever.__class__.__name__} does not support mode={mode}"
+                    f"{fixed_retriever.__class__.__name__} does not support mode={mode}",
                 )
             return fixed_retriever
 
@@ -311,7 +309,7 @@ class GraphRetriever(Retriever):
         if not self.vector_store:
             raise build_error(
                 StatusCode.RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND,
-                error_msg="vector_store is required for dynamic retriever creation"
+                error_msg="vector_store is required for dynamic retriever creation",
             )
 
         collection_name = self.chunk_collection if is_chunk else self.triple_collection
@@ -320,7 +318,7 @@ class GraphRetriever(Retriever):
             collection_type = "chunk" if is_chunk else "triple"
             raise build_error(
                 StatusCode.RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND,
-                error_msg=f"{collection_type}_collection is required for dynamic retriever creation"
+                error_msg=f"{collection_type}_collection is required for dynamic retriever creation",
             )
 
         # Create corresponding retriever based on mode
@@ -330,7 +328,7 @@ class GraphRetriever(Retriever):
             if not self.embed_model:
                 raise build_error(
                     StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND,
-                    error_msg="embed_model is required for vector mode"
+                    error_msg="embed_model is required for vector mode",
                 )
             retriever = VectorRetriever(
                 vector_store=self.vector_store,
@@ -379,7 +377,7 @@ class GraphRetriever(Retriever):
         if score_threshold is not None and mode != "vector":
             raise build_error(
                 StatusCode.RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID,
-                error_msg="score_threshold is only supported when mode='vector'"
+                error_msg="score_threshold is only supported when mode='vector'",
             )
         effective_threshold = score_threshold
 

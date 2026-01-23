@@ -9,10 +9,10 @@ Inherits from Processor, provides text chunking interface.
 import uuid
 from typing import Any, Callable, List, Optional
 
-from openjiuwen.core.retrieval.indexing.processor.base import Processor
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval.indexing.processor.base import Processor
 
 
 class Chunker(Processor):
@@ -44,17 +44,17 @@ class Chunker(Processor):
         if chunk_size <= 0:
             raise build_error(
                 StatusCode.RETRIEVAL_INDEXING_CHUNK_SIZE_INVALID,
-                error_msg=f"chunk_size must be greater than 0, current value: {chunk_size}"
+                error_msg=f"chunk_size must be greater than 0, current value: {chunk_size}",
             )
         if chunk_overlap < 0:
             raise build_error(
                 StatusCode.RETRIEVAL_INDEXING_CHUNK_OVERLAP_INVALID,
-                error_msg=f"chunk_overlap must be greater than or equal to 0, current value: {chunk_overlap}"
+                error_msg=f"chunk_overlap must be greater than or equal to 0, current value: {chunk_overlap}",
             )
         if chunk_overlap >= chunk_size:
             raise build_error(
                 StatusCode.RETRIEVAL_INDEXING_CHUNK_OVERLAP_INVALID,
-                error_msg="chunk_overlap must be less than chunk_size"
+                error_msg="chunk_overlap must be less than chunk_size",
             )
 
         self.chunk_size = chunk_size

@@ -3,12 +3,13 @@
 import uuid
 from abc import ABCMeta, abstractmethod
 from typing import Any, Callable, Tuple
+
 import tiktoken
 from transformers import PreTrainedTokenizerBase
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
 from openjiuwen.core.retrieval.indexing.processor.splitter.splitter import SentenceSplitter
-from openjiuwen.core.common.logging import logger
 
 DEFAULT_CHUNK_SIZE = 200
 DEFAULT_CHAR_CHUNK_SIZE = 200
@@ -24,14 +25,10 @@ class TextSplitter(metaclass=ABCMeta):
 class CharSplitter(TextSplitter):
     """Simple text splitter based on character length, no dependency on tokenizer."""
 
-    def __init__(
-        self, chunk_size: int | None = None, chunk_overlap: int | None = None
-    ) -> None:
+    def __init__(self, chunk_size: int | None = None, chunk_overlap: int | None = None) -> None:
         super().__init__()
         size = chunk_size or DEFAULT_CHAR_CHUNK_SIZE
-        overlap = (
-            chunk_overlap if chunk_overlap is not None else DEFAULT_CHAR_CHUNK_OVERLAP
-        )
+        overlap = chunk_overlap if chunk_overlap is not None else DEFAULT_CHAR_CHUNK_OVERLAP
         # Limit range to avoid step becoming 0 or negative
         overlap = max(0, min(overlap, size - 1))
         self.chunk_size = max(1, size)
@@ -44,11 +41,7 @@ class CharSplitter(TextSplitter):
         meta = doc.metadata or {}
 
         res: list[TextChunk] = []
-        step = (
-            self.chunk_size - self.chunk_overlap
-            if self.chunk_size > self.chunk_overlap
-            else self.chunk_size
-        )
+        step = self.chunk_size - self.chunk_overlap if self.chunk_size > self.chunk_overlap else self.chunk_size
         start = 0
         while start < len(text):
             end = min(len(text), start + self.chunk_size)

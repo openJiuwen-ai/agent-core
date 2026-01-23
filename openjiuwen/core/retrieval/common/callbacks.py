@@ -7,8 +7,8 @@ Subclasses of BaseCallback can be passed into Indexer constructor to implement v
 """
 
 import threading
-from typing import Optional, Sequence
 import warnings
+from typing import Optional, Sequence
 
 import tqdm
 import tqdm.rich

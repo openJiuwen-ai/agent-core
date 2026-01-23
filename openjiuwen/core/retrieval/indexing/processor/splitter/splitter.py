@@ -1,10 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import List, Tuple, Callable
+from typing import Callable, List, Tuple
+
 from pysbd import Segmenter
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
 from openjiuwen.core.retrieval.indexing.processor.splitter.base import Splitter
 
 
@@ -18,7 +18,7 @@ class SentenceSplitter(Splitter):
     ):
         """
         Initialize sentence splitter
-        
+
         Args:
             tokenizer: Tokenizer, must have encode and decode methods
             chunk_size: Chunk size (number of tokens)
@@ -30,16 +30,16 @@ class SentenceSplitter(Splitter):
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
         )
-        
+
         self.seg = Segmenter(language=lan, clean=False)
 
     def __call__(self, doc: str) -> List[Tuple[str, int, int]]:
         """
         Split document into sentence-level chunks
-        
+
         Args:
             doc: Document text to be split
-            
+
         Returns:
             List of chunks, each element is (text, start char position, end char position)
         """
@@ -120,4 +120,3 @@ class SentenceSplitter(Splitter):
             next_cur_sents = list(reversed(overlap_sents))
 
         return chunks, next_cur_sents
-

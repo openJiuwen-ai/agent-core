@@ -6,20 +6,21 @@ ChromaDB Vector Store Implementation
 Supports vector search, sparse search (text matching), and hybrid search.
 """
 
-import uuid
 import asyncio
 import json
+import uuid
 from typing import Any, List, Optional
+
 import chromadb
 from chromadb.config import DEFAULT_DATABASE, Settings
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.common.retrieval_result import SearchResult, RetrievalResult
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
+from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
+from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
 class ChromaVectorStore(VectorStore):
@@ -55,7 +56,7 @@ class ChromaVectorStore(VectorStore):
         if not chroma_path or not chroma_path.strip():
             raise build_error(
                 StatusCode.RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND,
-                error_msg="chroma_path is required and cannot be empty"
+                error_msg="chroma_path is required and cannot be empty",
             )
 
         self.config = config
@@ -188,7 +189,6 @@ class ChromaVectorStore(VectorStore):
                         metadata.update(json.loads(raw_metadata))
                     except Exception:
                         logger.warning(f"Failed to load metadata: {raw_metadata}")
-                        pass
 
             # Add other fields to metadata
             if self.doc_id_field in node:

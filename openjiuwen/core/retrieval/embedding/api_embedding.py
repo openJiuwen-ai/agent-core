@@ -6,19 +6,19 @@ API Embedding Model Implementation
 Universal HTTP embedding client implementation.
 """
 
-from typing import Any, List, Optional
 import asyncio
 import os
+from typing import Any, List, Optional
 
 import requests
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
-from openjiuwen.core.common.security.ssl_utils import SslUtils
+from openjiuwen.core.retrieval.embedding.base import Embedding
 
 
 class APIEmbedding(Embedding):
@@ -31,6 +31,7 @@ class APIEmbedding(Embedding):
         {"embeddings": [...]}
         {"data": [{"embedding": [...]}, ...]}
     """
+
     _EMBEDDING_SSL_VERIFY = "EMBEDDING_SSL_VERIFY"
     _EMBEDDING_SSL_CERT = "EMBEDDING_SSL_CERT"
 
@@ -63,7 +64,7 @@ class APIEmbedding(Embedding):
         if url_is_https:
             is_ssl_verify_off = SslUtils._bool_env(self._EMBEDDING_SSL_VERIFY, ["false"])
             ssl_cert = os.getenv(self._EMBEDDING_SSL_CERT)
-            
+
             # If SSL verification is disabled, use False
             if is_ssl_verify_off:
                 self._verify_ssl = False
@@ -100,8 +101,7 @@ class APIEmbedding(Embedding):
     async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
         if not text.strip():
             raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg="Empty text provided for embedding"
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text provided for embedding"
             )
         embeddings = await self._get_embeddings(text, **kwargs)
         return embeddings[0]
@@ -110,8 +110,7 @@ class APIEmbedding(Embedding):
         """Embed a single query text (sync version)."""
         if not text.strip():
             raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg="Empty text provided for embedding"
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text provided for embedding"
             )
         embeddings = self._get_embeddings_sync(text, **kwargs)
         return embeddings[0]
@@ -123,10 +122,7 @@ class APIEmbedding(Embedding):
         **kwargs: Any,
     ) -> List[List[float]]:
         if not texts:
-            raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg="Empty texts list provided"
-            )
+            raise build_error(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty texts list provided")
         callback_cls = kwargs.pop("callback_cls", BaseCallback)
         if not isinstance(callback_cls, type) or not issubclass(callback_cls, BaseCallback):
             raise build_error(
@@ -134,19 +130,18 @@ class APIEmbedding(Embedding):
                 error_msg=(
                     f"callback_cls in APIEmbedding.embed_documents must be a subclass of "
                     f"BaseCallback, got {type(callback_cls)}"
-                )
+                ),
             )
 
         non_empty = [t for t in texts if t.strip()]
         if len(non_empty) != len(texts):
             raise build_error(
                 StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg=f"{len(texts) - len(non_empty)} chunks are empty while embedding"
+                error_msg=f"{len(texts) - len(non_empty)} chunks are empty while embedding",
             )
         if not non_empty:
             raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg="All texts are empty after filtering"
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="All texts are empty after filtering"
             )
         # Respect caller batch_size but never exceed configured max_batch_size
         bsz = batch_size or self.max_batch_size or 1
@@ -195,12 +190,12 @@ class APIEmbedding(Embedding):
                     if not embeddings:
                         raise build_error(
                             StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID,
-                            error_msg=f"No embeddings field found in data items: {result}"
+                            error_msg=f"No embeddings field found in data items: {result}",
                         )
                 else:
                     raise build_error(
                         StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID,
-                        error_msg=f"No embeddings in response: {result}"
+                        error_msg=f"No embeddings in response: {result}",
                     )
 
                 # If dimension not yet determined, get from result and cache
@@ -214,7 +209,7 @@ class APIEmbedding(Embedding):
                     raise build_error(
                         StatusCode.RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED,
                         error_msg=f"Failed to get embedding after {self.max_retries} attempts",
-                        cause=e
+                        cause=e,
                     ) from e
                 logger.warning(
                     "Embedding request failed (attempt %s/%s): %s",
@@ -223,8 +218,7 @@ class APIEmbedding(Embedding):
                     e,
                 )
         raise build_error(
-            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED,
-            error_msg="Unreachable code in _get_embeddings"
+            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED, error_msg="Unreachable code in _get_embeddings"
         )
 
     def _get_embeddings_sync(self, text: str | List[str], **kwargs) -> List[List[float]]:
@@ -259,12 +253,12 @@ class APIEmbedding(Embedding):
                     if not embeddings:
                         raise build_error(
                             StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID,
-                            error_msg=f"No embeddings field found in data items: {result}"
+                            error_msg=f"No embeddings field found in data items: {result}",
                         )
                 else:
                     raise build_error(
                         StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID,
-                        error_msg=f"No embeddings in response: {result}"
+                        error_msg=f"No embeddings in response: {result}",
                     )
 
                 # Cache dimension if not yet determined
@@ -278,7 +272,7 @@ class APIEmbedding(Embedding):
                     raise build_error(
                         StatusCode.RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED,
                         error_msg=f"Failed to get embedding after {self.max_retries} attempts",
-                        cause=e
+                        cause=e,
                     ) from e
                 logger.warning(
                     "Embedding request failed (attempt %s/%s): %s",
@@ -287,6 +281,5 @@ class APIEmbedding(Embedding):
                     e,
                 )
         raise build_error(
-            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED,
-            error_msg="Unreachable code in _get_embeddings_sync"
+            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED, error_msg="Unreachable code in _get_embeddings_sync"
         )

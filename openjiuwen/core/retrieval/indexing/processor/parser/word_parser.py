@@ -1,15 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import os
 import asyncio
+import os
 from typing import Any, Optional
+
 from docx import Document
 from docx.oxml.ns import qn
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import register_parser
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 
 
 @register_parser([".docx", ".DOCX"])

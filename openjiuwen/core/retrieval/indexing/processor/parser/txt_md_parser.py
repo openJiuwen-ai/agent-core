@@ -7,8 +7,8 @@ import aiofiles
 from charset_normalizer import detect
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import register_parser
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 
 
 @register_parser([".txt", ".TXT", ".md", ".MD", ".markdown", ".MARKDOWN"])
@@ -37,9 +37,7 @@ class TxtMdParser(Parser):
                 else:
                     encoding = "utf-8"
 
-            async with aiofiles.open(
-                file_path, "r", encoding=encoding, errors="ignore"
-            ) as f:
+            async with aiofiles.open(file_path, "r", encoding=encoding, errors="ignore") as f:
                 content = await f.read()
 
             return content.strip() if content else None

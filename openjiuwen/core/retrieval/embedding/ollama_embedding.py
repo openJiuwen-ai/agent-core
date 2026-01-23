@@ -10,10 +10,9 @@ from typing import Any, List, Optional
 
 import requests
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
 from openjiuwen.core.retrieval.embedding.base import Embedding
@@ -88,13 +87,13 @@ class OllamaEmbedding(Embedding):
                 raise build_error(
                     StatusCode.RETRIEVAL_EMBEDDING_MODEL_NOT_FOUND,
                     error_msg=f"Model '{self.model_name}' not found in available models: {model_names}. "
-                    f"Make sure to pull the model first: ollama pull {self.model_name}"
+                    f"Make sure to pull the model first: ollama pull {self.model_name}",
                 )
         except requests.exceptions.RequestException as e:
             raise build_error(
                 StatusCode.RETRIEVAL_EMBEDDING_CALL_FAILED,
                 error_msg=f"Could not connect to Ollama at {self.base_url}. Is Ollama running?",
-                cause=e
+                cause=e,
             ) from e
 
     @property
@@ -123,8 +122,7 @@ class OllamaEmbedding(Embedding):
     async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
         if not text.strip():
             raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg="Empty text provided for embedding"
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text provided for embedding"
             )
 
         embeddings = await self._get_ollama_embedding(text, **kwargs)
@@ -137,10 +135,7 @@ class OllamaEmbedding(Embedding):
         **kwargs: Any,
     ) -> List[List[float]]:
         if not texts:
-            raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg="Empty texts list provided"
-            )
+            raise build_error(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty texts list provided")
         callback_cls = kwargs.pop("callback_cls", BaseCallback)
         if not isinstance(callback_cls, type) or not issubclass(callback_cls, BaseCallback):
             raise build_error(
@@ -148,7 +143,7 @@ class OllamaEmbedding(Embedding):
                 error_msg=(
                     f"callback_cls in OllamaEmbedding.embed_documents must be a subclass of "
                     f"BaseCallback, got {type(callback_cls)}"
-                )
+                ),
             )
 
         # Filter out empty texts
@@ -156,13 +151,12 @@ class OllamaEmbedding(Embedding):
         if len(non_empty_texts) != len(texts):
             raise build_error(
                 StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg=f"{len(texts) - len(non_empty_texts)} chunks are empty while embedding"
+                error_msg=f"{len(texts) - len(non_empty_texts)} chunks are empty while embedding",
             )
 
         if not non_empty_texts:
             raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg="All texts are empty after filtering"
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="All texts are empty after filtering"
             )
 
         # Process in batches if batch_size is specified
@@ -190,8 +184,7 @@ class OllamaEmbedding(Embedding):
 
         if not text:
             raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg="Empty text or list provided for embedding"
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text or list provided for embedding"
             )
 
         payload = {
@@ -215,7 +208,7 @@ class OllamaEmbedding(Embedding):
                 if "embeddings" not in result:
                     raise build_error(
                         StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID,
-                        error_msg=f"No embeddings in response: {result}"
+                        error_msg=f"No embeddings in response: {result}",
                     )
 
                 return result["embeddings"]
@@ -225,11 +218,10 @@ class OllamaEmbedding(Embedding):
                     raise build_error(
                         StatusCode.RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED,
                         error_msg=f"Failed to get embedding after {self.max_retries} attempts",
-                        cause=e
+                        cause=e,
                     ) from e
                 logger.warning(f"Attempt {attempt + 1} failed, retrying: {e}")
 
         raise build_error(
-            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED,
-            error_msg="This should never be reached"
+            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED, error_msg="This should never be reached"
         )

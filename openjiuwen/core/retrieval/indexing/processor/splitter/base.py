@@ -7,12 +7,12 @@ Provides unified interface for text splitting, subclasses need to implement spec
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Tuple, Callable, Optional, Any
+from typing import Any, Callable, List, Optional, Tuple
 
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.retrieval.common.document import Document, TextChunk
 
 
 class Splitter(ABC):
@@ -37,17 +37,17 @@ class Splitter(ABC):
         if chunk_size <= 0:
             raise build_error(
                 StatusCode.RETRIEVAL_INDEXING_CHUNK_SIZE_INVALID,
-                error_msg=f"chunk_size must be greater than 0, current value: {chunk_size}"
+                error_msg=f"chunk_size must be greater than 0, current value: {chunk_size}",
             )
         if chunk_overlap < 0:
             raise build_error(
                 StatusCode.RETRIEVAL_INDEXING_CHUNK_OVERLAP_INVALID,
-                error_msg=f"chunk_overlap must be greater than or equal to 0, current value: {chunk_overlap}"
+                error_msg=f"chunk_overlap must be greater than or equal to 0, current value: {chunk_overlap}",
             )
         if chunk_overlap >= chunk_size:
             raise build_error(
                 StatusCode.RETRIEVAL_INDEXING_CHUNK_OVERLAP_INVALID,
-                error_msg=f"chunk_overlap ({chunk_overlap}) must be less than chunk_size ({chunk_size})"
+                error_msg=f"chunk_overlap ({chunk_overlap}) must be less than chunk_size ({chunk_size})",
             )
 
         self.chunk_size = chunk_size
@@ -84,7 +84,7 @@ class Splitter(ABC):
         if not (hasattr(tokenizer, "encode") or callable(tokenizer)):
             raise build_error(
                 StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR,
-                error_msg="Tokenizer must have encode method or be callable"
+                error_msg="Tokenizer must have encode method or be callable",
             )
 
     @abstractmethod
@@ -98,7 +98,6 @@ class Splitter(ABC):
         Returns:
             List of chunks, each element is (text, start char position, end char position)
         """
-        pass
 
     def get_nodes_from_documents(self, docs: List[Document]) -> List[TextChunk]:
         """

@@ -6,9 +6,9 @@ from typing import Any, Dict, List, Optional
 
 import tiktoken
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
 from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
@@ -66,7 +66,7 @@ class TextChunker(Chunker):
                 if tiktoken is None:
                     raise build_error(
                         StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR,
-                        error_msg="chunk_unit='token' requires embed_model with tokenizer or tiktoken to be installed"
+                        error_msg="chunk_unit='token' requires embed_model with tokenizer or tiktoken to be installed",
                     )
                 try:
                     tokenizer = tiktoken.get_encoding("cl100k_base")
@@ -75,7 +75,7 @@ class TextChunker(Chunker):
                     raise build_error(
                         StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR,
                         error_msg=f"Failed to load tokenizer for token-based chunking: {exc}",
-                        cause=exc
+                        cause=exc,
                     ) from exc
 
             # Check if chunk_size needs adjustment

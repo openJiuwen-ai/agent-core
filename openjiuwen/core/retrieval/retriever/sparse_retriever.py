@@ -6,14 +6,13 @@ Sparse Retriever Implementation
 Sparse retriever based on BM25.
 """
 
-from typing import Any, List, Optional, Dict
-from typing import Literal
+from typing import Any, List, Literal, Optional
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.exception.codes import StatusCode
 
 
 class SparseRetriever(Retriever):
@@ -56,7 +55,7 @@ class SparseRetriever(Retriever):
         if mode != "sparse":
             raise build_error(
                 StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT,
-                error_msg=f"SparseRetriever only supports 'sparse' mode, got {mode}"
+                error_msg=f"SparseRetriever only supports 'sparse' mode, got {mode}",
             )
 
         # Execute sparse search

@@ -10,9 +10,9 @@ import asyncio
 import json
 from typing import Any, List
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.common.triple import Triple
 from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
@@ -122,10 +122,7 @@ class TripleExtractor(Extractor):
                 f"Recent Failed chunks: {', '.join(failed_chunks[:5])}{'...' if len(failed_chunks) > 5 else ''}. "
                 f"This may be due to rate limiting, API errors, or model issues."
             )
-            raise build_error(
-                StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
-                error_msg=error_msg
-            )
+            raise build_error(StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR, error_msg=error_msg)
 
         return all_triples
 

@@ -8,14 +8,13 @@ Uses plugin architecture, supports registering new file format parsers via decor
 """
 
 import os
-from typing import Dict, List, Any, Type, Callable
+from typing import Any, Callable, Dict, List, Type
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import Document
-
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 
 # Global parser registry
 _PARSER_REGISTRY: Dict[str, Callable[[], Parser]] = {}
@@ -61,9 +60,9 @@ class AutoFileParser(Parser):
         """Ensure all parsers are loaded and registered"""
         # Dynamically import all parser modules to trigger decorator execution
         try:
+            from openjiuwen.core.retrieval.indexing.processor.parser.json_parser import JSONParser
             from openjiuwen.core.retrieval.indexing.processor.parser.pdf_parser import PDFParser
             from openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser import TxtMdParser
-            from openjiuwen.core.retrieval.indexing.processor.parser.json_parser import JSONParser
             from openjiuwen.core.retrieval.indexing.processor.parser.word_parser import WordParser
         except ImportError as e:
             logger.warning(f"Failed to import some parser modules: {e}")
@@ -85,10 +84,7 @@ class AutoFileParser(Parser):
             ValueError: Unsupported file format
         """
         if not os.path.exists(doc):
-            raise build_error(
-                StatusCode.RETRIEVAL_INDEXING_FILE_NOT_FOUND,
-                error_msg=f"File {doc} does not exist"
-            )
+            raise build_error(StatusCode.RETRIEVAL_INDEXING_FILE_NOT_FOUND, error_msg=f"File {doc} does not exist")
 
         # Get file extension
         file_ext = os.path.splitext(doc)[-1].lower()
@@ -97,7 +93,7 @@ class AutoFileParser(Parser):
         if file_ext not in _PARSER_REGISTRY:
             raise build_error(
                 StatusCode.RETRIEVAL_INDEXING_FORMAT_NOT_SUPPORT,
-                error_msg=f"Unsupported format: {file_ext}, only {list(_PARSER_REGISTRY.keys())} are supported"
+                error_msg=f"Unsupported format: {file_ext}, only {list(_PARSER_REGISTRY.keys())} are supported",
             )
 
         # Get corresponding parser instance

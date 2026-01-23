@@ -7,19 +7,19 @@ Responsible for building, updating and deleting ChromaDB indices.
 """
 
 import asyncio
-from typing import Any, List, Literal, Optional, Dict
+from typing import Any, Dict, List, Literal, Optional
+
 import chromadb
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
+from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback, TqdmCallback
-from openjiuwen.core.retrieval.common.config import IndexConfig
+from openjiuwen.core.retrieval.common.config import IndexConfig, VectorStoreConfig
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
-from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 
 
 class ChromaIndexer(Indexer):
@@ -54,8 +54,7 @@ class ChromaIndexer(Indexer):
         """
         if not chroma_path or not chroma_path.strip():
             raise build_error(
-                StatusCode.RETRIEVAL_INDEXING_PATH_NOT_FOUND,
-                error_msg="chroma_path is required and cannot be empty"
+                StatusCode.RETRIEVAL_INDEXING_PATH_NOT_FOUND, error_msg="chroma_path is required and cannot be empty"
             )
 
         self.chroma_path = chroma_path
@@ -75,7 +74,7 @@ class ChromaIndexer(Indexer):
             case _:
                 raise build_error(
                     StatusCode.RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID,
-                    error_msg=f'expecting one of ["cosine", "euclidean", "dot"], but got "{distance_metric}"'
+                    error_msg=f'expecting one of ["cosine", "euclidean", "dot"], but got "{distance_metric}"',
                 )
         self.doc_index_callback = doc_index_callback
         if not isinstance(doc_index_callback, type) or not issubclass(doc_index_callback, BaseCallback):
@@ -84,7 +83,7 @@ class ChromaIndexer(Indexer):
                 error_msg=(
                     f"doc_index_callback in ChromaIndexer must be a subclass of BaseCallback, "
                     f"got {type(doc_index_callback)}"
-                )
+                ),
             )
 
         self._client = ChromaVectorStore.create_client(
@@ -137,7 +136,7 @@ class ChromaIndexer(Indexer):
                 raise build_error(
                     StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR,
                     error_msg="some documents with same doc_id already exist, if they are the same documents, "
-                    f"please consider updating instead of adding. {duplicate_doc_ids=}"
+                    f"please consider updating instead of adding. {duplicate_doc_ids=}",
                 )
 
             # If vector index is needed, generate embeddings
@@ -146,7 +145,7 @@ class ChromaIndexer(Indexer):
                 if not embed_model:
                     raise build_error(
                         StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND,
-                        error_msg="embed_model is required for vector/hybrid index type"
+                        error_msg="embed_model is required for vector/hybrid index type",
                     )
                 texts = [chunk.text for chunk in chunks]
                 embeddings = await embed_model.embed_documents(texts, callback_cls=self.doc_index_callback)
