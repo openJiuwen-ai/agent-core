@@ -1,10 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import uuid
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Union, AsyncIterator
 
 from openjiuwen.core.session import Config
 from openjiuwen.core.session.internal.wrapper import TaskSession
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.workflow import Session as WorkflowSession
 
 if TYPE_CHECKING:
@@ -36,6 +37,18 @@ class Session:
 
     def get_agent_description(self):
         return self._card.description
+
+    async def write_stream(self, data: Union[dict, OutputSchema]):
+        await self._inner.write_stream(data)
+
+    async def write_custom_stream(self, data: dict):
+        await self._inner.write_custom_stream(data)
+
+    def stream_iterator(self) -> AsyncIterator[Any]:
+        return self._inner.stream_iterator()
+
+    async def post_run(self):
+        await self._inner.post_run()
 
     def create_workflow_session(self) -> WorkflowSession:
         return WorkflowSession(parent=self, session_id=self.get_session_id())

@@ -227,7 +227,7 @@ class Runner:
                 yield chunk
         elif isinstance(agent_instance, BaseAgent):
             # ControllerAgent handles its own session lifecycle
-            async for chunk in agent_instance.stream(inputs, session=None):
+            async for chunk in agent_instance.stream(inputs, session=agent_session):
                 yield chunk
 
     async def run_agent_group(self,
