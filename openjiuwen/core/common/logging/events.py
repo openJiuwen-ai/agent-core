@@ -164,6 +164,7 @@ class BaseLogEvent:
     # Message and stack trace
     message: Optional[str] = None  # Log message content
     stacktrace: Optional[str] = None  # Stack trace information (for exceptions)
+    exception: Optional[str] = None  # Exception detail string
 
     # Extended fields
     metadata: Dict[str, Any] = field(default_factory=dict)

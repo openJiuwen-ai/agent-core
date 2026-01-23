@@ -7,15 +7,12 @@ import aiohttp
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage,
     AssistantMessage,
-    UserMessage,
-    SystemMessage,
-    ToolMessage,
     UsageMetadata
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -151,21 +148,63 @@ class SiliconFlowModelClient(BaseModelClient):
         )
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
-        logger.info(f"Request params: {params}")
+        llm_logger.info(
+            "LLM request params ready.",
+            event_type=LogEventType.LLM_CALL_START,
+            model_name=params.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=params.get("messages"),
+            tools=params.get("tools"),
+            temperature=params.get("temperature"),
+            top_p=params.get("top_p"),
+            max_tokens=params.get("max_tokens"),
+            is_stream=False
+        )
 
         try:
             async with self._apost(params, timeout=timeout) as response:
                 data = await response.json()
-                logger.info(f"SiliconFlow API response: {data}")
+                llm_logger.info(
+                    "SiliconFlow API response received.",
+                    event_type=LogEventType.LLM_CALL_END,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    messages=params.get("messages"),
+                    tools=params.get("tools"),
+                    temperature=params.get("temperature"),
+                    top_p=params.get("top_p"),
+                    max_tokens=params.get("max_tokens"),
+                    is_stream=False,
+                    metadata={"response": data}
+                )
 
                 # Parse response and apply output parser
-                logger.info(f"Before parse response with output parser, output_parser: {output_parser}")
+                llm_logger.info(
+                    "Before parse response with output parser.",
+                    event_type=LogEventType.LLM_CALL_END,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=False,
+                    metadata={"output_parser": str(output_parser)}
+                )
                 assistant_message = await self._parse_response(data, output_parser)
 
                 return assistant_message
                     
         except Exception as e:
-            logger.error(f"SiliconFlow API async invoke error: {e}")
+            llm_logger.error(
+                "SiliconFlow API async invoke error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=False,
+                exception=str(e)
+            )
             raise JiuWenBaseException(
                 error_code=StatusCode.MODEL_CALL_FAILED.code,
                 message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
@@ -236,7 +275,19 @@ class SiliconFlowModelClient(BaseModelClient):
                                 yield parsed_chunk
                                     
         except Exception as e:
-            logger.error(f"SiliconFlow API async stream error: {e}")
+            llm_logger.error(
+                "SiliconFlow API async stream error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=True,
+                exception=str(e)
+            )
             raise JiuWenBaseException(
                 error_code=StatusCode.MODEL_CALL_FAILED.code,
                 message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
@@ -278,7 +329,14 @@ class SiliconFlowModelClient(BaseModelClient):
                                 parser_content = current_parsed_result
                                 accumulated_content = ""  # Clear buffer to implement incremental output
                         except Exception as e:
-                            logger.debug(f"Stream parser attempt: {e}")
+                            llm_logger.debug(
+                                "Stream parser attempt error.",
+                                event_type=LogEventType.LLM_CALL_ERROR,
+                                model_name=self.model_config.model_name,
+                                model_provider=self.model_client_config.client_provider,
+                                is_stream=True,
+                                exception=str(e)
+                            )
                             parser_content = None
                     
                     # Create new chunk with original content and parser_content
@@ -360,14 +418,42 @@ class SiliconFlowModelClient(BaseModelClient):
         
         # Apply output parser (only parse content field)
         parser_content = None
-        logger.info(f"Before parse content with parser, content: {content}")
-        logger.info(f"Before parse content with parser, parser: {parser}")
+        llm_logger.info(
+            "Before parse content with parser.",
+            event_type=LogEventType.LLM_CALL_END,
+            model_name=self.model_config.model_name,
+            model_provider=self.model_client_config.client_provider,
+            response_content=content,
+            is_stream=False
+        )
+        llm_logger.info(
+            "Before parse content with parser config.",
+            event_type=LogEventType.LLM_CALL_END,
+            model_name=self.model_config.model_name,
+            model_provider=self.model_client_config.client_provider,
+            is_stream=False,
+            metadata={"parser": str(parser)}
+        )
         if parser and content:
             try:
                 parser_content = await parser.parse(content)
-                logger.info(f"Parser parse success, parsed content: {parser_content}")
+                llm_logger.info(
+                    "Parser parse success.",
+                    event_type=LogEventType.LLM_CALL_END,
+                    model_name=self.model_config.model_name,
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=False,
+                    metadata={"parser_content": parser_content}
+                )
             except Exception as e:
-                logger.warning(f"Parser parse error: {e}")
+                llm_logger.warning(
+                    "Parser parse error.",
+                    event_type=LogEventType.LLM_CALL_ERROR,
+                    model_name=self.model_config.model_name,
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=False,
+                    exception=str(e)
+                )
                 parser_content = None
         
         return AssistantMessage(
@@ -453,7 +539,14 @@ class SiliconFlowModelClient(BaseModelClient):
         except json.JSONDecodeError:
             return None
         except Exception as e:
-            logger.warning(f"Error parsing stream chunk: {e}")
+            llm_logger.warning(
+                "Error parsing stream chunk.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                exception=str(e)
+            )
             return None
 
     def _sanitize_tool_calls(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
