@@ -7,12 +7,12 @@ import time
 from datetime import datetime, timezone
 import pytest
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
-from tests.unit_tests.core.memory.store.mock_kv_store import MockKVStore
+from openjiuwen.core.foundation.store.in_memory_kv_store import InMemoryKVStore
 
 
 @pytest.fixture
 def store():
-    kv_store = MockKVStore()
+    kv_store = InMemoryKVStore()
     store = UserMemStore(kv_store_instance=kv_store)
     yield store
 

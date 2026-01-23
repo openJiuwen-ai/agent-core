@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from sqlalchemy.ext.asyncio import AsyncEngine
-from openjiuwen.core.memory.store.base_db_store import BaseDbStore
+from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
 
 
 class DefaultDbStore(BaseDbStore):

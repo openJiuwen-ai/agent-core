@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
 from typing import Any
-from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
+from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 from openjiuwen.core.common.exception.codes import StatusCode

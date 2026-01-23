@@ -6,7 +6,7 @@ import shutil
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from openjiuwen.core.memory.store.impl.default_kv_store import DefaultKVStore
+from openjiuwen.core.foundation.store.db_based_kv_store import DbBasedKVStore
 
 
 @pytest.fixture(name="kv_store")
@@ -20,7 +20,7 @@ def get_default_kv_store():
         pool_pre_ping=True,
         echo=False,
     )
-    kv_store = DefaultKVStore(engine)
+    kv_store = DbBasedKVStore(engine)
     yield kv_store
 
     shutil.rmtree(resource_dir)

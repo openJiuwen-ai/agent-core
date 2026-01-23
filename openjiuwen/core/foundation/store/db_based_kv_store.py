@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
+from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 
 
 class Base(DeclarativeBase):
@@ -29,7 +29,7 @@ class KVStoreTable(Base):
     value = Column(String, nullable=False)
 
 
-class DefaultKVStore(BaseKVStore):
+class DbBasedKVStore(BaseKVStore):
     def __init__(self, engine: AsyncEngine):
         self.engine = engine
         self.async_session = async_sessionmaker(

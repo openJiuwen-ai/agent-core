@@ -5,7 +5,7 @@ from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
 
-from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
+from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 

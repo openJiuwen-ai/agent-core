@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 
-from openjiuwen.core.memory.store import BaseDbStore
+from openjiuwen.core.foundation.store import BaseDbStore
 
 logger = logging.getLogger(__name__)
 

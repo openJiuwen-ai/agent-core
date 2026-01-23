@@ -9,10 +9,10 @@ from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
 from openjiuwen.core.memory.store.impl.memory_chroma_vector_store import MemoryChromaVectorStore
-from tests.unit_tests.core.memory.store.mock_kv_store import MockKVStore
+from openjiuwen.core.foundation.store.in_memory_kv_store import InMemoryKVStore
 # from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.memory.store.impl.default_db_store import DefaultDbStore
+from openjiuwen.core.foundation.store.default_db_store import DefaultDbStore
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, AgentMemoryConfig, MemoryScopeConfig
 from openjiuwen.core.common.schema.param import Param
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
@@ -38,7 +38,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         )
 
         # ---------- KV Store ----------
-        kv_store = MockKVStore
+        kv_store = InMemoryKVStore
 
         # ---------- vector_store ----------
         # vector_store = MemoryMilvusVectorStore(

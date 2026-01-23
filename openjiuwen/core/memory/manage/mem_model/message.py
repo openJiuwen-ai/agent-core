@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from sqlalchemy import Column, String
 from sqlalchemy.orm import declarative_mixin, declarative_base
-from openjiuwen.core.memory.store.base_db_store import BaseDbStore
+from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
 
 
 Base = declarative_base()

@@ -7,7 +7,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import VariableUnit
-from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
+from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 
 
 class VariableManager(BaseMemoryManager):

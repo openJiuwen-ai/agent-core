@@ -18,8 +18,8 @@ from openjiuwen.core.memory.manage.index.write_manager import WriteManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, MemoryType
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.search.search_manager import SearchManager, SearchParams
-from openjiuwen.core.memory.store.base_db_store import BaseDbStore
-from openjiuwen.core.memory.store.base_kv_store import BaseKVStore
+from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
+from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.manage.mem_model.message import create_tables
 from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
