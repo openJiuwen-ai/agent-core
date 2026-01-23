@@ -67,6 +67,11 @@ CHANGED_FILES := $(foreach file,$(CHANGES_RAW),$(call quote-path,$(file)))
 
 # Detect uv
 UV_EXISTS := $(strip $(shell uv --version >$(NULL) 2>&1 && echo yes))
+ifeq ($(UV_EXISTS),yes)
+	RUN_CMD ?=
+else
+	RUN_CMD ?= $(PYTHON) -m 
+endif
 
 help:
 	@echo Usage: make [target] [COMMITS=N] $(BLANK)
@@ -93,7 +98,7 @@ ifeq ($(UV_EXISTS),yes)
 	@uv pip install $(DEPENDENCIES)
 else
 	@echo [Makefile] Installing dependencies via pip
-	@python -m pip install $(DEPENDENCIES)
+	@$(RUN_CMD)pip install $(DEPENDENCIES)
 endif
 
 
@@ -106,7 +111,7 @@ update:
 test:
 	@echo NOTE: To supply arguments to pytest (for example, to use pytest-xdist), try running
 	@echo $(START)  > make test TESTFLAGS=$(DQ)...$(DQ)$(END)
-	@pytest $(TESTFLAGS)
+	@$(RUN_CMD)pytest $(TESTFLAGS)
 
 # Sanity check - fails if there are no selected Python files
 has-staged-changes:
@@ -119,27 +124,27 @@ ifeq ($(strip $(CHANGES_RAW)),)
 endif
 
 format: has-staged-changes
-	-@ruff check --select I $(CHANGED_FILES)
-	-@ruff format --check $(CHANGED_FILES)
+	-@$(RUN_CMD)ruff check --select I $(CHANGED_FILES)
+	-@$(RUN_CMD)ruff format --check $(CHANGED_FILES)
 
 lint: has-staged-changes
-	-@ruff check --show-fixes $(CHANGED_FILES)
+	-@$(RUN_CMD)ruff check --show-fixes $(CHANGED_FILES)
 
 pylint: has-staged-changes
-	-@pylint $(CHANGED_FILES)
+	-@$(RUN_CMD)pylint $(CHANGED_FILES)
 
 spelling: has-staged-changes
-	-@codespell $(CHANGED_FILES)
+	-@$(RUN_CMD)codespell $(CHANGED_FILES)
 
 fix-format: has-staged-changes
-	-@ruff check --select I --fix $(CHANGED_FILES)
-	-@ruff format $(CHANGED_FILES)
+	-@$(RUN_CMD)ruff check --select I --fix $(CHANGED_FILES)
+	-@$(RUN_CMD)ruff format $(CHANGED_FILES)
 
 fix-lint: has-staged-changes
-	-@ruff check --fix $(CHANGED_FILES)
+	-@$(RUN_CMD)ruff check --fix $(CHANGED_FILES)
 
 type-check: has-staged-changes
-	-@mypy $(CHANGED_FILES)
+	-@$(RUN_CMD)mypy $(CHANGED_FILES)
 
 check: has-staged-changes
 	@echo $(LINESEP)
