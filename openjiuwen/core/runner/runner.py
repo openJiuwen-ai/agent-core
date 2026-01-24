@@ -5,7 +5,7 @@ from typing import Optional, Union, Any
 
 from openjiuwen.core.multi_agent import BaseGroup
 from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
-from openjiuwen.core.single_agent import BaseAgentAlias as BaseAgent
+from openjiuwen.core.single_agent import BaseAgent, LegacyBaseAgent
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
@@ -174,7 +174,7 @@ class Runner:
             yield chunk
 
     async def run_agent(self,
-                        agent: str | BaseAgent,
+                        agent: str | BaseAgent | LegacyBaseAgent,
                         inputs: Any,
                         *,
                         session: Optional[str | Session] = None,
@@ -194,7 +194,7 @@ class Runner:
         agent_instance, agent_session = await self._prepare_agent(agent, inputs)
         if isinstance(agent_instance, RemoteAgent):
             res = await agent_instance.invoke(inputs)
-        elif isinstance(agent_instance, BaseAgent):
+        elif isinstance(agent_instance, LegacyBaseAgent):
             # ControllerAgent handles its own session lifecycle
             res = await agent_instance.invoke(inputs, session=None)
         else:
@@ -203,7 +203,7 @@ class Runner:
         return res
 
     async def run_agent_streaming(self,
-                                  agent: str | BaseAgent,
+                                  agent: str | BaseAgent | LegacyBaseAgent,
                                   inputs: Any,
                                   *,
                                   session: Optional[str | Session] = None,
@@ -225,10 +225,14 @@ class Runner:
         if isinstance(agent_instance, RemoteAgent):
             async for chunk in agent_instance.stream(inputs):
                 yield chunk
-        elif isinstance(agent_instance, BaseAgent):
+        elif isinstance(agent_instance, LegacyBaseAgent):
             # ControllerAgent handles its own session lifecycle
+            async for chunk in agent_instance.stream(inputs, session=None):
+                yield chunk
+        else:
             async for chunk in agent_instance.stream(inputs, session=agent_session):
                 yield chunk
+            await getattr(agent_session, "_inner").post_run()
 
     async def run_agent_group(self,
                               agent_group: str | BaseGroup,
