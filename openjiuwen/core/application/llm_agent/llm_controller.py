@@ -9,7 +9,7 @@ from typing import Dict, Optional, List, Any
 
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.single_agent.legacy import (
-    LegacyReActAgentConfig as ReActAgentConfig,
+    LegacyReActAgentConfig as ReActAgentConfig, PluginSchema,
 )
 from openjiuwen.core.controller import BaseController, Event, EventType, Task, TaskResult, TaskStatus
 from openjiuwen.core.controller.legacy.utils import MessageHandlerUtils
@@ -618,7 +618,10 @@ class LLMController(BaseController):
 
     async def _execute_plugin_task(self, task: Task, session: Session) -> TaskResult:
         """Execute plugin task - return result dictionary"""
-        tool = Runner.resource_mgr.get_tool(task.input.target_name)
+        tool = None
+        tool_id = self._find_plugin_id_by_name(task.input.target_name)
+        if tool_id:
+            tool = Runner.resource_mgr.get_tool(tool_id)
         if not tool:
             logger.error("Tool not found")
             raise build_error(
@@ -1446,3 +1449,11 @@ class LLMController(BaseController):
                     memory_scope_config.model_cfg is not None):
                 await self._long_term_memory_instance.set_scope_config(scope_id, memory_scope_config)
             self._memory_inited = True
+
+    def _find_plugin_id_by_name(self, tool_name: str) -> Optional[str]:
+        config = self.config
+        if hasattr(config, "plugins"):
+            for plugin in config.plugins:
+                if isinstance(plugin, PluginSchema) and tool_name == plugin.name:
+                    return plugin.id
+        return None
