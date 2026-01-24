@@ -34,10 +34,10 @@ pip install -U openjiuwen
 ```python
 import os
 import asyncio
-from openjiuwen.core.workflow import Start, End, LLMComponent, LLMCompConfig
+from openjiuwen.core.workflow import Start, End, LLMComponent, LLMCompConfig, generate_workflow_key
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
+from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig
 from openjiuwen.core.application.workflow_agent import WorkflowAgent
 from openjiuwen.core.workflow import Workflow, WorkflowCard
 
@@ -54,7 +54,7 @@ model_client_config = ModelClientConfig(
     client_provider=os.getenv("MODEL_PROVIDER"),
     api_key=os.getenv("API_KEY"),
     api_base=os.getenv("API_BASE"),
-    verify_ssl=os.getenv("VERIFY_SSL").lower() == "true"
+    verify_ssl=os.getenv("LLM_SSL_VERIFY").lower() == "true"
 )
 model_config = ModelRequestConfig(
     model=os.getenv("MODEL_NAME")
@@ -107,22 +107,18 @@ flow.set_end_comp("end", end, inputs_schema={"output": "${llm.output}"})
 flow.add_connection("start", "llm")
 flow.add_connection("llm", "end")
 
+Runner.resource_mgr.add_workflow(
+    WorkflowCard(id=generate_workflow_key(flow.card.id, flow.card.version)),
+    lambda: flow)
+
 # 创建并绑定Agent
-schema = WorkflowSchema(
-    id=flow.card.id,
-    name=flow.card.name,
-    version=flow.card.version,
-    description="第一个工作流",
-    inputs={"query": {"type": "string"}},
-)
 agent_config = WorkflowAgentConfig(
     id="hello_agent",
     version="0.1.1",
-    description="第一个Agent",
-    workflows=[schema],
+    description="第一个Agent"
 )
 workflow_agent = WorkflowAgent(agent_config)
-workflow_agent.bind_workflows([flow])
+workflow_agent.add_workflows([flow])
 
 
 # 运行Agent
