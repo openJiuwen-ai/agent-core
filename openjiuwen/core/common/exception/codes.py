@@ -434,6 +434,19 @@ class StatusCode(Enum):
     SCHEMA_VALIDATE_INVALID = (189001, "validate data with schema failed, reason={reason}, data={data}")
     SCHEMA_FORMAT_INVALID = (189002, "format data with schema failed, reason={reason}, data={data}")
 
+    # =========================
+    # SysOperation 190070–190079
+    # =========================
+
+    SYS_OPERATION_ADD_ERROR = (190070, "sys operation add failed, reason: {error_msg}")
+    SYS_OPERATION_REMOVE_ERROR = (190071, "sys operation remove failed, reason: {error_msg}")
+    SYS_OPERATION_GET_ERROR = (190072, "sys operation get failed, reason: {error_msg}")
+    SYS_OPERATION_CARD_PARAM_ERROR = (190073, "sys operation card param error, reason: {error_msg}")
+    SYS_OPERATION_FS_EXECUTION_ERROR = (190074, "file system operation failed, reason: {error_msg}")
+    SYS_OPERATION_SHELL_EXECUTION_ERROR = (190075, "shell operation failed, reason: {error_msg}")
+    SYS_OPERATION_CODE_EXECUTION_ERROR = (190076, "code operation failed, reason: {error_msg}")
+
+
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.
 

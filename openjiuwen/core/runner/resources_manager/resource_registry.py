@@ -7,6 +7,7 @@ from openjiuwen.core.runner.resources_manager.model_manager import ModelMgr
 from openjiuwen.core.runner.resources_manager.prompt_manager import PromptMgr
 from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
 from openjiuwen.core.runner.resources_manager.workflow_manager import WorkflowMgr
+from openjiuwen.core.runner.resources_manager.sys_operation_manager import SysOperationMgr
 
 
 class ResourceRegistry:
@@ -17,6 +18,7 @@ class ResourceRegistry:
         self._model_mgr = ModelMgr()
         self._agent_mgr: AgentMgr = AgentMgr()
         self._agent_group_mgr: AgentGroupMgr = AgentGroupMgr()
+        self._sys_operation_mgr: SysOperationMgr = SysOperationMgr()
 
     def remove_by_id(self, resource_id: str):
         if self.tool().remove_tool(resource_id):
@@ -30,6 +32,8 @@ class ResourceRegistry:
         if self.prompt().remove_prompt(resource_id):
             return
         if self.model().remove_model(resource_id):
+            return
+        if self.sys_operation().remove_sys_operation(resource_id):
             return
 
     def tool(self) -> ToolMgr:
@@ -49,3 +53,6 @@ class ResourceRegistry:
 
     def agent_group(self) -> AgentGroupMgr:
         return self._agent_group_mgr
+
+    def sys_operation(self) -> SysOperationMgr:
+        return self._sys_operation_mgr
