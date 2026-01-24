@@ -56,7 +56,6 @@ from openjiuwen.core.workflow.components.condition.number import NumberCondition
 from openjiuwen.core.session.workflow import Session, create_workflow_session
 
 
-
 _WORKFLOW_CLASSES = [
     "Workflow",
     "WorkflowCard",
@@ -97,8 +96,8 @@ _FLOW_RELATED_COMPONENTS = [
     "BranchComponent",
     "LoopComponent",
     "LoopGroup",
-    "BreakComponent",
-    "SetVariableComponent",
+    "LoopBreakComponent",
+    "LoopSetVariableComponent",
     "BranchRouter",
     "Branch",
 ]
