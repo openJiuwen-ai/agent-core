@@ -1,14 +1,20 @@
 # Cross-platform Makefile (Windows-friendly)
-.PHONY: help install update test has-staged-changes format lint pylint spelling fix-format fix-lint type-check check fix
-.DEFAULT_GOAL := help
+.PHONY: help dep install update test has-staged-changes format lint pylint spelling fix-format fix-lint type-check check fix
 
 # Less noisy
 MAKEFLAGS += --no-print-directory
 TESTFLAGS ?= .
-PYTHON ?= python
 
+PYTHON ?= python
+DEP ?=
 LINESEP := ------------------------------------------------------------------
-DEPENDENCIES := "ruff>=0.11.2" "pylint>=3.0.0" "mypy>=1.12.0" "types-requests" "codespell>=2.2.4"
+DEPENDENCIES := "ruff>=0.11.2" "pylint>=3.0.0" "mypy>=1.12.0" "types-requests" "codespell>=2.2.4" "pipdeptree"
+
+ifneq ($(DEP),)
+.DEFAULT_GOAL := dep
+else
+.DEFAULT_GOAL := help
+endif
 
 # SHELL = sh.exe / cmd.exe for PowerShell and cmd.exe on Windows, not anywhere else (even Git Bash)
 ifeq ($(filter cmd.exe sh.exe,$(SHELL)),$(SHELL))
@@ -66,20 +72,26 @@ endef
 CHANGED_FILES := $(foreach file,$(CHANGES_RAW),$(call quote-path,$(file)))
 
 # Detect uv
-UV_EXISTS := $(strip $(shell uv --version >$(NULL) 2>&1 && echo yes))
-ifeq ($(UV_EXISTS),yes)
-	RUN_CMD ?=
-else
-	RUN_CMD ?= $(PYTHON) -m 
+UV ?= $(strip $(shell uv --version >$(NULL) 2>&1 && echo yes || echo no))
+ifeq ($(UV),yes)
+	RUN_CMD ?= uv run
+	INSTALL_CMD := uv pip install
+else ifeq ($(UV),no)
+	RUN_CMD ?= $(PYTHON) -m
+	INSTALL_CMD := $(RUN_CMD) pip install
 endif
 
 help:
-	@echo Usage: make [target] [COMMITS=N] $(BLANK)
-	@echo If COMMITS=N is specified and greater than 0, check Python files changed in last N commits
-	@echo Otherwise the currently staged changes are checked $(BLANK)
+	-@echo $(START)Usage: make [target] [COMMITS=N] [UV=yes|no]$(END)$(BLANK)
+	@echo - If COMMITS=N is specified and greater than 0, check Python files changed in last N commits
+	@echo $(START)  Otherwise the currently staged changes are checked$(END)
+	@echo - If UV is set, it must be either yes or no, otherwise make will detect if uv is available
+	@echo - You can also use this Makefile to check what packages depends on a specific package
+	@echo $(START)  Example: make DEP=pydantic-core$(END)
+	@echo $(START)  Syntax:  make DEP=<package-name>$(END)$(BLANK)
 	@echo Available targets:
 	@echo $(START)    help       - Show this help message$(END)
-	@echo $(START)    install    - Install dependencies via uv or pip: ruff, pylint, mypy, codespell$(END)
+	@echo $(START)    install    - Install dependencies via uv or pip: ruff, pylint, mypy, codespell, pipdeptree$(END)
 	@echo $(START)    update     - Download latest version of this Makefile from gitcode.com/openJiuwen/agent-core$(END)
 	@echo $(START)    test       - Execute pytest, you can supply arguments via TESTFLAGS=$(DQ)...$(DQ)$(END)
 	@echo $(START)    format     - Check formatting of selected Python files via ruff$(END)
@@ -92,15 +104,22 @@ help:
 	@echo $(START)    check      - Run all checks: format, spelling, lint, pylint$(END)
 	@echo $(START)    fix        - Run all auto-fixes: fix-lint, fix-format$(END)
 
-install:
-ifeq ($(UV_EXISTS),yes)
-	@echo [Makefile] Installing dependencies via uv
-	@uv pip install $(DEPENDENCIES)
-else
-	@echo [Makefile] Installing dependencies via pip
-	@$(RUN_CMD)pip install $(DEPENDENCIES)
-endif
 
+dep:
+	@echo What packages depend on [$(DEP)]:
+	@$(RUN_CMD) pipdeptree --reverse --package $(DEP)
+
+install:
+ifeq ($(UV),yes)
+	@echo [Makefile] Installing dependencies via uv
+	@$(INSTALL_CMD) $(DEPENDENCIES)
+else ifeq ($(UV),no)
+	@echo [Makefile] Installing dependencies via pip
+	@$(INSTALL_CMD) $(DEPENDENCIES)
+else
+	@echo $(START)[Makefile] Unknown value for UV (yes/no): $(UV)$(END)
+	@$(FAIL_CMD)
+endif
 
 update:
 	@echo Downloading latest version of this Makefile from gitcode.com/openJiuwen/agent-core...
@@ -111,7 +130,7 @@ update:
 test:
 	@echo NOTE: To supply arguments to pytest (for example, to use pytest-xdist), try running
 	@echo $(START)  > make test TESTFLAGS=$(DQ)...$(DQ)$(END)
-	@$(RUN_CMD)pytest $(TESTFLAGS)
+	@$(RUN_CMD) pytest $(TESTFLAGS)
 
 # Sanity check - fails if there are no selected Python files
 has-staged-changes:
@@ -124,27 +143,27 @@ ifeq ($(strip $(CHANGES_RAW)),)
 endif
 
 format: has-staged-changes
-	-@$(RUN_CMD)ruff check --select I $(CHANGED_FILES)
-	-@$(RUN_CMD)ruff format --check $(CHANGED_FILES)
+	-@$(RUN_CMD) ruff check --select I $(CHANGED_FILES)
+	-@$(RUN_CMD) ruff format --check $(CHANGED_FILES)
 
 lint: has-staged-changes
-	-@$(RUN_CMD)ruff check --show-fixes $(CHANGED_FILES)
+	-@$(RUN_CMD) ruff check --show-fixes $(CHANGED_FILES)
 
 pylint: has-staged-changes
-	-@$(RUN_CMD)pylint $(CHANGED_FILES)
+	-@$(RUN_CMD) pylint $(CHANGED_FILES)
 
 spelling: has-staged-changes
-	-@$(RUN_CMD)codespell $(CHANGED_FILES)
+	-@$(RUN_CMD) codespell $(CHANGED_FILES)
 
 fix-format: has-staged-changes
-	-@$(RUN_CMD)ruff check --select I --fix $(CHANGED_FILES)
-	-@$(RUN_CMD)ruff format $(CHANGED_FILES)
+	-@$(RUN_CMD) ruff check --select I --fix $(CHANGED_FILES)
+	-@$(RUN_CMD) ruff format $(CHANGED_FILES)
 
 fix-lint: has-staged-changes
-	-@$(RUN_CMD)ruff check --fix $(CHANGED_FILES)
+	-@$(RUN_CMD) ruff check --fix $(CHANGED_FILES)
 
 type-check: has-staged-changes
-	-@$(RUN_CMD)mypy $(CHANGED_FILES)
+	-@$(RUN_CMD) mypy $(CHANGED_FILES)
 
 check: has-staged-changes
 	@echo $(LINESEP)
