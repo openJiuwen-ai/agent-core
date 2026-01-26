@@ -820,7 +820,7 @@ class FsOperation(BaseOperation):
             is_dir = p.is_dir()
             return FileSystemItem(
                 name=p.name, path=str(p), size=stat.st_size,
-                modified_time=str(datetime.fromtimestamp(stat.st_mtime)),
+                modified_time=str(datetime.datetime.fromtimestamp(stat.st_mtime)),
                 is_directory=is_dir, type=p.suffix if not is_dir else None,
             )
         except Exception:

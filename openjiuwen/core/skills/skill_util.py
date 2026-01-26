@@ -1,42 +1,43 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.skills.skill_manager import SkillManager
 from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
 
-if TYPE_CHECKING:
-    from openjiuwen.core.single_agent.agent import BaseAgent
-
-skill_prompt = PromptTemplate(
-    content='''To help you better complete tasks, the following skill knowledge is provided:
+SKILL_PROMPT_CONTENT = '''
+To help you better complete tasks, the following skill knowledge is provided:
 {{skills}}
 You can use the view_file tool to read the corresponding Skill.md file to obtain the relevant skill knowledge.
 '''
-)
+skill_prompt = PromptTemplate(content=SKILL_PROMPT_CONTENT)
 
 
 class SkillUtil:
     """Utility class for managing and working with skills.
-    
+
     This class provides a high-level interface for skill registration, tool management,
     and prompt generation. It combines SkillManager and SkillToolKit functionality.
     """
-    
+
     def __init__(self, sys_operation_id: str):
         """Initialize the skill utility.
-        
+
         Args:
             sys_operation_id: The system operation ID used for file and code operations.
         """
         self._skill_manager = SkillManager(sys_operation_id)
         self._skill_tool_kit = SkillToolKit(sys_operation_id)
 
+    def set_sys_operation_id(self, sys_operation_id: str) -> None:
+        self.skill_manager.set_sys_operation_id(sys_operation_id)
+        self.skill_tool_kit.sys_operation_id = sys_operation_id
+
     @property
     def skill_manager(self):
         """Get the skill manager instance.
-        
+
         Returns:
             SkillManager: The skill manager instance.
         """
@@ -45,32 +46,32 @@ class SkillUtil:
     @property
     def skill_tool_kit(self):
         """Get the skill tool kit instance.
-        
+
         Returns:
             SkillToolKit: The skill tool kit instance.
         """
         return self._skill_tool_kit
 
-    def register_skills(self, skill_path: str, agent: "BaseAgent", session_id: str = None) -> bool:
+    async def register_skills(self, skill_path: str, agent: "BaseAgent", session_id: str = None) -> bool:
         """Register skills and add skill tools to an agent.
-        
+
         This method registers the skill at the given path and adds all skill-related
         tools (view_file, execute_python_code, run_command) to the agent.
-        
+
         Args:
             skill_path: The path to the skill directory to register.
             agent: The agent to add skill tools to.
             session_id: The session ID for file operations. Defaults to None.
-            
+
         Returns:
             bool: True if registration was successful.
         """
         self._skill_tool_kit.add_skill_tools(agent)
-        self._skill_manager.register(Path(skill_path), session_id)
+        await self._skill_manager.register(Path(skill_path), session_id)
 
     def has_skill(self):
         """Check if any skills are registered.
-        
+
         Returns:
             bool: True if at least one skill is registered, False otherwise.
         """
@@ -78,7 +79,7 @@ class SkillUtil:
 
     def get_skill_prompt(self) -> str:
         """Generate a formatted prompt string containing information about all registered skills.
-        
+
         Returns:
             str: A formatted prompt string with skill information that can be used
                 to inform agents about available skills.
@@ -86,6 +87,9 @@ class SkillUtil:
         skills = self._skill_manager.get_all()
         skills_info = []
         for index, skill in enumerate(skills):
-            skills_info.append(f"{index}.Skill name: {skill.name}; Skill description: {skill.description}; Skill file "
-                               f"path: {skill.directory}")
+            skills_info.append(
+                f"{index}.Skill name: {skill.name}; "
+                f"Skill description: {skill.description}; "
+                f"Skill file path: {skill.directory}"
+            )
         return skill_prompt.format({"skills": "\n".join(skills_info)}).content

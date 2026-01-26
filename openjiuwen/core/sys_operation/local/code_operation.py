@@ -3,7 +3,7 @@
 import asyncio
 import os
 from typing import Optional, Dict, Any, Literal, AsyncIterator, Callable, List
-
+import sys
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation.base import BaseOperation, OperationMode
 from openjiuwen.core.sys_operation.registry import operation
@@ -14,7 +14,7 @@ from openjiuwen.core.sys_operation.result.code_operation_result import (
 )
 
 _SUPPORT_LANGUAGE_CMD_MAP: Dict[str, Callable[[str], List[str]]] = {
-    "python": lambda code: ["python", "-c", code],
+    "python": lambda code: [sys.executable, "-c", code],
     "javascript": lambda code: ["node", "-e", code]
 }
 

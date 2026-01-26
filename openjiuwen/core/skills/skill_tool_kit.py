@@ -1,57 +1,49 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import TYPE_CHECKING
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Optional
 
 from openjiuwen.core.foundation.tool import ToolCard, LocalFunction
 
-if TYPE_CHECKING:
-    from openjiuwen.core.runner import Runner
-    from openjiuwen.core.single_agent.agent import BaseAgent
-
 
 class SkillToolKit:
-    """Toolkit for creating and managing skill-related tools.
-    
-    This class provides methods to create various tools that can be used by agents
-    to interact with skills, such as viewing files, executing Python code, and
-    running shell commands.
-    """
-    
-    def __init__(self, sys_operation_id):
-        """Initialize the skill tool kit.
-        
-        Args:
-            sys_operation_id: The system operation ID used for file and code operations.
-        """
+    def __init__(self, sys_operation_id: str):
         self._sys_operation_id = sys_operation_id
+        self._runner = None
 
     @property
-    def sys_operation_id(self):
-        """Get the system operation ID.
-        
-        Returns:
-            str: The system operation ID.
-        """
+    def sys_operation_id(self) -> str:
         return self._sys_operation_id
 
     @sys_operation_id.setter
-    def sys_operation_id(self, sys_operation_id):
-        """Set the system operation ID.
-        
-        Args:
-            sys_operation_id: The new system operation ID.
-        """
+    def sys_operation_id(self, sys_operation_id: str):
         self._sys_operation_id = sys_operation_id
 
+    @staticmethod
+    async def _await_if_needed(val: Any) -> Any:
+        if asyncio.iscoroutine(val):
+            return await val
+        return val
+
+    def _get_sys_operation(self) -> Any:
+        if not self._sys_operation_id:
+            return None
+        from openjiuwen.core.runner.runner import Runner
+        return Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+
+    def set_runner(self, runner) -> None:
+        self._runner = runner
+
     def create_view_file_tool(self):
-        """Create a tool for viewing file contents.
-        
-        Returns:
-            LocalFunction: A tool function that can read and return file contents.
-        """
         view_file_tool_card = ToolCard(
             id="_internal_view_file",
             name="view_file",
-            description="View the contents of a file at the specified path",
+            description=(
+                "Given a file_path, reads and returns the file content stored at file_path. "
+                "Only reads text files (e.g. .md and .txt files), and does NOT read binary files "
+                "(e.g. .pdf, .xlsx, .ppt etc.)"
+            ),
             input_params={
                 "type": "object",
                 "properties": {
@@ -64,24 +56,27 @@ class SkillToolKit:
             }
         )
 
-        def view_file(file_path):
-            # 延迟导入以避免循环依赖
-            from openjiuwen.core.runner import Runner
-            sys_operation = Runner().resource_mgr.get_sys_operation(self._sys_operation_id)
-            res = sys_operation.code().read_file(file_path)
-            return str(res)
+        async def view_file(file_path: str):
+            sys_operation = self._get_sys_operation()
+            if sys_operation is None:
+                return "sys_operation is not available"
 
-        return LocalFunction(
-            card=view_file_tool_card,
-            func=view_file
-        )
+            fs = sys_operation.fs()
+            res = await self._await_if_needed(fs.read_file(file_path, mode="text"))
+
+            data = getattr(res, "data", None)
+            content = getattr(data, "content", None) if data is not None else None
+            if content is None:
+                content = res
+
+            if isinstance(content, (bytes, bytearray)):
+                return f"Binary file detected at {file_path}. Use execute_python_code to read it with pandas/openpyxl."
+
+            return str(content)
+
+        return LocalFunction(card=view_file_tool_card, func=view_file)
 
     def create_execute_python_code_tool(self):
-        """Create a tool for executing Python code.
-        
-        Returns:
-            LocalFunction: A tool function that can execute Python code blocks.
-        """
         execute_python_code_tool_card = ToolCard(
             id="_internal_execute_python_code",
             name="execute_python_code",
@@ -98,24 +93,27 @@ class SkillToolKit:
             }
         )
 
-        def execute_python_code(code_block):
-            # 延迟导入以避免循环依赖
-            from openjiuwen.core.runner import Runner
-            sys_operation = Runner().resource_mgr.get_sys_operation(self._sys_operation_id)
-            res = sys_operation.code().execute_code(code_block)
+        async def execute_python_code(code_block: str):
+            sys_operation = self._get_sys_operation()
+            if sys_operation is None:
+                return "sys_operation is not available"
+
+            code = sys_operation.code()
+            res = await self._await_if_needed(code.execute_code(code_block, language="python"))
+
+            data = getattr(res, "data", None)
+            if data is not None:
+                stdout = getattr(data, "stdout", None) or ""
+                stderr = getattr(data, "stderr", None) or ""
+                out = (stdout + ("\n" if stdout and stderr else "") + stderr).strip()
+                if out:
+                    return out
+
             return str(res)
 
-        return LocalFunction(
-            card=execute_python_code_tool_card,
-            func=execute_python_code
-        )
+        return LocalFunction(card=execute_python_code_tool_card, func=execute_python_code)
 
     def create_execute_command_tool(self):
-        """Create a tool for executing bash commands in a Linux terminal.
-        
-        Returns:
-            LocalFunction: A tool function that can execute bash commands.
-        """
         run_command_tool_card = ToolCard(
             id="_internal_run_command",
             name="run_command",
@@ -132,37 +130,35 @@ class SkillToolKit:
             }
         )
 
-        def run_command(code_block):
-            # 延迟导入以避免循环依赖
-            from openjiuwen.core.runner import Runner
-            sys_operation = Runner().resource_mgr.get_sys_operation(self._sys_operation_id)
-            res = sys_operation.code().execute_code(code_block)
+        async def run_command(bash_command: str):
+            sys_operation = self._get_sys_operation()
+            if sys_operation is None:
+                return "sys_operation is not available"
+
+            shell = sys_operation.shell()
+            res = await self._await_if_needed(shell.execute_cmd(bash_command))
+
+            data = getattr(res, "data", None)
+            if data is not None:
+                stdout = getattr(data, "stdout", None) or ""
+                stderr = getattr(data, "stderr", None) or ""
+                out = (stdout + ("\n" if stdout and stderr else "") + stderr).strip()
+                if out:
+                    return out
+
             return str(res)
 
-        return LocalFunction(
-            card=run_command_tool_card,
-            func=run_command
-        )
+        return LocalFunction(card=run_command_tool_card, func=run_command)
 
-    def add_skill_tools(self, agent: "BaseAgent"):
-        """Add skill-related tools to an agent.
-        
-        This method creates and registers three tools with the agent:
-        - execute_python_code: For executing Python code
-        - run_command: For executing bash commands
-        - view_file: For viewing file contents
-        
-        Args:
-            agent: The agent to add the tools to.
-        """
-        # 延迟导入以避免循环依赖
-        from openjiuwen.core.runner import Runner
+    def add_skill_tools(self, agent):
         execute_python_code_tool = self.create_execute_python_code_tool()
         execute_command_tool = self.create_execute_command_tool()
         view_file_tool = self.create_view_file_tool()
-        Runner().resource_mgr.add_tool(execute_python_code_tool)
-        Runner().resource_mgr.add_tool(execute_command_tool)
-        Runner().resource_mgr.add_tool(view_file_tool)
+
+        from openjiuwen.core.runner.runner import Runner
+        rm = Runner.resource_mgr
+        rm.add_tool([execute_python_code_tool, execute_command_tool, view_file_tool])
+
         agent.ability_kit.add(execute_python_code_tool.card)
         agent.ability_kit.add(execute_command_tool.card)
         agent.ability_kit.add(view_file_tool.card)

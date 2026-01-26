@@ -54,7 +54,7 @@ class ReActAgentConfig(BaseModel):
         default_factory=list,
         description="Prompt template list"
     )
-    context_window_limit: int = Field(
+    context_window_limit: Optional[int] = Field(
         default=20,
         description="Context window limit"
     )
@@ -133,7 +133,7 @@ class ReActAgentConfig(BaseModel):
         self.prompt_template = prompt_template
         return self
 
-    def configure_context_limit(self, limit: int) -> 'ReActAgentConfig':
+    def configure_context_limit(self, limit: Optional[int]) -> 'ReActAgentConfig':
         """Configure context window limit
 
         Args:
@@ -298,7 +298,7 @@ class ReActAgent(BaseAgent):
 
         # Reset sys operation id if changed
         if old_config.sys_operation_id != config.sys_operation_id:
-            self._skill_util.skill_tool_kit.sys_operation_id = config.sys_operation_id
+            self._skill_util.set_sys_operation_id(config.sys_operation_id)
 
         return self
 
@@ -323,6 +323,10 @@ class ReActAgent(BaseAgent):
             )
         return self._llm
 
+    async def register_skill(self, skill_path: Union[str, List[str]]):
+        """Register a skill"""
+        await self._skill_util.register_skills(skill_path, self)
+
     async def _call_llm(
         self,
         messages: List,
@@ -344,9 +348,6 @@ class ReActAgent(BaseAgent):
             tools=tools
         )
 
-    def register_skill(self, skill_path: Union[str, List[str]]):
-        """Register a skill"""
-        self._skill_util.register_skills(skill_path, self)
 
     async def invoke(
             self,
@@ -390,7 +391,8 @@ class ReActAgent(BaseAgent):
 
         if len(system_messages) > 0 and self._skill_util.has_skill():
             skill_prompt = self._skill_util.get_skill_prompt()
-            system_messages[-1]["content"] = system_messages[-1]["content"] + "\n" + skill_prompt
+            last_msg = system_messages[-1]
+            last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
 
         # Get tool info from _ability_kit
         tools = await self.list_tool_info()

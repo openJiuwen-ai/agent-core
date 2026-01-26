@@ -1,16 +1,15 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Dict, Optional, Union, List
-from pathlib import Path
 
+from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
-from openjiuwen.core.runner import Runner
 
 
 class Skill(BaseModel):
     """Represents a skill with its metadata.
-    
+
     Attributes:
         name: The name of the skill.
         description: The description of the skill.
@@ -30,7 +29,7 @@ class Skill(BaseModel):
 
 class SkillManager:
     """Manages skill registration and retrieval.
-    
+
     This class maintains a registry of skills and provides methods to register,
     unregister, and query skills. Skills are loaded from YAML files containing
     metadata such as name and description.
@@ -41,65 +40,74 @@ class SkillManager:
             sys_operation_id: str
     ):
         """Initialize the skill registry.
-        
+
         Args:
             env: The environment type, either "local" or "sandbox". Defaults to "sandbox".
         """
         self._registry: Dict[str, Skill] = {}
         self._sys_operation_id = sys_operation_id
+        self.description = ""
 
-    def _load_yaml(self, path: Path, session_id: str):
-        """Load and parse YAML front matter from a file.
-        
-        Args:
-            path: The file path to read.
-            session_id: The session ID for file operations.
-            
-        Returns:
-            A tuple of (yaml_data, body) where yaml_data is the parsed YAML dict
-            or None if no YAML front matter exists, and body is the remaining text.
-        """
-        sys_operation = Runner().resource_mgr.get_sys_operation(self._sys_operation_id)
-        text = sys_operation.code().read_file(str(Path))
+    def set_sys_operation_id(self, sys_operation_id: str) -> None:
+        self._sys_operation_id = sys_operation_id
+
+    async def _load_yaml(self, path: Path, session_id: str):
+        from openjiuwen.core.runner.runner import Runner
+        sys_operation = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+
+        result = await sys_operation.fs().read_file(str(path), mode="text", encoding="utf-8")
+
+        if getattr(result, "code", 0) != 0:
+            raise FileNotFoundError(getattr(result, "message", f"read_file failed: {path}"))
+
+        data = getattr(result, "data", None)
+        content = getattr(data, "content", None) if data is not None else None
+        if content is None:
+            raise FileNotFoundError(f"read_file is None：{path}")
+
+        text = content if isinstance(content, str) else str(content)
+
         if text.startswith("---"):
             _, yaml_block, body = text.split("---", 2)
             return yaml.safe_load(yaml_block), body.lstrip()
         return None, text
 
-    def _load_description(self, path: Path, session_id: str) -> str:
+    async def _load_description(self, path: Path, session_id: str) -> str:
         """Load the description from a skill file's YAML front matter.
-        
+
         Args:
             path: The path to the skill file (typically Skill.md).
             session_id: The session ID for file operations.
-            
+
         Returns:
             The description string from the YAML front matter.
-            
+
         Raises:
             KeyError: If the file does not contain a description field in the YAML front matter.
         """
-        yaml_data, _ = self._load_yaml(path, session_id)
+        self.description = ""
+        yaml_data, _ = await self._load_yaml(path, session_id)
         if yaml_data is None or "description" not in yaml_data:
             raise KeyError("Skill.md file does not contain a description field")
         return yaml_data['description']
 
-    def _create_skill_from_path(self, path: Path, session_id: str) -> Optional[Skill]:
+    async def _create_skill_from_path(self, path: Path, session_id: str) -> Optional[Skill]:
         """Create a Skill object from a file path.
-        
+
         Args:
             path: The path to the skill directory or file.
             session_id: The session ID for file operations.
-            
+
         Returns:
             A Skill object if the description is successfully loaded, None otherwise.
         """
-        description = self._load_description(path, session_id)
+        description = await self._load_description(path, session_id)
         if description is not None:
-            return Skill(name=path.name, description=description, directory=path)
+            skill_dir = path.parent
+            return Skill(name=skill_dir.name, description=description, directory=skill_dir)
         return None
 
-    def register(
+    async def register(
             self,
             skill_path: Union[Path, List[Path]],
             session_id: str = None,
@@ -117,13 +125,69 @@ class SkillManager:
         Raises:
             ValueError: If skill already exists and overwrite is False.
         """
+        from openjiuwen.core.runner.runner import Runner
+        sys_operation = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        fs = sys_operation.fs()
+
+        async def _register_root(root: Path):
+            dirs_res = await fs.list_directories(str(root), recursive=False)
+            if getattr(dirs_res, "code", 0) != 0:
+                raise NotADirectoryError(getattr(dirs_res, "message", f"list_directories failed: {root}"))
+
+            data = getattr(dirs_res, "data", None)
+            resolved_root = getattr(data, "root_path", None) if data is not None else None
+            dir_items = getattr(data, "list_items", None) if data is not None else None
+
+            # 如果解析后的 root_path 是目录，就不要把 root 当文件去读
+            if resolved_root and Path(resolved_root).is_dir():
+                if not dir_items:
+                    return
+            else:
+                skill = await self._create_skill_from_path(root, session_id)
+                if skill is not None:
+                    if (not overwrite) and (skill.name in self._registry):
+                        raise ValueError(f"Skill already exists: {skill.name}")
+                    self._registry[skill.name] = skill
+                return
+
+            for d in dir_items:
+                dir_path = getattr(d, "path", None)
+                dir_name = getattr(d, "name", None)
+                if not dir_path or not dir_name:
+                    continue
+
+                files_res = await fs.list_files(str(dir_path), recursive=False)
+                if getattr(files_res, "code", 0) != 0:
+                    continue
+
+                fdata = getattr(files_res, "data", None)
+                file_items = getattr(fdata, "list_items", None) if fdata is not None else None
+                if not file_items:
+                    continue
+
+                skill_md_path = None
+                for f in file_items:
+                    fname = getattr(f, "name", "") or ""
+                    if fname.lower() == "skill.md":
+                        skill_md_path = getattr(f, "path", None)
+                        break
+                if not skill_md_path:
+                    continue
+
+                skill = await self._create_skill_from_path(Path(str(skill_md_path)), session_id)
+                if skill is None:
+                    continue
+
+                if (not overwrite) and (skill.name in self._registry):
+                    raise ValueError(f"Skill already exists: {skill.name}")
+                self._registry[skill.name] = skill
+
         if skill_path is not None and isinstance(skill_path, Path):
-            skill = self._create_skill_from_path(skill_path, session_id)
-            self._registry[skill.name] = skill
+            await _register_root(skill_path)
+
         if skill_path is not None and isinstance(skill_path, list):
             for p in skill_path:
-                skill = self._create_skill_from_path(p, session_id)
-                self._registry[skill.name] = skill
+                await _register_root(p)
 
     def unregister(self, name: str):
         """Unregister a skill.
