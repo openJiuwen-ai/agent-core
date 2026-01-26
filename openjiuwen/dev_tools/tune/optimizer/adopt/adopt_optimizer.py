@@ -15,7 +15,7 @@ from openjiuwen.dev_tools.tune.optimizer.instruction_optimizer import Instructio
 from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.foundation.llm import BaseMessage, Model
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -51,10 +51,19 @@ class AdoptOptimizer(BaseOptimizer):
                         return await self._model.invoke(messages, tools=tools, temperature=temperature,
                                                         top_p=top_p, model=model_name, **kwargs)
                     except Exception as e:
-                        logger.warning(f"Failed to invoke model while doing optimization: {str(e)}, "
-                                       f"retry {i}/{DEFAULT_MODEL_RETRY_NUM}")
+                        llm_logger.warning(
+                            "Failed to invoke model while doing optimization,retry",
+                            event_type=LogEventType.LLM_CALL_ERROR,
+                            model_name=model_name,
+                            exception=str(e),
+                            metadata={"retry_num": i / DEFAULT_MODEL_RETRY_NUM}
+                        )
                         continue
-                logger.error("Failed to invoke the model, please check if the model is available.")
+                llm_logger.error(
+                    "Failed to invoke the model, please check if the model is available.",
+                    event_type=LogEventType.LLM_CALL_ERROR,
+                    model_name=model_name
+                )
                 return build_error(
                     StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR,
                     error_msg="Failed to invoke the model"
@@ -149,7 +158,12 @@ class AdoptOptimizer(BaseOptimizer):
         def generate_each_node_cases(case: EvaluatedCase):
             trace_nodes = self._history.get_llm_call_history(case_id=case.case_id, llm_call_id=node_name)
             if not trace_nodes:
-                logger.warn(f"failed to get trace nodes for node {case.case_id}-{node_name}")
+                llm_logger.warning(
+                    "failed to get trace nodes for node",
+                    event_type=LogEventType.LLM_CALL_ERROR,
+                    model_name=self._model_name,
+                    metadata={"case_id": case.case_id, "node_name": node_name}
+                )
                 return None
             input_list = [node.inputs for node in trace_nodes]
             output_list = [node.outputs for node in trace_nodes]

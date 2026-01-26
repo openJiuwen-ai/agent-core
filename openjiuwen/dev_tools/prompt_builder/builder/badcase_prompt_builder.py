@@ -5,7 +5,7 @@ from typing import Optional, List, AsyncGenerator
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import prompt_builder_logger, LogEventType
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, AssistantMessage
 
@@ -69,7 +69,11 @@ class BadCasePromptBuilder(BasePromptBuilder):
         intent = re.findall(r"<intent>((?:(?!<intent>).)*?)</intent>", response.content, re.DOTALL)
         intent = [intent_text.strip() for intent_text in intent]
         if "false" in intent:
-            logger.warning("Failed to get intent")
+            prompt_builder_logger.warning(
+                "Failed to get intent",
+                event_type=LogEventType.AGENT_ERROR,
+                input_data=response,
+            )
         text_match = re.findall(r"<summary>((?:(?!</summary>).)*?)</summary>", response.content, re.DOTALL)
         parse_summary = text_match[-1].strip() if len(text_match) >= 1 else response.content
         return parse_summary

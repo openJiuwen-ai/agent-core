@@ -8,7 +8,7 @@ import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
 from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import prompt_builder_logger, LogEventType
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, BaseMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
@@ -67,7 +67,12 @@ class FeedbackPromptBuilder(BasePromptBuilder):
             return await self._format_feedback_template_select(prompt, feedback, start_pos, end_pos)
         else:
             if mode != MODE_GENERAL:
-                logger.warning(f"Invalid mode: {mode}, using `general` instead")
+                prompt_builder_logger.warning(
+                    "Invalid mode, using `general` instead",
+                    event_type=LogEventType.AGENT_ERROR,
+                    input_data=prompt,
+                    metadate={"mode": mode}
+                )
             return self._format_feedback_template_general(prompt, feedback)
 
     def _format_feedback_template_general(self,
@@ -136,10 +141,18 @@ class FeedbackPromptBuilder(BasePromptBuilder):
         try:
             intent, optimized_feedback = self._extract_intent_from_responses(feedback_message.content)
         except build_error:
-            logger.warning(f"Intent recognition failed, using original feedback instead")
+            prompt_builder_logger.warning(
+                "Intent recognition failed, using original feedback instead",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=self._model
+            )
             return feedback
         if not intent or not optimized_feedback.strip():
-            logger.warning(f"Intent recognition failed, using original feedback instead")
+            prompt_builder_logger.warning(
+                "Intent recognition failed, using original feedback instead",
+                event_type=LogEventType.AGENT_ERROR,
+                model_name=self._model
+            )
             return feedback
         return optimized_feedback.strip()
 

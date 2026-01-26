@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import agent_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.operator.llm_call import LLMCall
@@ -76,12 +76,24 @@ class BaseOptimizer:
         try:
             self._update()
             for name, param in self._parameters.items():
-                logger.info(f"[llm_call name]: {name}\n"
-                            f"[frozen]: {param.llm_call.get_freeze_system_prompt()}\n"
-                            f"[system prompt]: {str(param.llm_call.get_system_prompt().content)}")
-                logger.info(f"[llm_call name]: {name}\n"
-                            f"[frozen]: {param.llm_call.get_freeze_user_prompt()}\n"
-                            f"[user prompt]: {str(param.llm_call.get_user_prompt().content)}")
+                agent_logger.info(
+                    "LLM call basic system prompt info",
+                    metadata={
+                        "llm_call_name": name,
+                        "frozen_system_prompt": param.llm_call.get_freeze_system_prompt(),
+                        "system_prompt_content": str(param.llm_call.get_system_prompt().content)
+                    },
+                    event_type=LogEventType.AGENT_START
+                )
+                agent_logger.info(
+                    "LLM call basic user prompt info",
+                    metadata={
+                        "llm_call_name": name,
+                        "frozen_system_prompt": param.llm_call.get_freeze_user_prompt(),
+                        "system_prompt_content": str(param.llm_call.get_user_prompt().content)
+                    },
+                    event_type=LogEventType.AGENT_START
+                )
             self._history.clear_history()
         except Exception as e:
             self._history.clear_history()

@@ -5,7 +5,7 @@ from typing import List, Optional, AsyncGenerator, Literal
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import prompt_builder_logger, LogEventType
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
@@ -89,7 +89,12 @@ class MetaTemplateBuilder(BasePromptBuilder):
             meta_user_template = TEMPLATE.PROMPT_BUILD_PLAN_META_USER_TEMPLATE
         else:
             if template_type != "general":
-                logger.warning(f"Invalid template_type: {template_type}, using `general` instead")
+                prompt_builder_logger.warning(
+                    "Invalid template_type, using `general` instead",
+                    event_type=LogEventType.AGENT_ERROR,
+                    input_data=prompt,
+                    metadata={"template_type": template_type}
+                )
             meta_system_template = TEMPLATE.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE
             meta_user_template = TEMPLATE.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE
 
@@ -107,7 +112,7 @@ class MetaTemplateBuilder(BasePromptBuilder):
         if not custom_meta_template_name:
             raise build_error(
                 StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
-                error_msg=f"failed to get custom meta-template, please provide template name"
+                error_msg="failed to get custom meta-template, please provide template name"
             )
         custom_meta_template_name = f"{META_TEMPLATE_NAME_PREFIX}{custom_meta_template_name}"
         custom_meta_template = self._meta_template_manager.get(custom_meta_template_name)
@@ -124,15 +129,15 @@ class MetaTemplateBuilder(BasePromptBuilder):
         if prompt is None:
             raise build_error(
                 StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
-                error_msg=f"prompt cannot be None"
+                error_msg="prompt cannot be None"
             )
         if not prompt.strip():
             raise build_error(
                 StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
-                error_msg=f"prompt cannot be empty"
+                error_msg="prompt cannot be empty"
             )
         if tools and any(not isinstance(tool, ToolInfo) for tool in tools):
             raise build_error(
                 StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR,
-                error_msg=f"each tool must be an instance of ToolInfo"
+                error_msg="each tool must be an instance of ToolInfo"
             )
