@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict
 
 from openjiuwen.core.foundation.llm import BaseMessage
 
@@ -57,3 +57,43 @@ class ContextMessageBuffer:
             self._history_messages_size = 0
             return
         self._history_messages_size = self._history_messages_size - self._max_buffer_size
+
+
+class OffloadMessageBuffer:
+    def __init__(
+            self,
+            init_messages: Dict[str, List[BaseMessage]] = None,
+    ):
+        self._in_memory_offload_messages: Dict[str, List[BaseMessage]] = init_messages or dict()
+
+    def offload(
+            self,
+            offload_handle: str,
+            offload_type: str,
+            messages: List[BaseMessage],
+    ):
+        if offload_type == "in_memory":
+            self._in_memory_offload_messages[offload_handle] = messages
+
+    def reload(
+            self,
+            offload_handle: str,
+            offload_type: str
+    ) -> List[BaseMessage]:
+        if offload_type == "in_memory":
+            return self._in_memory_offload_messages.get(offload_handle, [])
+        return []
+
+    def clear(
+            self,
+            offload_handle: str,
+            offload_type: str
+    ):
+        if offload_type == "in_memory":
+            self._in_memory_offload_messages.pop(offload_handle, None)
+        return
+
+    def get_all(
+            self
+    ):
+        return self._in_memory_offload_messages

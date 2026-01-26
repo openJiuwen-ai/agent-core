@@ -66,7 +66,6 @@ class TiktokenCounter(TokenCounter):
             return 0
         total = 0
         for idx, tool in enumerate(tools):
-            # 构造 function 对象
             function_obj = {
                 "name": tool.name,
                 "description": tool.description or "",
@@ -74,9 +73,9 @@ class TiktokenCounter(TokenCounter):
             }
             json_str = json.dumps(function_obj, ensure_ascii=False, separators=(",", ":"))
 
-            # 伪消息格式：functions.{name}:{index}
+            # message format：functions.{name}:{index}
             piece = f"<|start|>functions.{tool.name}:{idx}\n{json_str}<|end|>"
             total += self.count(piece)
 
-        # 与 count_messages 保持一致，给 assistant 留 3 个 token
+        # Consistent with count_messages, reserve 3 tokens for the assistant
         return total + 3

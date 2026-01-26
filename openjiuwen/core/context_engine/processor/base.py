@@ -2,14 +2,18 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from abc import abstractmethod
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
+import uuid
+
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.context_engine import ModelContext, ContextWindow
+from openjiuwen.core.context_engine.schema.messages import create_offload_message
 from openjiuwen.core.foundation.llm import BaseMessage
 
 
-_PROCESSOR_TYPE_ATTR: str = '__processor_type'
+_PROCESSOR_TYPE_ATTR: str = "__processor_type"
+_OFFLOAD_MESSAGE_HANDLE: str = "[[OFFLOAD: handle={handle}, type={type}]]"
 
 
 class MetaContextProcessor(type):
@@ -160,3 +164,48 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         supplied at construction time.
         """
         return self._config
+
+    async def offload_messages(
+            self,
+            role: str,
+            content: str,
+            messages: List[BaseMessage],
+            *,
+            context: ModelContext = None,
+            offload_handle: str = None,
+            offload_type: str = "in_memory",
+            **kwargs
+    ) -> Optional[BaseMessage]:
+        if not messages:
+            return None
+
+        if not offload_handle:
+            offload_handle = uuid.uuid4().hex
+
+        if context is not None and offload_type == "in_memory":
+            return self._offload_messages_to_memory(
+                role, content, messages, context, offload_handle, **kwargs
+            )
+        return None
+
+    @staticmethod
+    def _offload_messages_to_memory(
+            role: str,
+            content: str,
+            messages: List[BaseMessage],
+            context: ModelContext,
+            offload_handle: str = None,
+            **kwargs
+    ) -> Optional[BaseMessage]:
+        content = content + _OFFLOAD_MESSAGE_HANDLE.format(handle=offload_handle, type="in_memory")
+        if hasattr(context, "offload_messages"):
+            context.offload_messages(offload_handle, messages)
+            offload_handle = offload_handle if offload_handle else uuid.uuid4().hex
+            return create_offload_message(
+                role=role,
+                content=content,
+                offload_handle=offload_handle,
+                offload_type="in_memory",
+                **kwargs
+            )
+        return None

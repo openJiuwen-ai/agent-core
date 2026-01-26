@@ -9,14 +9,20 @@ import pytest
 from openjiuwen.core.common.exception.errors import StatusCode
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ModelContext
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, SystemMessage, UserMessage, AssistantMessage, ToolMessage
+    BaseMessage, SystemMessage, UserMessage, AssistantMessage, ToolMessage, ToolCall
 )
 
 
 class TestModelContext:
-    async def create_context(self, history: List[BaseMessage] = None, context_message_limit: int = 100) -> ModelContext:
+    async def create_context(
+            self,
+            history: List[BaseMessage] = None,
+            context_message_limit: int = 100,
+            dialogue_round: int = None
+    ) -> ModelContext:
         context_engine = ContextEngine(
-            ContextEngineConfig(default_window_message_num=context_message_limit)
+            ContextEngineConfig(default_window_message_num=context_message_limit,
+                                default_window_round_num=dialogue_round)
         )
         session = None
         return await context_engine.create_context("test_context", session, history_messages=history)
@@ -495,3 +501,127 @@ class TestModelContext:
         assert window.system_messages == system_msgs
         # Ensure no ToolMessage remains in the returned list
         assert not any(isinstance(m, ToolMessage) for m in window.context_messages)
+
+    @pytest.mark.asyncio
+    async def test_model_context_window_with_dialogue_round(self):
+        def create_tool_call_list(tcs: List[str]):
+            return [
+                ToolCall(id=tc, name="test-tool", type="function", arguments="")
+                for tc in tcs
+            ]
+        context = await self.create_context(dialogue_round=1)
+        dialogues = [
+            # dialogue-1
+            [
+                UserMessage(content="user-1"),
+                AssistantMessage(content="assistant-1", tool_calls=create_tool_call_list(["tc-1", "tc-2", "tc-3"])),
+                ToolMessage(content="tool-1", tool_call_id='tc-1'),
+                ToolMessage(content="tool-2", tool_call_id='tc-2'),
+                ToolMessage(content="tool-3", tool_call_id='tc-3'),
+                AssistantMessage(content="assistant-2"),
+            ],
+            # dialogue-2
+            [
+                UserMessage(content="user-2"),
+                AssistantMessage(content="assistant-3", tool_calls=create_tool_call_list(["tc-1", "tc-2"])),
+                ToolMessage(content="tool-4", tool_call_id='tc-1'),
+                ToolMessage(content="tool-5", tool_call_id='tc-2'),
+                AssistantMessage(content="assistant-4"),
+            ],
+            # dialogue-3
+            [
+                UserMessage(content="user-3"),
+                AssistantMessage(content="assistant-3", tool_calls=create_tool_call_list(["tc-1"])),
+                ToolMessage(content="tool-6", tool_call_id='tc-1'),
+                AssistantMessage(content="assistant-5")
+            ]
+        ]
+
+        messages = []
+        for dialogue in dialogues:
+            messages.extend(dialogue)
+
+        await context.add_messages(messages)
+        window = await context.get_context_window()
+        assert window.context_messages == dialogues[-1]
+
+        await context.add_messages(messages)
+        window = await context.get_context_window(dialogue_round=1)
+        assert window.context_messages == dialogues[-1]
+        context.clear_messages()
+
+        await context.add_messages(messages)
+        window = await context.get_context_window(dialogue_round=2)
+        assert window.context_messages == dialogues[-2] + dialogues[-1]
+        context.clear_messages()
+
+        await context.add_messages(messages)
+        window = await context.get_context_window(dialogue_round=3)
+        assert window.context_messages == messages
+        context.clear_messages()
+
+        await context.add_messages(messages)
+        window = await context.get_context_window(dialogue_round=4)
+        assert window.context_messages == messages
+        context.clear_messages()
+
+    @pytest.mark.asyncio
+    async def test_model_context_window_with_incomplete_dialogue_round(self):
+        def create_tool_call_list(tcs: List[str]):
+            return [
+                ToolCall(id=tc, name="test-tool", type="function", arguments="")
+                for tc in tcs
+            ]
+        context = await self.create_context(dialogue_round=1)
+        dialogues = [
+            # dialogue-1
+            [
+                UserMessage(content="user-1"),
+                AssistantMessage(content="assistant-1", tool_calls=create_tool_call_list(["tc-1", "tc-2", "tc-3"])),
+                ToolMessage(content="tool-1", tool_call_id='tc-1'),
+                ToolMessage(content="tool-2", tool_call_id='tc-2'),
+                ToolMessage(content="tool-3", tool_call_id='tc-3'),
+                AssistantMessage(content="assistant-2"),
+                UserMessage(content="user-1-1"),
+            ],
+            # dialogue-2
+            [
+                UserMessage(content="user-2"),
+                AssistantMessage(content="assistant-3", tool_calls=create_tool_call_list(["tc-1", "tc-2"])),
+                ToolMessage(content="tool-4", tool_call_id='tc-1'),
+                ToolMessage(content="tool-5", tool_call_id='tc-2'),
+                AssistantMessage(content="assistant-4"),
+            ],
+            # dialogue-3
+            [
+                UserMessage(content="user-3"),
+            ]
+        ]
+
+        messages = []
+        for dialogue in dialogues:
+            messages.extend(dialogue)
+
+        await context.add_messages(messages)
+        window = await context.get_context_window()
+        assert window.context_messages == dialogues[-1]
+
+        await context.add_messages(messages)
+        window = await context.get_context_window(dialogue_round=1)
+        assert window.context_messages == dialogues[-1]
+        context.clear_messages()
+
+        await context.add_messages(messages)
+        window = await context.get_context_window(dialogue_round=2)
+        assert window.context_messages == dialogues[-2] + dialogues[-1]
+        context.clear_messages()
+
+        await context.add_messages(messages)
+        window = await context.get_context_window(dialogue_round=3)
+        assert window.context_messages == messages
+        context.clear_messages()
+
+        await context.add_messages(messages)
+        window = await context.get_context_window(dialogue_round=4)
+        assert window.context_messages == messages
+        context.clear_messages()

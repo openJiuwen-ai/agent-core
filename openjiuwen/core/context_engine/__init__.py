@@ -25,7 +25,10 @@ from openjiuwen.core.context_engine.processor.compressor.current_round_compresso
     CurrentRoundCompressor,
     CurrentRoundCompressorConfig
 )
-
+from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+    RoundLevelCompressor,
+    RoundLevelCompressorConfig
+)
 
 # context base classes
 _CORE_CLASSES = [
@@ -57,7 +60,10 @@ _PROCESSORS_CLASSES = [
     "DialogueCompressorConfig",
     # current round compressor
     "CurrentRoundCompressor",
-    "CurrentRoundCompressorConfig"
+    "CurrentRoundCompressorConfig",
+    # round level compressor
+    "RoundLevelCompressor",
+    "RoundLevelCompressorConfig",
 ]
 
 

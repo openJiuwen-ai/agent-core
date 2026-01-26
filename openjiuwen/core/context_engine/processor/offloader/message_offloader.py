@@ -8,8 +8,8 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
 from openjiuwen.core.context_engine.base import ModelContext
-from openjiuwen.core.context_engine.processor.context_utils import ContextUtils
-from openjiuwen.core.context_engine.schema.messages import MemoryOffloadMessage, OffloadMessage
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage
 
 
@@ -64,14 +64,15 @@ class MessageOffloader(ContextProcessor):
         super().__init__(config)
         self._validate_config()
 
-    async def on_add_messages(self,
-                              context: ModelContext,
-                              messages_to_add: List[BaseMessage],
-                              **kwargs
-                              ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
+    async def on_add_messages(
+            self,
+            context: ModelContext,
+            messages_to_add: List[BaseMessage],
+            **kwargs
+    ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         context_messages = context.get_messages() + messages_to_add
         context_size = len(context)
-        event, processed_messages = await self._offload_large_messages(context_messages)
+        event, processed_messages = await self._offload_large_messages(context_messages, context)
         context_messages, messages_to_add = (
             processed_messages[:context_size],
             processed_messages[context_size:]
@@ -80,10 +81,10 @@ class MessageOffloader(ContextProcessor):
         return event, messages_to_add
 
     async def trigger_add_messages(
-        self,
-        context: ModelContext,
-        messages_to_add: List[BaseMessage],
-        **kwargs
+            self,
+            context: ModelContext,
+            messages_to_add: List[BaseMessage],
+            **kwargs
     ) -> bool:
         config = self.config
         message_size = len(context) + len(messages_to_add)
@@ -110,7 +111,11 @@ class MessageOffloader(ContextProcessor):
             return True
         return False
 
-    async def _offload_large_messages(self, messages: List[BaseMessage]) -> Tuple[ContextEvent, List[BaseMessage]]:
+    async def _offload_large_messages(
+            self,
+            messages: List[BaseMessage],
+            context: ModelContext
+    ) -> Tuple[ContextEvent, List[BaseMessage]]:
         processed_messages = messages[:]
         last_ai_msg_index = None
         if self.config.keep_last_round:
@@ -134,7 +139,7 @@ class MessageOffloader(ContextProcessor):
                 or len(msg.content) <= self.config.large_message_threshold
             ):
                 continue
-            offload_msg = await self._offload_message(msg)
+            offload_msg = await self._offload_message(msg, context)
             processed_messages = ContextUtils.replace_messages(
                 processed_messages, [offload_msg], idx, idx
             )
@@ -142,10 +147,18 @@ class MessageOffloader(ContextProcessor):
 
         return event, processed_messages
 
-    async def _offload_message(self, message: BaseMessage) -> OffloadMessage:
+    async def _offload_message(self, message: BaseMessage, context: ModelContext) -> BaseMessage:
         trimmed_content = message.content[:self.config.trim_size] + OMIT_STRING
-        offload_message = MemoryOffloadMessage(role=message.role, content=trimmed_content)
-        await offload_message.offload([message])
+        extra_fields = message.model_dump()
+        extra_fields.pop("role", None)
+        extra_fields.pop("content", None)
+        offload_message = await self.offload_messages(
+            role=message.role,
+            content=trimmed_content,
+            messages=[message],
+            context=context,
+            **extra_fields
+        )
         return offload_message
 
     def load_state(self, state: Dict[str, Any]) -> None:

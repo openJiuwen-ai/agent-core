@@ -7,13 +7,12 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
-from openjiuwen.core.context_engine.schema.messages import MemoryOffloadMessage
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.foundation.llm import (
     BaseMessage, AssistantMessage, UserMessage, SystemMessage,
     ModelRequestConfig, ModelClientConfig, Model, JsonOutputParser
 )
-from openjiuwen.core.context_engine.processor.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 
 
 DEFAULT_COMPRESSION_PROMPT: str = """
@@ -108,12 +107,12 @@ class DialogueCompressor(ContextProcessor):
         )
 
 
-    async def on_add_messages(self,
-                              context: ModelContext,
-                              messages_to_add: List[BaseMessage],
-                              **kwargs
-                              ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
-
+    async def on_add_messages(
+            self,
+            context: ModelContext,
+            messages_to_add: List[BaseMessage],
+            **kwargs
+    ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         context_messages = context.get_messages() + messages_to_add
         compressed_idx = await self.get_compress_idx(context_messages)
         if compressed_idx == -1:
@@ -130,7 +129,7 @@ class DialogueCompressor(ContextProcessor):
             dialogues = []
             for i in range(start_idx, end_idx + 1):
                 dialogues.append(context_messages[i])
-            compressed_context = await self._compress(dialogues)
+            compressed_context = await self._compress(dialogues, context)
             if compressed_context:
                 event.messages_to_modify += list(range(start_idx, end_idx))
                 context_messages = ContextUtils.replace_messages(
@@ -142,11 +141,12 @@ class DialogueCompressor(ContextProcessor):
         context.set_messages(context_messages)
         return None, []
 
-    async def trigger_add_messages(self,
-                                   context: ModelContext,
-                                   messages_to_add: List[BaseMessage],
-                                   **kwargs
-                                   ) -> bool:
+    async def trigger_add_messages(
+            self,
+            context: ModelContext,
+            messages_to_add: List[BaseMessage],
+            **kwargs
+    ) -> bool:
         config = self.config
         message_size = len(context) + len(messages_to_add)
         if self._message_num_threshold is not None and message_size > self._message_num_threshold:
@@ -200,14 +200,22 @@ class DialogueCompressor(ContextProcessor):
 
         return result
 
-    async def _compress(self, messages_to_compress: List[BaseMessage]) -> Optional[BaseMessage]:
+    async def _compress(
+            self,
+            messages_to_compress: List[BaseMessage],
+            context: ModelContext
+    ) -> Optional[BaseMessage]:
         messages = [SystemMessage(content=self._compressed_prompt)] + messages_to_compress
         response = await self._model.invoke(messages, output_parser=JsonOutputParser())
         summary = response.parser_content
         if summary:
             summary = summary.get("summary", "")
-            offload_message = MemoryOffloadMessage(role="assistant", content=summary)
-            await offload_message.offload(messages_to_compress)
+            offload_message = await self.offload_messages(
+                role="assistant",
+                content=summary,
+                messages=messages,
+                context=context
+            )
             return offload_message
         else:
             return None

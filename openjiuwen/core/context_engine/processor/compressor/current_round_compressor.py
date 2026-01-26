@@ -7,13 +7,12 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
-from openjiuwen.core.context_engine.schema.messages import MemoryOffloadMessage
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.foundation.llm import (
     BaseMessage, AssistantMessage, SystemMessage, UserMessage,
     ModelRequestConfig, ModelClientConfig, Model, JsonOutputParser
 )
-from openjiuwen.core.context_engine.processor.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 
 
 DEFAULT_COMPRESSION_PROMPT: str = """
@@ -103,7 +102,6 @@ class CurrentRoundCompressor(ContextProcessor):
                               **kwargs
                               ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         context_messages = context.get_messages() + messages_to_add
-        token_counter = context.token_counter()
         last_user_idx = await self.get_compress_idx(context_messages)
         end_idx = len(context_messages) - 1
         if last_user_idx == -1:
@@ -112,7 +110,9 @@ class CurrentRoundCompressor(ContextProcessor):
         if self._single_multi_config:
             compressed_context = await self.multi_compress(
                 context_messages,
-                last_user_idx, end_idx
+                last_user_idx,
+                end_idx,
+                context
             )
             if compressed_context:
                 event.messages_to_modify += list(range(last_user_idx, end_idx))
@@ -124,7 +124,9 @@ class CurrentRoundCompressor(ContextProcessor):
             try:
                 compressed_context = await self.single_compress(
                     context_messages,
-                    last_user_idx, end_idx, token_counter
+                    last_user_idx,
+                    end_idx,
+                    context
                 )
             except Exception as e:
                 raise e
@@ -174,9 +176,11 @@ class CurrentRoundCompressor(ContextProcessor):
         return compressed_idx
 
     async def multi_compress(
-        self,
-        context_messages: List[BaseMessage],
-        last_user_idx: int, end_idx: int
+            self,
+            context_messages: List[BaseMessage],
+            last_user_idx: int,
+            end_idx: int,
+            context: ModelContext,
     ) -> Optional[list[BaseMessage]]:
         start_idx = last_user_idx + 1
         end_idx = end_idx
@@ -187,7 +191,7 @@ class CurrentRoundCompressor(ContextProcessor):
                     if end_idx < start_idx:
                         return None
         messages_to_compress = context_messages[start_idx:end_idx]
-        compressed_context = await self.compress(messages_to_compress)
+        compressed_context = await self.compress(messages_to_compress, context)
         if compressed_context:
             context_messages = ContextUtils.replace_messages(
                 context_messages,
@@ -199,20 +203,21 @@ class CurrentRoundCompressor(ContextProcessor):
         return context_messages
 
     async def single_compress(
-        self,
-        context_messages: List[BaseMessage],
-        last_user_idx: int,
-        end_idx: int, counter
+            self,
+            context_messages: List[BaseMessage],
+            last_user_idx: int,
+            end_idx: int,
+            context: ModelContext
     ) -> Optional[list[BaseMessage]]:
         start_idx = last_user_idx + 1
         end_idx = end_idx
-        token_counter = counter
+        token_counter = context.token_counter()
         for idx in range(start_idx, end_idx):
             msg = context_messages[idx]
 
             context_token = token_counter.count_messages([msg])
             if context_token > self._large_message_threshold:
-                compressed_context = await self.compress([msg])
+                compressed_context = await self.compress([msg], context)
                 if compressed_context:
                     context_messages = ContextUtils.replace_messages(
                         context_messages,
@@ -222,7 +227,11 @@ class CurrentRoundCompressor(ContextProcessor):
                 continue
         return context_messages
 
-    async def compress(self, messages_to_compress: List[BaseMessage]) -> Optional[BaseMessage]:
+    async def compress(
+            self,
+            messages_to_compress: List[BaseMessage],
+            context: ModelContext
+    ) -> Optional[BaseMessage]:
         processed_messages = [
             UserMessage(content=f"role:{msg.role}, content:{msg.content}")
             for msg in messages_to_compress
@@ -237,8 +246,12 @@ class CurrentRoundCompressor(ContextProcessor):
         summary = response.parser_content
         if summary and isinstance(summary, dict):
             summary = summary.get("summary", "")
-            offload_message = MemoryOffloadMessage(role="assistant", content=summary)
-            await offload_message.offload(messages_to_compress)
+            offload_message = await self.offload_messages(
+                role="assistant",
+                content=summary,
+                messages=messages_to_compress,
+                context=context
+            )
             return offload_message
         else:
             return None

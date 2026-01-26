@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import functools
 
 from pydantic import BaseModel
@@ -42,15 +42,15 @@ class ContextEngine:
         self._config = config or ContextEngineConfig()
         self._context_pool: Dict[str, ModelContext] = dict()
 
-    async def create_context(self,
-                             context_id: str = "default_context_id",
-                             session: Session = None,
-                             *,
-                             processors: List[Tuple[str, BaseModel]] = None,
-                             history_messages: List[BaseMessage] = None,
-                             token_counter: TokenCounter = None,
-                             mem_scope_id: str = None,
-                             ) -> ModelContext:
+    async def create_context(
+            self,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            *,
+            processors: List[Tuple[str, BaseModel]] = None,
+            history_messages: List[BaseMessage] = None,
+            token_counter: TokenCounter = None,
+    ) -> ModelContext:
         """
         Create or retrieve a ModelContext for the given session & context ID.
 
@@ -66,21 +66,20 @@ class ContextEngine:
             context_id: Unique identifier for this context within the session.
             session: Session object supplying session_id; if None, a default
                      session ID is used.
-            history_messages: Initial message list; when omitted, behaviour
-                              depends on `mem_scope_id`.
+            history_messages: Initial message list.
             token_counter: Strategy for counting tokens; defaults to
                            TiktokenCounter if not provided.
-            mem_scope_id: Optional memory scope key; when given, messages
-                          are loaded from long-term memory if `history_messages`
-                          is None.
 
         Returns:
             ModelContext: The newly created or cached context instance.
         """
         session_id = session.session_id() if session else "default_session_id"
         full_context_id = f"{session_id}_{context_id}"
+        states = session.get_state("context") if session else None
         if full_context_id in self._context_pool:
-            return self._context_pool.get(full_context_id)
+            context = self._context_pool.get(full_context_id)
+            self._load_state_from_session(context, session, states)
+            return context
 
         processor_instances = [
             self._create_processor(processor_type, processor_config)
@@ -95,13 +94,15 @@ class ContextEngine:
             processors=processor_instances,
             token_counter=token_counter,
         )
+        self._load_state_from_session(context, session, states, is_load_messages=(not history_messages))
         self._context_pool[full_context_id] = context
         return context
 
-    def get_context(self,
-                    context_id: str = "default_context_id",
-                    session_id: str = "default_session_id"
-                    ) -> Optional[ModelContext]:
+    def get_context(
+            self,
+            context_id: str = "default_context_id",
+            session_id: str = "default_session_id"
+    ) -> Optional[ModelContext]:
         """
         Retrieve an existing ModelContext from the pool.
 
@@ -115,10 +116,11 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         return self._context_pool.get(full_context_id, None)
 
-    def clear_context(self,
-                      context_id: str = None,
-                      session_id: str = None
-                      ):
+    def clear_context(
+            self,
+            context_id: str = None,
+            session_id: str = None
+    ):
         """
         Remove contexts from the internal pool.
 
@@ -166,26 +168,29 @@ class ContextEngine:
 
     async def save_contexts(self,
                             context_ids: List[str],
-                            session: Session = None,
-                            *,
-                            mem_scope_id: str = None,
+                            session: Session,
                             ):
         """
         Batch-persist multiple contexts and their runtime states.
 
         Each context's messages, sliding-window position, token count and statistics
-        are saved locally. If `mem_scope_id` is provided, the same snapshots are
-        also written to long-term memory under that scope for later cross-session
-        restoration.
+        are saved locally.
 
         Args:
             context_ids: List of target context identifiers to save.
-            session: Session object; if None, "default_session_id" is used.
-            mem_scope_id: Optional memory scope key; when given, all listed
-                          contexts are additionally saved to long-term memory
-                          with this ID.
+            session: Session object;
         """
-        return
+        session_id = session.session_id()
+        states = dict()
+        for context_id in context_ids:
+            full_context_id = f"{session_id}_{context_id}"
+            context = self._context_pool.get(full_context_id)
+            if context is None or not hasattr(context, "save_state"):
+                continue
+            context_state = context.save_state()
+            states[context_id] = context_state
+        session.update_state({"context": None})
+        session.update_state({"context": states})
 
     @classmethod
     def register_processor(cls, processor_class=None):
@@ -241,3 +246,22 @@ class ContextEngine:
             ) from e
 
         return processor
+
+    @staticmethod
+    def _load_state_from_session(
+            context: ModelContext,
+            session: Session,
+            states: Dict[str, Any],
+            *,
+            is_load_messages: bool = True
+    ):
+        if not session or states is None:
+            return
+
+        if not hasattr(context, "load_state"):
+            return
+
+        if not is_load_messages:
+            states.pop("messages")
+
+        context.load_state(states)

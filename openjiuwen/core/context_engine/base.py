@@ -6,7 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.tool import ToolInfo, Tool
 from openjiuwen.core.context_engine.token.base import TokenCounter
 
 
@@ -125,6 +125,7 @@ class ModelContext(ABC):
                                  system_messages: List[BaseMessage] = None,
                                  tools: List[ToolInfo] = None,
                                  window_size: Optional[int] = None,
+                                 dialogue_round: Optional[int] = None,
                                  **kwargs
                                  ) -> "ContextWindow":
         """
@@ -138,6 +139,13 @@ class ModelContext(ABC):
             Tool definitions to include in the window.
         window_size : int, optional
             Maximum number of historical messages to include; defaults to all if omitted.
+        dialogue_round : int, optional
+            Number of most-recent conversation rounds to retain. A round is defined
+            as starting from a user message and ending at the next assistant message
+            that contains no tool calls (i.e., the final response in a tool-using
+            turn). Incomplete rounds (user without following assistant) still count
+            as one round. Takes precedence over `window_size` when both are specified.
+            Must be > 0 if set; None (default) disables round-based truncation.
         **kwargs : dict, optional
             Additional context-specific parameters.
 
@@ -177,6 +185,25 @@ class ModelContext(ABC):
         """
         Return a TokenCounter instance that can accurately count tokens
         for the model family used by this context.
+        """
+
+    @abstractmethod
+    def reloader_tool(self) -> Tool:
+        """
+        Return a Tool instance for reloading offloaded messages back into context.
+
+        This tool retrieves previously offloaded content using its handle and
+        re-injects the full message text into the active conversation. It is
+        typically invoked when the model encounters a reload hint (e.g.,
+        [[HANDLE:xxx]]) and needs to access the original content that was
+        moved out of context to save token budget.
+
+        The tool accepts two parameters:
+        - offload_handle: UUID or file path pointing to the offloaded content
+        - offload_type: storage backend type ("memory" or "filesystem")
+
+        Returns the complete original message text for insertion back into
+        the message history.
         """
 
 

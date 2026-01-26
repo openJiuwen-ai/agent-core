@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
-from openjiuwen.core.context_engine.schema.messages import MemoryOffloadMessage
+from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.foundation.llm import (
     BaseMessage,
@@ -21,7 +21,7 @@ from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
     JsonOutputParser,
 )
-from openjiuwen.core.context_engine.processor.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 
 
 CL_PATTERN = re.compile(r'^\[CL=(\d+)\]\s*')
@@ -154,7 +154,7 @@ class RoundLevelCompressor(ContextProcessor):
             )
             return None, messages_to_add
 
-        new_messages, start_inx, end_idx = await self._compress_rounds(all_messages, target_rounds)
+        new_messages, start_inx, end_idx = await self._compress_rounds(all_messages, target_rounds, context)
         context.set_messages(new_messages)
 
         event = ContextEvent(event_type=self.processor_type())
@@ -192,9 +192,9 @@ class RoundLevelCompressor(ContextProcessor):
                 and not a.tool_calls
         )
         condition2 = (
-                isinstance(u, MemoryOffloadMessage)
+                isinstance(u, OffloadMixin)
                 and u.role == "user"
-                and isinstance(a, MemoryOffloadMessage)
+                and isinstance(a, OffloadMixin)
                 and a.role == "assistant"
         )
         return condition1 or condition2
@@ -228,8 +228,12 @@ class RoundLevelCompressor(ContextProcessor):
 
         return all_qualified_windows
 
-    async def _compress_rounds(self, messages: List[BaseMessage],
-                               rounds: Union[List[DialogueRound], List[List[DialogueRound]]]) -> Tuple[
+    async def _compress_rounds(
+            self,
+            messages: List[BaseMessage],
+            rounds: Union[List[DialogueRound], List[List[DialogueRound]]],
+            context: ModelContext
+    ) -> Tuple[
         List[BaseMessage], List[int], List[int]]:
 
         if isinstance(rounds[0], DialogueRound):
@@ -251,8 +255,8 @@ class RoundLevelCompressor(ContextProcessor):
             base_level = window[0].level or 0
             new_level = base_level + 1
 
-            new_user = await self._compress_messages(users, user)
-            new_ai = await self._compress_messages(ais, ai)
+            new_user = await self._compress_messages(users, user, context)
+            new_ai = await self._compress_messages(ais, ai, context)
 
             if new_user is None or new_ai is None:
                 logger.warning("[RoundLevelCompressor] Compression failed, return original messages")
@@ -279,7 +283,12 @@ class RoundLevelCompressor(ContextProcessor):
         all_ends.reverse()
         return new_messages, all_starts, all_ends
 
-    async def _compress_messages(self, messages: List[BaseMessage], role: str):
+    async def _compress_messages(
+            self,
+            messages: List[BaseMessage],
+            role: str,
+            context: ModelContext
+    ) -> Optional[BaseMessage]:
         processed = [
             UserMessage(content=f"role:{m.role}, content:{m.content}")
             for m in messages
@@ -296,8 +305,12 @@ class RoundLevelCompressor(ContextProcessor):
         summary = response.parser_content
         if summary and isinstance(summary, dict):
             summary = summary.get("summary", "")
-            offload_message = MemoryOffloadMessage(role=role, content=summary)
-            await offload_message.offload(messages)
+            offload_message = await self.offload_messages(
+                role=role,
+                content=summary,
+                messages=messages,
+                context=context
+            )
             return offload_message
         else:
             logger.warning("[RoundLevelCompressor] Invalid summary from model")
