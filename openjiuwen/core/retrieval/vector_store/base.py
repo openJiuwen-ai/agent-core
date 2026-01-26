@@ -107,8 +107,8 @@ class VectorStore(ABC):
 
     @abstractmethod
     async def table_exists(self, table_name: str) -> bool:
-        pass
+        """Check if a collection exists in current database"""
 
     @abstractmethod
     async def delete_table(self, table_name: str) -> None:
-        pass
+        """Delete a collection from current database"""

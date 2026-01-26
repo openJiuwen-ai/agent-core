@@ -229,6 +229,10 @@ class StatusCode(Enum):
         155108, "retrieval invalid distance metric selected, reason: {error_msg}"
     )
     RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR = (155109, "retrieval indexing_add_doc runtime error, reason: {error_msg}")
+    RETRIEVAL_INDEXING_VECTOR_FIELD_INVALID = (
+        155110,
+        "retrieval indexing_vector_field is invalid, reason: {error_msg}",
+    )
 
     # KnowledgeBase Retrieval - Retriever 155200 - 155299
     RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT = (155200, "retrieval retriever_mode is not supported, reason: {error_msg}")
@@ -292,11 +296,7 @@ class StatusCode(Enum):
         155507,
         "retrieval kb_triple_extraction process error, reason: {error_msg}",
     )
-    RETRIEVAL_KB_DATABASE_CONFIG_INVALID = (
-        155508,
-        "retrieval kb_database_config is invalid, reason: Vector store and index manager have "
-        "incompatible {config_name} configs: {error_msg}",
-    )
+    RETRIEVAL_KB_DATABASE_CONFIG_INVALID = (155508, "retrieval kb_database_config is invalid, reason: {error_msg}")
 
     # =========================
     # Memory Engine 158000 – 159999

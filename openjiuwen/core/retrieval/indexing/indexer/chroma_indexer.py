@@ -19,6 +19,7 @@ from openjiuwen.core.retrieval.common.config import IndexConfig, VectorStoreConf
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
+from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
 from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
 
 
@@ -29,7 +30,7 @@ class ChromaIndexer(Indexer):
         self,
         chroma_path: str,
         text_field: str = "content",
-        vector_field: str = "embedding",
+        vector_field: str | ChromaVectorField = "embedding",
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
@@ -44,7 +45,7 @@ class ChromaIndexer(Indexer):
         Args:
             chroma_path: ChromaDB persistence path
             text_field: Text field name
-            vector_field: Vector field name
+            vector_field: Vector field name (str) or definition (ChromaVectorField)
             sparse_vector_field: Sparse vector field name
             metadata_field: Metadata field name
             doc_id_field: Document ID field name
@@ -59,7 +60,6 @@ class ChromaIndexer(Indexer):
 
         self.chroma_path = chroma_path
         self.text_field = text_field
-        self.vector_field = vector_field
         self.sparse_vector_field = sparse_vector_field
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
@@ -76,6 +76,18 @@ class ChromaIndexer(Indexer):
                     StatusCode.RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID,
                     error_msg=f'expecting one of ["cosine", "euclidean", "dot"], but got "{distance_metric}"',
                 )
+        if isinstance(vector_field, str):
+            self.vector_field = ChromaVectorField(vector_field=vector_field)
+        elif isinstance(vector_field, ChromaVectorField):
+            self.vector_field = vector_field
+        else:
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_VECTOR_FIELD_INVALID,
+                error_msg="vector_field must be either a str or ChromaVectorField instance",
+            )
+        self._construct_config = self.vector_field.to_dict(stage="construct")
+        self._construct_config["space"] = self._distance_metric
+        self._search_config = self.vector_field.to_dict(stage="search")
         self.doc_index_callback = doc_index_callback
         if not isinstance(doc_index_callback, type) or not issubclass(doc_index_callback, BaseCallback):
             raise build_error(
@@ -118,7 +130,7 @@ class ChromaIndexer(Indexer):
                 config=vector_store_config,
                 chroma_path=self.chroma_path,
                 text_field=self.text_field,
-                vector_field=self.vector_field,
+                vector_field=self.vector_field.vector_field,
                 sparse_vector_field=self.sparse_vector_field,
                 metadata_field=self.metadata_field,
                 doc_id_field=self.doc_id_field,
@@ -163,7 +175,7 @@ class ChromaIndexer(Indexer):
                     self.metadata_field: meta,
                 }
                 if chunk.embedding is not None:
-                    item[self.vector_field] = chunk.embedding
+                    item[self.vector_field.vector_field] = chunk.embedding
                 data.append(item)
 
             await vector_store.add(data=data)

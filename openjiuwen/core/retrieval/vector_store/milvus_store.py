@@ -11,9 +11,12 @@ from typing import Any, List, Optional
 
 from pymilvus import AnnSearchRequest, MilvusClient, RRFRanker
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
@@ -27,7 +30,7 @@ class MilvusVectorStore(VectorStore):
         milvus_uri: str,
         milvus_token: Optional[str] = None,
         text_field: str = "content",
-        vector_field: str = "embedding",
+        vector_field: str | MilvusVectorField = "embedding",
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
@@ -41,7 +44,7 @@ class MilvusVectorStore(VectorStore):
             milvus_uri: Milvus URI
             milvus_token: Milvus Token (optional)
             text_field: Text field name
-            vector_field: Vector field name
+            vector_field: Vector field name (str) or definition (MilvusVectorField)
             sparse_vector_field: Sparse vector field name
             metadata_field: Metadata field name
         """
@@ -50,12 +53,27 @@ class MilvusVectorStore(VectorStore):
         self.milvus_uri = milvus_uri
         self.milvus_token = milvus_token
         self.text_field = text_field
-        self.vector_field = vector_field
         self.sparse_vector_field = sparse_vector_field
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
         self.database_name = self.config.database_name
         self._distance_metric = config.distance_metric.replace("dot", "ip").replace("euclidean", "l2").upper()
+
+        if isinstance(vector_field, str):
+            self.vector_field = MilvusAUTO(vector_field=vector_field)
+        elif isinstance(vector_field, MilvusVectorField):
+            self.vector_field = vector_field
+        else:
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_VECTOR_FIELD_INVALID,
+                error_msg="vector_field must be either a str or MilvusVectorField instance",
+            )
+        if self.vector_field.index_type == "auto":
+            self._construct_config = {}
+        else:
+            self._construct_config = self.vector_field.to_dict(stage="construct")
+        self._construct_config["metric_type"] = self._distance_metric
+        self._search_config = self.vector_field.to_dict(stage="search")
 
         # Initialize Milvus client & database
         self._client = self.create_client(
@@ -159,10 +177,10 @@ class MilvusVectorStore(VectorStore):
             self._client.search,
             collection_name=self.collection_name,
             data=[query_vector],
-            anns_field=self.vector_field,
+            anns_field=self.vector_field.vector_field,
             limit=top_k,
             output_fields=output_fields,
-            search_params={"metric_type": self._distance_metric, "params": {}},
+            search_params={"metric_type": self._distance_metric, "params": self._search_config},
             filter=filter_expr,
         )
 
@@ -244,8 +262,8 @@ class MilvusVectorStore(VectorStore):
             if query_vector is not None:
                 dense_req = AnnSearchRequest(
                     data=[query_vector],
-                    anns_field=self.vector_field,
-                    param={"metric_type": self._distance_metric, "params": {}},
+                    anns_field=self.vector_field.vector_field,
+                    param={"metric_type": self._distance_metric, "params": self._search_config},
                     limit=top_k,
                 )
                 search_requests.append(dense_req)
@@ -404,7 +422,12 @@ class MilvusVectorStore(VectorStore):
             logger.warning(f"Failed to close Milvus client: {e}")
 
     async def table_exists(self, table_name: str) -> bool:
-        pass
+        """Check if a collection exists in current database"""
+        return self._client.has_collection(table_name)
 
     async def delete_table(self, table_name: str) -> None:
-        pass
+        """Delete a collection from current database"""
+        await asyncio.to_thread(
+            self._client.drop_collection,
+            collection_name=table_name,
+        )

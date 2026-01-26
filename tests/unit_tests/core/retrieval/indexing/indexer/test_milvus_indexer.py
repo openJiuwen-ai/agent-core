@@ -8,9 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.retrieval import MilvusIndexer
-from openjiuwen.core.retrieval import IndexConfig
-from openjiuwen.core.retrieval import TextChunk
+from openjiuwen.core.retrieval import IndexConfig, MilvusIndexer, TextChunk
 
 
 @pytest.fixture
@@ -72,8 +70,22 @@ class TestMilvusIndexer:
             doc_id_field="custom_doc_id",
         )
         assert indexer.text_field == "custom_text"
-        assert indexer.vector_field == "custom_vector"
+        assert indexer.vector_field.vector_field == "custom_vector"
         assert indexer.doc_id_field == "custom_doc_id"
+
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
+    def test_init_with_invalid_vector_field(self, mock_client_class):
+        """Test initialization with custom fields"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        with pytest.raises(BaseError, match="vector_field must be either a str or MilvusVectorField instance"):
+            _ = MilvusIndexer(
+                milvus_uri="http://localhost:19530",
+                text_field="custom_text",
+                vector_field=dict(vector_field="custom_vector"),
+                doc_id_field="custom_doc_id",
+            )
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")

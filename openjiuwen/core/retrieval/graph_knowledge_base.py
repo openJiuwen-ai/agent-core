@@ -192,8 +192,7 @@ class GraphKnowledgeBase(KnowledgeBase):
                         StatusCode.RETRIEVAL_KB_TRIPLE_INDEX_BUILD_EXECUTION_ERROR,
                         error_msg="Failed to build triple index",
                     )
-                else:
-                    logger.info(f"Built triple index with {len(triple_chunks)} triples")
+                logger.info(f"Built triple index with {len(triple_chunks)} triples")
 
         # Return document ID list
         doc_ids = [doc.id_ for doc in documents]
@@ -256,20 +255,20 @@ class GraphKnowledgeBase(KnowledgeBase):
             )
 
             return results
-        else:
-            # Use normal retrieval (fallback to simple knowledge base retrieval method)
-            from openjiuwen.core.retrieval.simple_knowledge_base import SimpleKnowledgeBase
 
-            base_kb = SimpleKnowledgeBase(
-                config=self.config,
-                vector_store=self.vector_store,
-                embed_model=self.embed_model,
-                parser=self.parser,
-                chunker=self.chunker,
-                index_manager=self.index_manager,
-            )
+        # Use normal retrieval (fallback to simple knowledge base retrieval method)
+        from openjiuwen.core.retrieval.simple_knowledge_base import SimpleKnowledgeBase
 
-            return await base_kb.retrieve(query, config, **kwargs)
+        base_kb = SimpleKnowledgeBase(
+            config=self.config,
+            vector_store=self.vector_store,
+            embed_model=self.embed_model,
+            parser=self.parser,
+            chunker=self.chunker,
+            index_manager=self.index_manager,
+        )
+
+        return await base_kb.retrieve(query, config, **kwargs)
 
     async def delete_documents(
         self,

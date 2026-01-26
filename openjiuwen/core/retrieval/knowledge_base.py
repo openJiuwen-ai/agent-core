@@ -57,16 +57,25 @@ class KnowledgeBase(ABC):
     def validate_index(self):
         """Validate vector store and index manager"""
         data_fields = ["text_field", "vector_field", "sparse_vector_field", "metadata_field", "doc_id_field"]
-        for attr in ["database_name", "distance_metric", "index_type"] + data_fields:
+        for attr in ["database_name", "distance_metric"] + data_fields:
             vector_store_val = getattr(self.vector_store, attr, None)
             index_manager_val = getattr(self.index_manager, attr, None)
             if vector_store_val != index_manager_val:
                 raise build_error(
                     StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
-                    config_name=attr,
-                    error_msg=f'\n- Vector Store ({type(self.vector_store).__name__}) is using "{vector_store_val}"'
-                    f'\n- Index manager ({type(self.index_manager).__name__}) is using "{index_manager_val}"',
+                    error_msg=f"Vector store and index manager have incompatible {attr} configs:\n"
+                    f'- Vector Store ({type(self.vector_store).__name__}) is using "{vector_store_val}"\n'
+                    f'- Index manager ({type(self.index_manager).__name__}) is using "{index_manager_val}"',
                 )
+
+    async def delete_collection(self, collection: str) -> None:
+        """Delete a collection from current database"""
+        if self.vector_store is None:
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_VECTOR_STORE_NOT_FOUND,
+                error_msg="vector_store is required for delete_collection",
+            )
+        return await self.vector_store.delete_table(collection)
 
     @abstractmethod
     async def parse_files(

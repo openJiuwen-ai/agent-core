@@ -25,7 +25,7 @@ class ChromaVectorField(VectorField):
     high-dimensional vectors.
 
     Attributes:
-        max_neighbours: Maximum number of edges per node in the HNSW graph.
+        max_neighbors: Maximum number of edges per node in the HNSW graph.
             Higher values improve accuracy but increase memory usage and construction time.
             Default: 16, Range: [2, 2048]
         ef_construction: Number of candidate neighbors to consider during index
@@ -44,7 +44,7 @@ class ChromaVectorField(VectorField):
 
     database_type: Literal["chroma"] = Field(default="chroma", description="Database type", init=False)
     index_type: Literal["hnsw"] = Field(default="hnsw", description="ANN index type", init=False)
-    max_neighbours: int = Field(
+    max_neighbors: int = Field(
         default=16,
         ge=2,
         le=2048,

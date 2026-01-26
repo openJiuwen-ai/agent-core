@@ -19,7 +19,7 @@ class TestChromaVectorField:
         assert field.vector_field == "embedding"
         assert field.database_type == "chroma"
         assert field.index_type == "hnsw"
-        assert field.max_neighbours == 16
+        assert field.max_neighbors == 16
         assert field.ef_construction == 100
         assert field.ef_search == 100
         assert field.extra_search == {}
@@ -37,26 +37,26 @@ class TestChromaVectorField:
         """Test initialization with custom parameters"""
         field = ChromaVectorField(
             vector_field="embeddings",
-            max_neighbours=32,
+            max_neighbors=32,
             ef_construction=200,
             ef_search=150.5,
         )
         assert field.vector_field == "embeddings"
-        assert field.max_neighbours == 32
+        assert field.max_neighbors == 32
         assert field.ef_construction == 200
         assert field.ef_search == 150.5
 
     @staticmethod
-    def test_init_max_neighbours_min():
-        """Test initialization with minimum max_neighbours"""
-        field = ChromaVectorField(max_neighbours=2)
-        assert field.max_neighbours == 2
+    def test_init_max_neighbors_min():
+        """Test initialization with minimum max_neighbors"""
+        field = ChromaVectorField(max_neighbors=2)
+        assert field.max_neighbors == 2
 
     @staticmethod
-    def test_init_max_neighbours_max():
-        """Test initialization with maximum max_neighbours"""
-        field = ChromaVectorField(max_neighbours=2048)
-        assert field.max_neighbours == 2048
+    def test_init_max_neighbors_max():
+        """Test initialization with maximum max_neighbors"""
+        field = ChromaVectorField(max_neighbors=2048)
+        assert field.max_neighbors == 2048
 
     @staticmethod
     def test_init_ef_construction_min():
@@ -105,20 +105,20 @@ class TestChromaVectorField:
         assert field.extra_search["num_threads"] == 8
 
     @staticmethod
-    def test_validation_max_neighbours_too_low():
-        """Test validation error for max_neighbours below minimum"""
+    def test_validation_max_neighbors_too_low():
+        """Test validation error for max_neighbors below minimum"""
         with pytest.raises(ValidationError) as exc_info:
-            ChromaVectorField(max_neighbours=1)
+            ChromaVectorField(max_neighbors=1)
         errors = exc_info.value.errors()
-        assert any(error["type"] == "greater_than_equal" and "max_neighbours" in str(error["loc"]) for error in errors)
+        assert any(error["type"] == "greater_than_equal" and "max_neighbors" in str(error["loc"]) for error in errors)
 
     @staticmethod
-    def test_validation_max_neighbours_too_high():
-        """Test validation error for max_neighbours above maximum"""
+    def test_validation_max_neighbors_too_high():
+        """Test validation error for max_neighbors above maximum"""
         with pytest.raises(ValidationError) as exc_info:
-            ChromaVectorField(max_neighbours=2049)
+            ChromaVectorField(max_neighbors=2049)
         errors = exc_info.value.errors()
-        assert any(error["type"] == "less_than_equal" and "max_neighbours" in str(error["loc"]) for error in errors)
+        assert any(error["type"] == "less_than_equal" and "max_neighbors" in str(error["loc"]) for error in errors)
 
     @staticmethod
     def test_validation_ef_construction_too_low():
@@ -172,19 +172,19 @@ class TestChromaVectorField:
     def test_to_dict_search():
         """Test to_dict method for search stage"""
         field = ChromaVectorField(
-            max_neighbours=32,
+            max_neighbors=32,
             ef_construction=200,
             ef_search=150,
             extra_search={"num_threads": 4},
         )
         result = field.to_dict("search")
         # Search stage should include extra_search contents (unpacked)
-        # Note: ef_search, max_neighbours, ef_construction are marked as IS_CONSTRUCT
+        # Note: ef_search, max_neighbors, ef_construction are marked as IS_CONSTRUCT
         # so they won't appear in search stage results
         assert "num_threads" in result
         assert result["num_threads"] == 4
         # Search stage should not include construction-only fields
-        assert "max_neighbours" not in result
+        assert "max_neighbors" not in result
         assert "ef_construction" not in result
         assert "ef_search" not in result
         # Should not include internal fields
@@ -197,15 +197,15 @@ class TestChromaVectorField:
     def test_to_dict_construct():
         """Test to_dict method for construct stage"""
         field = ChromaVectorField(
-            max_neighbours=32,
+            max_neighbors=32,
             ef_construction=200,
             ef_search=150,
             extra_search={"num_threads": 4},
         )
         result = field.to_dict("construct")
         # Construct stage should include all fields marked with IS_CONSTRUCT
-        assert "max_neighbours" in result
-        assert result["max_neighbours"] == 32
+        assert "max_neighbors" in result
+        assert result["max_neighbors"] == 32
         assert "ef_construction" in result
         assert result["ef_construction"] == 200
         assert "ef_search" in result
@@ -221,7 +221,7 @@ class TestChromaVectorField:
     def test_to_dict_search_with_none_fields():
         """Test to_dict search stage filters out None fields"""
         field = ChromaVectorField(
-            max_neighbours=32,
+            max_neighbors=32,
             ef_construction=200,
             # ef_search uses default, but it's marked as IS_CONSTRUCT so won't appear in search
         )
@@ -235,12 +235,12 @@ class TestChromaVectorField:
     def test_to_dict_construct_with_none_fields():
         """Test to_dict construct stage filters out None fields"""
         field = ChromaVectorField(
-            max_neighbours=32,
+            max_neighbors=32,
             ef_construction=200,
         )
         result = field.to_dict("construct")
         # Construction fields should be present
-        assert "max_neighbours" in result
+        assert "max_neighbors" in result
         assert "ef_construction" in result
 
     @staticmethod

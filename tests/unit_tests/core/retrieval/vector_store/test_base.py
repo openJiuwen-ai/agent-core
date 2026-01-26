@@ -3,7 +3,6 @@
 Vector store abstract base class test cases
 """
 
-
 import pytest
 
 from openjiuwen.core.retrieval import VectorStore

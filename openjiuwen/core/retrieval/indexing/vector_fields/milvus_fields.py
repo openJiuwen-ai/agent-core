@@ -292,13 +292,13 @@ class MilvusHNSW(MilvusVectorField):
     - PRQ: Product residual quantization, best compression ratio
 
     Attributes:
-        max_neighbours: Maximum number of edges per node in the graph. Higher
+        M: Maximum number of edges per node in the graph. Higher
             values improve accuracy but increase memory usage and construction time.
             Default: 30, Range: [2, 2048]
-        ef_construction: Number of candidate neighbors to consider during index
+        efConstruction: Number of candidate neighbors to consider during index
             construction. Higher values improve graph quality but slow construction.
             Default: 360, Range: [1, ∞)
-        ef_search_factor: Multiplier for search breadth. If set, ef = top_k * ef_search_factor.
+        efSearchFactor: Multiplier for search breadth. If set, ef = top_k * efSearchFactor.
             Higher values improve recall at the cost of latency. Default: None
         variant: Optional quantization variant to reduce memory usage.
             Options: "SQ", "PQ", "PRQ", or None (no quantization). Default: None
@@ -309,25 +309,25 @@ class MilvusHNSW(MilvusVectorField):
     """
 
     index_type: Literal["hnsw"] = Field(default="hnsw", description="ANN index type", init=False)
-    max_neighbours: int = Field(
+    M: int = Field(
         default=30,
         ge=2,
         le=2048,
         description="Maximum number of edges each node can have in the graph",
         **IS_CONSTRUCT,
     )
-    ef_construction: int = Field(
+    efConstruction: int = Field(
         default=360,
         ge=1,
         description="Number of candidate neighbors considered during index construction",
         **IS_CONSTRUCT,
     )
-    ef_search_factor: float = Field(
+    efSearchFactor: float = Field(
         default=DEFAULT,
         ge=1,
         description="Controls the search breadth for Milvus HNSW search queries. "
-        "If set, top_k * ef_search_factor = ef (in Milvus) = number of candidates explored during search. "
-        "High ef_search_factor improves recall at the cost of latency.",
+        "If set, top_k * efSearchFactor = ef (in Milvus) = number of candidates explored during search. "
+        "High efSearchFactor improves recall at the cost of latency.",
         **IS_SEARCH,
     )
     variant: Optional[Literal["SQ", "PQ", "PRQ"]] = Field(

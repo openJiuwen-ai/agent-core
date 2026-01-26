@@ -161,21 +161,6 @@ class TestKnowledgeBaseConfigurationValidation:
             )
 
     @staticmethod
-    def test_validation_fails_on_mismatch_index_type():
-        """Test that validation fails when index_type doesn't match"""
-        config = KnowledgeBaseConfig(kb_id="test_kb")
-        mock_vector_store, mock_index_manager = TestKnowledgeBaseConfigurationValidation._create_compatible_mocks()
-        mock_vector_store.index_type = "vector"
-        mock_index_manager.index_type = "bm25"
-
-        with pytest.raises(BaseError, match="incompatible index_type configs"):
-            ConcreteKnowledgeBase(
-                config=config,
-                vector_store=mock_vector_store,
-                index_manager=mock_index_manager,
-            )
-
-    @staticmethod
     def test_validation_fails_on_mismatch_text_field():
         """Test that validation fails when text_field doesn't match"""
         config = KnowledgeBaseConfig(kb_id="test_kb")

@@ -59,8 +59,22 @@ class TestChromaIndexer:
             doc_id_field="custom_doc_id",
         )
         assert indexer.text_field == "custom_text"
-        assert indexer.vector_field == "custom_vector"
+        assert indexer.vector_field.vector_field == "custom_vector"
         assert indexer.doc_id_field == "custom_doc_id"
+
+    @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
+    def test_init_with_invalid_vector_field(self, mock_client_class):
+        """Test initialization with custom fields"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        with pytest.raises(BaseError, match="vector_field must be either a str or ChromaVectorField instance"):
+            _ = ChromaIndexer(
+                chroma_path="/tmp/test_chroma",
+                text_field="custom_text",
+                vector_field=dict(vector_field="custom_vector"),
+                doc_id_field="custom_doc_id",
+            )
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")

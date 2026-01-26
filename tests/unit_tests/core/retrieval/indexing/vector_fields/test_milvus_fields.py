@@ -496,10 +496,10 @@ class TestMilvusHNSW:
         assert field.vector_field == "embedding"
         assert field.database_type == "milvus"
         assert field.index_type == "hnsw"
-        assert field.max_neighbours == 30
-        assert field.ef_construction == 360
-        # ef_search_factor has default None, should be None (not set)
-        assert field.ef_search_factor is None
+        assert field.M == 30
+        assert field.efConstruction == 360
+        # efSearchFactor has default None, should be None (not set)
+        assert field.efSearchFactor is None
         # variant has default None, should be None (not set)
         assert field.variant is None
         assert field.extra_construct == {}
@@ -510,38 +510,38 @@ class TestMilvusHNSW:
         """Test initialization with custom parameters"""
         field = MilvusHNSW(
             vector_field="embeddings",
-            max_neighbours=64,
-            ef_construction=400,
-            ef_search_factor=2.0,
+            M=64,
+            efConstruction=400,
+            efSearchFactor=2.0,
         )
         assert field.vector_field == "embeddings"
-        assert field.max_neighbours == 64
-        assert field.ef_construction == 400
-        assert field.ef_search_factor == 2.0
+        assert field.M == 64
+        assert field.efConstruction == 400
+        assert field.efSearchFactor == 2.0
 
     @staticmethod
-    def test_init_max_neighbours_min():
-        """Test initialization with minimum max_neighbours"""
-        field = MilvusHNSW(max_neighbours=2)
-        assert field.max_neighbours == 2
+    def test_init_m_min():
+        """Test initialization with minimum M"""
+        field = MilvusHNSW(M=2)
+        assert field.M == 2
 
     @staticmethod
-    def test_init_max_neighbours_max():
-        """Test initialization with maximum max_neighbours"""
-        field = MilvusHNSW(max_neighbours=2048)
-        assert field.max_neighbours == 2048
+    def test_init_m_max():
+        """Test initialization with maximum M"""
+        field = MilvusHNSW(M=2048)
+        assert field.M == 2048
 
     @staticmethod
     def test_init_ef_construction_min():
-        """Test initialization with minimum ef_construction"""
-        field = MilvusHNSW(ef_construction=1)
-        assert field.ef_construction == 1
+        """Test initialization with minimum efConstruction"""
+        field = MilvusHNSW(efConstruction=1)
+        assert field.efConstruction == 1
 
     @staticmethod
     def test_init_ef_search_factor_min():
-        """Test initialization with minimum ef_search_factor"""
-        field = MilvusHNSW(ef_search_factor=1.0)
-        assert field.ef_search_factor == 1.0
+        """Test initialization with minimum efSearchFactor"""
+        field = MilvusHNSW(efSearchFactor=1.0)
+        assert field.efSearchFactor == 1.0
 
     @staticmethod
     def test_init_variant_sq():
@@ -583,38 +583,36 @@ class TestMilvusHNSW:
         assert field.extra_search["refine_k"] == 1.5
 
     @staticmethod
-    def test_validation_max_neighbours_too_low():
-        """Test validation error for max_neighbours below minimum"""
+    def test_validation_m_too_low():
+        """Test validation error for M below minimum"""
         with pytest.raises(ValidationError) as exc_info:
-            MilvusHNSW(max_neighbours=1)
+            MilvusHNSW(M=1)
         errors = exc_info.value.errors()
-        assert any(error["type"] == "greater_than_equal" and "max_neighbours" in str(error["loc"]) for error in errors)
+        assert any(error["type"] == "greater_than_equal" and "M" in str(error["loc"]) for error in errors)
 
     @staticmethod
-    def test_validation_max_neighbours_too_high():
-        """Test validation error for max_neighbours above maximum"""
+    def test_validation_m_too_high():
+        """Test validation error for M above maximum"""
         with pytest.raises(ValidationError) as exc_info:
-            MilvusHNSW(max_neighbours=2049)
+            MilvusHNSW(M=2049)
         errors = exc_info.value.errors()
-        assert any(error["type"] == "less_than_equal" and "max_neighbours" in str(error["loc"]) for error in errors)
+        assert any(error["type"] == "less_than_equal" and "M" in str(error["loc"]) for error in errors)
 
     @staticmethod
     def test_validation_ef_construction_too_low():
-        """Test validation error for ef_construction below minimum"""
+        """Test validation error for efConstruction below minimum"""
         with pytest.raises(ValidationError) as exc_info:
-            MilvusHNSW(ef_construction=0)
+            MilvusHNSW(efConstruction=0)
         errors = exc_info.value.errors()
-        assert any(error["type"] == "greater_than_equal" and "ef_construction" in str(error["loc"]) for error in errors)
+        assert any(error["type"] == "greater_than_equal" and "efConstruction" in str(error["loc"]) for error in errors)
 
     @staticmethod
     def test_validation_ef_search_factor_too_low():
-        """Test validation error for ef_search_factor below minimum"""
+        """Test validation error for efSearchFactor below minimum"""
         with pytest.raises(ValidationError) as exc_info:
-            MilvusHNSW(ef_search_factor=0.5)
+            MilvusHNSW(efSearchFactor=0.5)
         errors = exc_info.value.errors()
-        assert any(
-            error["type"] == "greater_than_equal" and "ef_search_factor" in str(error["loc"]) for error in errors
-        )
+        assert any(error["type"] == "greater_than_equal" and "efSearchFactor" in str(error["loc"]) for error in errors)
 
     @staticmethod
     def test_validation_sq_invalid_sq_type():
@@ -682,17 +680,17 @@ class TestMilvusHNSW:
     def test_to_dict_search():
         """Test to_dict method for search stage"""
         field = MilvusHNSW(
-            max_neighbours=64,
-            ef_construction=400,
-            ef_search_factor=2.0,
+            M=64,
+            efConstruction=400,
+            efSearchFactor=2.0,
         )
         result = field.to_dict("search")
-        # Search stage should include ef_search_factor
-        assert "ef_search_factor" in result
-        assert result["ef_search_factor"] == 2.0
+        # Search stage should include efSearchFactor
+        assert "efSearchFactor" in result
+        assert result["efSearchFactor"] == 2.0
         # Search stage should not include construction-only fields
-        assert "max_neighbours" not in result
-        assert "ef_construction" not in result
+        assert "M" not in result
+        assert "efConstruction" not in result
         # Should not include internal fields
         assert "database_type" not in result
         assert "index_type" not in result
@@ -702,18 +700,18 @@ class TestMilvusHNSW:
     def test_to_dict_construct():
         """Test to_dict method for construct stage"""
         field = MilvusHNSW(
-            max_neighbours=64,
-            ef_construction=400,
-            ef_search_factor=2.0,
+            M=64,
+            efConstruction=400,
+            efSearchFactor=2.0,
         )
         result = field.to_dict("construct")
-        # Construct stage should include max_neighbours and ef_construction
-        assert "max_neighbours" in result
-        assert result["max_neighbours"] == 64
-        assert "ef_construction" in result
-        assert result["ef_construction"] == 400
+        # Construct stage should include M and efConstruction
+        assert "M" in result
+        assert result["M"] == 64
+        assert "efConstruction" in result
+        assert result["efConstruction"] == 400
         # Construct stage should not include search-only fields
-        assert "ef_search_factor" not in result
+        assert "efSearchFactor" not in result
         # Should not include internal fields
         assert "database_type" not in result
         assert "index_type" not in result
@@ -721,23 +719,23 @@ class TestMilvusHNSW:
 
     @staticmethod
     def test_to_dict_search_without_ef_search_factor():
-        """Test to_dict search stage when ef_search_factor is not set (None)"""
-        field = MilvusHNSW(max_neighbours=64, ef_construction=400)
+        """Test to_dict search stage when efSearchFactor is not set (None)"""
+        field = MilvusHNSW(M=64, efConstruction=400)
         result = field.to_dict("search")
-        # ef_search_factor should not appear if it's None
-        assert "ef_search_factor" not in result
+        # efSearchFactor should not appear if it's None
+        assert "efSearchFactor" not in result
 
     @staticmethod
     def test_to_dict_search_with_extra_search():
         """Test to_dict search stage with extra_search"""
         field = MilvusHNSW(
             variant="PQ",
-            ef_search_factor=2.0,
+            efSearchFactor=2.0,
             extra_search={"refine_k": 1.5},
         )
         result = field.to_dict("search")
-        assert "ef_search_factor" in result
-        assert result["ef_search_factor"] == 2.0
+        assert "efSearchFactor" in result
+        assert result["efSearchFactor"] == 2.0
         assert "refine_k" in result
         assert result["refine_k"] == 1.5
         assert "extra_search" not in result  # Should be unpacked
@@ -747,15 +745,15 @@ class TestMilvusHNSW:
         """Test to_dict construct stage with extra_construct"""
         field = MilvusHNSW(
             variant="SQ",
-            max_neighbours=64,
-            ef_construction=400,
+            M=64,
+            efConstruction=400,
             extra_construct={"sq_type": "SQ8", "refine": True},
         )
         result = field.to_dict("construct")
-        assert "max_neighbours" in result
-        assert result["max_neighbours"] == 64
-        assert "ef_construction" in result
-        assert result["ef_construction"] == 400
+        assert "M" in result
+        assert result["M"] == 64
+        assert "efConstruction" in result
+        assert result["efConstruction"] == 400
         assert "sq_type" in result
         assert result["sq_type"] == "SQ8"
         assert "refine" in result
