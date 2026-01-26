@@ -84,7 +84,8 @@ class RestfulApi(Tool):
         query_params = [(k, v) for k, v in map_results.get(APIParamLocation.QUERY, {}).items()]
         if query_params:
             url = f'{url}?{urlencode(query_params)}'
-        async with aiohttp.ClientSession(connector=connector) as session:
+        proxy = UrlUtils.get_global_proxy_url(url)
+        async with aiohttp.ClientSession(proxy=proxy, connector=connector) as session:
             async with session.request(
                     self._method,
                     url,
