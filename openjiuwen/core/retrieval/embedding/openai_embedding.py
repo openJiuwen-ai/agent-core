@@ -34,6 +34,7 @@ class OpenAIEmbedding(APIEmbedding):
         max_retries: int = 3,
         extra_headers: Optional[dict] = None,
         max_batch_size: int = 8,
+        dimension: Optional[int] = None,
         verify: bool | str | ssl.SSLContext = True,
         **kwargs,
     ):
@@ -46,6 +47,7 @@ class OpenAIEmbedding(APIEmbedding):
             max_retries: Maximum retry count
             extra_headers: Additional request headers
             max_batch_size: Maximum batch size for each query
+            dimension: Embedding dimension for Matryoshka models
             verify (bool/str/ssl.SSLContext): Decides SSL context to use for the httpx clients,
                 bool: whether to use SSL context with default CA certificate (using EMBEDDING_SSL_CERT from
                 https://gitcode.com/openJiuwen/agent-core/pull/180 if possible, otherwise using system default);
@@ -56,10 +58,11 @@ class OpenAIEmbedding(APIEmbedding):
         super().__init__(
             config, timeout=timeout, max_retries=max_retries, extra_headers=extra_headers, max_batch_size=max_batch_size
         )
-        if config.base_url is None:
-            self.api_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        elif isinstance(self.api_url, str):
-            self.api_url = self.api_url.removeprefix("/").removesuffix("/embeddings")
+        self.matryoshka_dimension = False
+        if isinstance(dimension, int):
+            self._dimension = dimension
+            self.matryoshka_dimension = True
+        self.api_url = self.api_url.removesuffix("/").removesuffix("/embeddings")
 
         # Create OpenAI clients
         if verify is True and isinstance(self._verify_ssl, str):
@@ -122,8 +125,8 @@ class OpenAIEmbedding(APIEmbedding):
         """Get embedding vectors"""
 
         dimensions = kwargs.get("dimensions")
-        if isinstance(dimensions, int):
-            self._dimension = dimensions
+        if self.matryoshka_dimension and dimensions is None:
+            kwargs["dimensions"] = self._dimension
 
         for attempt in range(self.max_retries):
             try:
@@ -139,7 +142,7 @@ class OpenAIEmbedding(APIEmbedding):
                 # If dimension not yet determined, get from result and cache
                 if self._dimension is None and embeddings and embeddings[0]:
                     self._dimension = len(embeddings[0])
-                    logger.debug(f"Determined embedding dimension: {self._dimension}")
+                    logger.debug("Determined embedding dimension: %d", self._dimension)
 
                 return embeddings
             except openai.APIError as e:
@@ -163,8 +166,8 @@ class OpenAIEmbedding(APIEmbedding):
         """Get embedding vectors (sync version)."""
 
         dimensions = kwargs.get("dimensions")
-        if isinstance(dimensions, int):
-            self._dimension = dimensions
+        if self.matryoshka_dimension and dimensions is None:
+            kwargs["dimensions"] = self._dimension
 
         for attempt in range(self.max_retries):
             try:
@@ -175,7 +178,7 @@ class OpenAIEmbedding(APIEmbedding):
                 # If dimension not yet determined, get from result and cache
                 if self._dimension is None and embeddings and embeddings[0]:
                     self._dimension = len(embeddings[0])
-                    logger.debug(f"Determined embedding dimension: {self._dimension}")
+                    logger.debug("Determined embedding dimension: %d", self._dimension)
 
                 return embeddings
             except openai.APIError as e:
