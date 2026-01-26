@@ -891,13 +891,16 @@ class ResourceMgr:
                                                                     skip_if_tag_not_exists,
                                                                     StatusCode.RESOURCE_MCP_TOOL_GET_ERROR)
         results = []
-        tool_names = name if isinstance(name, list) else [name]
+        tool_names = [name] if isinstance(name, str) else name
         for mcp_server_id in server_ids_to_get:
             try:
                 await self._resource_registry.tool().refresh_tool_server(mcp_server_id, skip_not_exist=True)
             except Exception as e:
                 if not ignore_exception:
                     raise e
+            if tool_names is None:
+                results.extend(self._resource_registry.tool().get_mcp_tools(mcp_server_id, session))
+                continue
             for tool_name in tool_names:
                 tool = self._resource_registry.tool().get_mcp_tool(tool_name, mcp_server_id, session)
                 if exact_match:
@@ -935,7 +938,7 @@ class ResourceMgr:
         server_ids_to_get, exact_match = self._inner_get_server_ids(server_id, server_name, tag, tag_match_strategy,
                                                                     skip_if_tag_not_exists,
                                                                     StatusCode.RESOURCE_MCP_TOOL_GET_ERROR)
-        tool_names = name if isinstance(name, list) else [name]
+        tool_names = [name] if isinstance(name, str) else name
         results = []
         for mcp_server_id in server_ids_to_get:
             try:
@@ -943,8 +946,13 @@ class ResourceMgr:
             except Exception as e:
                 if not ignore_exception:
                     raise e
-            for tool_name in tool_names:
-                tool_id = self._resource_registry.tool().get_mcp_tool_id(mcp_server_id, tool_name)
+            tool_ids = []
+            if tool_names is None:
+                tool_ids = self._resource_registry.tool().get_mcp_tool_id(mcp_server_id)
+            else:
+                for tool_name in tool_names:
+                    tool_ids.append(self._resource_registry.tool().get_mcp_tool_id(mcp_server_id, tool_name))
+            for tool_id in tool_ids:
                 tool_card = self._id_to_card.get(tool_id) if tool_id else None
                 if exact_match:
                     results.append(tool_card.tool_info() if tool_card else None)
@@ -1234,10 +1242,10 @@ class ResourceMgr:
             except Exception as e:
                 if not remove_by_tag:
                     error = e
-            removed_card = self._id_to_card.pop(resource_id, None)
+            removed_card = self._id_to_card.pop(remove_id, None)
             if error:
                 logger.error(
-                    f"remove resource error, id={resource_id}, type={resource_type}, card={removed_card},"
+                    f"remove resource error, id={remove_id}, type={resource_type}, card={removed_card},"
                     f" reason={str(error)}")
                 results.append(Error(error))
             elif resource_type in ["tool", "prompt"]:

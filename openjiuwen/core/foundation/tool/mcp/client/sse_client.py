@@ -83,6 +83,7 @@ class SseClient(McpClient):
             tools_list = [
                 McpToolCard(
                     name=tool.name,
+                    server_name=self._name,
                     description=getattr(tool, "description", ""),
                     input_params=getattr(tool, "inputSchema", {}),
                 )

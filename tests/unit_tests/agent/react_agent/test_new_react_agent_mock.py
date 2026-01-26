@@ -269,7 +269,7 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
         not_exist = agent.get_ability("not_exist")
         self.assertIsNone(not_exist)
 
-    def test_list_tool_info(self):
+    async def test_list_tool_info(self):
         """测试获取 ToolInfo 列表"""
         with patch.object(
             ReActAgent,
@@ -280,7 +280,7 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             agent.add_ability(self._create_add_tool_card())
             agent.add_ability(self._create_multiply_tool_card())
 
-        tool_infos = agent.list_tool_info()
+        tool_infos = await agent.list_tool_info()
         self.assertEqual(len(tool_infos), 2)
 
         names = [t.name for t in tool_infos]

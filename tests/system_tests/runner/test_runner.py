@@ -365,6 +365,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         mock_tools = [
             McpToolCard(
                 name="browser_navigate",
+                server_name="my_server",
                 description="Navigate to a URL",
                 input_params={
                     "type": "object",
@@ -374,6 +375,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             ),
             McpToolCard(
                 name="browser_extract_text",
+                server_name="my_server",
                 description="Extract text from the current page",
                 input_params={
                     "type": "object",
@@ -445,6 +447,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         mock_tools = [
             McpToolCard(
                 name="doubter",
+                server_name="my_server",
                 description="Doubter tool via stdio",
                 input_params={
                     "type": "object",
@@ -454,6 +457,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             ),
             McpToolCard(
                 name="checker",
+                server_name="my_server",
                 description="Checker tool via stdio",
                 input_params={
                     "type": "object",
@@ -529,6 +533,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         mock_tools = [
             McpToolCard(
                 name="browser_navigate",
+                server_name="my_server",
                 description="Navigate to a URL via Playwright",
                 input_params={
                     "type": "object",
@@ -538,6 +543,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             ),
             McpToolCard(
                 name="browser_click",
+                server_name="my_server",
                 description="Click an element via Playwright",
                 input_params={
                     "type": "object",
