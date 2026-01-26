@@ -221,6 +221,14 @@ class BaseModelClient(ABC):
         # Add other parameters (filter out internal parameters)
         # parser and output_parser are for internal use and should not be passed to model API
         internal_params = {"parser", "output_parser"}
+        
+        # Get all fields from model_config (including extra fields)
+        params.update(self.model_config.model_dump(
+            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude_none=True
+        ))
+        
+        # Then add kwargs parameters (will override model_config params with same key)
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in internal_params}
         params.update(filtered_kwargs)
 
