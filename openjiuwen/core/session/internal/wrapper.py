@@ -180,6 +180,9 @@ class TaskSession(StateSession):
             self._interaction = SimpleAgentInteraction(self._inner)
         await self._interaction.wait_user_inputs(value)
 
+    def get_inner_session(self):
+        return self._inner
+
     # todo: all resource interaface will be deleted when resource_mgr supports tag feature
     def get_prompt(self, template_id: str) -> PromptTemplate:
         return self._inner.resource_manager()._resource_registry.prompt().get_prompt(template_id)

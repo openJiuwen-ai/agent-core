@@ -677,7 +677,7 @@ class LLMController(BaseController):
             logger.info(f"React llm inputs: {llm_inputs}")
 
         try:
-            model = await self._get_model()
+            model = await self._get_model(session=session.get_inner_session())
             llm_output = await self._call_llm_get_output(
                 model,
                 self.config.model.model_info.model_name,
@@ -788,7 +788,7 @@ class LLMController(BaseController):
             logger.error(f"Failed to stream LLM output: {e}")
             raise
 
-    async def _get_model(self):
+    async def _get_model(self, session=None):
         """Get model instance"""
         model_id = generate_key(
             self.config.model.model_info.api_key,
@@ -796,7 +796,7 @@ class LLMController(BaseController):
             self.config.model.model_provider
         )
 
-        model = await Runner.resource_mgr.get_model(model_id=model_id)
+        model = await Runner.resource_mgr.get_model(model_id=model_id, session=session)
 
         if model is None:
             model_client_config = ModelClientConfig(
@@ -820,7 +820,7 @@ class LLMController(BaseController):
 
             Runner.resource_mgr.add_model(model_id=model_id, model=model_provider)
 
-        return await Runner.resource_mgr.get_model(model_id=model_id)
+        return await Runner.resource_mgr.get_model(model_id=model_id, session=session)
 
     def _get_workflow_id_from_schema(self, workflow_name: str) -> Optional[str]:
         """Get workflow_id from workflow schema by name
