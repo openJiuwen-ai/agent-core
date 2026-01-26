@@ -96,7 +96,6 @@ class TestMemoryChromaVectorStore:
         vector_data = {
             "id": "vec1",
             "embedding": [0.1, 0.2, 0.3, 0.4],
-            "scope_id": "scope1"
         }
 
         # 调用add方法
@@ -108,7 +107,6 @@ class TestMemoryChromaVectorStore:
         rounded = [[round(x, 4) for x in vec] for vec in result["embeddings"].tolist()]
         assert result["ids"] == ["vec1"]
         assert rounded == [[0.1, 0.2, 0.3, 0.4]]
-        assert result["metadatas"] == [{"scope_id": "scope1"}]
 
     @pytest.mark.asyncio
     async def test_add_multiple_vectors(self, chroma_store, persist_directory, table_name):
@@ -165,12 +163,10 @@ class TestMemoryChromaVectorStore:
             {
                 "id": "vec1",
                 "embedding": [0.1, 0.2, 0.3, 0.4],
-                "scope_id": "scope1"
             },
             {
                 "id": "vec2",
                 "embedding": [0.5, 0.6, 0.7, 0.8],
-                "scope_id": "scope2"
             }
         ]
 
@@ -179,17 +175,16 @@ class TestMemoryChromaVectorStore:
 
         # 调用search方法
         query_vector = [0.1, 0.2, 0.3, 0.4]
-        results = await chroma_store.search(query_vector, top_k=2, table_name=table_name, scope_id="scope1")
+        results = await chroma_store.search(query_vector, top_k=2, table_name=table_name)
 
         # 验证结果
         assert isinstance(results, list)
-        assert len(results) == 1  # 只有scope1的向量
+        assert len(results) == 2
         assert all(isinstance(result, SearchResult) for result in results)
 
         # 验证搜索结果
-        assert results[0].id == "vec1"
+        assert results[0].id == "vec2"
         assert results[0].text == ""
-        assert results[0].metadata == {"scope_id": "scope1"}
 
     @pytest.mark.asyncio
     async def test_search_empty_results(self, chroma_store, persist_directory, table_name):

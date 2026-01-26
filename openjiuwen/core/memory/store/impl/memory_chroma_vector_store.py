@@ -85,17 +85,15 @@ class MemoryChromaVectorStore(VectorStore):
         # Process in batches
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
-            ids, embeddings, metadatas = [], [], []
+            ids, embeddings = [], []
             for item in batch:
                 ids.append(item["id"])
                 embeddings.append(item["embedding"])
-                metadatas.append({"scope_id": item["scope_id"] if item.get("scope_id") else ""})
 
             await asyncio.to_thread(
                 collection.add,
                 ids=ids,
                 embeddings=embeddings,
-                metadatas=metadatas
             )
 
     async def search(
@@ -107,7 +105,6 @@ class MemoryChromaVectorStore(VectorStore):
     ) -> List[SearchResult]:
         """Vector search"""
         table_name = kwargs.get("table_name")
-        scope_id = kwargs.get("scope_id")
         self.check_table_name(table_name, "search")
 
         collection = await self.get_collection(table_name)
@@ -116,23 +113,20 @@ class MemoryChromaVectorStore(VectorStore):
             collection.query,
             query_embeddings=[query_vector],
             n_results=top_k,
-            where={"scope_id": scope_id} if scope_id is not None else None,
         )
 
         search_results = []
         if len(results['ids']) > 0 and results['ids'][0]:
             ids = results['ids'][0]
             distances = results['distances'][0] if results.get('distances') else [1.0] * len(ids)
-            metadatas = results['metadatas'][0] if results.get('metadatas') else [{}] * len(ids)
 
             # Convert distances to scores (higher is better)
-            for item_id, distance, metadata in zip(ids, distances, metadatas):
+            for item_id, distance in zip(ids, distances):
                 score = 1 - distance
                 search_results.append(SearchResult(
                     id=item_id,
                     text="",
                     score=score,
-                    metadata=metadata or {}
                 ))
 
         return search_results

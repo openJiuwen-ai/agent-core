@@ -78,7 +78,6 @@ class SemanticStore:
                 data.append({
                     "id": doc_id,
                     "embedding": embedding,
-                    "scope_id": scope_id
                 })
             
             # Add to vector store
@@ -141,7 +140,6 @@ class SemanticStore:
             results = await self.vector_store.search(
                 query_vector=query_embedding,
                 top_k=top_k,
-                scope_id=scope_id,
                 table_name=table_name
             )
             

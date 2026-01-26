@@ -10,7 +10,6 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 
 MEMORY_ID_LENGTH = 36
-SCOPE_ID_LENGTH = 64
 
 
 def convert_milvus_result(results) -> List[SearchResult]:
@@ -73,9 +72,7 @@ class MemoryMilvusVectorStore(VectorStore):
                 FieldSchema(name="id", dtype=DataType.VARCHAR,
                             is_primary=True, max_length=MEMORY_ID_LENGTH),
                 FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR,
-                            dim=self.embedding_dims),
-                FieldSchema(name="scope_id", dtype=DataType.VARCHAR,
-                    max_length=SCOPE_ID_LENGTH)
+                            dim=self.embedding_dims)
             ]
             schema = CollectionSchema(fields, description="embedding collection")
             collection = Collection(name=collection_name, schema=schema, using="default")
@@ -102,13 +99,11 @@ class MemoryMilvusVectorStore(VectorStore):
         collection = await self._get_collection(collection_name=table_name)
         embeddings = [d["embedding"] for d in data]
         memory_ids = [d["id"] for d in data]
-        scope_id = [d.get("scope_id", "") or "" for d in data]
         await asyncio.to_thread(
             collection.insert,
             [
                 memory_ids,
                 embeddings,
-                scope_id,
             ],
             timeout=self.timeout
         )
@@ -122,10 +117,6 @@ class MemoryMilvusVectorStore(VectorStore):
                 store_type="milvus vector store",
                 error_msg=f"table_name is required for search operation",
             )
-        scope_id = kwargs.get("scope_id")
-        expr_filters = None
-        if scope_id:
-            expr_filters = f"scope_id == '{scope_id}'"
         collection = await self._get_collection(table_name)
         results = await asyncio.to_thread(
             collection.search,
@@ -133,7 +124,6 @@ class MemoryMilvusVectorStore(VectorStore):
             anns_field="embedding",
             param={"metric_type": "IP", "params": {"nprobe": 10}},
             limit=top_k,
-            expr=expr_filters,
             timeout=self.timeout,
         )
         parsed_results = convert_milvus_result(results)
