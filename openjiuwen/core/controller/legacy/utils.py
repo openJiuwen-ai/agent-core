@@ -312,4 +312,6 @@ class ReasonerUtils:
 
             Runner.resource_mgr.add_model(model_id=model_id, model=create_model)
 
+            model = await Runner.resource_mgr.get_model(model_id=model_id)
+
         return model
