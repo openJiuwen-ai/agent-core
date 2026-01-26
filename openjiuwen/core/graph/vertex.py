@@ -199,6 +199,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         is_sub_graph = self._session.parent_id() != ''
         actor_manager = self._session.actor_manager()
         output_schema = self._node_config.stream_io_configs.outputs_schema if self._node_config.stream_io_configs else None
+        output_transformer = None
         if not isinstance(output_schema, dict):
             output_transformer = output_schema
         end_stream_index = 0
