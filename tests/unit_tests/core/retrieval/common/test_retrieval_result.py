@@ -2,13 +2,11 @@
 """
 Retrieval result data model test cases
 """
+
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.core.retrieval.common.retrieval_result import (
-    SearchResult,
-    RetrievalResult,
-)
+from openjiuwen.core.retrieval import SearchResult, RetrievalResult
 
 
 class TestSearchResult:
@@ -44,10 +42,10 @@ class TestSearchResult:
         """Test missing required fields"""
         with pytest.raises(ValidationError):
             SearchResult()
-        
+
         with pytest.raises(ValidationError):
             SearchResult(id="result_1")
-        
+
         with pytest.raises(ValidationError):
             SearchResult(id="result_1", text="Test result")
 
@@ -90,7 +88,6 @@ class TestRetrievalResult:
         """Test missing required fields"""
         with pytest.raises(ValidationError):
             RetrievalResult()
-        
+
         with pytest.raises(ValidationError):
             RetrievalResult(text="Test result")
-

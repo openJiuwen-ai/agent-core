@@ -9,23 +9,22 @@ import pytest
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.component.branch_comp import BranchComponent
-from openjiuwen.core.component.condition.array import ArrayCondition
-from openjiuwen.core.component.loop_callback.intermediate_loop_var import IntermediateLoopVarCallback
-from openjiuwen.core.component.loop_callback.output import OutputCallback
-from openjiuwen.core.component.loop_comp import LoopGroup, AdvancedLoopComponent, LoopComponent
-from openjiuwen.core.component.set_variable_comp import SetVariableComponent
-from openjiuwen.core.component.workflow_comp import SubWorkflowComponent
-from openjiuwen.core.runtime.constants import FORCE_DEL_WORKFLOW_STATE_KEY
-from openjiuwen.core.runtime.interaction.checkpointer import default_inmemory_checkpointer
-from openjiuwen.core.runtime.interaction.interaction import InteractionOutput
-from openjiuwen.core.runtime.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.runtime.workflow import WorkflowRuntime
-from openjiuwen.core.stream.base import BaseStreamMode, TraceSchema, OutputSchema
-from openjiuwen.core.workflow.base import Workflow, WorkflowExecutionState, WorkflowOutput
-from openjiuwen.core.workflow.base import WorkflowConfig
-from openjiuwen.core.workflow.workflow_config import ComponentAbility
-from openjiuwen.core.workflow.workflow_config import WorkflowMetadata
+from openjiuwen.core.workflow import BranchComponent, WorkflowCard
+from openjiuwen.core.workflow import ArrayCondition
+from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
+from openjiuwen.core.workflow import LoopGroup, LoopComponent
+from openjiuwen.core.workflow import LoopSetVariableComponent
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
+from openjiuwen.core.session import FORCE_DEL_WORKFLOW_STATE_KEY
+from openjiuwen.core.session import get_default_inmemory_checkpointer
+from openjiuwen.core.session import InteractionOutput
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.workflow import create_workflow_session
+from openjiuwen.core.session.stream import BaseStreamMode, TraceSchema, OutputSchema
+from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
+from openjiuwen.core.workflow import ComponentAbility
+from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
 from tests.unit_tests.core.workflow.mock_nodes import (
     InteractiveNode4StreamCp,
     MockStartNode,
@@ -58,16 +57,20 @@ async def test_simple_workflow():
     flow, mock_node, mock_start = create_simple_workflow()
     session_id = uuid.uuid4().hex
     with pytest.raises(JiuWenBaseException) as e:
-        await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="a", ability="invoke", error=RuntimeError('value < 20'))
+        await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: a, ability: invoke, error: value < 20",
+    )
     assert mock_start.runtime == 1
     assert mock_node.runtime == 1
     flow2, mock_node2, mock_start2 = create_simple_workflow()
     with pytest.raises(JiuWenBaseException) as e:
-        await flow2.invoke(InteractiveInput(), WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="a", ability="invoke", error=RuntimeError('value < 20'))
+        await flow2.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: a, ability: invoke, error: value < 20",
+    )
     assert mock_start2.runtime == 0
     assert mock_node2.runtime == 1
 
@@ -75,7 +78,7 @@ async def test_simple_workflow():
 def create_simple_workflow():
     mock_start = MockStartNode4Cp("start")
     mock_node = Node4Cp("a")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="simple_workflow")))
+    flow = Workflow(card=WorkflowCard(id="simple_workflow"))
     flow.set_start_comp("start", mock_start,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -100,7 +103,7 @@ async def test_workflow_comp():
     """
     mock_start = MockStartNode4Cp("a1")
     mock_node = Node4Cp("a2")
-    subflow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_workflow_comp")))
+    subflow = Workflow(card=WorkflowCard(id="test_workflow_comp"))
     subflow.set_start_comp("a1", mock_start,
                            inputs_schema={
                                "a": "${a}",
@@ -135,25 +138,28 @@ async def test_workflow_comp():
     flow.add_connection("a", "end")
     session_id = uuid.uuid4().hex
     with pytest.raises(JiuWenBaseException) as e:
-        await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="a2", ability="invoke", error=RuntimeError('value < 20'))
+        await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: a2, ability: invoke, error: value < 20",
+    )
 
     assert mock_start.runtime == 1
     assert mock_node.runtime == 1
 
     await asyncio.sleep(0.1)
     with pytest.raises(JiuWenBaseException) as e:
-        await flow.invoke(InteractiveInput(), WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="a2", ability="invoke",
-            error=RuntimeError('value < 20'))
+        await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: a2, ability: invoke, error: value < 20",
+    )
     assert mock_start.runtime == 1
     assert mock_node.runtime == 2
 
 
 async def test_workflow_with_loop():
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_workflow_with_loop")))
+    flow = Workflow(card=WorkflowCard(id="test_workflow_with_loop"))
     flow.set_start_comp("s", MockStartNode("s"))
     flow.set_end_comp("e", MockEndNode("e"),
                       inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}"})
@@ -167,7 +173,7 @@ async def test_workflow_with_loop():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
     loop_group.add_workflow_comp("2", AddTenNode4Cp("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    loop_group.add_workflow_comp("3", SetVariableComponent(
+    loop_group.add_workflow_comp("3", LoopSetVariableComponent(
         {"${l.user_var}": "${2.result}"}))
     loop_group.start_comp("1")
     loop_group.end_comp("3")
@@ -191,47 +197,53 @@ async def test_workflow_with_loop():
     session_id = uuid.uuid4().hex
     with pytest.raises(JiuWenBaseException) as e:
         await flow.invoke({"input_array": [1, 2, 3], "input_number": 1},
-                                   WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="2", ability="invoke",
-        error=RuntimeError('inner error: 1'))
+                                   create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: 2, ability: invoke, error: inner error: 1"
+    )
     with pytest.raises(JiuWenBaseException) as e:
-        result = await flow.invoke(InteractiveInput(), WorkflowRuntime(session_id=session_id))
+        result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
 
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="2", ability="invoke",
-        error=RuntimeError('inner error: 11'))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: 2, ability: invoke, error: inner error: 11"
+    )
     with pytest.raises(JiuWenBaseException) as e:
-        result = await flow.invoke(InteractiveInput(), WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="2", ability="invoke",
-        error=RuntimeError('inner error: 21'))
+        result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: 2, ability: invoke, error: inner error: 21"
+    )
 
-    result = await flow.invoke(InteractiveInput(), WorkflowRuntime(session_id=session_id))
+    result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
     assert result == WorkflowOutput(result={"array_result": [11, 12, 13], "user_var": 31},
                                         state=WorkflowExecutionState.COMPLETED)
 
 
     with pytest.raises(JiuWenBaseException) as e:
         expect_e = Exception()
-        result = await flow.invoke({"input_array": [4, 5], "input_number": 2}, WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="2", ability="invoke",
-            error=RuntimeError('inner error: 2'))
+        result = await flow.invoke({"input_array": [4, 5], "input_number": 2},
+                                   create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: 2, ability: invoke, error: inner error: 2"
+    )
 
     with pytest.raises(JiuWenBaseException) as e:
-        result = await flow.invoke(InteractiveInput(), WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="2", ability="invoke",
-            error=RuntimeError('inner error: 12'))
+        result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+        error_msg="node_id: 2, ability: invoke, error: inner error: 12"
+    )
 
-    result = await flow.invoke(InteractiveInput(), WorkflowRuntime(session_id=session_id))
+    result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
     assert result == WorkflowOutput(result={"array_result": [14, 15], "user_var": 22},
                                         state=WorkflowExecutionState.COMPLETED)
 
 
 async def test_workflow_with_loop_interactive():
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_workflow_with_loop_interactive")))
+    flow = Workflow(card=WorkflowCard(id="test_workflow_with_loop_interactive"))
     flow.set_start_comp("s", MockStartNode("s"))
     flow.set_end_comp("e", MockEndNode("e"),
                       inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}"})
@@ -245,7 +257,7 @@ async def test_workflow_with_loop_interactive():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
     loop_group.add_workflow_comp("2", InteractiveNode4Cp("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    loop_group.add_workflow_comp("3", SetVariableComponent(
+    loop_group.add_workflow_comp("3", LoopSetVariableComponent(
         {"${l.user_var}": "${2.result}"}))
     loop_group.start_comp("1")
     loop_group.end_comp("3")
@@ -268,7 +280,8 @@ async def test_workflow_with_loop_interactive():
     session_id = uuid.uuid4().hex
 
     # 每次节点2有两个等待用户输入，索引为：0、1，循环三次，共6个输入
-    res = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1},
+                            create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -278,7 +291,7 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -288,7 +301,7 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -298,7 +311,7 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -308,7 +321,7 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -318,7 +331,7 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -328,12 +341,12 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(result={"array_result": [11, 12, 13], "user_var": None},
                                  state=WorkflowExecutionState.COMPLETED)
 
     # 重复执行
-    res = await flow.invoke({"input_array": [4, 5], "input_number": 2}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"input_array": [4, 5], "input_number": 2}, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -343,7 +356,7 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -353,7 +366,7 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -363,7 +376,7 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -373,12 +386,12 @@ async def test_workflow_with_loop_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(result={"array_result": [14, 15], "user_var": None},
                                  state=WorkflowExecutionState.COMPLETED)
 
 async def test_workflow_with_loop_comp_interactive():
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_workflow_with_loop_interactive")))
+    flow = Workflow(card=WorkflowCard(id="test_workflow_with_loop_interactive"))
     flow.set_start_comp("s", MockStartNode("s"))
     flow.set_end_comp("e", MockEndNode("e"),
                       inputs_schema={"array_result": "${b.array_result}", "user_var": "${b.user_var}"})
@@ -392,7 +405,7 @@ async def test_workflow_with_loop_comp_interactive():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
     loop_group.add_workflow_comp("2", InteractiveNode4Cp("2"),
                                  inputs_schema={"source": "${l.user_var}"})
-    loop_group.add_workflow_comp("3", SetVariableComponent(
+    loop_group.add_workflow_comp("3", LoopSetVariableComponent(
         {"${l.user_var}": "${2.result}"}))
     loop_group.start_comp("1")
     loop_group.end_comp("3")
@@ -417,7 +430,8 @@ async def test_workflow_with_loop_comp_interactive():
     session_id = uuid.uuid4().hex
 
     # 每次节点2有两个等待用户输入，索引为：0、1，循环三次，共6个输入
-    res = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"input_array": [1, 2, 3], "input_number": 1},
+                            create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -427,7 +441,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -437,7 +451,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -447,7 +461,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -457,7 +471,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -467,7 +481,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -477,12 +491,12 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(result={"array_result": [11, 12, 13], "user_var": None},
                                  state=WorkflowExecutionState.COMPLETED)
 
     # 重复执行
-    res = await flow.invoke({"input_array": [4, 5], "input_number": 2}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"input_array": [4, 5], "input_number": 2}, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -492,7 +506,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -502,7 +516,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -512,7 +526,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 1,
                                              'payload': InteractionOutput.model_validate(
@@ -522,7 +536,7 @@ async def test_workflow_with_loop_comp_interactive():
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(result={"array_result": [14, 15], "user_var": None},
                                  state=WorkflowExecutionState.COMPLETED)
 
@@ -532,7 +546,7 @@ async def test_simple_interactive_workflow():
     graph : start->a->end
     """
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_simple_interactive_workflow")))
+    flow = Workflow(card=WorkflowCard(id="test_simple_interactive_workflow"))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -551,7 +565,7 @@ async def test_simple_interactive_workflow():
 
     session_id = uuid.uuid4().hex
 
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -560,7 +574,7 @@ async def test_simple_interactive_workflow():
     user_input = InteractiveInput()
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate(
             {'index': 1, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
@@ -574,7 +588,7 @@ async def test_simple_stream_interactive_workflow():
     graph : start->a->end
     """
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_simple_stream_interactive_workflow")))
+    flow = Workflow(card=WorkflowCard(id="test_simple_stream_interactive_workflow"))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -595,7 +609,7 @@ async def test_simple_stream_interactive_workflow():
 
     session_id = uuid.uuid4().hex
 
-    async for res in flow.stream({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id)):
+    async for res in flow.stream({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id)):
         if res.type == INTERACTION:
             interaction_node = res.payload.id
             interaction_msg = res.payload.value
@@ -604,7 +618,7 @@ async def test_simple_stream_interactive_workflow():
     user_input = InteractiveInput()
     user_input.update(interaction_node, {"aa": "any key"})
     result = None
-    async for res in flow.stream(user_input, WorkflowRuntime(session_id=session_id),
+    async for res in flow.stream(user_input, create_workflow_session(session_id=session_id),
                                  stream_modes=[BaseStreamMode.OUTPUT]):
         if res.type == "output":
             assert res.payload[0] == "a"
@@ -631,7 +645,7 @@ async def test_collect_node_interactive_workflow():
     flow.add_workflow_comp(
         "b",
         InteractiveNode4Collect("b"),
-        inputs_schema={"aa": "${a.aa}", "ac": "${a.ac}"},
+        inputs_schema={"aa1": "${a.aa}", "ac1": "${a.ac}"},
         stream_inputs_schema={"aa": "${a.aa}", "ac": "${a.ac}"},
         wait_for_all=True,
         comp_ability=[ComponentAbility.COLLECT],
@@ -642,10 +656,8 @@ async def test_collect_node_interactive_workflow():
     flow.add_connection("b", "end")
     session_id = uuid.uuid4().hex
     with pytest.raises(JiuWenBaseException) as e:
-        res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
-    assert e.value.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code
-    assert e.value.message == StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id="b", ability="collect",
-        error=StatusCode.INTERACTIVE_NOT_SUPPORT_STREAM_ERROR.errmsg)
+        res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
+    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
 
 
 async def test_simple_concurrent_interactive_workflow():
@@ -654,7 +666,7 @@ async def test_simple_concurrent_interactive_workflow():
                  ->b->end
     """
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_simple_concurrent_interactive_workflow")))
+    flow = Workflow(card=WorkflowCard(id="test_simple_concurrent_interactive_workflow"))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -679,7 +691,7 @@ async def test_simple_concurrent_interactive_workflow():
 
     session_id = uuid.uuid4().hex
 
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
     assert sorted(res.result, key=lambda x: x.payload.id) == sorted([
         OutputSchema.model_validate({'type': INTERACTION, 'index': 0, 'payload': InteractionOutput.model_validate(
             {'id': 'a', 'value': 'Please enter any key'})}),
@@ -689,7 +701,7 @@ async def test_simple_concurrent_interactive_workflow():
     user_input = InteractiveInput()
     user_input.update("a", {"aa": "any key a"})
     user_input.update("b", {"aa": "any key b"})
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert sorted(res.result, key=lambda x: x.payload.id) == sorted([
         OutputSchema.model_validate(
             {'index': 1, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
@@ -702,12 +714,12 @@ async def test_simple_concurrent_interactive_workflow():
     user_input = InteractiveInput()
     user_input.update("a", {"aa": "any key a"})
     user_input.update("b", {"aa": "any key b"})
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(result={"result": ["any key a", "any key b"]}, state=WorkflowExecutionState.COMPLETED)
 
 
 async def test_workflow_with_branch():
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_workflow_with_branch")))
+    flow = Workflow(card=WorkflowCard(id="test_workflow_with_branch"))
     flow.set_start_comp("start", MockStartNode("start"))
     flow.set_end_comp("end", MockEndNode("end"),
                       inputs_schema={"a": "${a.result}", "b": "${b.result}"})
@@ -728,13 +740,13 @@ async def test_workflow_with_branch():
     flow.add_connection("a", "end")
     flow.add_connection("b", "end")
 
-    async for chuck in flow.stream({"a": 2}, WorkflowRuntime()):
+    async for chuck in flow.stream({"a": 2}, create_workflow_session()):
         if isinstance(chuck, TraceSchema):
             print(chuck.model_dump_json(indent=4))
         elif isinstance(chuck, OutputSchema):
             assert chuck.payload.get("b") == 12
 
-    async for chuck in flow.stream({"a": 15}, WorkflowRuntime()):
+    async for chuck in flow.stream({"a": 15}, create_workflow_session()):
         if isinstance(chuck, TraceSchema):
             print(chuck.model_dump_json(indent=4))
         elif isinstance(chuck, OutputSchema):
@@ -746,7 +758,7 @@ async def test_simple_interactive_workflow_raw_input():
     graph : start->a->end
     """
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_simple_interactive_workflow_raw_input")))
+    flow = Workflow(card=WorkflowCard(id="test_simple_interactive_workflow_raw_input"))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -765,74 +777,72 @@ async def test_simple_interactive_workflow_raw_input():
 
     session_id = uuid.uuid4().hex
 
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
                                                  {'id': 'a', 'value': 'Please enter any key'})})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
     user_input = InteractiveInput({"aa": "any key"})
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate(
             {'index': 1, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
              'type': INTERACTION})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
     assert start_node.runtime == 1
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result={'result': 'any key'},
         state=WorkflowExecutionState.COMPLETED)
 
 async def test_simple_interactive_workflow_both_raw_input_update():
-    """
-    graph : start->a->end
-    """
-    start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(
-        metadata=WorkflowMetadata(id="test_simple_interactive_workflow_both_raw_input_update")))
-    flow.set_start_comp("start", start_node,
-                        inputs_schema={
-                            "a": "${inputs.a}",
-                            "b": "${inputs.b}",
-                            "c": 1,
-                            "d": [1, 2, 3]})
-    flow.add_workflow_comp("a", InteractiveNode4Cp("a"),
+        """
+        graph : start->a->end
+        """
+        start_node = MockStartNode4Cp("start")
+        flow = Workflow(card=WorkflowCard(id="test_simple_interactive_workflow_both_raw_input_update"))
+        flow.set_start_comp("start", start_node,
                             inputs_schema={
-                                "aa": "${start.a}",
-                                "ac": "${start.c}"})
-    flow.set_end_comp("end", MockEndNode("end"),
-                        inputs_schema={
-                            "result": "${a.aa}"})
-    flow.add_connection("start", "a")
-    flow.add_connection("a", "end")
+                                "a": "${inputs.a}",
+                                "b": "${inputs.b}",
+                                "c": 1,
+                                "d": [1, 2, 3]})
+        flow.add_workflow_comp("a", InteractiveNode4Cp("a"),
+                               inputs_schema={
+                                   "aa": "${start.a}",
+                                   "ac": "${start.c}"})
+        flow.set_end_comp("end", MockEndNode("end"),
+                          inputs_schema={
+                              "result": "${a.aa}"})
+        flow.add_connection("start", "a")
+        flow.add_connection("a", "end")
 
-    session_id = uuid.uuid4().hex
+        session_id = uuid.uuid4().hex
 
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
-    assert res == WorkflowOutput(
-        result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
-                                                'payload': InteractionOutput.model_validate(
-                                                    {'id': 'a', 'value': 'Please enter any key'})})],
-        state=WorkflowExecutionState.INPUT_REQUIRED)
+        res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
+        assert res == WorkflowOutput(
+            result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
+                                                 'payload': InteractionOutput.model_validate(
+                                                     {'id': 'a', 'value': 'Please enter any key'})})],
+            state=WorkflowExecutionState.INPUT_REQUIRED)
 
-    user_input = InteractiveInput({"aa": "any key"})
-    with pytest.raises(JiuWenBaseException) as exc_info:
-        user_input.update("a", {"aa": "abc"})
-    assert exc_info.value.error_code == StatusCode.INTERACTIVE_UPDATE_FAILED.code
-    assert exc_info.value.message == StatusCode.INTERACTIVE_UPDATE_FAILED.errmsg
+        user_input = InteractiveInput({"aa": "any key"})
+        with pytest.raises(JiuWenBaseException) as exc_info:
+            user_input.update("a", {"aa": "abc"})
+        assert exc_info.value.error_code == StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.code
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
-    assert res == WorkflowOutput(
-        result=[OutputSchema.model_validate(
-            {'index': 1, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
-                'type': INTERACTION})],
-        state=WorkflowExecutionState.INPUT_REQUIRED)
-    assert start_node.runtime == 1
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
-    assert res == WorkflowOutput(
-        result={'result': 'any key'},
-        state=WorkflowExecutionState.COMPLETED)
+        res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
+        assert res == WorkflowOutput(
+            result=[OutputSchema.model_validate(
+                {'index': 1, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
+                 'type': INTERACTION})],
+            state=WorkflowExecutionState.INPUT_REQUIRED)
+        assert start_node.runtime == 1
+        res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
+        assert res == WorkflowOutput(
+            result={'result': 'any key'},
+            state=WorkflowExecutionState.COMPLETED)
 
 
 async def test_simple_interactive_workflow_raw_inputs_empty_str_list():
@@ -840,7 +850,7 @@ async def test_simple_interactive_workflow_raw_inputs_empty_str_list():
     graph : start->a->end
     """
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_simple_interactive_workflow_raw_inputs_empty_str_list")))
+    flow = Workflow(card=WorkflowCard(id="test_simple_interactive_workflow_raw_inputs_empty_str_list"))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -862,7 +872,7 @@ async def test_simple_interactive_workflow_raw_inputs_empty_str_list():
         session_id = uuid.uuid4().hex
         start_node.runtime = 0
 
-        res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+        res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
         assert res == WorkflowOutput(
             result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                                  'payload': InteractionOutput.model_validate(
@@ -871,14 +881,14 @@ async def test_simple_interactive_workflow_raw_inputs_empty_str_list():
 
         user_input = InteractiveInput(raw_inputs)
 
-        res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+        res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
         assert res == WorkflowOutput(
             result=[OutputSchema.model_validate(
                 {'index': 1, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
                  'type': INTERACTION})],
             state=WorkflowExecutionState.INPUT_REQUIRED)
         assert start_node.runtime == 1
-        res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+        res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
         assert res == WorkflowOutput(
             result={'result': raw_inputs},
             state=WorkflowExecutionState.COMPLETED)
@@ -888,7 +898,7 @@ async def test_simple_interactive_workflow_update_empty_str_list():
     graph : start->a->end
     """
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_simple_interactive_workflow_update_empty_str_list")))
+    flow = Workflow(card=WorkflowCard(id="test_simple_interactive_workflow_update_empty_str_list"))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -910,7 +920,7 @@ async def test_simple_interactive_workflow_update_empty_str_list():
         session_id = uuid.uuid4().hex
         start_node.runtime = 0
 
-        res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+        res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
         assert res == WorkflowOutput(
             result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                                  'payload': InteractionOutput.model_validate(
@@ -920,14 +930,14 @@ async def test_simple_interactive_workflow_update_empty_str_list():
         user_input = InteractiveInput()
         user_input.update("a", raw_inputs)
 
-        res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+        res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
         assert res == WorkflowOutput(
             result=[OutputSchema.model_validate(
                 {'index': 1, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
                  'type': INTERACTION})],
             state=WorkflowExecutionState.INPUT_REQUIRED)
         assert start_node.runtime == 1
-        res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+        res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
         assert res == WorkflowOutput(
             result={'result': raw_inputs},
             state=WorkflowExecutionState.COMPLETED)
@@ -937,7 +947,7 @@ async def test_simple_interactive_workflow_none():
     graph : start->a->end
     """
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_simple_interactive_workflow_none")))
+    flow = Workflow(card=WorkflowCard(id="test_simple_interactive_workflow_none"))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -956,7 +966,7 @@ async def test_simple_interactive_workflow_none():
 
     session_id = uuid.uuid4().hex
 
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
@@ -965,14 +975,14 @@ async def test_simple_interactive_workflow_none():
 
     user_input = InteractiveInput()
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate(
             {'index': 0, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
              'type': INTERACTION})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
     assert start_node.runtime == 1
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate(
             {'index': 0, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
@@ -985,7 +995,7 @@ async def test_simple_interactive_workflow_checkpointer():
     """
     workflow_id = "test_simple_interactive_workflow_checkpointer"
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id=workflow_id)))
+    flow = Workflow(card=WorkflowCard(id=workflow_id))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -1004,41 +1014,41 @@ async def test_simple_interactive_workflow_checkpointer():
 
     session_id = uuid.uuid4().hex
 
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
                                                  {'id': 'a', 'value': 'Please enter any key'})})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
-    state = await default_inmemory_checkpointer.graph_store().get(session_id, workflow_id)
+    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is not None
-    first_time_workflow_store = default_inmemory_checkpointer._workflow_stores.get(session_id)
+    first_time_workflow_store = get_default_inmemory_checkpointer()._workflow_stores.get(session_id)
     assert first_time_workflow_store is not None
 
     user_input = InteractiveInput()
     interaction_id = res.result[0].payload.id
     user_input.update(interaction_id, {"aa": "any key"})
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate(
             {'index': 1, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
              'type': INTERACTION})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
     assert start_node.runtime == 1
-    state = await default_inmemory_checkpointer.graph_store().get(session_id, workflow_id)
+    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is not None
-    workflow_store = default_inmemory_checkpointer._workflow_stores.get(session_id)
+    workflow_store = get_default_inmemory_checkpointer()._workflow_stores.get(session_id)
     assert workflow_store is not None
     assert workflow_store is first_time_workflow_store
 
-    res = await flow.invoke(user_input, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result={'result': "any key"},
         state=WorkflowExecutionState.COMPLETED)
     # checkpoint will be deleted when completed
-    state = await default_inmemory_checkpointer.graph_store().get(session_id, workflow_id)
+    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is None
-    workflow_store = default_inmemory_checkpointer._workflow_stores.get(session_id)
+    workflow_store = get_default_inmemory_checkpointer()._workflow_stores.get(session_id)
     assert workflow_store is None
 
 
@@ -1048,7 +1058,7 @@ async def test_simple_interactive_workflow_checkpointer_manual_release():
     """
     workflow_id = "test_simple_interactive_workflow_checkpointer"
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id=workflow_id)))
+    flow = Workflow(card=WorkflowCard(id=workflow_id))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -1067,22 +1077,22 @@ async def test_simple_interactive_workflow_checkpointer_manual_release():
 
     session_id = uuid.uuid4().hex
 
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
                                                  {'id': 'a', 'value': 'Please enter any key'})})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
-    state = await default_inmemory_checkpointer.graph_store().get(session_id, workflow_id)
+    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is not None
-    first_time_workflow_store = getattr(default_inmemory_checkpointer, "_workflow_stores").get(session_id)
+    first_time_workflow_store = getattr(get_default_inmemory_checkpointer(), "_workflow_stores").get(session_id)
     assert first_time_workflow_store is not None
 
     # manually clear the checkpointer
-    await default_inmemory_checkpointer.release(session_id)
-    state = await default_inmemory_checkpointer.graph_store().get(session_id, workflow_id)
+    await get_default_inmemory_checkpointer().release(session_id)
+    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is None
-    first_time_workflow_store = getattr(default_inmemory_checkpointer, "_workflow_stores").get(session_id)
+    first_time_workflow_store = getattr(get_default_inmemory_checkpointer(), "_workflow_stores").get(session_id)
     assert first_time_workflow_store is None
 
 
@@ -1091,7 +1101,7 @@ async def test_simple_interactive_workflow_clear_checkpointer():
     graph : start->a->end
     """
     start_node = MockStartNode4Cp("start")
-    flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(id="test_simple_interactive_workflow")))
+    flow = Workflow(card=WorkflowCard(id="test_simple_interactive_workflow"))
     flow.set_start_comp("start", start_node,
                         inputs_schema={
                             "a": "${inputs.a}",
@@ -1110,17 +1120,16 @@ async def test_simple_interactive_workflow_clear_checkpointer():
 
     session_id = uuid.uuid4().hex
 
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, WorkflowRuntime(session_id=session_id))
+    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate({'type': INTERACTION, 'index': 0,
                                              'payload': InteractionOutput.model_validate(
                                                  {'id': 'a', 'value': 'Please enter any key'})})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
 
-    runtime = WorkflowRuntime(session_id=session_id)
+    session = create_workflow_session(session_id=session_id, envs={FORCE_DEL_WORKFLOW_STATE_KEY: True})
     # will clean checkpointer of the session when input is not interactive input, workflow reinvoke from start node
-    runtime.config().set_envs({FORCE_DEL_WORKFLOW_STATE_KEY: True})
-    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, runtime)
+    res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, session)
     assert res == WorkflowOutput(
         result=[OutputSchema.model_validate(
             {'index': 0, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),

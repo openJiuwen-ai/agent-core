@@ -19,30 +19,27 @@ import os
 import unittest
 from unittest.mock import patch
 
-from openjiuwen.core.runtime.wrapper import TaskRuntime
-from openjiuwen.core.component.branch_comp import BranchComponent
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.intent_detection_comp import (
+from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.workflow import BranchComponent
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import (
     IntentDetectionComponent,
     IntentDetectionCompConfig,
 )
-from openjiuwen.core.component.llm_comp import LLMCompConfig, LLMComponent
-from openjiuwen.core.component.questioner_comp import (
+from openjiuwen.core.workflow import LLMCompConfig, LLMComponent
+from openjiuwen.core.workflow import (
     FieldInfo,
     QuestionerComponent,
     QuestionerConfig,
 )
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.component.tool_comp import ToolComponent, ToolComponentConfig
-from openjiuwen.core.runtime.runtime import BaseRuntime
-from openjiuwen.core.stream.base import CustomSchema
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.utils.prompt.template.template import Template
-from openjiuwen.core.utils.tool.param import Param
-from openjiuwen.core.utils.tool.service_api.restful_api import RestfulApi
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.workflow import ToolComponent, ToolComponentConfig
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session.stream import CustomSchema
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.tool import RestfulApi, RestfulApiCard
+from openjiuwen.core.workflow import Workflow
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode
 
 # 注意：切勿将真实密钥提交到仓库！
@@ -54,18 +51,24 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 # Mock 插件返回值
 _FINAL_RESULT: str = "上海今天晴 30°C"
 
+os.environ["SSRF_PROTECT_ENABLED"] = "false"
 # Mock RESTful Api 元信息
 _MOCK_TOOL = RestfulApi(
-    name="test",
-    description="test",
-    params=[
-        Param(name="location", description="地点", type="string"),
-        Param(name="date", description="日期", type="int"),
-    ],
-    path="http://127.0.0.1:8000",
-    headers={},
-    method="GET",
-    response=[],
+    card=RestfulApiCard(
+        name="test",
+        description="test",
+        input_params={
+            "type": "object",
+            "properties": {
+                "location": {"description": "地点", "type": "string"},
+                "date": {"description": "日期", "type": "integer"},
+            },
+            "required": ["location", "date"],
+        },
+        url="http://127.0.0.1:8000",
+        headers={},
+        method="GET",
+    ),
 )
 
 # --------------------------- Prompt 模板 --------------------------- #
@@ -156,7 +159,7 @@ class RealWorkflowTest(unittest.TestCase):
             category_name_list=["旅游", "天气"],
             default_class="分类1",
             model=model_config,
-            intent_detection_template=Template(
+            intent_detection_template=PromptTemplate(
                 name="default",
                 content=[{"role": "user", "content": user_prompt}],
             ),
@@ -220,7 +223,7 @@ class RealWorkflowTest(unittest.TestCase):
             self,
             mock_plugin_get_tool,
             mock_plugin_invoke,
-    ) -> tuple[BaseRuntime, Workflow]:
+    ) -> tuple[BaseSession, Workflow]:
         """
         根据 mock 工具函数构建完整工作流拓扑。
 
@@ -232,9 +235,8 @@ class RealWorkflowTest(unittest.TestCase):
 
         # 2. 初始化工作流与上下文
         flow = Workflow(
-            workflow_config=WorkflowConfig()
         )
-        context = TaskRuntime(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 3. 实例化各组件
         start = MockStartNode("start")
@@ -288,14 +290,14 @@ class RealWorkflowTest(unittest.TestCase):
         flow.add_connection("questioner", "plugin")
         flow.add_connection("plugin", "end")
 
-        return context.create_workflow_runtime(), flow
+        return context.create_workflow_session(), flow
 
     # ------------------------------------------------------------------ #
     #                            测试用例本身                             #
     # ------------------------------------------------------------------ #
     @unittest.skip("skip system test")
-    @patch("jiuwen.core.utils.tool.service_api.restful_api.RestfulApi.invoke")
-    @patch("jiuwen.core.component.tool_comp.ToolExecutable.get_tool")
+    @patch("openjiuwen.core.foundation.tool.service_api.restful_api.RestfulApi.invoke")
+    @patch("openjiuwen.core.workflow.components.tool.tool_comp.ToolExecutable.get_tool")
     def test_workflow_llm_questioner_plugin(
             self,
             mock_plugin_get_tool,
@@ -324,10 +326,10 @@ class RealWorkflowTest(unittest.TestCase):
         """
         测试LLM组件通过StreamWriter流出数据
         """
-        context = TaskRuntime(trace_id="test")
-        flow = Workflow(workflow_config=WorkflowConfig())
+        context = create_agent_session(session_id="test")
+        flow = Workflow()
 
-        start = Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        start = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         llm_config = LLMCompConfig(
@@ -349,5 +351,7 @@ class RealWorkflowTest(unittest.TestCase):
 
         inputs = {"query": "写一个笑话。注意：不要超过20个字！"}
         writer_chunks = []
-        self.loop.run_until_complete(self._async_stream_workflow_for_stream_writer(flow, inputs, context.create_workflow_runtime(), writer_chunks))
+        self.loop.run_until_complete(
+            self._async_stream_workflow_for_stream_writer(flow, inputs, context.create_workflow_session(),
+                                                          writer_chunks))
         print(writer_chunks)

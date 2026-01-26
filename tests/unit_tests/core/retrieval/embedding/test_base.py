@@ -2,11 +2,11 @@
 """
 Embedding model abstract base class test cases
 """
-from unittest.mock import AsyncMock
+
 
 import pytest
 
-from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.retrieval import Embedding
 
 
 class ConcreteEmbedding(Embedding):
@@ -48,4 +48,3 @@ class TestEmbedding:
         """Test dimension property"""
         model = ConcreteEmbedding()
         assert model.dimension == 384
-

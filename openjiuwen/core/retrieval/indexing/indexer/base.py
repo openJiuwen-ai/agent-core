@@ -5,8 +5,9 @@ Index Manager Abstract Base Class
 
 Provides a unified interface for index management.
 """
+
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Dict
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.retrieval.common.config import IndexConfig
 from openjiuwen.core.retrieval.common.document import TextChunk
@@ -15,7 +16,7 @@ from openjiuwen.core.retrieval.embedding.base import Embedding
 
 class Indexer(ABC):
     """Index manager abstract base class"""
-    
+
     @abstractmethod
     async def build_index(
         self,
@@ -25,8 +26,7 @@ class Indexer(ABC):
         **kwargs: Any,
     ) -> bool:
         """Build index"""
-        pass
-    
+
     @abstractmethod
     async def update_index(
         self,
@@ -37,8 +37,7 @@ class Indexer(ABC):
         **kwargs: Any,
     ) -> bool:
         """Update index"""
-        pass
-    
+
     @abstractmethod
     async def delete_index(
         self,
@@ -47,20 +46,17 @@ class Indexer(ABC):
         **kwargs: Any,
     ) -> bool:
         """Delete index"""
-        pass
-    
+
     @abstractmethod
     async def index_exists(
         self,
         index_name: str,
     ) -> bool:
         """Check if index exists"""
-        pass
-    
+
     @abstractmethod
     async def get_index_info(
         self,
         index_name: str,
     ) -> Dict[str, Any]:
         """Get index information"""
-        pass

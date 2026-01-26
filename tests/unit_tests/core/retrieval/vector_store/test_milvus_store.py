@@ -1,14 +1,14 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """
 Milvus vector store test cases
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
-from openjiuwen.core.retrieval.common.config import VectorStoreConfig
-from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.retrieval import MilvusVectorStore, SearchResult, VectorStoreConfig
 
 
 @pytest.fixture
@@ -72,8 +72,23 @@ class TestMilvusVectorStore:
             doc_id_field="custom_doc_id",
         )
         assert store.text_field == "custom_text"
-        assert store.vector_field == "custom_vector"
+        assert store.vector_field.vector_field == "custom_vector"
         assert store.doc_id_field == "custom_doc_id"
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_init_with_invalid_vector_field(self, mock_client_class, vector_store_config):
+        """Test initialization with custom fields"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        with pytest.raises(BaseError, match="vector_field must be either a str or MilvusVectorField instance"):
+            _ = MilvusVectorStore(
+                config=vector_store_config,
+                milvus_uri="http://localhost:19530",
+                text_field="custom_text",
+                vector_field=dict(vector_field="custom_vector"),
+                doc_id_field="custom_doc_id",
+            )
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
@@ -137,10 +152,7 @@ class TestMilvusVectorStore:
         )
 
         # Create data exceeding batch_size
-        data = [
-            {"id": str(i), "embedding": [0.1] * 384, "content": f"Content {i}"}
-            for i in range(200)
-        ]
+        data = [{"id": str(i), "embedding": [0.1] * 384, "content": f"Content {i}"} for i in range(200)]
 
         await store.add(data, batch_size=50)
         # Should insert in multiple batches
@@ -152,15 +164,19 @@ class TestMilvusVectorStore:
     async def test_search_success(self, mock_client_class, vector_store_config):
         """Test successful vector search"""
         mock_client = MagicMock()
-        mock_client.search = MagicMock(return_value=[[
-            {
-                "id": "1",
-                "content": "Test content",
-                "metadata": {"source": "test"},
-                "document_id": "doc_1",
-                "score": 0.9,
-            }
-        ]])
+        mock_client.search = MagicMock(
+            return_value=[
+                [
+                    {
+                        "id": "1",
+                        "content": "Test content",
+                        "metadata": {"source": "test"},
+                        "document_id": "doc_1",
+                        "score": 0.9,
+                    }
+                ]
+            ]
+        )
         mock_client_class.return_value = mock_client
 
         store = MilvusVectorStore(
@@ -187,7 +203,7 @@ class TestMilvusVectorStore:
         )
 
         filters = {"source": "test"}
-        results = await store.search([0.1] * 384, top_k=5, filters=filters)
+        _ = await store.search([0.1] * 384, top_k=5, filters=filters)
         # Verify filters were passed
         call_kwargs = mock_client.search.call_args[1]
         assert "filter" in call_kwargs
@@ -213,14 +229,18 @@ class TestMilvusVectorStore:
     async def test_sparse_search_success(self, mock_client_class, vector_store_config):
         """Test successful sparse search"""
         mock_client = MagicMock()
-        mock_client.search = MagicMock(return_value=[[
-            {
-                "id": "1",
-                "content": "Test content",
-                "metadata": {},
-                "score": 0.8,
-            }
-        ]])
+        mock_client.search = MagicMock(
+            return_value=[
+                [
+                    {
+                        "id": "1",
+                        "content": "Test content",
+                        "metadata": {},
+                        "score": 0.8,
+                    }
+                ]
+            ]
+        )
         mock_client_class.return_value = mock_client
 
         store = MilvusVectorStore(
@@ -246,7 +266,7 @@ class TestMilvusVectorStore:
         )
 
         filters = {"source": "test"}
-        results = await store.sparse_search("test query", top_k=5, filters=filters)
+        _ = await store.sparse_search("test query", top_k=5, filters=filters)
         # Verify BM25 search was used
         call_kwargs = mock_client.search.call_args[1]
         assert call_kwargs["search_params"]["metric_type"] == "BM25"
@@ -276,14 +296,18 @@ class TestMilvusVectorStore:
     ):
         """Test successful hybrid search"""
         mock_client = MagicMock()
-        mock_client.hybrid_search = MagicMock(return_value=[[
-            {
-                "id": "1",
-                "content": "Test content",
-                "metadata": {},
-                "score": 0.9,
-            }
-        ]])
+        mock_client.hybrid_search = MagicMock(
+            return_value=[
+                [
+                    {
+                        "id": "1",
+                        "content": "Test content",
+                        "metadata": {},
+                        "score": 0.9,
+                    }
+                ]
+            ]
+        )
         mock_client_class.return_value = mock_client
 
         mock_ann_request = MagicMock()
@@ -339,8 +363,10 @@ class TestMilvusVectorStore:
             milvus_uri="http://localhost:19530",
         )
 
-        with patch.object(store, "search", new_callable=AsyncMock) as mock_search, \
-             patch.object(store, "sparse_search", new_callable=AsyncMock) as mock_sparse:
+        with (
+            patch.object(store, "search", new_callable=AsyncMock) as mock_search,
+            patch.object(store, "sparse_search", new_callable=AsyncMock) as mock_sparse,
+        ):
             mock_search.return_value = [
                 SearchResult(id="1", text="Vector result", score=0.9, metadata={}),
             ]
@@ -458,3 +484,177 @@ class TestMilvusVectorStore:
         # Should catch exception, not raise
         store.close()
 
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_check_vector_field_collection_not_exists(self, mock_client_class, vector_store_config):
+        """Test check_vector_field when collection doesn't exist"""
+        mock_client = MagicMock()
+        mock_client.has_collection = MagicMock(return_value=False)
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        # Should return early without error
+        store.check_vector_field()
+        mock_client.has_collection.assert_called_once_with("test_collection")
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_check_vector_field_vector_field_not_found(self, mock_client_class, vector_store_config):
+        """Test check_vector_field when vector field doesn't exist in database"""
+        from pymilvus import DataType
+
+        mock_client = MagicMock()
+        mock_client.has_collection = MagicMock(return_value=True)
+        mock_client.describe_index = MagicMock(return_value=None)
+        mock_client.describe_collection = MagicMock(
+            return_value={
+                "fields": [{"field_id": 1, "name": "other_vector", "type": DataType.FLOAT_VECTOR, "params": {}}]
+            }
+        )
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+        )
+
+        with pytest.raises(BaseError, match="MilvusVectorStore has vector_field at embedding"):
+            store.check_vector_field()
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_check_vector_field_index_type_mismatch(self, mock_client_class, vector_store_config):
+        """Test check_vector_field when index type doesn't match"""
+        from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusHNSW
+
+        mock_client = MagicMock()
+        mock_client.has_collection = MagicMock(return_value=True)
+        mock_client.describe_index = MagicMock(
+            return_value={
+                "index_type": "IVF_FLAT",
+                "metric_type": "COSINE",
+                "params": {"nlist": 128},
+            }
+        )
+        mock_client_class.return_value = mock_client
+
+        # Create store with HNSW index type
+        vector_field = MilvusHNSW(vector_field="embedding", M=16, efConstruction=200)
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+            vector_field=vector_field,
+        )
+
+        with pytest.raises(BaseError, match="MilvusVectorStore has index_type of hnsw"):
+            store.check_vector_field()
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_check_vector_field_config_mismatch(self, mock_client_class, vector_store_config):
+        """Test check_vector_field when config parameters don't match"""
+        from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusHNSW
+
+        mock_client = MagicMock()
+        mock_client.has_collection = MagicMock(return_value=True)
+        # Database has different m value (16 vs 32)
+        mock_client.describe_index = MagicMock(
+            return_value={
+                "index_type": "HNSW",
+                "metric_type": "COSINE",
+                "params": {"M": 32, "efConstruction": 200},
+            }
+        )
+        mock_client_class.return_value = mock_client
+
+        # Create store with m=16
+        vector_field = MilvusHNSW(vector_field="embedding", M=16, efConstruction=200)
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+            vector_field=vector_field,
+        )
+
+        with pytest.raises(BaseError, match="database actual config differs from current knowledge base"):
+            store.check_vector_field()
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_check_vector_field_success_matching_config(self, mock_client_class, vector_store_config):
+        """Test check_vector_field with matching configuration"""
+        from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusHNSW
+
+        mock_client = MagicMock()
+        mock_client.has_collection = MagicMock(return_value=True)
+        # Database config matches store config
+        mock_client.describe_index = MagicMock(
+            return_value={
+                "index_type": "HNSW",
+                "metric_type": "COSINE",
+                "M": 16,
+                "efConstruction": 200,
+            }
+        )
+        mock_client_class.return_value = mock_client
+
+        vector_field = MilvusHNSW(vector_field="embedding", M=16, efConstruction=200)
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+            vector_field=vector_field,
+        )
+
+        # Should not raise exception
+        store.check_vector_field()
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_check_vector_field_auto_index_type(self, mock_client_class, vector_store_config):
+        """Test check_vector_field with auto index type (should skip index type check)"""
+        mock_client = MagicMock()
+        mock_client.has_collection = MagicMock(return_value=True)
+        mock_client.describe_index = MagicMock(
+            return_value={
+                "index_type": "AUTOINDEX",
+                "metric_type": "COSINE",
+                "params": {},
+            }
+        )
+        mock_client_class.return_value = mock_client
+
+        # Store with auto index type
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+            vector_field="embedding",  # Default is auto
+        )
+
+        # Should not raise exception even if index type is AUTOINDEX
+        store.check_vector_field()
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_check_vector_field_ignores_ef_search_factor(self, mock_client_class, vector_store_config):
+        """Test that check_vector_field ignores efSearchFactor parameter"""
+        from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusHNSW
+
+        mock_client = MagicMock()
+        mock_client.has_collection = MagicMock(return_value=True)
+        # Database config has efSearchFactor but store doesn't (should be ignored)
+        mock_client.describe_index = MagicMock(
+            return_value={
+                "index_type": "HNSW",
+                "metric_type": "COSINE",
+                "M": 16,
+                "efConstruction": 200,
+                "efSearchFactor": 2.0,
+            }
+        )
+        mock_client_class.return_value = mock_client
+
+        vector_field = MilvusHNSW(vector_field="embedding", M=16, efConstruction=200)
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+            vector_field=vector_field,
+        )
+
+        # Should not raise exception even though efSearchFactor differs
+        store.check_vector_field()

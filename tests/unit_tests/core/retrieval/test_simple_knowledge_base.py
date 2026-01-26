@@ -2,22 +2,16 @@
 """
 Simple knowledge base implementation test cases
 """
-from unittest.mock import AsyncMock, MagicMock, patch
+
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval.simple_knowledge_base import (
-    SimpleKnowledgeBase,
-    retrieve_multi_kb,
-    retrieve_multi_kb_with_source,
-)
-from openjiuwen.core.retrieval.common.config import (
-    KnowledgeBaseConfig,
-    RetrievalConfig,
-    IndexConfig,
-)
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.retrieval import SimpleKnowledgeBase, retrieve_multi_kb, retrieve_multi_kb_with_source
+from openjiuwen.core.retrieval import KnowledgeBaseConfig
+from openjiuwen.core.retrieval import Document, TextChunk
+from openjiuwen.core.retrieval import RetrievalResult
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -30,10 +24,12 @@ def mock_config():
 def mock_parser():
     """Create mock parser"""
     parser = AsyncMock()
-    parser.parse = AsyncMock(return_value=[
-        Document(id_="doc_1", text="Test document 1"),
-        Document(id_="doc_2", text="Test document 2"),
-    ])
+    parser.parse = AsyncMock(
+        return_value=[
+            Document(id_="doc_1", text="Test document 1"),
+            Document(id_="doc_2", text="Test document 2"),
+        ]
+    )
     return parser
 
 
@@ -41,10 +37,12 @@ def mock_parser():
 def mock_chunker():
     """Create mock chunker"""
     chunker = MagicMock()
-    chunker.chunk_documents = MagicMock(return_value=[
-        TextChunk(id_="chunk_1", text="Test chunk 1", doc_id="doc_1"),
-        TextChunk(id_="chunk_2", text="Test chunk 2", doc_id="doc_1"),
-    ])
+    chunker.chunk_documents = MagicMock(
+        return_value=[
+            TextChunk(id_="chunk_1", text="Test chunk 1", doc_id="doc_1"),
+            TextChunk(id_="chunk_2", text="Test chunk 2", doc_id="doc_1"),
+        ]
+    )
     return chunker
 
 
@@ -79,9 +77,11 @@ def mock_embed_model():
 def mock_retriever():
     """Create mock retriever"""
     retriever = AsyncMock()
-    retriever.retrieve = AsyncMock(return_value=[
-        RetrievalResult(text="Test result", score=0.95),
-    ])
+    retriever.retrieve = AsyncMock(
+        return_value=[
+            RetrievalResult(text="Test result", score=0.95),
+        ]
+    )
     return retriever
 
 
@@ -89,9 +89,7 @@ class TestSimpleKnowledgeBase:
     """Simple knowledge base tests"""
 
     @pytest.mark.asyncio
-    async def test_parse_files_success(
-        self, mock_config, mock_parser
-    ):
+    async def test_parse_files_success(self, mock_config, mock_parser):
         """Test parsing files successfully"""
         kb = SimpleKnowledgeBase(config=mock_config, parser=mock_parser)
         file_paths = ["test1.txt", "test2.txt"]
@@ -103,13 +101,11 @@ class TestSimpleKnowledgeBase:
     async def test_parse_files_without_parser(self, mock_config):
         """Test parsing files without parser"""
         kb = SimpleKnowledgeBase(config=mock_config)
-        with pytest.raises(ValueError, match="parser is required"):
+        with pytest.raises(BaseError, match="parser is required"):
             await kb.parse_files(["test.txt"])
 
     @pytest.mark.asyncio
-    async def test_parse_files_with_exception(
-        self, mock_config, mock_parser
-    ):
+    async def test_parse_files_with_exception(self, mock_config, mock_parser):
         """Test exception when parsing files"""
         mock_parser.parse = AsyncMock(side_effect=Exception("Parse error"))
         kb = SimpleKnowledgeBase(config=mock_config, parser=mock_parser)
@@ -117,9 +113,23 @@ class TestSimpleKnowledgeBase:
         assert len(documents) == 0
 
     @pytest.mark.asyncio
-    async def test_add_documents_success(
-        self, mock_config, mock_chunker, mock_index_manager, mock_embed_model
+    async def test_database_name_mismatch(
+        self, mock_config, mock_chunker, mock_vector_store, mock_index_manager, mock_embed_model
     ):
+        """Test different database_name in vector store and index manager raises expected error"""
+        setattr(mock_index_manager, "database_name", "different_name")
+        with pytest.raises(BaseError, match="incompatible database_name configs"):
+            kb = SimpleKnowledgeBase(
+                config=mock_config,
+                vector_store=mock_vector_store,
+                chunker=mock_chunker,
+                index_manager=mock_index_manager,
+                embed_model=mock_embed_model,
+            )
+            del kb
+
+    @pytest.mark.asyncio
+    async def test_add_documents_success(self, mock_config, mock_chunker, mock_index_manager, mock_embed_model):
         """Test adding documents successfully"""
         kb = SimpleKnowledgeBase(
             config=mock_config,
@@ -141,14 +151,14 @@ class TestSimpleKnowledgeBase:
     async def test_add_documents_without_chunker(self, mock_config):
         """Test adding documents without chunker"""
         kb = SimpleKnowledgeBase(config=mock_config)
-        with pytest.raises(ValueError, match="chunker is required"):
+        with pytest.raises(BaseError, match="chunker is required"):
             await kb.add_documents([Document(text="Test")])
 
     @pytest.mark.asyncio
     async def test_add_documents_without_index_manager(self, mock_config, mock_chunker):
         """Test adding documents without index manager"""
         kb = SimpleKnowledgeBase(config=mock_config, chunker=mock_chunker)
-        with pytest.raises(ValueError, match="index_manager is required"):
+        with pytest.raises(BaseError, match="index_manager is required"):
             await kb.add_documents([Document(text="Test")])
 
     @pytest.mark.asyncio
@@ -163,13 +173,11 @@ class TestSimpleKnowledgeBase:
             index_manager=mock_index_manager,
             embed_model=mock_embed_model,
         )
-        with pytest.raises(RuntimeError, match="Failed to build index"):
+        with pytest.raises(BaseError, match="Failed to build index"):
             await kb.add_documents([Document(text="Test")])
 
     @pytest.mark.asyncio
-    async def test_retrieve_with_retriever(
-        self, mock_config, mock_retriever
-    ):
+    async def test_retrieve_with_retriever(self, mock_config, mock_retriever):
         """Test retrieval with provided retriever"""
         kb = SimpleKnowledgeBase(config=mock_config, retriever=mock_retriever)
         results = await kb.retrieve("test query")
@@ -180,13 +188,11 @@ class TestSimpleKnowledgeBase:
     async def test_retrieve_without_retriever_or_vector_store(self, mock_config):
         """Test retrieval without retriever or vector store"""
         kb = SimpleKnowledgeBase(config=mock_config)
-        with pytest.raises(ValueError, match="vector_store or retriever is required"):
+        with pytest.raises(BaseError, match="vector_store or retriever is required"):
             await kb.retrieve("test query")
 
     @pytest.mark.asyncio
-    async def test_delete_documents_success(
-        self, mock_config, mock_index_manager
-    ):
+    async def test_delete_documents_success(self, mock_config, mock_index_manager):
         """Test deleting documents successfully"""
         kb = SimpleKnowledgeBase(config=mock_config, index_manager=mock_index_manager)
         result = await kb.delete_documents(["doc_1", "doc_2"])
@@ -197,13 +203,11 @@ class TestSimpleKnowledgeBase:
     async def test_delete_documents_without_index_manager(self, mock_config):
         """Test deleting documents without index manager"""
         kb = SimpleKnowledgeBase(config=mock_config)
-        with pytest.raises(ValueError, match="index_manager is required"):
+        with pytest.raises(BaseError, match="index_manager is required"):
             await kb.delete_documents(["doc_1"])
 
     @pytest.mark.asyncio
-    async def test_update_documents_success(
-        self, mock_config, mock_chunker, mock_index_manager, mock_embed_model
-    ):
+    async def test_update_documents_success(self, mock_config, mock_chunker, mock_index_manager, mock_embed_model):
         """Test updating documents successfully"""
         kb = SimpleKnowledgeBase(
             config=mock_config,
@@ -217,9 +221,7 @@ class TestSimpleKnowledgeBase:
         mock_index_manager.update_index.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_get_statistics_success(
-        self, mock_config, mock_index_manager
-    ):
+    async def test_get_statistics_success(self, mock_config, mock_index_manager):
         """Test getting statistics successfully"""
         kb = SimpleKnowledgeBase(config=mock_config, index_manager=mock_index_manager)
         stats = await kb.get_statistics()
@@ -250,17 +252,21 @@ class TestRetrieveMultiKb:
         """Test multi-knowledge base retrieval successfully"""
         mock_kb1 = AsyncMock()
         mock_kb1.config = MagicMock(kb_id="kb1")
-        mock_kb1.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 1", score=0.9),
-            RetrievalResult(text="Result 2", score=0.8),
-        ])
+        mock_kb1.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 1", score=0.9),
+                RetrievalResult(text="Result 2", score=0.8),
+            ]
+        )
 
         mock_kb2 = AsyncMock()
         mock_kb2.config = MagicMock(kb_id="kb2")
-        mock_kb2.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 2", score=0.85),
-            RetrievalResult(text="Result 3", score=0.7),
-        ])
+        mock_kb2.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 2", score=0.85),
+                RetrievalResult(text="Result 3", score=0.7),
+            ]
+        )
 
         results = await retrieve_multi_kb([mock_kb1, mock_kb2], "test query", top_k=5)
         assert len(results) <= 5
@@ -277,9 +283,11 @@ class TestRetrieveMultiKb:
 
         mock_kb2 = AsyncMock()
         mock_kb2.config = MagicMock(kb_id="kb2")
-        mock_kb2.retrieve = AsyncMock(return_value=[
-            RetrievalResult(text="Result 1", score=0.9),
-        ])
+        mock_kb2.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(text="Result 1", score=0.9),
+            ]
+        )
 
         results = await retrieve_multi_kb([mock_kb1, mock_kb2], "test query")
         assert len(results) == 1
@@ -289,30 +297,31 @@ class TestRetrieveMultiKb:
         """Test multi-knowledge base retrieval (with source information)"""
         mock_kb1 = AsyncMock()
         mock_kb1.config = MagicMock(kb_id="kb1")
-        mock_kb1.retrieve = AsyncMock(return_value=[
-            RetrievalResult(
-                text="Result 1",
-                score=0.9,
-                metadata={"raw_score": 0.9, "raw_score_scaled": 0.9},
-            ),
-        ])
+        mock_kb1.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(
+                    text="Result 1",
+                    score=0.9,
+                    metadata={"raw_score": 0.9, "raw_score_scaled": 0.9},
+                ),
+            ]
+        )
 
         mock_kb2 = AsyncMock()
         mock_kb2.config = MagicMock(kb_id="kb2")
-        mock_kb2.retrieve = AsyncMock(return_value=[
-            RetrievalResult(
-                text="Result 1",
-                score=0.95,
-                metadata={"raw_score": 0.95, "raw_score_scaled": 0.95},
-            ),
-        ])
-
-        results = await retrieve_multi_kb_with_source(
-            [mock_kb1, mock_kb2], "test query", top_k=5
+        mock_kb2.retrieve = AsyncMock(
+            return_value=[
+                RetrievalResult(
+                    text="Result 1",
+                    score=0.95,
+                    metadata={"raw_score": 0.95, "raw_score_scaled": 0.95},
+                ),
+            ]
         )
+
+        results = await retrieve_multi_kb_with_source([mock_kb1, mock_kb2], "test query", top_k=5)
         assert len(results) <= 5
         if results:
             assert "text" in results[0]
             assert "score" in results[0]
             assert "kb_ids" in results[0]
-

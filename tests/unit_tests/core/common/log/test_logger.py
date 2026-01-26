@@ -2,26 +2,32 @@
 Test log function
 """
 
-import pytest
 import logging
-import tempfile
 import os
 import sys
+import tempfile
 import threading
 from io import StringIO
+from typing import (
+    Any,
+    Dict,
+)
 from unittest import mock
-from typing import Dict, Any
 
-from openjiuwen.core.common.logging import LogManager
-from openjiuwen.extensions.common.log import DefaultLogger
-from openjiuwen.core.common.logging import set_thread_session
-from openjiuwen.core.common.logging import get_thread_session
-from openjiuwen.core.common.logging import LoggerProtocol
+import pytest
+
+from openjiuwen.core.common.logging import (
+    LogManager,
+    LoggerProtocol,
+    get_session_id,
+    set_session_id,
+)
+from openjiuwen.core.common.logging.default import DefaultLogger
 
 
 def thread_function(session_id, log_list, stdout_capture):
     """Thread function, used for testing thread isolation"""
-    logger = LogManager.get_logger('common')
+    logger = LogManager.get_logger("common")
 
     if not logger._logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
@@ -36,13 +42,13 @@ def thread_function(session_id, log_list, stdout_capture):
 
     logger.set_level(logging.INFO)
 
-    set_thread_session(session_id)
-    logger.info(f'Thread started with session id {session_id}')
+    set_session_id(session_id)
+    logger.info(f"Thread started with session id {session_id}")
 
     for handler in logger._logger.handlers:
         handler.flush()
 
-    log_list.append((session_id, get_thread_session()))
+    log_list.append((session_id, get_session_id()))
 
 
 @pytest.fixture
@@ -56,50 +62,57 @@ def temp_config_dir():
 @pytest.fixture
 def test_config_file(temp_config_dir):
     """Create the YAML configuration file for the test"""
-    config_file_path = os.path.join(temp_config_dir.name, 'test_config.yaml')
-    
+    config_file_path = os.path.join(temp_config_dir.name, "test_config.yaml")
+
     test_config = {
-        'logging': {
-            'level': 'INFO',
-            'backup_count': 5,
-            'max_bytes': 1024 * 1024,
-            'format': '%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s',
-            'log_file': 'common.log',
-            'output': ['console', 'file'],
-            'interface_log_file': 'interface.log',
-            'prompt_builder_interface_log_file': 'prompt_builder.log',
-            'performance_log_file': 'performance.log',
-            'interface_output': ['console', 'file'],
-            'performance_output': ['console', 'file'],
-            'log_path': temp_config_dir.name
+        "logging": {
+            "level": "INFO",
+            "backup_count": 5,
+            "max_bytes": 1024 * 1024,
+            "format": "%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s",
+            "log_file": "common.log",
+            "output": ["console", "file"],
+            "interface_log_file": "interface.log",
+            "prompt_builder_interface_log_file": "prompt_builder.log",
+            "performance_log_file": "performance.log",
+            "interface_output": ["console", "file"],
+            "performance_output": ["console", "file"],
+            "log_path": temp_config_dir.name,
         }
     }
-    
+
     import yaml
-    with open(config_file_path, 'w', encoding='utf-8') as f:
+
+    with open(config_file_path, "w", encoding="utf-8") as f:
         yaml.dump(test_config, f)
-    
+
     return config_file_path
 
 
 @pytest.fixture
 def mock_log_config(test_config_file):
     """Mock log configuration"""
-    from openjiuwen.extensions.common.configs.log_config import LogConfig, log_config as original_log_config
-    from openjiuwen.extensions.common.configs.config_manager import ConfigManager, config_manager as original_config_manager
-    
+    from openjiuwen.core.common.logging.default.log_config import (
+        LogConfig,
+        log_config as original_log_config,
+    )
+    from openjiuwen.core.common.logging.default.config_manager import (
+        ConfigManager,
+        config_manager as original_config_manager,
+    )
+
     test_log_config = LogConfig(test_config_file)
     test_config_manager = ConfigManager(test_config_file)
 
-    import openjiuwen.extensions.common.configs.log_config as log_config_module
-    import openjiuwen.extensions.common.configs.config_manager as config_manager_module
+    import openjiuwen.core.common.logging.default.log_config as log_config_module
+    import openjiuwen.core.common.logging.default.config_manager as config_manager_module
 
     _original_log_config = original_log_config
     _original_config_manager = original_config_manager
 
     log_config_module.log_config = test_log_config
     config_manager_module.config_manager = test_config_manager
-    
+
     yield test_log_config
 
     log_config_module.log_config = _original_log_config
@@ -132,39 +145,36 @@ def initialized_logger(mock_log_config, stdout_capture):
     LogManager.reset()
     LogManager.initialize()
 
-    from openjiuwen.extensions.common.log.default_impl import ThreadContextFilter
+    from openjiuwen.core.common.logging.default.default_impl import ContextFilter
 
     for log in LogManager.get_all_loggers().values():
-        for handler in log._logger.handlers[:]:
+        for handler in log.logger().handlers[:]:
             if isinstance(handler, logging.StreamHandler):
                 handler.stream = sys.stdout
-            elif hasattr(handler, 'stream'):
+            elif hasattr(handler, "stream"):
                 try:
                     handler.close()
                 except Exception:
                     pass
                 log._logger.removeHandler(handler)
 
-        has_stream_handler = any(
-            isinstance(h, logging.StreamHandler) 
-            for h in log._logger.handlers
-        )
+        has_stream_handler = any(isinstance(h, logging.StreamHandler) for h in log.logger().handlers)
         if not has_stream_handler:
             handler = logging.StreamHandler(sys.stdout)
-            handler.add_filter(ThreadContextFilter(log.log_type))
+            handler.add_filter(ContextFilter(log.log_type))
             formatter = log._get_formatter()
             handler.setFormatter(formatter)
             handler.set_level(logging.DEBUG)
-            log._logger.addHandler(handler)
+            log.logger().addHandler(handler)
 
-        log._logger.setLevel(logging.DEBUG)
+        log.logger().setLevel(logging.DEBUG)
 
     yield
 
-    set_thread_session('')
+    set_session_id("")
     try:
         for logger in LogManager.get_all_loggers().values():
-            if hasattr(logger, '_logger'):
+            if hasattr(logger, "_logger"):
                 for handler in logger._logger.handlers[:]:
                     try:
                         handler.close()
@@ -183,9 +193,9 @@ class TestThreadSafety:
         """Test the isolation of trace_id between threads"""
         log_list = []
         threads = [
-            threading.Thread(target=thread_function, args=('10001', log_list, stdout_capture)),
-            threading.Thread(target=thread_function, args=('10002', log_list, stdout_capture)),
-            threading.Thread(target=thread_function, args=('10003', log_list, stdout_capture))
+            threading.Thread(target=thread_function, args=("10001", log_list, stdout_capture)),
+            threading.Thread(target=thread_function, args=("10002", log_list, stdout_capture)),
+            threading.Thread(target=thread_function, args=("10003", log_list, stdout_capture)),
         ]
 
         stdout_capture.truncate(0)
@@ -199,12 +209,12 @@ class TestThreadSafety:
         for session_id, recorded_id in log_list:
             assert session_id == recorded_id, f"Thread session_id mismatch: expected {session_id}, actual {recorded_id}"
 
-        assert get_thread_session() == ''
+        assert get_session_id() == "default_trace_id"
 
         output = stdout_capture.getvalue()
-        assert '10001' in output
-        assert '10002' in output
-        assert '10003' in output
+        assert "10001" in output
+        assert "10002" in output
+        assert "10003" in output
 
 
 class TestLogManager:
@@ -212,6 +222,7 @@ class TestLogManager:
 
     def test_custom_logger_registration_and_usage(self, initialized_logger, capsys):
         """Test the registration and usage of the custom logger"""
+
         class CustomLogger:
             def __init__(self):
                 self.messages = []
@@ -222,22 +233,22 @@ class TestLogManager:
                 print(formatted_msg)
                 self.messages.append(formatted_msg)
 
-            def debug(self, msg, *args, **kwargs): 
+            def debug(self, msg, *args, **kwargs):
                 pass
 
-            def warning(self, msg, *args, **kwargs): 
+            def warning(self, msg, *args, **kwargs):
                 pass
 
-            def error(self, msg, *args, **kwargs): 
+            def error(self, msg, *args, **kwargs):
                 pass
 
-            def critical(self, msg, *args, **kwargs): 
+            def critical(self, msg, *args, **kwargs):
                 pass
 
-            def exception(self, msg, *args, **kwargs): 
+            def exception(self, msg, *args, **kwargs):
                 pass
 
-            def log(self, level, msg, *args, **kwargs): 
+            def log(self, level, msg, *args, **kwargs):
                 pass
 
             def set_level(self, level):
@@ -258,14 +269,14 @@ class TestLogManager:
             def get_config(self) -> Dict[str, Any]:
                 return self._config.copy()
 
-            def reconfigure(self, config: Dict[str, Any]): 
+            def reconfigure(self, config: Dict[str, Any]):
                 self._config = config
 
         custom_logger_instance = CustomLogger()
 
-        LogManager.register_logger('custom', custom_logger_instance)
+        LogManager.register_logger("custom", custom_logger_instance)
 
-        retrieved_logger = LogManager.get_logger('custom')
+        retrieved_logger = LogManager.get_logger("custom")
         assert retrieved_logger is custom_logger_instance
         retrieved_logger.info("Test custom logger")
 
@@ -275,7 +286,7 @@ class TestLogManager:
 
     def test_default_logger_creation(self, initialized_logger, capsys):
         """Test the dynamic creation of the default logger"""
-        new_logger = LogManager.get_logger('new_type_test')
+        new_logger = LogManager.get_logger("new_type_test")
 
         assert isinstance(new_logger, DefaultLogger)
 
@@ -293,7 +304,7 @@ class TestLogManager:
     def test_get_all_loggers(self, initialized_logger):
         """Test to obtain all loggers"""
         all_loggers = LogManager.get_all_loggers()
-        expected_types = {'common', 'interface', 'prompt_builder', 'performance'}
+        expected_types = {"common", "interface", "prompt_builder", "performance"}
         assert expected_types.issubset(set(all_loggers.keys()))
 
         for log_instance in all_loggers.values():
@@ -301,30 +312,30 @@ class TestLogManager:
 
     def test_register_logger_type_check(self, initialized_logger):
         """Test the type checking when registering the logger"""
+
         class InvalidLogger:
             pass
 
         invalid_logger = InvalidLogger()
 
         with pytest.raises(TypeError, match="Logger must implement LoggerProtocol"):
-            LogManager.register_logger('invalid', invalid_logger)
+            LogManager.register_logger("invalid", invalid_logger)
 
     def test_get_logger_creates_on_demand(self, initialized_logger):
         """Test the creation of a logger as needed"""
-        new_type_logger = LogManager.get_logger('on_demand_test')
+        new_type_logger = LogManager.get_logger("on_demand_test")
 
         assert isinstance(new_type_logger, DefaultLogger)
-        assert new_type_logger.log_type == 'on_demand_test'
+        assert new_type_logger.log_type == "on_demand_test"
 
-        same_logger = LogManager.get_logger('on_demand_test')
+        same_logger = LogManager.get_logger("on_demand_test")
         assert same_logger is new_type_logger
 
 
 class TestLogLevel:
-
     def test_log_level_filtering(self, initialized_logger, capsys):
         """Test the log-level filtering function"""
-        test_logger_instance = LogManager.get_logger('level_test')
+        test_logger_instance = LogManager.get_logger("level_test")
 
         test_logger_instance.set_level(logging.DEBUG)
 
@@ -368,9 +379,9 @@ class TestLogFileOutput:
 
     def test_interface_log_file_output(self, initialized_logger, stdout_capture, temp_config_dir):
         """Output the test interface log file"""
-        interface_logger = LogManager.get_logger('interface')
+        interface_logger = LogManager.get_logger("interface")
 
-        set_thread_session('FILE-TEST-123')
+        set_session_id("FILE-TEST-123")
 
         test_message = "This is a test message for file output"
         interface_logger.info(test_message)
@@ -378,24 +389,24 @@ class TestLogFileOutput:
         for handler in interface_logger._logger.handlers:
             handler.flush()
 
-        actual_log_file = interface_logger.config.get('log_file', '')
+        actual_log_file = interface_logger.config.get("log_file", "")
 
         if not os.path.exists(actual_log_file):
             stdout_output = stdout_capture.getvalue()
             assert test_message in stdout_output, "Console output should contain test message"
-            assert 'FILE-TEST-123' in stdout_output, "Console output should contain trace_id"
+            assert "FILE-TEST-123" in stdout_output, "Console output should contain trace_id"
             return
 
-        with open(actual_log_file, 'r', encoding='utf-8') as f:
+        with open(actual_log_file, "r", encoding="utf-8") as f:
             content = f.read()
 
         if content.strip():
             assert test_message in content, "Log file should contain test message"
-            assert 'FILE-TEST-123' in content, "Log file should contain trace_id"
+            assert "FILE-TEST-123" in content, "Log file should contain trace_id"
         else:
             stdout_output = stdout_capture.getvalue()
             assert test_message in stdout_output, "Console output should contain test message"
-            assert 'FILE-TEST-123' in stdout_output, "Console output should contain trace_id"
+            assert "FILE-TEST-123" in stdout_output, "Console output should contain trace_id"
             return
 
         stdout_output = stdout_capture.getvalue()
@@ -407,7 +418,7 @@ class TestDefaultLogger:
 
     def test_message_sanitization(self, initialized_logger, capsys):
         """Test the message cleaning function (to prevent log injection)"""
-        logger = LogManager.get_logger('common')
+        logger = LogManager.get_logger("common")
         logger.set_level(logging.INFO)
 
         test_message = "Test message\nwith newline\r\nand carriage return\r"
@@ -419,39 +430,39 @@ class TestDefaultLogger:
         captured = capsys.readouterr()
         output = captured.out
 
-        lines = output.split('\n')
+        lines = output.split("\n")
         for line in lines:
-            if 'Test message' in line:
-                assert '\r' not in line
-                assert 'with newline' in line
-                assert 'and carriage return' in line
+            if "Test message" in line:
+                assert "\r" not in line
+                assert "with newline" in line
+                assert "and carriage return" in line
 
     def test_logger_config_access(self, initialized_logger):
         """Test log configuration access"""
-        logger = LogManager.get_logger('common')
+        logger = LogManager.get_logger("common")
 
         config = logger.get_config()
         assert isinstance(config, dict)
-        assert 'log_file' in config
-        assert 'output' in config
-        assert 'level' in config
+        assert "log_file" in config
+        assert "output" in config
+        assert "level" in config
 
     def test_logger_reconfigure(self, initialized_logger, stdout_capture):
         """Reconfigure the test log"""
-        logger = LogManager.get_logger('common')
+        logger = LogManager.get_logger("common")
 
         original_config = logger.get_config()
         new_config = original_config.copy()
-        new_config['level'] = logging.DEBUG
+        new_config["level"] = logging.DEBUG
 
         logger.reconfigure(new_config)
 
         updated_config = logger.get_config()
-        assert updated_config['level'] == logging.DEBUG
+        assert updated_config["level"] == logging.DEBUG
 
     def test_all_log_levels(self, initialized_logger, stdout_capture):
         """Test all log levels"""
-        logger = LogManager.get_logger('common')
+        logger = LogManager.get_logger("common")
         logger.set_level(logging.DEBUG)
 
         stdout_capture.truncate(0)
@@ -475,7 +486,7 @@ class TestDefaultLogger:
 
     def test_exception_logging(self, initialized_logger, stdout_capture):
         """Test abnormal log recording"""
-        logger = LogManager.get_logger('common')
+        logger = LogManager.get_logger("common")
         logger.set_level(logging.ERROR)
 
         stdout_capture.truncate(0)
@@ -496,43 +507,44 @@ class TestDefaultLogger:
 
 class TestLogManagerReset:
     """Test the log manager reset function"""
-    
+
     def test_reset_clears_loggers(self, initialized_logger):
         """Test reset clears all loggers"""
-        logger1 = LogManager.get_logger('common')
-        logger2 = LogManager.get_logger('interface')
-        
+        logger1 = LogManager.get_logger("common")
+        logger2 = LogManager.get_logger("interface")
+
         assert len(LogManager.get_all_loggers()) > 0
-        
+
         LogManager.reset()
 
-        logger3 = LogManager.get_logger('common')
+        logger3 = LogManager.get_logger("common")
         assert isinstance(logger3, DefaultLogger)
 
 
 class TestLogDirectoryCreation:
     """Test log directory creation function"""
-    
+
     @staticmethod
     def test_create_nested_log_directory(temp_config_dir):
         """Test the creation of multi-level nested log directories (such as logs/run)"""
-        nested_log_path = os.path.join(temp_config_dir.name, 'logs', 'run')
-        nested_log_file = os.path.join(nested_log_path, 'test.log')
+        nested_log_path = os.path.join(temp_config_dir.name, "logs", "run")
+        nested_log_file = os.path.join(nested_log_path, "test.log")
 
         if os.path.exists(nested_log_path):
             import shutil
-            shutil.rmtree(os.path.join(temp_config_dir.name, 'logs'))
+
+            shutil.rmtree(os.path.join(temp_config_dir.name, "logs"))
 
         config = {
-            'log_file': nested_log_file,
-            'output': ['file'],
-            'level': logging.INFO,
-            'backup_count': 5,
-            'max_bytes': 1024 * 1024,
-            'format': '%(asctime)s | %(levelname)s | %(message)s'
+            "log_file": nested_log_file,
+            "output": ["file"],
+            "level": logging.INFO,
+            "backup_count": 5,
+            "max_bytes": 1024 * 1024,
+            "format": "%(asctime)s | %(levelname)s | %(message)s",
         }
 
-        logger = DefaultLogger('test_nested', config)
+        logger = DefaultLogger("test_nested", config)
 
         assert os.path.exists(nested_log_path), f"Directory {nested_log_path} should be created"
         assert os.path.isdir(nested_log_path), f"{nested_log_path} should be a directory"
@@ -546,10 +558,10 @@ class TestLogDirectoryCreation:
 
         assert os.path.exists(nested_log_file), f"Log file {nested_log_file} should be created"
 
-        with open(nested_log_file, 'r', encoding='utf-8') as f:
+        with open(nested_log_file, "r", encoding="utf-8") as f:
             content = f.read()
             assert "Test nested directory log" in content
-    
+
     @staticmethod
     def test_create_log_directory_with_relative_path(temp_config_dir):
         """The test uses relative paths to create a log directory"""
@@ -557,22 +569,23 @@ class TestLogDirectoryCreation:
         try:
             os.chdir(temp_config_dir.name)
 
-            relative_log_file = os.path.join('logs', 'run', 'relative_test.log')
+            relative_log_file = os.path.join("logs", "run", "relative_test.log")
 
-            if os.path.exists('logs'):
+            if os.path.exists("logs"):
                 import shutil
-                shutil.rmtree('logs')
-            
+
+                shutil.rmtree("logs")
+
             config = {
-                'log_file': relative_log_file,
-                'output': ['file'],
-                'level': logging.INFO,
-                'backup_count': 5,
-                'max_bytes': 1024 * 1024,
-                'format': '%(asctime)s | %(levelname)s | %(message)s'
+                "log_file": relative_log_file,
+                "output": ["file"],
+                "level": logging.INFO,
+                "backup_count": 5,
+                "max_bytes": 1024 * 1024,
+                "format": "%(asctime)s | %(levelname)s | %(message)s",
             }
-            
-            logger = DefaultLogger('test_relative', config)
+
+            logger = DefaultLogger("test_relative", config)
 
             abs_log_file = os.path.abspath(relative_log_file)
             abs_log_dir = os.path.dirname(abs_log_file)
@@ -586,58 +599,57 @@ class TestLogDirectoryCreation:
                 handler.close()
 
             assert os.path.exists(abs_log_file), f"Log file {abs_log_file} should be created"
-            
+
         finally:
             os.chdir(original_cwd)
-    
+
     @staticmethod
     def test_create_log_directory_failure_raises_exception(temp_config_dir):
         """An exception was thrown when the test failed to create the log directory"""
         from openjiuwen.core.common.exception.exception import JiuWenBaseException
         from openjiuwen.core.common.exception.status_code import StatusCode
 
-        if sys.platform == 'win32':
-
-            invalid_log_file = 'Z:\\invalid\\drive\\test.log'
+        if sys.platform == "win32":
+            invalid_log_file = "Z:\\invalid\\drive\\test.log"
         else:
-            invalid_log_file = '/proc/invalid_path/test.log'
-        
+            invalid_log_file = "/proc/invalid_path/test.log"
+
         config = {
-            'log_file': invalid_log_file,
-            'output': ['file'],
-            'level': logging.INFO,
-            'backup_count': 5,
-            'max_bytes': 1024 * 1024,
-            'format': '%(asctime)s | %(levelname)s | %(message)s'
+            "log_file": invalid_log_file,
+            "output": ["file"],
+            "level": logging.INFO,
+            "backup_count": 5,
+            "max_bytes": 1024 * 1024,
+            "format": "%(asctime)s | %(levelname)s | %(message)s",
         }
 
-        with mock.patch('os.makedirs') as mock_makedirs:
+        with mock.patch("os.makedirs") as mock_makedirs:
             mock_makedirs.side_effect = OSError("Permission denied")
-            
+
             with pytest.raises(JiuWenBaseException) as exc_info:
                 DefaultLogger('test_failure', config)
             
-            assert exc_info.value.error_code == StatusCode.LOG_PATH_CREATE_FAILED.code
-            assert "Failed to create log directory" in exc_info.value.message
+            assert exc_info.value.error_code == StatusCode.COMMON_LOG_PATH_INIT_FAILED.code
+            assert "common log_path initialization failed" in exc_info.value.message
     
     @staticmethod
     def test_create_existing_directory_no_error(temp_config_dir):
         """No error will be reported when the test directory already exists"""
-        existing_log_path = os.path.join(temp_config_dir.name, 'logs', 'existing')
+        existing_log_path = os.path.join(temp_config_dir.name, "logs", "existing")
         os.makedirs(existing_log_path, exist_ok=True)
-        
-        existing_log_file = os.path.join(existing_log_path, 'test.log')
-        
+
+        existing_log_file = os.path.join(existing_log_path, "test.log")
+
         config = {
-            'log_file': existing_log_file,
-            'output': ['file'],
-            'level': logging.INFO,
-            'backup_count': 5,
-            'max_bytes': 1024 * 1024,
-            'format': '%(asctime)s | %(levelname)s | %(message)s'
+            "log_file": existing_log_file,
+            "output": ["file"],
+            "level": logging.INFO,
+            "backup_count": 5,
+            "max_bytes": 1024 * 1024,
+            "format": "%(asctime)s | %(levelname)s | %(message)s",
         }
 
-        logger = DefaultLogger('test_existing', config)
+        logger = DefaultLogger("test_existing", config)
 
         assert os.path.exists(existing_log_path)
 
@@ -649,29 +661,29 @@ class TestLogDirectoryCreation:
             handler.close()
 
         assert os.path.exists(existing_log_file)
-    
+
     @staticmethod
     def test_log_path_validation(temp_config_dir):
         """Verify the legitimacy of the test log path"""
         from openjiuwen.core.common.exception.exception import JiuWenBaseException
         from openjiuwen.core.common.exception.status_code import StatusCode
 
-        if sys.platform == 'win32':
-            sensitive_path = 'C:\\Windows\\System32\\test.log'
+        if sys.platform == "win32":
+            sensitive_path = "C:\\Windows\\System32\\test.log"
         else:
-            sensitive_path = '/etc/passwd'
-        
+            sensitive_path = "/etc/passwd"
+
         config = {
-            'log_file': sensitive_path,
-            'output': ['file'],
-            'level': logging.INFO,
-            'backup_count': 5,
-            'max_bytes': 1024 * 1024,
-            'format': '%(asctime)s | %(levelname)s | %(message)s'
+            "log_file": sensitive_path,
+            "output": ["file"],
+            "level": logging.INFO,
+            "backup_count": 5,
+            "max_bytes": 1024 * 1024,
+            "format": "%(asctime)s | %(levelname)s | %(message)s",
         }
-        
+
         with pytest.raises(JiuWenBaseException) as exc_info:
             DefaultLogger('test_sensitive', config)
         
-        assert exc_info.value.error_code == StatusCode.LOG_PATH_SENSITIVE_ERROR.code
-        assert "sensitive" in exc_info.value.message.lower() or "unsafe" in exc_info.value.message.lower()
+        assert exc_info.value.error_code == StatusCode.COMMON_LOG_PATH_INVALID.code
+        assert "common log_path is invalid" in exc_info.value.message.lower()

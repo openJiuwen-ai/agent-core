@@ -1,25 +1,27 @@
+import os
 from unittest.mock import patch, MagicMock, Mock
 
 import pytest
 
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.component.tool_comp import ToolComponentConfig, ToolExecutable, ToolComponent
-from openjiuwen.core.context_engine.config import ContextEngineConfig
-from openjiuwen.core.context_engine.engine import ContextEngine
-from openjiuwen.core.runtime.workflow import WorkflowRuntime, NodeRuntime
-from openjiuwen.core.runtime.wrapper import WrappedNodeRuntime, TaskRuntime
-from openjiuwen.core.utils.tool.param import Param
-from openjiuwen.core.utils.tool.service_api.restful_api import RestfulApi
-from openjiuwen.core.utils.tool.tool import tool
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowMetadata, WorkflowConfig
+from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
+from openjiuwen.core.session import WorkflowSession, NodeSession
+from openjiuwen.core.session.node import Session
+from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.workflow import create_workflow_session
+from openjiuwen.core.foundation.tool import RestfulApi, ToolCard, RestfulApiCard
+from openjiuwen.core.foundation.tool import tool
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.workflow import WorkflowCard
+from openjiuwen.core.workflow import Start, End
+from openjiuwen.core.workflow import ToolComponentConfig, ToolComponent
+from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.workflow.components.tool.tool_comp import ToolExecutable
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode
 
 
 @pytest.fixture
 def fake_ctx():
-    return WrappedNodeRuntime(NodeRuntime(WorkflowRuntime(), "test"))
+    return Session(NodeSession(WorkflowSession(), "test"))
 
 
 @pytest.fixture()
@@ -37,28 +39,55 @@ def mock_tool_input():
 
 @pytest.fixture
 def mock_tool():
+    os.environ["SSRF_PROTECT_ENABLED"] = "false"
     return RestfulApi(
-        name="test",
-        description="test",
-        params=[Param(name="location", description="location", type='string'),
-                Param(name="date", description="date", type='int')],
-        path="http://127.0.0.1:8000",
-        headers={},
-        method="GET",
-        response=[],
+        card=RestfulApiCard(
+            name="test",
+            description="test",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "location": {"description": "location", "type": "string"},
+                    "date": {"description": "date", "type": "integer"},
+                },
+                "required": ["location", "date"],
+            },
+            url="http://127.0.0.1:8000",
+            headers={},
+            method="GET",
+        ),
     )
 
 
 @pytest.fixture
-def mock_tool_kwargs(mock_tool, mock_tool_input):
+def mock_tool_kwargs(mock_tool, mock_tool_config):
     return {
         "tool": mock_tool,
         "config": mock_tool_config
     }
 
 
+@tool(
+    card=ToolCard(
+        id="test_local_function",
+        name="test_local_function",
+        description="测试本地函数",
+        input_params={
+            "type": "object",
+            "properties": {
+                "a": {"description": "参数1", "type": "string"},
+                "b": {"description": "参数2", "type": ["integer", "null"], "default": 789},
+            },
+            "required": ["a"],
+        },
+    )
+)
+def test_local_function(a, b):
+    return dict(res=a, info=b)
+
+
 @patch('requests.request')
-@patch('openjiuwen.core.utils.tool.service_api.restful_api.RestfulApi._async_request')
+@patch('openjiuwen.core.foundation.tool.service_api.restful_api.RestfulApi._async_request')
 @pytest.mark.asyncio
 async def test_tool_comp_invoke(mock_async_request, mock_request, mock_tool_input,
                                 mock_tool_kwargs, fake_ctx):
@@ -77,10 +106,12 @@ async def test_tool_comp_invoke(mock_async_request, mock_request, mock_tool_inpu
     assert res.get('error_code') == 0
 
 
-@patch('openjiuwen.core.component.tool_comp.ToolExecutable.invoke')
+@patch('openjiuwen.core.workflow.components.tool.tool_comp.ToolExecutable.invoke')
 @pytest.mark.asyncio
 async def test_tool_comp_in_workflow(mock_invoke, mock_tool, mock_tool_config, fake_ctx):
     mock_invoke.return_value = 'res'
+    mock_tool_config = ToolComponentConfig(tool_id="test_local_function")
+    Runner.resource_mgr.add_tool(test_local_function)
     flow = Workflow()
 
     start_component = MockStartNode("s")
@@ -94,19 +125,8 @@ async def test_tool_comp_in_workflow(mock_invoke, mock_tool, mock_tool_config, f
     flow.add_connection("s", "tool")
     flow.add_connection("tool", "e")
 
-    await flow.invoke({}, WorkflowRuntime(session_id="test"))
+    await flow.invoke({}, create_workflow_session(session_id="test"))
 
-
-@tool(
-    name="test_local_function",
-    description="测试本地函数",
-    params=[
-        Param(name="a", description="参数1", param_type="string", required=True),
-        Param(name="b", description="参数2", param_type="integer", default_value=789, required=True),
-    ],
-)
-def test_local_function(a, b):
-    return dict(res=a, info=b)
 
 class TestToolComponent:
 
@@ -115,19 +135,14 @@ class TestToolComponent:
         id = "tool_workflow"
         version = "1.0"
         name = "tool"
-        flow = Workflow(workflow_config=WorkflowConfig(metadata=WorkflowMetadata(name=name, id=id, version=version, )))
+        flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
-        tool_component = ToolComponent(ToolComponentConfig())
-        tool_component.bind_tool(test_local_function)
+
+        Runner.resource_mgr.add_tool(test_local_function)
+        tool_component = ToolComponent(ToolComponentConfig(tool_id="test_local_function"))
 
         flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}", "name": "${name}"})
         flow.set_end_comp("e", end_component,
@@ -139,8 +154,8 @@ class TestToolComponent:
 
         session_id = "test_tool"
         config = ContextEngineConfig()
-        ce_engine = ContextEngine("123", config)
-        workflow_context = ce_engine.get_workflow_context(workflow_id="tool_workflow", session_id=session_id)
-        workflow_runtime = TaskRuntime(trace_id=session_id).create_workflow_runtime()
-        invoke_result = await flow.invoke({"query": "你好"}, workflow_runtime, workflow_context)
-        assert invoke_result.result["responseContent"] == "{'res': '你好', 'info': 789}"
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="tool_workflow")
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
+        invoke_result = await flow.invoke({"query": "你好"}, workflow_session, workflow_context)
+        assert invoke_result.result["response"] == "{'res': '你好', 'info': 789}"

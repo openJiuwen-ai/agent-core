@@ -2,11 +2,11 @@
 """
 Text preprocessor test cases
 """
-from unittest.mock import MagicMock
+
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.chunker.text_preprocessor import (
+from openjiuwen.core.retrieval import (
     TextPreprocessor,
     WhitespaceNormalizer,
     URLEmailRemover,
@@ -227,27 +227,23 @@ class TestSpecialCharacterNormalizer:
     @staticmethod
     def test_init_with_chars_to_replace():
         """Test initialization with characters to replace"""
-        normalizer = SpecialCharacterNormalizer(
-            chars_to_replace={"&": "and", "@": "at"}
-        )
+        normalizer = SpecialCharacterNormalizer(chars_to_replace={"&": "and", "@": "at"})
         assert normalizer.chars_to_replace == {"&": "and", "@": "at"}
 
     @staticmethod
     def test_remove_control_characters():
         """Test removing control characters"""
         normalizer = SpecialCharacterNormalizer()
-        text = "Test\x00text\x1Fwith\x7Fcontrol"
+        text = "Test\x00text\x1fwith\x7fcontrol"
         result = normalizer.process(text)
         assert "\x00" not in result
-        assert "\x1F" not in result
-        assert "\x7F" not in result
+        assert "\x1f" not in result
+        assert "\x7f" not in result
 
     @staticmethod
     def test_replace_characters():
         """Test replacing characters"""
-        normalizer = SpecialCharacterNormalizer(
-            chars_to_replace={"&": "and", "@": "at"}
-        )
+        normalizer = SpecialCharacterNormalizer(chars_to_replace={"&": "and", "@": "at"})
         text = "Tom & Jerry @ home"
         result = normalizer.process(text)
         assert "and" in result
@@ -317,6 +313,7 @@ class TestPreprocessingPipeline:
     @staticmethod
     def test_process_order():
         """Test processing order"""
+
         # Create a preprocessor that tracks processing order
         class OrderTracker(TextPreprocessor):
             def __init__(self, name):
@@ -345,10 +342,12 @@ class TestPreprocessingPipeline:
     @staticmethod
     def test_len():
         """Test length method"""
-        pipeline = PreprocessingPipeline([
-            WhitespaceNormalizer(),
-            URLEmailRemover(),
-        ])
+        pipeline = PreprocessingPipeline(
+            [
+                WhitespaceNormalizer(),
+                URLEmailRemover(),
+            ]
+        )
         assert len(pipeline) == 2
 
     @staticmethod
@@ -357,4 +356,3 @@ class TestPreprocessingPipeline:
         pipeline = PreprocessingPipeline([WhitespaceNormalizer()])
         result = pipeline.process("")
         assert result == ""
-

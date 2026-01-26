@@ -2,16 +2,21 @@
 """
 Vector store abstract base class test cases
 """
-from unittest.mock import AsyncMock
 
 import pytest
 
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.retrieval import VectorStore
 
 
 class ConcreteVectorStore(VectorStore):
     """Concrete vector store implementation for testing abstract base class"""
+
+    @staticmethod
+    def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> None:
+        pass
+
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
 
     async def add(self, data, batch_size=None, **kwargs):
         pass
@@ -22,13 +27,17 @@ class ConcreteVectorStore(VectorStore):
     async def sparse_search(self, query_text, top_k=5, filters=None, **kwargs):
         return []
 
-    async def hybrid_search(
-        self, query_text, query_vector=None, top_k=5, alpha=0.5, filters=None, **kwargs
-    ):
+    async def hybrid_search(self, query_text, query_vector=None, top_k=5, alpha=0.5, filters=None, **kwargs):
         return []
 
     async def delete(self, ids=None, filter_expr=None, **kwargs):
         return True
+
+    async def table_exists(self, table_name: str) -> bool:
+        pass
+
+    async def delete_table(self, table_name: str) -> None:
+        pass
 
 
 class TestVectorStore:
@@ -59,9 +68,7 @@ class TestVectorStore:
     async def test_hybrid_search(self):
         """Test hybrid search"""
         store = ConcreteVectorStore()
-        results = await store.hybrid_search(
-            "test query", query_vector=[0.1] * 384, top_k=5
-        )
+        results = await store.hybrid_search("test query", query_vector=[0.1] * 384, top_k=5)
         assert results == []
 
     @pytest.mark.asyncio
@@ -70,4 +77,3 @@ class TestVectorStore:
         store = ConcreteVectorStore()
         result = await store.delete(ids=["1", "2"])
         assert result is True
-

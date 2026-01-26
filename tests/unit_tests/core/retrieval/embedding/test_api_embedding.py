@@ -2,13 +2,14 @@
 """
 API embedding model implementation test cases
 """
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
+from unittest.mock import Mock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
-from openjiuwen.core.retrieval.common.config import EmbeddingConfig
+from openjiuwen.core.retrieval import APIEmbedding
+from openjiuwen.core.retrieval import EmbeddingConfig
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -99,9 +100,7 @@ class TestAPIEmbedding:
     async def test_embed_query_success_data_format(self, embedding_config):
         """Test embedding query text successfully (data format)"""
         mock_response = Mock()
-        mock_response.json.return_value = {
-            "data": [{"embedding": [0.1] * 384}]
-        }
+        mock_response.json.return_value = {"data": [{"embedding": [0.1] * 384}]}
         mock_response.raise_for_status = Mock()
 
         with patch("asyncio.to_thread") as mock_to_thread:
@@ -115,7 +114,7 @@ class TestAPIEmbedding:
     async def test_embed_query_empty_text(self, embedding_config):
         """Test embedding empty text"""
         model = APIEmbedding(config=embedding_config)
-        with pytest.raises(ValueError, match="Empty text provided"):
+        with pytest.raises(BaseError, match="Empty text provided"):
             await model.embed_query("   ")
 
     @pytest.mark.asyncio
@@ -150,15 +149,13 @@ class TestAPIEmbedding:
         import requests
 
         mock_response = Mock()
-        mock_response.raise_for_status = Mock(
-            side_effect=requests.exceptions.RequestException("Connection error")
-        )
+        mock_response.raise_for_status = Mock(side_effect=requests.exceptions.RequestException("Connection error"))
 
         with patch("asyncio.to_thread") as mock_to_thread:
             mock_to_thread.return_value = mock_response
 
             model = APIEmbedding(config=embedding_config, max_retries=2)
-            with pytest.raises(RuntimeError, match="Failed to get embedding"):
+            with pytest.raises(BaseError, match="Failed to get embedding"):
                 await model.embed_query("test query")
             assert mock_to_thread.call_count == 2
 
@@ -173,16 +170,14 @@ class TestAPIEmbedding:
             mock_to_thread.return_value = mock_response
 
             model = APIEmbedding(config=embedding_config)
-            with pytest.raises(ValueError, match="No embeddings in response"):
+            with pytest.raises(BaseError, match="No embeddings in response"):
                 await model.embed_query("test query")
 
     @pytest.mark.asyncio
     async def test_embed_documents_success(self, embedding_config):
         """Test embedding document list successfully"""
         mock_response = Mock()
-        mock_response.json.return_value = {
-            "embeddings": [[0.1] * 384, [0.2] * 384, [0.3] * 384]
-        }
+        mock_response.json.return_value = {"embeddings": [[0.1] * 384, [0.2] * 384, [0.3] * 384]}
         mock_response.raise_for_status = Mock()
 
         with patch("asyncio.to_thread") as mock_to_thread:
@@ -232,21 +227,21 @@ class TestAPIEmbedding:
     async def test_embed_documents_empty_list(self, embedding_config):
         """Test embedding empty list"""
         model = APIEmbedding(config=embedding_config)
-        with pytest.raises(ValueError, match="Empty texts list provided"):
+        with pytest.raises(BaseError, match="Empty texts list provided"):
             await model.embed_documents([])
 
     @pytest.mark.asyncio
     async def test_embed_documents_with_empty_texts(self, embedding_config):
         """Test list containing empty texts"""
         model = APIEmbedding(config=embedding_config)
-        with pytest.raises(ValueError, match="chunks are empty"):
+        with pytest.raises(BaseError, match="chunks are empty"):
             await model.embed_documents(["text 1", "   ", "text 2"])
 
     @pytest.mark.asyncio
     async def test_embed_documents_all_empty(self, embedding_config):
         """Test all texts are empty"""
         model = APIEmbedding(config=embedding_config)
-        with pytest.raises(ValueError):
+        with pytest.raises(BaseError):
             await model.embed_documents(["   ", "  ", ""])
 
     @pytest.mark.asyncio

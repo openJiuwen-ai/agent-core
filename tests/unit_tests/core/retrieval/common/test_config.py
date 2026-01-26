@@ -2,15 +2,16 @@
 """
 Configuration class test cases
 """
+
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.core.retrieval.common.config import (
+from openjiuwen.core.retrieval import (
+    EmbeddingConfig,
+    IndexConfig,
     KnowledgeBaseConfig,
     RetrievalConfig,
-    IndexConfig,
     VectorStoreConfig,
-    EmbeddingConfig,
 )
 
 
@@ -161,10 +162,10 @@ class TestEmbeddingConfig:
     @staticmethod
     def test_create_with_required_fields():
         """Test creating configuration with required fields"""
-        config = EmbeddingConfig(model_name="test_model")
+        config = EmbeddingConfig(model_name="test_model", base_url="https://api.example.com")
         assert config.model_name == "test_model"
+        assert config.base_url == "https://api.example.com"
         assert config.api_key is None
-        assert config.base_url is None
 
     @staticmethod
     def test_create_with_all_fields():
@@ -183,4 +184,3 @@ class TestEmbeddingConfig:
         """Test missing required model_name"""
         with pytest.raises(ValidationError):
             EmbeddingConfig()
-

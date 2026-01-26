@@ -2,14 +2,16 @@
 """
 Triple extractor test cases
 """
+
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.extractor.triple_extractor import TripleExtractor
+from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.retrieval.common.document import TextChunk
-from openjiuwen.core.retrieval.common.triple import Triple
+from openjiuwen.core.retrieval.indexing.processor.extractor.triple_extractor import TripleExtractor
 
 
 @pytest.fixture
@@ -23,12 +25,14 @@ def mock_llm_client():
 def mock_completion():
     """Create mock completion object"""
     completion = MagicMock()
-    completion.content = json.dumps({
-        "triples": [
-            ["Alice", "knows", "Bob"],
-            ["Bob", "works_at", "Company"],
-        ]
-    })
+    completion.content = json.dumps(
+        {
+            "triples": [
+                ["Alice", "knows", "Bob"],
+                ["Bob", "works_at", "Company"],
+            ]
+        }
+    )
     return completion
 
 
@@ -58,7 +62,7 @@ class TestTripleExtractor:
     @pytest.mark.asyncio
     async def test_extract_multiple_chunks(self, mock_llm_client, mock_completion):
         """Test extracting multiple chunks"""
-        mock_llm_client.ainvoke = AsyncMock(return_value=mock_completion)
+        mock_llm_client.invoke = AsyncMock(return_value=mock_completion)
 
         extractor = TripleExtractor(
             llm_client=mock_llm_client,
@@ -71,7 +75,7 @@ class TestTripleExtractor:
         ]
         triples = await extractor.extract(chunks)
         # Should extract triples for each chunk
-        assert mock_llm_client.ainvoke.call_count == 2
+        assert mock_llm_client.invoke.call_count == 2
 
     @pytest.mark.asyncio
     async def test_extract_with_exception(self, mock_llm_client):
@@ -85,9 +89,10 @@ class TestTripleExtractor:
         chunks = [
             TextChunk(id_="1", text="Alice knows Bob", doc_id="doc_1"),
         ]
-        # Should catch exception and return empty list
-        triples = await extractor.extract(chunks)
-        assert len(triples) == 0
+        # Should raise exception when extraction fails
+        with pytest.raises(BaseError) as exc_info:
+            await extractor.extract(chunks)
+        assert exc_info.value.code == StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR.code
 
     @pytest.mark.asyncio
     async def test_extract_invalid_json(self, mock_llm_client):
@@ -103,10 +108,10 @@ class TestTripleExtractor:
         chunks = [
             TextChunk(id_="1", text="Alice knows Bob", doc_id="doc_1"),
         ]
-        # Should handle JSON parsing errors
-        triples = await extractor.extract(chunks)
-        # May return empty list or partial results
-        assert isinstance(triples, list)
+        # Should raise exception when JSON parsing fails
+        with pytest.raises(BaseError) as exc_info:
+            await extractor.extract(chunks)
+        assert exc_info.value.code == StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR.code
 
     @pytest.mark.asyncio
     async def test_extract_empty_chunks(self, mock_llm_client):

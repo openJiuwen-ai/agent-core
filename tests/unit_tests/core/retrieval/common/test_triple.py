@@ -2,10 +2,11 @@
 """
 Triple data model test cases
 """
+
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.core.retrieval.common.triple import Triple
+from openjiuwen.core.retrieval import Triple
 
 
 class TestTriple:
@@ -70,10 +71,9 @@ class TestTriple:
         """Test missing required fields"""
         with pytest.raises(ValidationError):
             Triple()
-        
+
         with pytest.raises(ValidationError):
             Triple(subject="Alice")
-        
+
         with pytest.raises(ValidationError):
             Triple(subject="Alice", predicate="knows")
-

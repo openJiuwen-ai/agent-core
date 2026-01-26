@@ -4,9 +4,9 @@
 from typing import Optional, Tuple
 
 
-def generate_idx_name(usr_id: str, group_id: str, mem_type: str):
+def generate_idx_name(usr_id: str, scope_id: str, mem_type: str):
     """generate vector idx name"""
-    return 'uid_{}_gid_{}_mtype_{}'.format(usr_id, group_id, mem_type)
+    return 'uid_{}_gid_{}_mtype_{}'.format(usr_id, scope_id, mem_type)
 
 
 def parse_memory_hit_infos(hits: list[Tuple[str, float]]) -> tuple[list[str], dict[str, float]]:
@@ -15,4 +15,4 @@ def parse_memory_hit_infos(hits: list[Tuple[str, float]]) -> tuple[list[str], di
         scores = {hit[0]: hit[1] for hit in hits} if hits else {}
         return ids, scores
     except Exception as e:
-        raise ValueError(f"Failed to parse memory hit infos: {e}")
+        raise ValueError(f"Failed to parse memory hit infos: {e}") from e

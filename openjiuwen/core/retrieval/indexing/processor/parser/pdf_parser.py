@@ -8,8 +8,8 @@ from typing import Any, Optional
 import pdfplumber
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import register_parser
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 
 
 @register_parser([".pdf", ".PDF"])
@@ -22,6 +22,7 @@ class PDFParser(Parser):
     async def _parse(self, file_path: str) -> Optional[str]:
         """Parse PDF file"""
         try:
+
             def _sync_parse_pdf():
                 content = []
                 with pdfplumber.open(file_path) as pdf:

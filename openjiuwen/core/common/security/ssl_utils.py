@@ -44,9 +44,12 @@ class SslUtils:
             return False, False
 
         if ssl_cert is None:
-            raise JiuWenBaseException(StatusCode.INVALID_SSL_CERT_ERROR.code,
-                                      f"when {verify_switch_env}=true, must provide ssl cert {ssl_cert_env}")
-
+            raise JiuWenBaseException(
+                error_code=StatusCode.COMMON_SSL_CERT_INVALID.code,
+                message=StatusCode.COMMON_SSL_CERT_INVALID.errmsg(
+                    error_msg=f"when {verify_switch_env}=true, must provide ssl cert {ssl_cert_env}"
+                )
+            )
         return True, ssl_cert
 
     @staticmethod
@@ -75,13 +78,13 @@ class SslUtils:
                     safe_prefix = os.path.realpath(safe_cert_dir)
                     if not real_cert_path.startswith(safe_prefix + os.sep):
                         ExceptionUtils.raise_exception(
-                            StatusCode.SSL_UTILS_CREATE_SSL_CONTEXT_ERROR,
-                            "Certificate path is outside the allowed directory."
+                            StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED,
+                            "certificate path is outside the allowed directory"
                         )
                 else:
                     ExceptionUtils.raise_exception(
-                        StatusCode.SSL_UTILS_CREATE_SSL_CONTEXT_ERROR,
-                        f"SAFE_CERT_DIR is not set.")
+                        StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED,
+                        f"SAFE_CERT_DIR is not set")
 
                 SslUtils._secure_load_cert(ctx, real_cert_path)
 
@@ -100,27 +103,28 @@ class SslUtils:
             fd = os.open(ssl_cert, flags, mode)
         except OSError:
             ExceptionUtils.raise_exception(
-                StatusCode.SSL_UTILS_CREATE_SSL_CONTEXT_ERROR, "Failed to open certificate file")
+                StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, "failed to open certificate file"
+            )
 
         try:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
                 ExceptionUtils.raise_exception(
-                    StatusCode.SSL_UTILS_CREATE_SSL_CONTEXT_ERROR, "file path is invalid")
+                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, "file path is invalid")
             if st.st_size == 0 or st.st_size > 1024 * 1024:
                 ExceptionUtils.raise_exception(
-                    StatusCode.SSL_UTILS_CREATE_SSL_CONTEXT_ERROR, "file size is invalid")
+                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, "file size is invalid")
 
             with os.fdopen(fd, "rb") as f:
                 ca_pem = f.read()
             if not ca_pem:
                 ExceptionUtils.raise_exception(
-                    StatusCode.SSL_UTILS_CREATE_SSL_CONTEXT_ERROR, "file content is empty")
+                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, "file content is empty")
         except Exception:
             os.close(fd)
             ExceptionUtils.raise_exception(
-                StatusCode.SSL_UTILS_CREATE_SSL_CONTEXT_ERROR,
-                "Failed to read certificate file."
+                StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED,
+                "failed to read certificate file"
             )
 
         ctx.load_verify_locations(cadata=ca_pem.decode("ascii"))

@@ -5,22 +5,24 @@ Simple Knowledge Base Implementation
 
 Provides complete knowledge base functionality including document parsing, chunking, index building, and retrieval.
 """
-from typing import Any, List, Optional, Dict
-import uuid
 
+import uuid
+from typing import Any, Dict, List, Optional
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
-from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig, RetrievalConfig
+from openjiuwen.core.retrieval.common.config import IndexConfig, KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
-from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
-from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
+from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
+from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
+from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
 from openjiuwen.core.retrieval.retriever.base import Retriever
-from openjiuwen.core.retrieval.common.config import IndexConfig
+from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
 class SimpleKnowledgeBase(KnowledgeBase):
@@ -41,7 +43,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ):
         """
         Initialize the knowledge base
-        
+
         Args:
             config: Knowledge base configuration
             vector_store: Vector store instance
@@ -73,14 +75,14 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> List[Document]:
         """Parse files from file paths into a list of Document objects"""
         if not self.parser:
-            raise ValueError("parser is required for parse_files")
+            raise build_error(StatusCode.RETRIEVAL_KB_PARSER_NOT_FOUND, error_msg="parser is required for parse_files")
 
         all_documents = []
         for file_path in file_paths:
             try:
                 file_name = kwargs.get("file_name", file_path.split("/")[-1])
                 file_id = kwargs.get("file_id", str(uuid.uuid4()))
-                
+
                 documents = await self.parser.parse(
                     file_path,
                     file_name=file_name,
@@ -100,9 +102,15 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> List[str]:
         """Add documents to the knowledge base"""
         if not self.chunker:
-            raise ValueError("chunker is required for add_documents")
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_CHUNKER_NOT_FOUND, error_msg="chunker is required for add_documents"
+            )
         if not self.index_manager:
-            raise ValueError("index_manager is required for add_documents")
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_INDEX_MANAGER_NOT_FOUND, error_msg="index_manager is required for add_documents"
+            )
+        if self.strict_validation and self.vector_store:
+            self.vector_store.check_vector_field()
 
         # Chunk documents
         chunks = self.chunker.chunk_documents(documents)
@@ -115,14 +123,18 @@ class SimpleKnowledgeBase(KnowledgeBase):
             index_type=self.config.index_type,
         )
 
+        database_name = getattr(getattr(self.vector_store, "config", None), "database_name", "")
+        if not isinstance(database_name, str):
+            database_name = ""
         success = await self.index_manager.build_index(
             chunks=chunks,
             config=index_config,
             embed_model=self.embed_model,
+            database_name=database_name,
         )
 
         if not success:
-            raise RuntimeError("Failed to build index")
+            raise build_error(StatusCode.RETRIEVAL_KB_INDEX_BUILD_EXECUTION_ERROR, error_msg="Failed to build index")
 
         # Return document ID list
         doc_ids = [doc.id_ for doc in documents]
@@ -139,24 +151,28 @@ class SimpleKnowledgeBase(KnowledgeBase):
         if not self.retriever:
             # Auto-create retriever
             if not self.vector_store:
-                raise ValueError(
-                    "vector_store or retriever is required for retrieve"
+                raise build_error(
+                    StatusCode.RETRIEVAL_KB_VECTOR_STORE_NOT_FOUND,
+                    error_msg="vector_store or retriever is required for retrieve",
                 )
-            
+
             # Select appropriate retriever based on index_type
             if self.config.index_type == "vector":
                 from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
+
                 self.retriever = VectorRetriever(
                     vector_store=self.vector_store,
                     embed_model=self.embed_model,
                 )
             elif self.config.index_type == "bm25":
                 from openjiuwen.core.retrieval.retriever.sparse_retriever import SparseRetriever
+
                 self.retriever = SparseRetriever(
                     vector_store=self.vector_store,
                 )
             else:  # hybrid or others
                 from openjiuwen.core.retrieval.retriever.hybrid_retriever import HybridRetriever
+
                 self.retriever = HybridRetriever(
                     vector_store=self.vector_store,
                     embed_model=self.embed_model,
@@ -164,7 +180,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
 
         # Use config or default values
         retrieval_config = config or RetrievalConfig()
-        
+
         # Determine retrieval mode
         mode = "hybrid"
         if self.config.index_type == "vector":
@@ -172,9 +188,13 @@ class SimpleKnowledgeBase(KnowledgeBase):
         elif self.config.index_type == "bm25":
             mode = "sparse"
 
-        results = await self.retriever.retrieve(query=query, top_k=retrieval_config.top_k,
-                                                score_threshold=retrieval_config.score_threshold,
-                                                filters=retrieval_config.filters, mode=mode, )
+        results = await self.retriever.retrieve(
+            query=query,
+            top_k=retrieval_config.top_k,
+            score_threshold=retrieval_config.score_threshold,
+            filters=retrieval_config.filters,
+            mode=mode,
+        )
 
         return results
 
@@ -185,7 +205,12 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> bool:
         """Delete documents"""
         if not self.index_manager:
-            raise ValueError("index_manager is required for delete_documents")
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_INDEX_MANAGER_NOT_FOUND,
+                error_msg="index_manager is required for delete_documents",
+            )
+        if self.strict_validation and self.vector_store:
+            self.vector_store.check_vector_field()
 
         index_name = f"kb_{self.config.kb_id}_chunks"
         success = True
@@ -207,9 +232,16 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> List[str]:
         """Update documents"""
         if not self.chunker:
-            raise ValueError("chunker is required for update_documents")
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_CHUNKER_NOT_FOUND, error_msg="chunker is required for update_documents"
+            )
         if not self.index_manager:
-            raise ValueError("index_manager is required for update_documents")
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_INDEX_MANAGER_NOT_FOUND,
+                error_msg="index_manager is required for update_documents",
+            )
+        if self.strict_validation and self.vector_store:
+            self.vector_store.check_vector_field()
 
         # Chunk documents
         chunks = self.chunker.chunk_documents(documents)
@@ -238,7 +270,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     async def get_statistics(self) -> Dict[str, Any]:
         """Get knowledge base statistics"""
         index_name = f"kb_{self.config.kb_id}_chunks"
-        
+
         if not self.index_manager:
             return {
                 "kb_id": self.config.kb_id,
@@ -246,7 +278,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
             }
 
         index_info = await self.index_manager.get_index_info(index_name)
-        
+
         return {
             "kb_id": self.config.kb_id,
             "index_type": self.config.index_type,
@@ -311,9 +343,7 @@ async def retrieve_multi_kb_with_source(
         try:
             return await kb.retrieve(query, config)
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "retrieve_multi_kb_with_source: kb_id=%s failed: %s", getattr(kb.config, "kb_id", None), e
-            )
+            logger.warning("retrieve_multi_kb_with_source: kb_id=%s failed: %s", getattr(kb.config, "kb_id", None), e)
             return []
 
     import asyncio
@@ -342,9 +372,7 @@ async def retrieve_multi_kb_with_source(
                 merged[text]["raw_score"] = max(prev, raw_score) if prev is not None else raw_score
             if raw_score_scaled is not None:
                 prev = merged[text].get("raw_score_scaled")
-                merged[text]["raw_score_scaled"] = (
-                    max(prev, raw_score_scaled) if prev is not None else raw_score_scaled
-                )
+                merged[text]["raw_score_scaled"] = max(prev, raw_score_scaled) if prev is not None else raw_score_scaled
             merged[text]["kb_ids"].add(kb_id)
 
     ranked = sorted(

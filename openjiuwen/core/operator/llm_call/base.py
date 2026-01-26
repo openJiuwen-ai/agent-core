@@ -3,11 +3,10 @@
 
 from typing import Dict, Any, Optional, List, Callable, AsyncIterator
 
-from openjiuwen.core.runtime.runtime import Runtime
-from openjiuwen.core.utils.prompt.template.template import Template
-from openjiuwen.core.utils.llm.base import BaseModelClient
-from openjiuwen.core.utils.llm.messages import BaseMessage, SystemMessage
-from openjiuwen.core.utils.tool.schema import ToolInfo
+from openjiuwen.core.session import Session
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, Model
+from openjiuwen.core.foundation.tool import ToolInfo
 
 DEFAULT_USER_PROMPT: str = "{{query}}"
 
@@ -15,7 +14,7 @@ DEFAULT_USER_PROMPT: str = "{{query}}"
 class LLMCall:
     def __init__(self,
                  model_name: str,
-                 llm: BaseModelClient,
+                 llm: Model,
                  system_prompt: str | List[BaseMessage] | List[Dict],
                  user_prompt: str | List[BaseMessage] | List[Dict],
                  freeze_system_prompt: bool = False,
@@ -24,8 +23,8 @@ class LLMCall:
                  ) -> None:
         self._llm = llm
         self._model_name = model_name
-        self._system_prompt = Template(content=system_prompt)
-        self._user_prompt = Template(content=user_prompt or DEFAULT_USER_PROMPT)
+        self._system_prompt = PromptTemplate(content=system_prompt)
+        self._user_prompt = PromptTemplate(content=user_prompt or DEFAULT_USER_PROMPT)
         self._freeze_system_prompt = freeze_system_prompt
         self._freeze_user_prompt = freeze_user_prompt
         self._optimizer_callback: Optional[Callable] = None
@@ -33,47 +32,50 @@ class LLMCall:
 
     async def invoke(self,
                      inputs: Dict[str, Any],
-                     runtime: Runtime,
+                     session: Session,
                      history: Optional[List[BaseMessage]] = None,
                      tools: Optional[List[ToolInfo]] = None,
                      ) -> BaseMessage:
         messages = self._format_llm_input(inputs, history)
-        response = await self._llm.ainvoke(self._model_name, messages, tools=tools)
+        response = await self._llm.invoke(model=self._model_name, messages=messages, tools=tools)
         if self._optimizer_callback is not None:
-            await self._optimizer_callback(self._llm_call_id, inputs, response, runtime)
+            await self._optimizer_callback(self._llm_call_id, inputs, response, session)
         return response
 
     async def stream(self,
                      inputs: Dict[str, Any],
-                     runtime: Runtime,
+                     session: Session,
                      history: Optional[List[BaseMessage]] = None,
                      tools: Optional[List[ToolInfo]] = None,
                      ) -> AsyncIterator:
         messages = self._format_llm_input(inputs, history)
         message_chunks = []
-        async for chunk in self._llm.astream(self._model_name, messages, tools=tools):
+        async for chunk in self._llm.stream(model=self._model_name, messages=messages, tools=tools):
             message_chunks.append(chunk.content if hasattr(chunk, "content") else str(chunk))
             yield chunk
         response = "".join(message_chunks)
         if self._optimizer_callback is not None:
-            await self._optimizer_callback(self._llm_call_id, inputs, response, runtime)
+            await self._optimizer_callback(self._llm_call_id, inputs, response, session)
+
+    def get_optimizer_callback(self) -> Optional[Callable]:
+        return self._optimizer_callback
 
     def set_optimizer_callback(self, callback: Optional[Callable]) -> None:
         self._optimizer_callback = callback
 
-    def get_system_prompt(self) -> Template:
+    def get_system_prompt(self) -> PromptTemplate:
         return self._system_prompt
 
-    def get_user_prompt(self) -> Template:
+    def get_user_prompt(self) -> PromptTemplate:
         return self._user_prompt
 
     def update_system_prompt(self, system_prompt: str | List[BaseMessage] | List[Dict]) -> None:
         if not self._freeze_system_prompt:
-            self._system_prompt = Template(content=system_prompt)
+            self._system_prompt = PromptTemplate(content=system_prompt)
 
     def update_user_prompt(self, user_prompt: str | List[BaseMessage] | List[Dict]) -> None:
         if not self._freeze_user_prompt:
-            self._user_prompt = Template(content=user_prompt)
+            self._user_prompt = PromptTemplate(content=user_prompt)
 
     def set_freeze_system_prompt(self, switch: bool) -> None:
         self._freeze_system_prompt = switch

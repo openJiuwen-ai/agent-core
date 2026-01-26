@@ -6,23 +6,24 @@ import pytest
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.component.branch_comp import BranchComponent
-from openjiuwen.core.component.branch_router import BranchRouter
-from openjiuwen.core.component.condition.number import NumberCondition
-from openjiuwen.core.component.intent_detection_comp import IntentDetectionCompConfig, IntentDetectionComponent
-from openjiuwen.core.component.llm_comp import LLMCompConfig, LLMComponent
-from openjiuwen.core.component.loop_callback.intermediate_loop_var import IntermediateLoopVarCallback
-from openjiuwen.core.component.loop_callback.output import OutputCallback
-from openjiuwen.core.component.loop_comp import AdvancedLoopComponent, LoopGroup, LoopComponent
-from openjiuwen.core.component.set_variable_comp import SetVariableComponent
-from openjiuwen.core.component.tool_comp import ToolComponent, ToolComponentConfig
-from openjiuwen.core.component.workflow_comp import SubWorkflowComponent
-from openjiuwen.core.runtime.runtime import BaseRuntime
-from openjiuwen.core.utils.tool.param import Param
-from openjiuwen.core.utils.tool.service_api.restful_api import RestfulApi
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import ComponentAbility
-from openjiuwen.graph.visualization.drawable import Drawable
+from openjiuwen.core.workflow import BranchComponent
+from openjiuwen.core.workflow import BranchRouter
+from openjiuwen.core.workflow import NumberCondition
+from openjiuwen.core.workflow import IntentDetectionCompConfig, IntentDetectionComponent
+from openjiuwen.core.workflow import LLMCompConfig, LLMComponent
+from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
+from openjiuwen.core.workflow import LoopGroup, LoopComponent
+from openjiuwen.core.workflow import LoopSetVariableComponent
+from openjiuwen.core.workflow import ToolComponent, ToolComponentConfig
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.foundation.tool import RestfulApi, RestfulApiCard
+from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.workflow import ComponentAbility
+from openjiuwen.core.graph.visualization.drawable import Drawable
+from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
+from openjiuwen.core.runner import Runner
 from tests.unit_tests.core.workflow.mock_nodes import AddTenNode, MockEndNode, MockStartNode, CommonNode, \
     StreamCompNode, CollectCompNode, Node1
 
@@ -60,7 +61,7 @@ def test_visualize_simple_workflow():
         \tnode_1 --> node_2
         \tnode_2 --> node_3
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -71,7 +72,7 @@ def test_visualize_simple_stream_workflow():
     flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
                            comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
     flow.add_workflow_comp("b", CollectCompNode("b"), inputs_schema={"value": "${a.value}"},
-                           stream_inputs_schema={"value": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
+                           stream_inputs_schema={"value1": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
                            wait_for_all=True)
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result1": "${b.value}"})
     flow.add_connection("start", "a")
@@ -90,7 +91,7 @@ def test_visualize_simple_stream_workflow():
         \tnode_2 ==> node_3
         \tnode_3 --> node_4
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
 def test_visualize_workflow_with_branch_comp():
@@ -132,7 +133,7 @@ def test_visualize_workflow_with_branch_comp():
         \tnode_4 --> node_2
         \tnode_5 --> node_2
         """).lstrip()
-    assert flow.to_mermaid() == mermaid_script
+    assert flow.draw() == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -171,7 +172,7 @@ def test_visualize_workflow_with_branch_router():
         \tnode_2 --> node_4
         \tnode_3 --> node_4
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -187,11 +188,11 @@ def test_visualize_workflow_with_condition():
                                        "d": [1, 2, 3]})
 
     # Literal is for visualization
-    def router(runtime: BaseRuntime) -> Literal["a", "b"]:
-        val = runtime.state().get_global("start.a")
+    def router(session: BaseSession) -> Literal["a", "b"]:
+        val = session.state().get_global("start.a")
         if val is not None:
             return "a"
-        val = runtime.state().get_global("start.b")
+        val = session.state().get_global("start.b")
         if val is not None:
             return "b"
         return "a"
@@ -217,7 +218,7 @@ def test_visualize_workflow_with_condition():
         \tnode_2 --> node_4
         \tnode_3 --> node_4
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -273,7 +274,7 @@ def test_visualize_sub_workflow():
         \tnode_2 --> node_3
         \tnode_3 --> node_4
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
     # expand sub graph
     mermaid_script = textwrap.dedent("""
@@ -296,7 +297,7 @@ def test_visualize_sub_workflow():
         \tnode_3 --> node_4
         \tnode_4 --> node_5
         """).lstrip()
-    assert flow.to_mermaid(title="jiuwen workflow", expand_subgraph=True) == mermaid_script
+    assert flow.draw(title="jiuwen workflow", expand_subgraph=True) == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -372,7 +373,7 @@ def test_visualize_multi_layer_sub_workflow():
         \tnode_2 --> node_3
         \tnode_3 --> node_4
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
     # expand first layer sub graph
     mermaid_script = textwrap.dedent("""
@@ -397,7 +398,7 @@ def test_visualize_multi_layer_sub_workflow():
         \tnode_4 --> node_5
         \tnode_5 --> node_6
         """).lstrip()
-    assert flow.to_mermaid(title="jiuwen workflow", expand_subgraph=1) == mermaid_script
+    assert flow.draw(title="jiuwen workflow", expand_subgraph=1) == mermaid_script
 
     # expand second layer sub graph
     mermaid_script = textwrap.dedent("""
@@ -429,10 +430,10 @@ def test_visualize_multi_layer_sub_workflow():
         \tnode_5 --> node_6
         \tnode_6 --> node_7
         """).lstrip()
-    assert flow.to_mermaid(title="jiuwen workflow", expand_subgraph=2) == mermaid_script
+    assert flow.draw(title="jiuwen workflow", expand_subgraph=2) == mermaid_script
 
     # expand all layer sub graph
-    assert flow.to_mermaid(title="jiuwen workflow", expand_subgraph=True) == mermaid_script
+    assert flow.draw(title="jiuwen workflow", expand_subgraph=True) == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -445,7 +446,7 @@ def test_visualize_workflow_with_advanced_loop():
     loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.index}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"),
                                  inputs_schema={"source": "${l.intermediate_loop_var.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.intermediate_loop_var.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.intermediate_loop_var.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.start_nodes(["1"])
     loop_group.end_nodes(["3"])
@@ -483,7 +484,7 @@ def test_visualize_workflow_with_advanced_loop():
         \tnode_3 -.-> node_4
         \tnode_4 --> node_5
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
     # expand loop
     mermaid_script = textwrap.dedent("""
@@ -509,7 +510,7 @@ def test_visualize_workflow_with_advanced_loop():
         \tnode_3 --> node_4
         \tnode_4 --> node_5
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow", expand_subgraph=True) == mermaid_script
+    assert flow.draw("jiuwen workflow", expand_subgraph=True) == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -524,7 +525,7 @@ def test_visualize_workflow_with_loop():
     loop_group.add_workflow_comp("1", AddTenNode("1", {"check": "${s.a}"}),
                                  inputs_schema={"source": "${l.item}", "check": "${s.a}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.add_workflow_comp("4", CommonNode("4"), inputs_schema={"index": "${l.index}"})
     loop_group.start_comp("1")
@@ -569,7 +570,7 @@ def test_visualize_workflow_with_loop():
         \tnode_3 -.-> node_4
         \tnode_4 --> node_5
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
     # expand loop
     mermaid_script = textwrap.dedent("""
@@ -597,7 +598,7 @@ def test_visualize_workflow_with_loop():
         \tnode_4 --> node_5
         \tnode_5 --> node_6
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow", expand_subgraph=True) == mermaid_script
+    assert flow.draw("jiuwen workflow", expand_subgraph=True) == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -612,7 +613,7 @@ def test_visualize_workflow_with_loop_unset_end_nodes():
     loop_group.add_workflow_comp("1", AddTenNode("1", {"check": "${s.a}"}),
                                  inputs_schema={"source": "${l.item}", "check": "${s.a}"})
     loop_group.add_workflow_comp("2", AddTenNode("2"), inputs_schema={"source": "${l.user_var}"})
-    set_variable_component = SetVariableComponent({"${l.user_var}": "${2.result}"})
+    set_variable_component = LoopSetVariableComponent({"${l.user_var}": "${2.result}"})
     loop_group.add_workflow_comp("3", set_variable_component)
     loop_group.add_workflow_comp("4", CommonNode("4"), inputs_schema={"index": "${l.index}"})
     loop_group.start_comp("1")
@@ -656,7 +657,7 @@ def test_visualize_workflow_with_loop_unset_end_nodes():
         \tnode_3 -.-> node_4
         \tnode_4 --> node_5
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script
 
     # expand loop
     mermaid_script = textwrap.dedent("""
@@ -684,7 +685,7 @@ def test_visualize_workflow_with_loop_unset_end_nodes():
         \tnode_4 --> node_5
         \tnode_5 --> node_6
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow", expand_subgraph=True) == mermaid_script
+    assert flow.draw("jiuwen workflow", expand_subgraph=True) == mermaid_script
 
 
 def test_drawable_exception():
@@ -774,7 +775,7 @@ def test_visualize_simple_stream_workflow_animation():
     flow.add_workflow_comp("a", StreamCompNode("a"), inputs_schema={"value": "${start.a}"},
                            comp_ability=[ComponentAbility.STREAM], wait_for_all=True)
     flow.add_workflow_comp("b", CollectCompNode("b"), inputs_schema={"value": "${a.value}"},
-                           stream_inputs_schema={"value": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
+                           stream_inputs_schema={"value1": "${a.value}"}, comp_ability=[ComponentAbility.COLLECT],
                            wait_for_all=True)
     flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result1": "${b.value}"})
     flow.add_connection("start", "a")
@@ -794,7 +795,7 @@ def test_visualize_simple_stream_workflow_animation():
         link_1@{animate: true}
         \tnode_3 --> node_4
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow", enable_animation=True) == mermaid_script
+    assert flow.draw("jiuwen workflow", enable_animation=True) == mermaid_script
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
@@ -837,20 +838,27 @@ def test_visualize_simple_workflow_intent():
         inputs_schema={"query": "${start.query}"},
     )
 
-    tool_config = ToolComponentConfig()
+    tool_config = ToolComponentConfig(tool_id="WeatherReporter")
     weather_tool = RestfulApi(
-        name="WeatherReporter",
-        description="天气查询插件",
-        params=[
-            Param(name="location", description="地点", type="string", required=True),
-            Param(name="date", description="日期", type="string", required=True),
-        ],
-        path="http://127.0.0.1:9000/weather",
-        headers={},
-        method="GET",
-        response=[],
+        card=RestfulApiCard(
+            id="WeatherReporter",
+            name="WeatherReporter",
+            description="天气查询插件",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "location": {"description": "地点", "type": "string"},
+                    "date": {"description": "日期", "type": "string"},
+                },
+                "required": ["location", "date"],
+            },
+            url="http://127.0.0.1:9000/weather",
+            headers={},
+            method="GET",
+        ),
     )
-    plugin = ToolComponent(tool_config).bind_tool(weather_tool)
+    Runner.resource_mgr.add_tool(weather_tool)
+    plugin = ToolComponent(tool_config)
     flow.add_workflow_comp(
         "plugin",
         plugin,
@@ -882,4 +890,4 @@ def test_visualize_simple_workflow_intent():
         \tnode_3 --> node_4
         \tnode_4 --> node_5
         """).lstrip()
-    assert flow.to_mermaid("jiuwen workflow") == mermaid_script
+    assert flow.draw("jiuwen workflow") == mermaid_script

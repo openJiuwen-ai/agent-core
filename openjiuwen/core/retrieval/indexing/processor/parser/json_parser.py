@@ -8,8 +8,8 @@ from typing import Any, Optional
 import aiofiles
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import register_parser
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 
 
 @register_parser([".json", ".JSON"])
@@ -22,9 +22,7 @@ class JSONParser(Parser):
     async def _parse(self, file_path: str) -> Optional[str]:
         """Parse JSON file"""
         try:
-            async with aiofiles.open(
-                file_path, "r", encoding="utf-8", errors="ignore"
-            ) as f:
+            async with aiofiles.open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 raw_content = await f.read()
 
             def _format_json() -> str:

@@ -1,9 +1,19 @@
 [project]
 name = "openjiuwen"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.1.4"
+description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
+classifiers = [
+    'Development Status :: 4 - Beta',
+    'Programming Language :: Python',
+    'Programming Language :: Python :: Implementation :: CPython',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3 :: Only',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+]
 dependencies = [
     # HTTP clients
     "aiohttp>=3.11.12",
@@ -38,12 +48,19 @@ dependencies = [
     "pdfplumber>=0.11.8",
 
     # Utilities
+    "numpy!=2.4.0",
     "cacheout>=0.16.0",
     "mermaid-py>=0.8.0",
     "pycryptodome>=3.23.0",
     "charset-normalizer>=3.4.4",
     "pysbd>=0.3.4",
 ]
+
+[project.urls]
+Homepage = "https://openjiuwen.com"
+Documentation = "https://openjiuwen.com/docs-page"
+Repository = "https://gitcode.com/openJiuwen/agent-core.git"
+Changelog = "https://gitcode.com/openJiuwen/agent-core/releases"
 
 [tool.uv]
 default-groups = ['dev']
@@ -67,6 +84,9 @@ dev = [
 
     # Linting & formatting
     "ruff>=0.11.2",
+    "pylint>=3.0.0",
+    "mypy>=1.12.0",
+    "codespell>=2.2.4",
 ]
 
 [tool.coverage.run]
@@ -77,3 +97,66 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["jiuwen"]
 addopts = ["-v", "--html=report/index.html", "--self-contained-html"]
+
+# Formatting & Linting
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.pylint.MAIN]
+ignore-paths = ["^(examples|tests)/.*"]
+load-plugins = ["pylint.extensions.bad_builtin"]
+py-version = "3.11"
+
+[tool.pylint."DEPRECATED BUILTINS"]
+bad-functions = ["print"]
+
+[tool.pylint.FORMAT]
+max-line-length = 120
+
+[tool.pylint.DESIGN]
+max-return = 5
+max-args = 10
+max-locals = 15
+max-branches = 25
+
+[tool.pylint."MESSAGES CONTROL"]
+disable = [
+    "import-outside-toplevel",
+    "missing-module-docstring",
+    "too-few-public-methods",
+    "use-dict-literal",
+    "use-list-literal",
+    "unused-argument",
+    "too-many-nested-blocks",
+    "too-many-positional-arguments",
+    "too-many-instance-attributes",
+    "too-many-ancestors",
+    "broad-exception-caught",
+    "broad-exception-raised",
+    "missing-timeout",
+]
+
+# Type Checking
+[tool.mypy]
+python_version = "3.11"
+
+# Required to catch inconsistent return types
+check_untyped_defs = true
+
+# Ignore certain issues to stay minimal
+disable_error_code = ["index"]
+disallow_untyped_defs = false
+disallow_any_unimported = false
+disallow_any_expr = false
+disallow_any_decorated = false
+warn_unused_ignores = false
+warn_return_any = false
+ignore_missing_imports = true
+
+# No constraints on optional
+no_implicit_optional = false
+strict_optional = false
+
+# Show errors
+show_error_codes = true

@@ -1,8 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Protocol, runtime_checkable, Dict, Any
 import logging
+from typing import (
+    Any,
+    Dict,
+    Protocol,
+    runtime_checkable,
+)
 
 
 @runtime_checkable
@@ -44,6 +49,10 @@ class LoggerProtocol(Protocol):
     def add_handler(self, handler: logging.Handler) -> None:
         """Add log handler"""
         ...
+
+    def logger(self):
+        """Return inner logger"""
+        pass
 
     def remove_handler(self, handler: logging.Handler) -> None:
         """Remove log handler"""

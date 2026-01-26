@@ -9,15 +9,13 @@ import os
 import unittest
 from datetime import datetime
 
-from openjiuwen.agent.react_agent.react_agent import ReActAgent
-from openjiuwen.agent.config.react_config import ReActAgentConfig
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.utils.tool.function.function import LocalFunction
-from openjiuwen.core.utils.tool.param import Param
-from openjiuwen.core.utils.tool.service_api.restful_api import RestfulApi
-from openjiuwen.core.utils.tool.tool import tool
-from openjiuwen.core.runner.runner import Runner, resource_mgr
+from openjiuwen.core.single_agent.legacy import LegacyReActAgent as ReActAgent
+from openjiuwen.core.application.llm_agent import ReActAgentConfig
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.tool import LocalFunction
+from openjiuwen.core.foundation.tool import RestfulApi, ToolCard, RestfulApiCard
+from openjiuwen.core.foundation.tool import tool
+from openjiuwen.core.runner import Runner
 
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
@@ -58,16 +56,21 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
     def _create_tool():
         """创建 RestfulApi 工具"""
         weather_plugin = RestfulApi(
-            name="WeatherReporter",
-            description="天气查询插件",
-            params=[
-                Param(name="location", description="天气查询的地点，必须为英文", type="string", required=True),
-                Param(name="date", description="天气查询的时间，格式为YYYY-MM-DD", type="string", required=True),
-            ],
-            path="http://127.0.0.1:8000/weather",
-            headers={},
-            method="GET",
-            response=[],
+            card=RestfulApiCard(
+                name="WeatherReporter",
+                description="天气查询插件",
+                input_params={
+                    "type": "object",
+                    "properties": {
+                        "location": {"description": "天气查询的地点，必须为英文", "type": "string"},
+                        "date": {"description": "天气查询的时间，格式为YYYY-MM-DD", "type": "string"},
+                    },
+                    "required": ["location", "date"],
+                },
+                url="http://127.0.0.1:8000/weather",
+                headers={},
+                method="GET",
+            ),
         )
         return weather_plugin
 
@@ -75,24 +78,36 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
     def _create_function_tool():
         """创建 LocalFunction 工具"""
         add_plugin = LocalFunction(
-            name="add",
-            description="加法",
-            params=[
-                Param(name="a", description="加数", type="number", required=True),
-                Param(name="b", description="被加数", type="number", required=True),
-            ],
-            func=lambda a, b: a + b
+            card=ToolCard(
+                name="add",
+                description="加法",
+                input_params={
+                    "type": "object",
+                    "properties": {
+                        "a": {"description": "加数", "type": "number"},
+                        "b": {"description": "被加数", "type": "number"},
+                    },
+                    "required": ["a", "b"],
+                },
+            ),
+            func=lambda a, b: a + b,
         )
         return add_plugin
 
     @staticmethod
     @tool(
-        name="add",
-        description="加法",
-        params=[
-            Param(name="a", description="加数", type="number", required=True),
-            Param(name="b", description="被加数", type="number", required=True),
-        ],
+        card=ToolCard(
+            name="add",
+            description="加法",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "a": {"description": "加数", "type": "number"},
+                    "b": {"description": "被加数", "type": "number"},
+                },
+                "required": ["a", "b"],
+            },
+        )
     )
     def add_function(a, b):
         """加法函数，使用tool注解装饰"""
@@ -109,7 +124,7 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
 
-        # 1. 创建最小化配置的 agent（Linus 风格：只传必要参数）
+        # 1. 创建最小化配置的 single_agent（Linus 风格：只传必要参数）
         react_agent_config = ReActAgentConfig(
             id="react_agent_123",
             version="0.0.1",
@@ -130,8 +145,10 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         weather_tool = self._create_tool()
         react_agent.add_tools([weather_tool])
 
+        weather_tool.card().id = "WeatherReporter"
+
         # 4. 添加工具到 resource_mgr（Runner 需要）
-        resource_mgr.tool().add_tool("WeatherReporter", weather_tool)
+        Runner.resource_mgr.add_tool(weather_tool)
 
         result = await Runner.run_agent(react_agent, {"query": "查询杭州的天气"})
         print(f"ReActAgent 最终输出结果：{result}")
@@ -142,7 +159,7 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
 
-        # 1. 创建最小化配置的 agent
+        # 1. 创建最小化配置的 single_agent
         react_agent_config = ReActAgentConfig(
             id="react_agent_stream",
             version="0.0.1",
@@ -162,22 +179,24 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         weather_tool = self._create_tool()
         react_agent.add_tools([weather_tool])
 
+        weather_tool.card().id = "WeatherReporter"
+
         # 4. 添加工具到 resource_mgr
-        resource_mgr.tool().add_tool("WeatherReporter", weather_tool)
+        Runner.resource_mgr.add_tool(weather_tool)
 
         res = Runner.run_agent_streaming(react_agent, {"query": "查询杭州的天气"})
         async for i in res:
             print("ReActAgent 输出结果：", i)
 
     @unittest.skip("require network")
-    async def test_react_agent_invoke_without_runtime(self):
-        """测试不传runtime的调用（使用新的动态配置方法）"""
+    async def test_react_agent_invoke_without_session(self):
+        """测试不传session的调用（使用新的动态配置方法）"""
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
 
-        # 1. 创建最小化配置的 agent
+        # 1. 创建最小化配置的 single_agent
         react_agent_config = ReActAgentConfig(
-            id="react_agent_no_runtime",
+            id="react_agent_no_session",
             version="0.0.1",
             description="AI助手",
             model=self._create_model()
@@ -221,8 +240,10 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         add_tool = self._create_function_tool()
         react_agent.add_tools([add_tool])
 
+        add_tool.card().id="add"
+
         # 4. 添加工具到 resource_mgr
-        resource_mgr.tool().add_tool("add", add_tool)
+        Runner.resource_mgr.add_tool(add_tool)
 
         result = await Runner.run_agent(react_agent, {"query": "计算1+2"})
         print(f"ReActAgent 最终输出结果：{result}")
@@ -235,7 +256,7 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         """测试使用tool注解装饰的函数作为工具（使用新的动态配置方法）"""
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
 
-        # 1. 创建最小化配置的 agent（Linus 风格：只传必要参数）
+        # 1. 创建最小化配置的 single_agent（Linus 风格：只传必要参数）
         react_agent_config = ReActAgentConfig(
             id="react_agent_1235",
             version="0.0.3",
@@ -255,7 +276,8 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         react_agent.add_tools([annotated_tool])
 
         # 4. 添加工具到 resource_mgr
-        resource_mgr.tool().add_tool("add", annotated_tool)
+        annotated_tool.card().id = "add"
+        Runner.resource_mgr.add_tool(annotated_tool)
 
         result = await Runner.run_agent(react_agent, {"query": "计算1+2"})
         print(f"ReActAgent 使用注解工具最终输出结果：{result}")
@@ -265,7 +287,7 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         """测试使用tool注解装饰的函数作为工具（使用新的动态配置方法）"""
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
 
-        # 1. 创建最小化配置的 agent（Linus 风格：只传必要参数）
+        # 1. 创建最小化配置的 single_agent（Linus 风格：只传必要参数）
         react_agent_config = ReActAgentConfig(
             id="react_agent_1235",
             version="0.0.3",
@@ -285,7 +307,8 @@ class ReActAgentTest(unittest.IsolatedAsyncioTestCase):
         react_agent.add_tools([annotated_tool])
 
         # 4. 添加工具到 resource_mgr
-        resource_mgr.tool().add_tool("add", annotated_tool)
+        annotated_tool.card().id = "add"
+        Runner.resource_mgr.add_tool(annotated_tool)
 
         result = Runner.run_agent_streaming(react_agent, {"query": "计算1+2"})
         async for i in result:

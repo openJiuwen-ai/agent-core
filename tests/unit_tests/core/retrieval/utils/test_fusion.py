@@ -2,10 +2,10 @@
 """
 Fusion utility function test cases
 """
-import pytest
 
-from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
+
+from openjiuwen.core.retrieval import rrf_fusion
+from openjiuwen.core.retrieval import RetrievalResult, SearchResult
 
 
 class TestRRFFusion:
@@ -89,4 +89,3 @@ class TestRRFFusion:
         fused = rrf_fusion([results])
         assert len(fused) == 2
         assert isinstance(fused[0], SearchResult)
-

@@ -6,22 +6,22 @@ from asyncio import CancelledError
 from typing import Any, Optional, AsyncIterator, Literal
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT, END_NODE_STREAM, INPUTS_KEY, CONFIG_KEY
+from openjiuwen.core.common.utils.schema_utils import SchemaUtils
+from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.graph.atomic_node import AsyncAtomicNode
 from openjiuwen.core.graph.executable import Executable, Output
 from openjiuwen.core.graph.graph_state import GraphState
-from openjiuwen.core.runtime.constants import COMP_STREAM_CALL_TIMEOUT_KEY
-from openjiuwen.core.runtime.runtime import BaseRuntime
-from openjiuwen.core.runtime.utils import get_by_schema
-from openjiuwen.core.runtime.workflow import NodeRuntime
-from openjiuwen.core.stream.base import StreamSchemas, OutputSchema
-from openjiuwen.core.stream.emitter import StreamEmitter
-from openjiuwen.core.stream_actor.base import StreamConsumer
-from openjiuwen.core.tracer.workflow_tracer import TracerWorkflowUtils
-from openjiuwen.core.workflow.workflow_config import ComponentAbility
-from openjiuwen.graph.pregel import GraphInterrupt
+from openjiuwen.core.session import COMP_STREAM_CALL_TIMEOUT_KEY, get_by_schema
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session import NodeSession
+from openjiuwen.core.session.stream import StreamSchemas, OutputSchema
+from openjiuwen.core.session.stream import StreamEmitter
+from openjiuwen.core.graph.stream_actor.base import StreamConsumer
+from openjiuwen.core.session.tracer import TracerWorkflowUtils
+from openjiuwen.core.graph.pregel import GraphInterrupt
 
 SUB_WORKFLOW_COMPONENT = "sub_workflow"
 
@@ -30,7 +30,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
     def __init__(self, node_id: str, executable: Executable = None):
         self._node_id = node_id
         self._executable = executable
-        self._runtime: NodeRuntime = None
+        self._context = None
+        self._session: NodeSession = None
         self._stream_called_timeout = 10
         # if stream_call is available, call should wait for it
         self._stream_done = asyncio.Future()
@@ -44,10 +45,11 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         self._has_stream_call: bool = False
         self._source_id: list = []
 
-    def init(self, runtime: BaseRuntime) -> bool:
-        self._runtime = NodeRuntime(runtime, self._node_id, type(self._executable).__name__)
-        self._stream_called_timeout = runtime.config().get_env(COMP_STREAM_CALL_TIMEOUT_KEY)
-        self._node_config = self._runtime.node_config()
+    def init(self, session: BaseSession, **kwargs) -> bool:
+        self._session = NodeSession(session, self._node_id, type(self._executable).__name__)
+        self._context = kwargs.get("context")
+        self._stream_called_timeout = session.config().get_env(COMP_STREAM_CALL_TIMEOUT_KEY)
+        self._node_config = self._session.node_config()
         self._component_ability = (
             self._node_config.abilities) if self._node_config and self._node_config.abilities else [
             ComponentAbility.INVOKE]
@@ -60,7 +62,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         try:
             def set_event():
                 if event is not None:
-                    logger.debug(f"node {self._node_id} with ability {ability.ability_name} set event")
+                    logger.debug(f"node {self._node_id} with ability {ability.name} set event")
                     event.set()
 
             # Simplified strategy pattern using lambda functions wrapping async execution
@@ -68,20 +70,20 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 batch_inputs = await self._pre_invoke()
                 if is_subgraph:
                     batch_inputs = {INPUTS_KEY: batch_inputs, CONFIG_KEY: config}
-                results = await self._executable.on_invoke(batch_inputs, runtime=self._runtime)
+                results = await self._executable.on_invoke(batch_inputs, session=self._session, context=self._context)
                 await self._post_invoke(results)
 
             async def stream_strategy():
                 batch_inputs = await self._pre_invoke()
                 if is_subgraph:
                     batch_inputs = {INPUTS_KEY: batch_inputs, CONFIG_KEY: config}
-                result_iter = self._executable.on_stream(batch_inputs, runtime=self._runtime)
+                result_iter = self._executable.on_stream(batch_inputs, session=self._session, context=self._context)
                 await self._post_stream(result_iter, ComponentAbility.STREAM)
 
             async def collect_strategy():
                 collect_iter = await self._pre_stream(ComponentAbility.COLLECT)
                 set_event()
-                batch_output = await self._executable.on_collect(collect_iter, self._runtime)
+                batch_output = await self._executable.on_collect(collect_iter, self._session, context=self._context)
                 await self._post_invoke(batch_output)
 
             async def transform_strategy():
@@ -91,7 +93,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     set_event()
                 except Exception as e:
                     logger.error(f"failed to prepare transform for node {self._node_id}, error: {e}")
-                output_iter = self._executable.on_transform(transform_iter, self._runtime)
+                output_iter = self._executable.on_transform(transform_iter, self._session, context=self._context)
                 await self._post_stream(output_iter, ComponentAbility.TRANSFORM)
 
             ability_strategies = {
@@ -106,23 +108,26 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             if strategy:
                 await strategy()
             else:
-                logger.error(f"error ComponentAbility: {ability.ability_name}")
+                logger.error(f"error ComponentAbility: {ability.name}")
             return True
         except GraphInterrupt:
             raise
         except JiuWenBaseException as e:
-            if e.error_code == StatusCode.COMPONENT_EXECUTE_ERROR.code:
+            if e.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code:
                 raise e
-            else:
-                raise JiuWenBaseException(StatusCode.COMPONENT_EXECUTE_ERROR.code,
-                                          StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id=self._node_id,
-                                                                                           ability=ability.ability_name,
-                                                                                           error=e.message))
+            raise JiuWenBaseException(
+                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
+                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+                    error_msg=f"node_id: {self._node_id}, ability: {ability.name}, error: {e}"
+                ),
+            ) from e
         except Exception as e:
-            raise JiuWenBaseException(StatusCode.COMPONENT_EXECUTE_ERROR.code,
-                                      StatusCode.COMPONENT_EXECUTE_ERROR.errmsg.format(node_id=self._node_id,
-                                                                                       ability=ability.ability_name,
-                                                                                       error=e))
+            raise JiuWenBaseException(
+                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
+                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
+                    error_msg=f"node_id: {self._node_id}, ability: {ability.name}, error: {e}"
+                ),
+            ) from e
         finally:
             if event and not event.is_set():
                 event.set()
@@ -131,12 +136,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         logger.debug(f"begin to call node [{self._node_id}]")
         try:
             if self._executable.post_commit():
-                await self.atomic_invoke(config=config, runtime=self._runtime)
+                await self.atomic_invoke(config=config, session=self._session)
             else:
                 await self.call(config)
             return {"source_node_id": [self._node_id]}
         except Exception as e:
-            if self._runtime.tracer() is not None:
+            if self._session.tracer() is not None:
                 await self.__trace_error__(e)
             raise e
         finally:
@@ -149,49 +154,54 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
 
     async def _pre_invoke(self) -> Optional[dict]:
         await self.__trace_component_begin__()
-        inputs_transformer = self._node_config.io_config.inputs_transformer if self._node_config else None
+        inputs_schema = self._node_config.io_config.inputs_schema if self._node_config else None
+        inputs_transformer = inputs_schema if not isinstance(inputs_schema, dict) else None
         if inputs_transformer is None:
-            inputs_schema = self._node_config.io_config.inputs_schema if self._node_config else None
-            inputs = self._runtime.state().get_inputs(inputs_schema) if inputs_schema is not None else None
+            inputs = self._session.state().get_inputs(inputs_schema) if inputs_schema is not None else None
         else:
-            inputs = self._runtime.state().get_inputs_by_transformer(inputs_transformer)
+            inputs = self._session.state().get_inputs_by_transformer(inputs_transformer)
         await self.__trace_component_inputs__(inputs)
         return inputs
 
     async def _post_invoke(self, results: Optional[dict]) -> Any:
-        output_transformer = self._node_config.io_config.outputs_transformer if self._node_config else None
-        if output_transformer is None:
-            output_schema = self._node_config.io_config.outputs_schema if self._node_config else None
-            if output_schema:
-                results = get_by_schema(output_schema, results)
+        outputs_schema = self._node_config.io_config.outputs_schema if self._node_config else None
+        outputs_transformer = outputs_schema if not isinstance(outputs_schema, dict) else None
+        if outputs_transformer is None:
+            if outputs_schema:
+                results = get_by_schema(outputs_schema, results)
                 if (not self.is_end_node) and results and isinstance(results, dict):
                     results = {key: value for key, value in results.items() if value is not None}
         else:
-            results = output_transformer(results)
-        self._runtime.state().set_outputs(results)
+            results = outputs_transformer(results)
+        if results is not None:
+            self._session.state().set_outputs(results)
         await self.__trace_component_outputs__(results)
         self._clear_interactive()
         return results
 
     async def _pre_stream(self, ability: ComponentAbility) -> dict:
         await self.__trace_component_begin__()
-        actor_manager = self._runtime.actor_manager()
+        actor_manager = self._session.actor_manager()
         inputs_schema = self._node_config.stream_io_configs.inputs_schema if self._node_config else None
+        if not isinstance(inputs_schema, dict):
+            inputs_schema = None
         logger.debug(f"{ability} consumer handler inputs schema: {inputs_schema}")
-        if (not self._runtime.tracer()) or self._executable.skip_trace():
+        if (not self._session.tracer()) or self._executable.skip_trace():
             return await actor_manager.consume(self._node_id, ability, inputs_schema)
 
         async def stream_callable(chunk):
-            await TracerWorkflowUtils.trace_component_stream_input(self._runtime, chunk, send=False)
+            await TracerWorkflowUtils.trace_component_stream_input(self._session, chunk, send=False)
 
         return await actor_manager.consume(self._node_id, ability, inputs_schema, stream_callable)
 
     async def _post_stream(self, results_iter: AsyncIterator, ability: ComponentAbility) -> None:
         is_end_node = self.is_end_node
-        is_sub_graph = self._runtime.parent_id() != ''
-        actor_manager = self._runtime.actor_manager()
-        output_transformer = self._node_config.stream_io_configs.outputs_transformer if self._node_config else None
-        output_schema = self._node_config.stream_io_configs.outputs_schema if self._node_config else None
+        is_sub_graph = self._session.parent_id() != ''
+        actor_manager = self._session.actor_manager()
+        output_schema = self._node_config.stream_io_configs.outputs_schema if self._node_config.stream_io_configs else None
+        output_transformer = None
+        if not isinstance(output_schema, dict):
+            output_transformer = output_schema
         end_stream_index = 0
         async for chunk in results_iter:
             if output_transformer is None:
@@ -202,9 +212,9 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             await self._process_chunk(message, is_end_node, end_stream_index, is_sub_graph, ability)
             end_stream_index += 1
         if is_end_node and is_sub_graph:
-            await self._runtime.actor_manager().sub_workflow_stream().send(StreamEmitter.END_FRAME)
+            await self._session.actor_manager().sub_workflow_stream().send(StreamEmitter.END_FRAME)
         else:
-            await self._runtime.actor_manager().end_message(self._node_id, ability)
+            await self._session.actor_manager().end_message(self._node_id, ability)
         self._clear_interactive()
 
     async def _process_chunk(self, message,
@@ -222,24 +232,24 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     "payload": message
                 }
             await self.__trace_component_stream_output__(message_stream_data)
-            if self._runtime.stream_writer_manager().get_output_writer():
-                await self._runtime.stream_writer_manager().get_output_writer().write(message_stream_data)
+            if self._session.stream_writer_manager().get_output_writer():
+                await self._session.stream_writer_manager().get_output_writer().write(message_stream_data)
         elif is_end_node and is_sub_graph:
             message_stream_data = message.payload if isinstance(message, OutputSchema) else message
             await self.__trace_component_stream_output__(message_stream_data)
-            await self._runtime.actor_manager().sub_workflow_stream().send(message_stream_data)
+            await self._session.actor_manager().sub_workflow_stream().send(message_stream_data)
         else:
             first_frame = end_stream_index == 0
             logger.debug(f"sending message: {message}, first_frame: {first_frame}")
             await self.__trace_component_stream_output__(message)
-            await self._runtime.actor_manager().produce(self._node_id, message, ability, first_frame=first_frame)
+            await self._session.actor_manager().produce(self._node_id, message, ability, first_frame=first_frame)
 
     def _clear_interactive(self) -> None:
-        if self._runtime.state().get(INTERACTIVE_INPUT):
-            self._runtime.state().update({INTERACTIVE_INPUT: None})
+        if self._session.state().get(INTERACTIVE_INPUT):
+            self._session.state().update({INTERACTIVE_INPUT: None})
 
     async def call(self, config: Any = None):
-        if self._runtime is None or self._executable is None:
+        if self._session is None or self._executable is None:
             raise JiuWenBaseException(1, "vertex is not initialized, node is is " + self._node_id)
 
         is_subgraph = self._executable.graph_invoker()
@@ -292,7 +302,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         self._stream_done = asyncio.Future()
         logger.debug(f"node [{self._node_id}] stream entrypoint has been called")
 
-        if self._runtime is None or self._runtime.actor_manager() is None:
+        if self._session is None or self._session.actor_manager() is None:
             error = JiuWenBaseException(1, "queue manager is not initialized")
             self._stream_done.set_result(error)
             error_callback(error)
@@ -342,46 +352,46 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         return len(call_ability) > 0
 
     async def __trace_component_inputs__(self, inputs: Optional[dict]) -> None:
-        if (not self._runtime.tracer()) or self._executable.skip_trace():
+        if (not self._session.tracer()) or self._executable.skip_trace():
             return
         self._is_call_started.set()
         need_send = (not self._has_stream_call) or self._stream_done.done()
-        await TracerWorkflowUtils.trace_component_inputs(self._runtime, inputs, send=need_send)
+        await TracerWorkflowUtils.trace_component_inputs(self._session, inputs, send=need_send)
         if self._executable.component_type() == SUB_WORKFLOW_COMPONENT:
-            self._runtime.tracer().register_workflow_span_manager(self._runtime.executable_id())
+            self._session.tracer().register_workflow_span_manager(self._session.executable_id())
 
     async def __trace_component_outputs__(self, outputs: Optional[dict] = None) -> None:
-        if (not self._runtime.tracer()) or self._executable.skip_trace():
+        if (not self._session.tracer()) or self._executable.skip_trace():
             return
-        await TracerWorkflowUtils.trace_component_outputs(self._runtime, outputs)
+        await TracerWorkflowUtils.trace_component_outputs(self._session, outputs)
 
     async def __trace_component_begin__(self) -> None:
-        if (not self._runtime.tracer()) or self._executable.skip_trace():
+        if (not self._session.tracer()) or self._executable.skip_trace():
             return
         if not self._is_started.is_set():
             self._is_started.set()
-            await TracerWorkflowUtils.trace_component_begin(self._runtime)
+            await TracerWorkflowUtils.trace_component_begin(self._session)
 
     async def __trace_component_done__(self) -> None:
-        if (not self._runtime.tracer()) or self._executable.skip_trace():
+        if (not self._session.tracer()) or self._executable.skip_trace():
             return
-        await TracerWorkflowUtils.trace_component_done(self._runtime)
+        await TracerWorkflowUtils.trace_component_done(self._session)
 
     async def __trace_component_stream_output__(self, chunk) -> None:
-        if (not self._runtime.tracer()) or self._executable.skip_trace():
+        if (not self._session.tracer()) or self._executable.skip_trace():
             return
-        await TracerWorkflowUtils.trace_component_stream_output(self._runtime, chunk)
+        await TracerWorkflowUtils.trace_component_stream_output(self._session, chunk)
 
     async def __trace_error__(self, error: Exception) -> None:
-        if (not self._runtime.tracer()) or self._executable.skip_trace():
+        if (not self._session.tracer()) or self._executable.skip_trace():
             return
-        await TracerWorkflowUtils.trace_error(self._runtime, error)
+        await TracerWorkflowUtils.trace_error(self._session, error)
 
     async def __trace_component_stream_input_send__(self) -> None:
-        if (not self._runtime.tracer()) or self._executable.skip_trace():
+        if (not self._session.tracer()) or self._executable.skip_trace():
             return
         if (not self._has_call) or self._is_call_started.is_set():
-            await TracerWorkflowUtils.trace_component_stream_input(self._runtime, {}, send=True)
+            await TracerWorkflowUtils.trace_component_stream_input(self._session, {}, send=True)
 
     async def reset(self):
         self._call_count = 0

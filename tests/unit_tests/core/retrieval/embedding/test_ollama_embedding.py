@@ -2,13 +2,15 @@
 """
 Ollama embedding model implementation test cases
 """
-from unittest.mock import MagicMock, Mock, patch
+
+from unittest.mock import Mock, patch
 
 import pytest
 import requests
 
-from openjiuwen.core.retrieval.embedding.ollama_embedding import OllamaEmbedding
-from openjiuwen.core.retrieval.common.config import EmbeddingConfig
+from openjiuwen.core.retrieval import OllamaEmbedding
+from openjiuwen.core.retrieval import EmbeddingConfig
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -28,9 +30,7 @@ class TestOllamaEmbedding:
         """Test successful initialization"""
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
@@ -44,24 +44,20 @@ class TestOllamaEmbedding:
         """Test model not found"""
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "other-model"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "other-model"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
-            with pytest.raises(ValueError, match="not found in available models"):
+            with pytest.raises(BaseError, match="not found in available models"):
                 OllamaEmbedding(config=ollama_config)
 
     @classmethod
     def test_init_connection_error(cls, ollama_config):
         """Test connection error"""
         with patch("requests.get") as mock_get:
-            mock_get.side_effect = requests.exceptions.ConnectionError(
-                "Connection refused"
-            )
+            mock_get.side_effect = requests.exceptions.ConnectionError("Connection refused")
 
-            with pytest.raises(ConnectionError, match="Could not connect to Ollama"):
+            with pytest.raises(BaseError, match="Could not connect to Ollama"):
                 OllamaEmbedding(config=ollama_config)
 
     @classmethod
@@ -69,9 +65,7 @@ class TestOllamaEmbedding:
         """Test initialization with extra headers"""
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
@@ -83,15 +77,11 @@ class TestOllamaEmbedding:
         """Test initialization with custom parameters"""
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
-            model = OllamaEmbedding(
-                config=ollama_config, timeout=120, max_retries=5
-            )
+            model = OllamaEmbedding(config=ollama_config, timeout=120, max_retries=5)
             assert model.timeout == 120
             assert model.max_retries == 5
 
@@ -101,9 +91,7 @@ class TestOllamaEmbedding:
         ollama_config.base_url = "http://localhost:11434/"
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
@@ -114,22 +102,16 @@ class TestOllamaEmbedding:
     @pytest.mark.asyncio
     async def test_embed_query_success(self, ollama_config):
         """Test embedding query text successfully"""
-        with patch("requests.get") as mock_get, patch(
-            "asyncio.to_thread"
-        ) as mock_to_thread:
+        with patch("requests.get") as mock_get, patch("asyncio.to_thread") as mock_to_thread:
             # Model check during initialization
             mock_init_response = Mock()
-            mock_init_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_init_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_init_response.raise_for_status = Mock()
             mock_get.return_value = mock_init_response
 
             # Response for embedding request
             mock_embed_response = Mock()
-            mock_embed_response.json.return_value = {
-                "embeddings": [[0.1] * 768]
-            }
+            mock_embed_response.json.return_value = {"embeddings": [[0.1] * 768]}
             mock_embed_response.raise_for_status = Mock()
             mock_to_thread.return_value = mock_embed_response
 
@@ -143,27 +125,21 @@ class TestOllamaEmbedding:
         """Test embedding empty text"""
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError, match="Empty text provided"):
+            with pytest.raises(BaseError, match="Empty text provided"):
                 await model.embed_query("   ")
 
     @pytest.mark.asyncio
     async def test_embed_query_retry_on_failure(self, ollama_config):
         """Test retry on request failure"""
-        with patch("requests.get") as mock_get, patch(
-            "asyncio.to_thread"
-        ) as mock_to_thread:
+        with patch("requests.get") as mock_get, patch("asyncio.to_thread") as mock_to_thread:
             # Model check during initialization
             mock_init_response = Mock()
-            mock_init_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_init_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_init_response.raise_for_status = Mock()
             mock_get.return_value = mock_init_response
 
@@ -174,9 +150,7 @@ class TestOllamaEmbedding:
             )
 
             mock_success_response = Mock()
-            mock_success_response.json.return_value = {
-                "embeddings": [[0.1] * 768]
-            }
+            mock_success_response.json.return_value = {"embeddings": [[0.1] * 768]}
             mock_success_response.raise_for_status = Mock()
 
             mock_to_thread.side_effect = [
@@ -192,14 +166,10 @@ class TestOllamaEmbedding:
     @pytest.mark.asyncio
     async def test_embed_query_max_retries_exceeded(self, ollama_config):
         """Test exceeding maximum retry count"""
-        with patch("requests.get") as mock_get, patch(
-            "asyncio.to_thread"
-        ) as mock_to_thread:
+        with patch("requests.get") as mock_get, patch("asyncio.to_thread") as mock_to_thread:
             # Model check during initialization
             mock_init_response = Mock()
-            mock_init_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_init_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_init_response.raise_for_status = Mock()
             mock_get.return_value = mock_init_response
 
@@ -211,21 +181,17 @@ class TestOllamaEmbedding:
             mock_to_thread.return_value = mock_failure_response
 
             model = OllamaEmbedding(config=ollama_config, max_retries=2)
-            with pytest.raises(RuntimeError, match="Failed to get embedding"):
+            with pytest.raises(BaseError, match="Failed to get embedding"):
                 await model.embed_query("test query")
             assert mock_to_thread.call_count == 2
 
     @pytest.mark.asyncio
     async def test_embed_query_invalid_response(self, ollama_config):
         """Test invalid response format"""
-        with patch("requests.get") as mock_get, patch(
-            "asyncio.to_thread"
-        ) as mock_to_thread:
+        with patch("requests.get") as mock_get, patch("asyncio.to_thread") as mock_to_thread:
             # Model check during initialization
             mock_init_response = Mock()
-            mock_init_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_init_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_init_response.raise_for_status = Mock()
             mock_get.return_value = mock_init_response
 
@@ -236,28 +202,22 @@ class TestOllamaEmbedding:
             mock_to_thread.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError, match="No embeddings in response"):
+            with pytest.raises(BaseError, match="No embeddings in response"):
                 await model.embed_query("test query")
 
     @pytest.mark.asyncio
     async def test_embed_documents_success(self, ollama_config):
         """Test embedding document list successfully"""
-        with patch("requests.get") as mock_get, patch(
-            "asyncio.to_thread"
-        ) as mock_to_thread:
+        with patch("requests.get") as mock_get, patch("asyncio.to_thread") as mock_to_thread:
             # Model check during initialization
             mock_init_response = Mock()
-            mock_init_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_init_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_init_response.raise_for_status = Mock()
             mock_get.return_value = mock_init_response
 
             # Response for embedding request
             mock_embed_response = Mock()
-            mock_embed_response.json.return_value = {
-                "embeddings": [[0.1] * 768, [0.2] * 768, [0.3] * 768]
-            }
+            mock_embed_response.json.return_value = {"embeddings": [[0.1] * 768, [0.2] * 768, [0.3] * 768]}
             mock_embed_response.raise_for_status = Mock()
             mock_to_thread.return_value = mock_embed_response
 
@@ -270,22 +230,16 @@ class TestOllamaEmbedding:
     @pytest.mark.asyncio
     async def test_embed_documents_with_batching(self, ollama_config):
         """Test batch embedding documents"""
-        with patch("requests.get") as mock_get, patch(
-            "asyncio.to_thread"
-        ) as mock_to_thread:
+        with patch("requests.get") as mock_get, patch("asyncio.to_thread") as mock_to_thread:
             # Model check during initialization
             mock_init_response = Mock()
-            mock_init_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_init_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_init_response.raise_for_status = Mock()
             mock_get.return_value = mock_init_response
 
             # Response for embedding request
             mock_embed_response = Mock()
-            mock_embed_response.json.return_value = {
-                "embeddings": [[0.1] * 768, [0.2] * 768]
-            }
+            mock_embed_response.json.return_value = {"embeddings": [[0.1] * 768, [0.2] * 768]}
             mock_embed_response.raise_for_status = Mock()
             mock_to_thread.return_value = mock_embed_response
 
@@ -301,14 +255,12 @@ class TestOllamaEmbedding:
         """Test embedding empty list"""
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError, match="Empty texts list provided"):
+            with pytest.raises(BaseError, match="Empty texts list provided"):
                 await model.embed_documents([])
 
     @pytest.mark.asyncio
@@ -316,14 +268,12 @@ class TestOllamaEmbedding:
         """Test list containing empty texts"""
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError, match="chunks are empty"):
+            with pytest.raises(BaseError, match="chunks are empty"):
                 await model.embed_documents(["text 1", "   ", "text 2"])
 
     @pytest.mark.asyncio
@@ -331,29 +281,25 @@ class TestOllamaEmbedding:
         """Test all texts are empty"""
         with patch("requests.get") as mock_get:
             mock_response = Mock()
-            mock_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_response.raise_for_status = Mock()
             mock_get.return_value = mock_response
 
             model = OllamaEmbedding(config=ollama_config)
-            with pytest.raises(ValueError):
+            with pytest.raises(BaseError):
                 await model.embed_documents(["   ", "  ", ""])
 
     @classmethod
     def test_dimension_property(cls, ollama_config):
         """Test dimension property"""
-        with patch("requests.get") as mock_get, patch(
-            "asyncio.get_event_loop"
-        ) as mock_get_loop, patch(
-            "asyncio.to_thread"
-        ) as mock_to_thread:
+        with (
+            patch("requests.get") as mock_get,
+            patch("asyncio.get_event_loop") as mock_get_loop,
+            patch("asyncio.to_thread") as mock_to_thread,
+        ):
             # Model check during initialization
             mock_init_response = Mock()
-            mock_init_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_init_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_init_response.raise_for_status = Mock()
             mock_get.return_value = mock_init_response
 
@@ -374,14 +320,10 @@ class TestOllamaEmbedding:
     @classmethod
     def test_dimension_property_with_running_loop(cls, ollama_config):
         """Test dimension property (event loop is running)"""
-        with patch("requests.get") as mock_get, patch(
-            "asyncio.get_event_loop"
-        ) as mock_get_loop:
+        with patch("requests.get") as mock_get, patch("asyncio.get_event_loop") as mock_get_loop:
             # Model check during initialization
             mock_init_response = Mock()
-            mock_init_response.json.return_value = {
-                "models": [{"name": "nomic-embed-text"}]
-            }
+            mock_init_response.json.return_value = {"models": [{"name": "nomic-embed-text"}]}
             mock_init_response.raise_for_status = Mock()
             mock_get.return_value = mock_init_response
 

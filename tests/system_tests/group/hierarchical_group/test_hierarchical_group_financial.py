@@ -5,44 +5,48 @@
 HierarchicalGroup 金融场景测试 - 使用 HierarchicalMainController + WorkflowAgent
 
 场景：
-- 1个主 agent（使用 HierarchicalMainController 进行意图识别和任务分发）
-- 3个子 workflow agent：转账、查余额、理财
+- 1个主 single_agent（使用 HierarchicalMainController 进行意图识别和任务分发）
+- 3个子 workflow single_agent：转账、查余额、理财
 - 每个 workflow 都有 QuestionerComponent 中断节点
 """
+import asyncio
 import os
 import unittest
-import asyncio
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
 
-from openjiuwen.agent.config.base import AgentConfig
-from openjiuwen.agent.config.workflow_config import WorkflowAgentConfig
-from openjiuwen.agent.workflow_agent.workflow_agent import WorkflowAgent
-from openjiuwen.agent_group.hierarchical_group import (
+from openjiuwen.core.single_agent.legacy import (
+    AgentConfig,
+    ControllerAgent,
+    WorkflowAgentConfig,
+)
+from openjiuwen.core.application.workflow_agent import WorkflowAgent
+from examples.groups.hierarchical_group import (
     HierarchicalGroup,
     HierarchicalGroupConfig
 )
-from openjiuwen.agent_group.hierarchical_group.agents.main_controller import HierarchicalMainController
-from openjiuwen.core.agent.agent import ControllerAgent
-from openjiuwen.core.agent.message.message import Message
-from openjiuwen.core.component.common.configs.model_config import ModelConfig
-from openjiuwen.core.component.end_comp import End
-from openjiuwen.core.component.questioner_comp import (
+from examples.groups.hierarchical_group.agents.main_controller import HierarchicalMainController
+from openjiuwen.core.controller import Event
+from openjiuwen.core.common.constants import constant as const
+from openjiuwen.core.workflow import WorkflowComponent, WorkflowCard
+from openjiuwen.core.foundation.llm import (
+    ModelConfig,
+    BaseModelInfo,
+    ModelClientConfig,
+    ModelRequestConfig
+)
+from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import (
     FieldInfo,
     QuestionerComponent,
     QuestionerConfig
 )
-from openjiuwen.core.component.start_comp import Start
-from openjiuwen.core.common.constants import constant as const
-from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.utils.llm.base import BaseModelInfo
-from openjiuwen.core.workflow.base import Workflow
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata
-from openjiuwen.core.runtime.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.component.base import WorkflowComponent
-from openjiuwen.core.context_engine.base import Context
+from openjiuwen.core.workflow import Start
+from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Output, Input
-from openjiuwen.core.runtime.base import ComponentExecutable
-from openjiuwen.core.runtime.runtime import Runtime
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session import Session
+from openjiuwen.core.workflow import Workflow
 
 # 模型配置
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
@@ -79,16 +83,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _create_start_component():
         """创建 Start 组件"""
-        return Start({
-            "inputs": [
-                {
-                    "id": "query",
-                    "type": "String",
-                    "required": "true",
-                    "sourceType": "ref"
-                }
-            ]
-        })
+        return Start()
 
     def _build_financial_workflow(
             self,
@@ -111,15 +106,13 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         Returns:
             Workflow: 包含 start -> questioner -> end 的工作流
         """
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        card = WorkflowCard(
                 name=workflow_name,
                 id=workflow_id,
                 version="1.0",
                 description=workflow_desc,
-            )
         )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=card)
 
         # 创建组件
         start = self._create_start_component()
@@ -133,8 +126,25 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         model_config = self._create_model_config()
+        # client_provider 需要使用正确的大小写格式 (OpenAI, SiliconFlow)
+        provider = model_config.model_provider
+        if provider and provider.lower() == 'openai':
+            provider = 'OpenAI'
+        elif provider and provider.lower() == 'siliconflow':
+            provider = 'SiliconFlow'
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_client_config=ModelClientConfig(
+                client_provider=provider,
+                api_key=model_config.model_info.api_key,
+                api_base=model_config.model_info.api_base,
+                timeout=model_config.model_info.timeout,
+                verify_ssl=False,
+            ),
+            model_config=ModelRequestConfig(
+                model=model_config.model_info.model_name,
+                temperature=model_config.model_info.temperature,
+                top_p=model_config.model_info.top_p,
+            ),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -197,15 +207,13 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         Returns:
             Workflow: 包含 start -> questioner -> end 的工作流
         """
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        card = WorkflowCard(
                 name=workflow_name,
                 id=workflow_id,
                 version="1.0",
                 description=workflow_desc,
             )
-        )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=card)
 
         # 创建组件
         start = self._create_start_component()
@@ -246,8 +254,25 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # 创建 Questioner 组件
         model_config = self._create_model_config()
+        # client_provider 需要使用正确的大小写格式 (OpenAI, SiliconFlow)
+        provider = model_config.model_provider
+        if provider and provider.lower() == 'openai':
+            provider = 'OpenAI'
+        elif provider and provider.lower() == 'siliconflow':
+            provider = 'SiliconFlow'
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_client_config=ModelClientConfig(
+                client_provider=provider,
+                api_key=model_config.model_info.api_key,
+                api_base=model_config.model_info.api_base,
+                timeout=model_config.model_info.timeout,
+                verify_ssl=False,
+            ),
+            model_config=ModelRequestConfig(
+                model=model_config.model_info.model_name,
+                temperature=model_config.model_info.temperature,
+                top_p=model_config.model_info.top_p,
+            ),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -282,10 +307,9 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         Returns:
             LLMAgent 实例
         """
-        from openjiuwen.agent.llm_agent.llm_agent import LLMAgent
-        from openjiuwen.agent.config.react_config import ReActAgentConfig
-        from openjiuwen.core.utils.tool.function.function import LocalFunction
-        from openjiuwen.core.utils.tool.param import Param
+        from openjiuwen.core.application.llm_agent import LLMAgent
+        from openjiuwen.core.application.llm_agent import ReActAgentConfig
+        from openjiuwen.core.foundation.tool.function.function import LocalFunction, ToolCard
 
         model_config = self._create_model_config()
         prompt_template = [
@@ -305,13 +329,19 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         # 可选：添加工具
         if with_tools:
             multiply_tool = LocalFunction(
-                name="multiply",
-                description="将两个数字相乘",
-                params=[
-                    Param(name="a", description="第一个数", type="number", required=True),
-                    Param(name="b", description="第二个数", type="number", required=True),
-                ],
-                func=lambda a, b: a * b
+                card=ToolCard(
+                    name="multiply",
+                    description="将两个数字相乘",
+                    input_params={
+                        "type": "object",
+                        "properties": {
+                            "a": {"description": "第一个数", "type": "number"},
+                            "b": {"description": "第二个数", "type": "number"},
+                        },
+                        "required": ["a", "b"],
+                    },
+                ),
+                func=lambda a, b: a * b,
             )
             agent.add_tools([multiply_tool])
 
@@ -327,10 +357,9 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         Returns:
             ReActAgent 实例
         """
-        from openjiuwen.agent.react_agent.react_agent import ReActAgent
-        from openjiuwen.agent.config.react_config import ReActAgentConfig
-        from openjiuwen.core.utils.tool.function.function import LocalFunction
-        from openjiuwen.core.utils.tool.param import Param
+        from openjiuwen.core.single_agent.legacy import LegacyReActAgent
+        from openjiuwen.core.application.llm_agent import ReActAgentConfig
+        from openjiuwen.core.foundation.tool.function.function import LocalFunction, ToolCard
 
         model_config = self._create_model_config()
         prompt_template = [
@@ -345,31 +374,37 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
             prompt_template=prompt_template,
         )
 
-        agent = ReActAgent(config)
+        agent = LegacyReActAgent(config)
 
         # 添加求和工具
         sum_tool = LocalFunction(
-            name="sum",
-            description="两数求和",
-            params=[
-                Param(name="a", description="第一个数", type="number", required=True),
-                Param(name="b", description="第二个数", type="number", required=True),
-            ],
-            func=lambda a, b: a + b
+            card=ToolCard(
+                name="sum",
+                description="两数求和",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "a": {"description": "第一个数", "type": "number"},
+                        "b": {"description": "第二个数", "type": "number"},
+                    },
+                    "required": ["a", "b"],
+                },
+            ),
+            func=lambda a, b: a + b,
         )
         agent.add_tools([sum_tool])
 
         return agent
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_financial_workflow_with_interrupt_invoke(self):
         """
         金融场景完整用例：HierarchicalGroup + 工作流中断恢复
 
         测试流程：
-        1. 创建 HierarchicalGroup，主 agent 使用 HierarchicalMainController
+        1. 创建 HierarchicalGroup，主 single_agent 使用 HierarchicalMainController
         2. 添加 3 个金融 WorkflowAgent（每个都有中断节点）
-        3. 发送转账请求 -> 路由到转账 agent -> 触发中断（询问金额）
+        3. 发送转账请求 -> 路由到转账 single_agent -> 触发中断（询问金额）
         4. 提供金额 -> 恢复工作流 -> 完成
         """
         print("\n=== 金融场景 HierarchicalGroup 测试 ===")
@@ -425,7 +460,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         )
         hierarchical_group = HierarchicalGroup(config)
 
-        # 4. 创建主 agent（HierarchicalMainController）
+        # 4. 创建主 single_agent（HierarchicalMainController）
         main_config = AgentConfig(
             id="main_controller",
             description="金融服务主控制器，识别用户意图并分发任务"
@@ -433,7 +468,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         main_controller = HierarchicalMainController()
         main_agent = ControllerAgent(main_config, controller=main_controller)
 
-        # 5. 添加所有 agent 到 group
+        # 5. 添加所有 single_agent 到 group
         hierarchical_group.add_agent("main_controller", main_agent)
         hierarchical_group.add_agent("transfer_agent", transfer_agent)
         hierarchical_group.add_agent("balance_agent", balance_agent)
@@ -443,9 +478,9 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # ========== 步骤1: 发送转账请求 -> 中断 ==========
         # 不指定 receiver_id，让消息自动路由到 leader
-        # Leader (HierarchicalMainController) 会通过 LLM 意图识别找到目标 agent
+        # Leader (HierarchicalMainController) 会通过 LLM 意图识别找到目标 single_agent
         print("\n【步骤1】发送转账请求")
-        message1 = Message.create_user_message(
+        message1 = Event.create_user_event(
             content="我要转账",
             conversation_id=conversation_id
         )
@@ -471,13 +506,13 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         print(f"✅ 步骤1成功：转账工作流触发中断，询问金额")
 
         # ========== 步骤2: 提供金额 -> 恢复 -> 完成 ==========
-        # 不指定 receiver_id，leader 会自动检测到有中断的 agent 并恢复
+        # 不指定 receiver_id，leader 会自动检测到有中断的 single_agent 并恢复
         print("\n【步骤2】提供转账金额")
-        message2 = Message.create_user_message(
+        message2 = Event.create_user_event(
             content="100元",
             conversation_id=conversation_id
         )
-        # 不设置 receiver_id，leader 会通过 _get_last_interrupted_agent 恢复到中断的 agent
+        # 不设置 receiver_id，leader 会通过 _get_last_interrupted_agent 恢复到中断的 single_agent
 
         try:
             result2 = await asyncio.wait_for(
@@ -498,18 +533,18 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result2['output'].state.value, 'COMPLETED', "步骤2工作流应该完成"
         )
-        response_content = result2['output'].result.get('responseContent', '')
+        response_content = result2['output'].result.get('response', '')
         print(f"✅ 步骤2成功：转账工作流完成，返回: {response_content}")
 
         print("\n🎉 金融场景测试完成！")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_financial_workflow_with_interrupt_stream(self):
         """
         金融场景 Stream 用例：HierarchicalGroup.stream + 工作流中断恢复
 
         测试流程：
-        1. 创建 HierarchicalGroup，主 agent 使用 HierarchicalMainController
+        1. 创建 HierarchicalGroup，主 single_agent 使用 HierarchicalMainController
         2. 添加 3 个金融 WorkflowAgent（每个都有中断节点）
         3. 使用 stream() 发送转账请求 -> 触发中断
         4. 使用 stream() 提供金额 -> 恢复工作流 -> 完成
@@ -567,7 +602,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         )
         hierarchical_group = HierarchicalGroup(config)
 
-        # 4. 创建主 agent（HierarchicalMainController）
+        # 4. 创建主 single_agent（HierarchicalMainController）
         main_config = AgentConfig(
             id="main_controller",
             description="金融服务主控制器，识别用户意图并分发任务"
@@ -575,7 +610,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         main_controller = HierarchicalMainController()
         main_agent = ControllerAgent(main_config, controller=main_controller)
 
-        # 5. 添加所有 agent 到 group
+        # 5. 添加所有 single_agent 到 group
         hierarchical_group.add_agent("main_controller", main_agent)
         hierarchical_group.add_agent("transfer_agent", transfer_agent)
         hierarchical_group.add_agent("balance_agent", balance_agent)
@@ -586,7 +621,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         # ========== 步骤1: 使用 stream 发送转账请求 -> 中断 ==========
         # 不指定 receiver_id，让消息自动路由到 leader
         print("\n【步骤1】使用 stream 发送转账请求")
-        message1 = Message.create_user_message(
+        message1 = Event.create_user_event(
             content="我要转账",
             conversation_id=conversation_id
         )
@@ -617,13 +652,13 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         print(f"✅ 步骤1成功：转账工作流触发中断，询问金额")
 
         # ========== 步骤2: 使用 stream 提供金额 -> 恢复 -> 完成 ==========
-        # 不指定 receiver_id，leader 会自动检测到有中断的 agent 并恢复
+        # 不指定 receiver_id，leader 会自动检测到有中断的 single_agent 并恢复
         print("\n【步骤2】使用 stream 提供转账金额")
-        message2 = Message.create_user_message(
+        message2 = Event.create_user_event(
             content="200元",
             conversation_id=conversation_id
         )
-        # 不设置 receiver_id，leader 会通过 _get_last_interrupted_agent 恢复到中断的 agent
+        # 不设置 receiver_id，leader 会通过 _get_last_interrupted_agent 恢复到中断的 single_agent
 
         # 收集流式输出
         chunks2 = []
@@ -653,13 +688,13 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(final_chunk2, "步骤2应该有 workflow_final chunk")
 
         payload2 = final_chunk2.payload
-        response_content = payload2.get('responseContent', '')
+        response_content = payload2.get('response', '')
         self.assertIn('200', response_content, "步骤2应该包含转账金额")
         print(f"✅ 步骤2成功：转账工作流完成，返回: {response_content}")
 
         print("\n🎉 金融场景 Stream 测试完成！")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_multi_agent_jump_and_recovery_stream(self):
         """
         多子Agent跳转恢复测试：HierarchicalGroup.stream + 多Agent中断跳转恢复
@@ -728,7 +763,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         )
         hierarchical_group = HierarchicalGroup(config)
 
-        # 4. 创建主 agent（HierarchicalMainController）
+        # 4. 创建主 single_agent（HierarchicalMainController）
         main_config = AgentConfig(
             id="main_controller",
             description="金融服务主控制器，识别用户意图并分发任务",
@@ -737,7 +772,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         main_controller = HierarchicalMainController()
         main_agent = ControllerAgent(main_config, controller=main_controller)
 
-        # 5. 添加所有 agent 到 group
+        # 5. 添加所有 single_agent 到 group
         hierarchical_group.add_agent("main_controller", main_agent)
         hierarchical_group.add_agent("transfer_agent", transfer_agent)
         hierarchical_group.add_agent("balance_agent", balance_agent)
@@ -747,7 +782,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # ========== 步骤1: 发送转账请求 -> transfer_agent 中断 ==========
         print("\n【步骤1】发送转账请求 -> transfer_agent 中断")
-        message1 = Message.create_user_message(
+        message1 = Event.create_user_event(
             content="我要转账",
             conversation_id=conversation_id
         )
@@ -776,7 +811,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # ========== 步骤2: 发送理财请求 -> invest_agent 中断 ==========
         print("\n【步骤2】发送理财请求 -> invest_agent 中断（跳转到新Agent）")
-        message2 = Message.create_user_message(
+        message2 = Event.create_user_event(
             content="我想理财",
             conversation_id=conversation_id
         )
@@ -805,7 +840,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # ========== 步骤3: 提供金额 -> 恢复 transfer_agent -> 完成 ==========
         print("\n【步骤3】提供金额 -> 恢复 transfer_agent -> 完成转账")
-        message3 = Message.create_user_message(
+        message3 = Event.create_user_event(
             content="我要转账100元",
             conversation_id=conversation_id
         )
@@ -836,13 +871,13 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(final_chunk3, "步骤3应该有 workflow_final chunk")
         payload3 = final_chunk3.payload
-        response_content3 = payload3.get('responseContent', '')
+        response_content3 = payload3.get('response', '')
         self.assertIn('100', response_content3, "步骤3应该包含转账金额")
         print(f"✅ 步骤3成功：transfer_agent 恢复并完成，返回: {response_content3}")
 
         # ========== 步骤4: 提供产品 -> 恢复 invest_agent -> 完成 ==========
         print("\n【步骤4】提供产品 -> 恢复 invest_agent -> 完成理财")
-        message4 = Message.create_user_message(
+        message4 = Event.create_user_event(
             content="我要购买稳健型理财产品",
             conversation_id=conversation_id
         )
@@ -873,7 +908,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(final_chunk4, "步骤4应该有 workflow_final chunk")
         payload4 = final_chunk4.payload
-        response_content4 = payload4.get('responseContent', '')
+        response_content4 = payload4.get('response', '')
         self.assertIn('稳健', response_content4, "步骤4应该包含理财产品名称")
         print(f"✅ 步骤4成功：invest_agent 恢复并完成，返回: {response_content4}")
 
@@ -881,14 +916,14 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         print("   - transfer_agent: 中断 -> 跳转 -> 恢复 -> 完成")
         print("   - invest_agent: 中断 -> 恢复 -> 完成")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_hierarchical_main_controller_001(self):
         """
         不指定路由，由leader_agent做意图识别
 
         测试流程：
-        1. 创建多种类型的 agent（workflow agent、llm agent、react agent）
-        2. 创建 HierarchicalGroup，主 agent 使用 HierarchicalMainController
+        1. 创建多种类型的 single_agent（workflow single_agent、llm single_agent、react single_agent）
+        2. 创建 HierarchicalGroup，主 single_agent 使用 HierarchicalMainController
         3. 不指定路由，由 leader_agent 做意图识别并分发任务
         """
         print("\n=== 测试 HierarchicalMainController 意图识别 ===")
@@ -909,7 +944,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
             questioner_type="weather"
         )
 
-        # 2、创建 agent
+        # 2、创建 single_agent
         cash_access_agent = self._create_workflow_agent(
             agent_id="cash_access_agent",
             description="银行存取钱，处理用户在指定银行进行存取钱操作",
@@ -953,31 +988,31 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         group.add_agent("sum_agent", sum_agent)
 
         # 6-1、 与第1个agent进行交互（存取钱）
-        # message1 = Message.create_user_message(
+        # message1 = Event.create_user_event(
         #     content="民生银行存钱5000元",
         #     conversation_id=conversation_id
         # )
         # result = await group.invoke(message1)
-        # print(f"agent group result: {result}")
+        # print(f"single_agent group result: {result}")
         # self.assertEqual(
         #     result["output"].result,
         #     {'output': {'data': {'bank': '民生银行', 'action': '存钱', 'amount': 5000}}}
         # )
 
         # 6-2、 与第2个agent进行交互（天气查询）
-        # message2 = Message.create_user_message(
+        # message2 = Event.create_user_event(
         #     content="杭州明日天气晴温度25度",
         #     conversation_id=conversation_id
         # )
         # result = await group.invoke(message2)
-        # print(f"agent group result: {result}")
+        # print(f"single_agent group result: {result}")
         # self.assertEqual(
         #     result["output"].result,
         #     {'output': {'data': {'location': '杭州', 'date': '明日', 'weather': '晴', 'temperature': '25度'}}}
         # )
 
         # 6-3、 与第3个agent进行交互（翻倍运算 - LLM Agent）
-        message3 = Message.create_user_message(
+        message3 = Event.create_user_event(
             content="帮我把数字5翻倍，然后用模板格式输出结果",
             conversation_id=conversation_id
         )
@@ -985,7 +1020,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         print(f"LLM Agent (翻倍运算) result: {result3}")
 
         # 6-4、与第4个agent进行交互（求和运算 - React Agent）
-        message4 = Message.create_user_message(
+        message4 = Event.create_user_event(
             content="请计算 3 加 5 的和是多少",
             conversation_id=conversation_id
         )
@@ -994,11 +1029,11 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n[PASS] HierarchicalMainController 意图识别测试完成！")
 
-    @unittest.skip("skip system test - requires network")
     @patch(
-        "openjiuwen.agent_group.hierarchical_group.agents.main_controller."
+        "openjiuwen.core.application.groups.hierarchical_group.agents.main_controller."
         "HierarchicalMainController._detect_intent"
     )
+    @unittest.skip("skip system test")
     async def test_hierarchical_with_react_agent_only(self, mock_detect_intent):
         """
         测试 HierarchicalGroup 中只有 React Agent 的场景
@@ -1042,7 +1077,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         mock_detect_intent.return_value = "sum_agent"
 
         # 6. 发送消息
-        message = Message.create_user_message(
+        message = Event.create_user_event(
             content="请计算 3 加 5 的和是多少",
             conversation_id=conversation_id
         )
@@ -1062,11 +1097,11 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n[PASS] HierarchicalGroup + React Agent Only 测试完成！")
 
-    @unittest.skip("skip system test - requires network")
     @patch(
-        "openjiuwen.agent_group.hierarchical_group.agents.main_controller."
+        "openjiuwen.core.application.groups.hierarchical_group.agents.main_controller."
         "HierarchicalMainController._detect_intent"
     )
+    @unittest.skip("skip system test")
     async def test_hierarchical_with_llm_agent_only(self, mock_detect_intent):
         """
         测试 HierarchicalGroup 中只有 LLM Agent 的场景
@@ -1110,7 +1145,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         mock_detect_intent.return_value = "double_agent"
 
         # 6. 发送消息
-        message = Message.create_user_message(
+        message = Event.create_user_event(
             content="帮我把数字 5 翻倍",
             conversation_id=conversation_id
         )
@@ -1137,11 +1172,11 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n[PASS] HierarchicalGroup + LLM Agent Only 测试完成！")
 
-    @unittest.skip("skip system test - requires network")
     @patch(
-        "openjiuwen.agent_group.hierarchical_group.agents.main_controller."
+        "openjiuwen.core.application.groups.hierarchical_group.agents.main_controller."
         "HierarchicalMainController._detect_intent"
     )
+    @unittest.skip("skip system test")
     async def test_hierarchical_with_llm_agent_with_tools(self, mock_detect_intent):
         """
         测试 HierarchicalGroup 中 LLM Agent 使用工具的场景
@@ -1186,7 +1221,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         mock_detect_intent.return_value = "calc_agent"
 
         # 6. 发送消息
-        message = Message.create_user_message(
+        message = Event.create_user_event(
             content="计算 5 乘以 3",
             conversation_id=conversation_id
         )
@@ -1214,15 +1249,15 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         print("\n[PASS] HierarchicalGroup + LLM Agent with Tools 测试完成！")
 
-    @unittest.skip("require network")
+    @unittest.skip("skip system test")
     async def test_financial_workflow_with_interrupt_invoke_interactive_input(self):
         """
         金融场景完整用例：HierarchicalGroup + 工作流中断恢复
 
         测试流程：
-        1. 创建 HierarchicalGroup，主 agent 使用 HierarchicalMainController
+        1. 创建 HierarchicalGroup，主 single_agent 使用 HierarchicalMainController
         2. 添加 2 个金融 WorkflowAgent（每个都有中断节点）
-        3. 发送转账请求 -> 路由到转账 agent -> 触发中断（询问金额）
+        3. 发送转账请求 -> 路由到转账 single_agent -> 触发中断（询问金额）
         4. 提供金额 -> 恢复工作流 -> 完成
         """
         print("\n=== 金融场景 HierarchicalGroup 测试 ===")
@@ -1264,7 +1299,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         )
         hierarchical_group = HierarchicalGroup(config)
 
-        # 4. 创建主 agent（HierarchicalMainController）
+        # 4. 创建主 single_agent（HierarchicalMainController）
         main_config = AgentConfig(
             id="main_controller",
             description="金融服务主控制器，识别用户意图并分发任务"
@@ -1272,7 +1307,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         main_controller = HierarchicalMainController()
         main_agent = ControllerAgent(main_config, controller=main_controller)
 
-        # 5. 添加所有 agent 到 group
+        # 5. 添加所有 single_agent 到 group
         hierarchical_group.add_agent("main_controller", main_agent)
         hierarchical_group.add_agent("transfer_agent", transfer_agent)
         hierarchical_group.add_agent("balance_agent", balance_agent)
@@ -1281,9 +1316,9 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # ========== 步骤1: 发送转账请求 -> 中断 ==========
         # 不指定 receiver_id，让消息自动路由到 leader
-        # Leader (HierarchicalMainController) 会通过 LLM 意图识别找到目标 agent
+        # Leader (HierarchicalMainController) 会通过 LLM 意图识别找到目标 single_agent
         print("\n【步骤1】发送转账请求")
-        message1 = Message.create_user_message(
+        message1 = Event.create_user_event(
             content="我要转账",
             conversation_id=conversation_id
         )
@@ -1309,16 +1344,16 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         print(f"✅ 步骤1成功：转账工作流触发中断，询问金额")
 
         # ========== 步骤2: 提供金额 -> 恢复 -> 完成 ==========
-        # 不指定 receiver_id，leader 会自动检测到有中断的 agent 并恢复
+        # 不指定 receiver_id，leader 会自动检测到有中断的 single_agent 并恢复
         print("\n【步骤2】提供转账金额")
         user_input = InteractiveInput()
         component_id = result1[0].payload.id
         user_input.update(component_id, {"amount": "100元"})
-        message2 = Message.create_user_message(
+        message2 = Event.create_user_event(
             content=user_input,
             conversation_id=conversation_id
         )
-        # 不设置 receiver_id，leader 会通过 _get_last_interrupted_agent 恢复到中断的 agent
+        # 不设置 receiver_id，leader 会通过 _get_last_interrupted_agent 恢复到中断的 single_agent
 
         try:
             result2 = await asyncio.wait_for(
@@ -1339,13 +1374,13 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result2['output'].state.value, 'COMPLETED', "步骤2工作流应该完成"
         )
-        response_content = result2['output'].result.get('responseContent', '')
+        response_content = result2['output'].result.get('response', '')
         self.assertIn("100", response_content, "应该包含转账金额100元")
         print(f"✅ 步骤2成功：转账工作流完成，返回: {response_content}")
 
         print("\n🎉 金融场景测试完成！")
 
-    @unittest.skip("skip system test - requires network")
+    @unittest.skip("skip system test")
     async def test_hierarchical_group_014(self):
         """
         # @CaseID: test_hierarchical_group_014
@@ -1358,7 +1393,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         # 3、将3个Agent、1个leader_agent加入group
         # 4、Runner.run_agent_group_streaming进行会话操作，使用InteractiveInput恢复，通过主agent调度workflowAgent
         # @Result:
-        # agent group创建成功，会话请求正常
+        # single_agent group创建成功，会话请求正常
         # @Date:
         # @Status: New
         # @ModifyRecord: None
@@ -1425,12 +1460,12 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 
         # 9、与bank_agent下面的cash_access_flow进行交互
         print("\n【步骤1】发送银行存取钱请求，触发并行中断")
-        message1 = Message.create_user_message(content="我想在民生银行存取款", conversation_id=conversation_id)
+        message1 = Event.create_user_event(content="我想在民生银行存取款", conversation_id=conversation_id)
         chunks1 = []
         stream1 = Runner.run_agent_group_streaming(group, message1)
         async for chunk in stream1:
             chunks1.append(chunk)
-            print(f"agent group message1 chunk: {chunk}")
+            print(f"single_agent group message1 chunk: {chunk}")
 
         # 收集所有中断
         interaction_chunks = []
@@ -1438,18 +1473,18 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
             if chunk.type == '__interaction__':
                 interaction_chunks.append(chunk)
                 print(f"✓ 中断组件ID: {chunk.payload.id}, 提示: {chunk.payload.value}")
-        
+
         self.assertEqual(len(interaction_chunks), 2, "应该同时返回2个中断（interactive和questioner）")
 
         # 10、使用InteractiveInput同时恢复所有中断
         print("\n【步骤2】使用InteractiveInput同时恢复所有中断")
         user_input = InteractiveInput()
-        
+
         # 根据中断提示内容智能填充恢复数据
         for chunk in interaction_chunks:
             interaction_id = chunk.payload.id
             interaction_value = str(chunk.payload.value)
-            
+
             # 根据提示内容判断应该填充什么数据
             if "跳转" in interaction_value or "确认" in interaction_value or "手机银行" in interaction_value:
                 user_input.update(interaction_id, "是，确认跳转手机银行操作界面")
@@ -1467,12 +1502,12 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
                     user_input.update(interaction_id, "在民生银行存钱5000元")
                     print(f"  填充中断 [{interaction_id}]: 在民生银行存钱5000元")
 
-        message2 = Message.create_user_message(content=user_input, conversation_id=conversation_id)
+        message2 = Event.create_user_event(content=user_input, conversation_id=conversation_id)
         chunks2 = []
         stream2 = Runner.run_agent_group_streaming(group, message2)
         async for chunk in stream2:
             chunks2.append(chunk)
-            print(f"agent group message2 chunk: {chunk}")
+            print(f"single_agent group message2 chunk: {chunk}")
 
         # 验证workflow完成
         final_chunk = None
@@ -1482,21 +1517,21 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
                 break
 
         self.assertIsNotNone(final_chunk, "应该有 workflow_final 输出")
-        
+
         # 验证最终结果包含预期的数据
         final_payload = final_chunk.payload
         print(f"✅ 步骤2成功：workflow 成功完成，结果: {final_payload}")
-        
+
         # 验证结果包含关键信息
         if isinstance(final_payload, dict):
-            response_str = final_payload.get('responseContent', str(final_payload))
+            response_str = final_payload.get('response', str(final_payload))
         else:
             response_str = str(final_payload)
-        
+
         self.assertIn("5000", response_str, "结果应包含金额5000")
         self.assertIn("存钱", response_str, "结果应包含操作类型：存钱")
         self.assertIn("确认跳转手机银行操作界面", response_str, "结果应包含确认信息")
-        
+
         print("\n🎉 test_hierarchical_group_014 测试完成！")
         print("   ✓ 成功创建包含多个workflow的WorkflowAgent")
         print("   ✓ 成功创建LLMAgent和ReactAgent")
@@ -1527,15 +1562,13 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
                      start -> interactive \
                               questioner  -> end
         """
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        card = WorkflowCard(
                 name=workflow_name,
                 id=workflow_id,
                 version="1.0",
                 description=workflow_desc,
             )
-        )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=card)
 
         # 创建组件
         start = self._create_start_component()
@@ -1550,8 +1583,25 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
             FieldInfo(field_name="amount", description="金额（数字）", required=True),
         ]
         model_config = self._create_model_config()
+        # client_provider 需要使用正确的大小写格式 (OpenAI, SiliconFlow)
+        provider = model_config.model_provider
+        if provider and provider.lower() == 'openai':
+            provider = 'OpenAI'
+        elif provider and provider.lower() == 'siliconflow':
+            provider = 'SiliconFlow'
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_client_config=ModelClientConfig(
+                client_provider=provider,
+                api_key=model_config.model_info.api_key,
+                api_base=model_config.model_info.api_base,
+                timeout=model_config.model_info.timeout,
+                verify_ssl=False,
+            ),
+            model_config=ModelRequestConfig(
+                model=model_config.model_info.model_name,
+                temperature=model_config.model_info.temperature,
+                top_p=model_config.model_info.top_p,
+            ),
             question_content="请您提供明确用户操作：存钱 还是 取钱, 具体金额相关的信息",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -1607,15 +1657,14 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
         Returns:
             Workflow: 包含 start -> interactive1 -> interactive2 -> end 的工作流
         """
-        workflow_config = WorkflowConfig(
-            metadata=WorkflowMetadata(
+        card = WorkflowCard(
                 name=workflow_name,
                 id=workflow_id,
                 version="1.0",
                 description=workflow_desc,
-            )
+
         )
-        flow = Workflow(workflow_config=workflow_config)
+        flow = Workflow(card=card)
 
         # 创建组件
         start = self._create_start_component()
@@ -1672,7 +1721,7 @@ class TestHierarchicalGroupFinancial(unittest.IsolatedAsyncioTestCase):
 # ============ 自定义Interactive组件 ============
 
 
-class InteractiveConfirmComponent(ComponentExecutable, WorkflowComponent):
+class InteractiveConfirmComponent(WorkflowComponent):
     """
     交互确认组件 - 用于用户确认操作
     """
@@ -1681,13 +1730,13 @@ class InteractiveConfirmComponent(ComponentExecutable, WorkflowComponent):
         super().__init__()
         self.comp_id = comp_id
 
-    async def invoke(self, inputs: Input, runtime: Runtime, context: Context) -> Output:
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         # 请求用户确认
-        confirm = await runtime.interact("是否跳转手机银行操作界面")
+        confirm = await session.interact("是否跳转手机银行操作界面")
         return {"confirm_result": confirm}
 
 
-class InteractivePasswordComponent(ComponentExecutable, WorkflowComponent):
+class InteractivePasswordComponent(WorkflowComponent):
     """
     交互密码输入组件
     """
@@ -1697,9 +1746,9 @@ class InteractivePasswordComponent(ComponentExecutable, WorkflowComponent):
         self.comp_id = comp_id
         self.prompt = prompt
 
-    async def invoke(self, inputs: Input, runtime: Runtime, context: Context) -> Output:
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         # 请求用户输入密码
-        password = await runtime.interact(self.prompt)
+        password = await session.interact(self.prompt)
         return {"password": password}
 
 

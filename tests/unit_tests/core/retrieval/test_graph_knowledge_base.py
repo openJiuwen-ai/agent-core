@@ -2,18 +2,16 @@
 """
 GraphRAG knowledge base implementation test cases
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval.graph_knowledge_base import GraphKnowledgeBase
-from openjiuwen.core.retrieval.common.config import (
-    KnowledgeBaseConfig,
-    RetrievalConfig,
-)
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
-from openjiuwen.core.retrieval.common.triple import Triple
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.retrieval import GraphKnowledgeBase
+from openjiuwen.core.retrieval import KnowledgeBaseConfig, RetrievalConfig
+from openjiuwen.core.retrieval import Document, TextChunk
+from openjiuwen.core.retrieval import Triple
+from openjiuwen.core.retrieval import RetrievalResult
 
 
 @pytest.fixture
@@ -26,9 +24,11 @@ def mock_config():
 def mock_parser():
     """Create mock parser"""
     parser = AsyncMock()
-    parser.parse = AsyncMock(return_value=[
-        Document(id_="doc_1", text="Test document 1"),
-    ])
+    parser.parse = AsyncMock(
+        return_value=[
+            Document(id_="doc_1", text="Test document 1"),
+        ]
+    )
     return parser
 
 
@@ -36,9 +36,11 @@ def mock_parser():
 def mock_chunker():
     """Create mock chunker"""
     chunker = MagicMock()
-    chunker.chunk_documents = MagicMock(return_value=[
-        TextChunk(id_="chunk_1", text="Test chunk 1", doc_id="doc_1"),
-    ])
+    chunker.chunk_documents = MagicMock(
+        return_value=[
+            TextChunk(id_="chunk_1", text="Test chunk 1", doc_id="doc_1"),
+        ]
+    )
     return chunker
 
 
@@ -46,14 +48,16 @@ def mock_chunker():
 def mock_extractor():
     """Create mock extractor"""
     extractor = AsyncMock()
-    extractor.extract = AsyncMock(return_value=[
-        Triple(
-            subject="Alice",
-            predicate="knows",
-            object="Bob",
-            metadata={"doc_id": "doc_1"},
-        ),
-    ])
+    extractor.extract = AsyncMock(
+        return_value=[
+            Triple(
+                subject="Alice",
+                predicate="knows",
+                object="Bob",
+                metadata={"doc_id": "doc_1"},
+            ),
+        ]
+    )
     return extractor
 
 
@@ -88,9 +92,7 @@ class TestGraphKnowledgeBase:
     """Graph knowledge base tests"""
 
     @pytest.mark.asyncio
-    async def test_parse_files_success(
-        self, mock_config, mock_parser
-    ):
+    async def test_parse_files_success(self, mock_config, mock_parser):
         """Test parsing files successfully"""
         kb = GraphKnowledgeBase(config=mock_config, parser=mock_parser)
         file_paths = ["test1.txt"]
@@ -152,13 +154,13 @@ class TestGraphKnowledgeBase:
         mock_embed_model,
     ):
         """Test graph retrieval"""
-        with patch(
-            "openjiuwen.core.retrieval.graph_knowledge_base.GraphRetriever"
-        ) as mock_graph_retriever_class:
+        with patch("openjiuwen.core.retrieval.graph_knowledge_base.GraphRetriever") as mock_graph_retriever_class:
             mock_graph_retriever = AsyncMock()
-            mock_graph_retriever.retrieve = AsyncMock(return_value=[
-                RetrievalResult(text="Test result", score=0.95),
-            ])
+            mock_graph_retriever.retrieve = AsyncMock(
+                return_value=[
+                    RetrievalResult(text="Test result", score=0.95),
+                ]
+            )
             mock_graph_retriever_class.return_value = mock_graph_retriever
 
             kb = GraphKnowledgeBase(
@@ -179,21 +181,24 @@ class TestGraphKnowledgeBase:
         mock_embed_model,
     ):
         """Test using Agentic retrieval"""
-        with patch(
-            "openjiuwen.core.retrieval.graph_knowledge_base.GraphRetriever"
-        ) as mock_graph_retriever_class, patch(
-            "openjiuwen.core.retrieval.graph_knowledge_base.AgenticRetriever"
-        ) as mock_agentic_retriever_class:
+        with (
+            patch("openjiuwen.core.retrieval.graph_knowledge_base.GraphRetriever") as mock_graph_retriever_class,
+            patch("openjiuwen.core.retrieval.graph_knowledge_base.AgenticRetriever") as mock_agentic_retriever_class,
+        ):
             mock_graph_retriever = AsyncMock()
-            mock_graph_retriever.retrieve = AsyncMock(return_value=[
-                RetrievalResult(text="Test result", score=0.95),
-            ])
+            mock_graph_retriever.retrieve = AsyncMock(
+                return_value=[
+                    RetrievalResult(text="Test result", score=0.95),
+                ]
+            )
             mock_graph_retriever_class.return_value = mock_graph_retriever
 
             mock_agentic_retriever = AsyncMock()
-            mock_agentic_retriever.retrieve = AsyncMock(return_value=[
-                RetrievalResult(text="Agentic result", score=0.98),
-            ])
+            mock_agentic_retriever.retrieve = AsyncMock(
+                return_value=[
+                    RetrievalResult(text="Agentic result", score=0.98),
+                ]
+            )
             mock_agentic_retriever_class.return_value = mock_agentic_retriever
 
             kb = GraphKnowledgeBase(
@@ -207,9 +212,7 @@ class TestGraphKnowledgeBase:
             mock_agentic_retriever_class.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_delete_documents_with_graph(
-        self, mock_config, mock_index_manager
-    ):
+    async def test_delete_documents_with_graph(self, mock_config, mock_index_manager):
         """Test deleting documents (with graph index enabled)"""
         kb = GraphKnowledgeBase(config=mock_config, index_manager=mock_index_manager)
         result = await kb.delete_documents(["doc_1"])
@@ -218,9 +221,7 @@ class TestGraphKnowledgeBase:
         assert mock_index_manager.delete_index.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_delete_documents_without_graph(
-        self, mock_config, mock_index_manager
-    ):
+    async def test_delete_documents_without_graph(self, mock_config, mock_index_manager):
         """Test deleting documents (without graph index)"""
         mock_config.use_graph = False
         kb = GraphKnowledgeBase(config=mock_config, index_manager=mock_index_manager)
@@ -254,9 +255,7 @@ class TestGraphKnowledgeBase:
         assert mock_index_manager.build_index.call_count >= 1
 
     @pytest.mark.asyncio
-    async def test_get_statistics_with_graph(
-        self, mock_config, mock_index_manager
-    ):
+    async def test_get_statistics_with_graph(self, mock_config, mock_index_manager):
         """Test getting statistics (with graph index enabled)"""
         kb = GraphKnowledgeBase(config=mock_config, index_manager=mock_index_manager)
         stats = await kb.get_statistics()
@@ -291,4 +290,3 @@ class TestGraphKnowledgeBase:
         mock_graph_retriever.close.assert_called_once()
         mock_chunk_retriever.close.assert_called_once()
         mock_triple_retriever.close.assert_called_once()
-

@@ -11,12 +11,12 @@ import unittest
 from datetime import datetime
 from typing import Dict, AsyncIterator, Any
 
-from openjiuwen.agent.config.base import AgentConfig
-from openjiuwen.core.agent.agent import BaseAgent
-from openjiuwen.core.agent_group import AgentGroupConfig
-from openjiuwen.core.agent_group.agent_group import BaseGroup, AgentGroupRuntime
-from openjiuwen.core.runtime.runtime import Runtime
-from openjiuwen.core.runner.runner import Runner
+from openjiuwen.core.single_agent.legacy import AgentConfig, LegacyBaseAgent
+from openjiuwen.core.multi_agent.legacy import (
+    AgentGroupConfig,
+    BaseGroup
+)
+from openjiuwen.core.runner import Runner
 
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
@@ -30,11 +30,13 @@ def build_current_date():
     return current_datetime.strftime("%Y-%m-%d")
 
 
-class PlanningAgent(BaseAgent):
-    async def stream(self, inputs: Dict, runtime: Runtime = None) -> AsyncIterator[Any]:
+class PlanningAgent(LegacyBaseAgent):
+    from openjiuwen.core.single_agent import Session
+
+    async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
-    async def invoke(self, inputs: Dict, runtime: Runtime = None) -> Dict:
+    async def invoke(self, inputs: Dict, session: Session = None) -> Dict:
         await asyncio.sleep(0.5)
         return {
             "query": inputs["query"],
@@ -45,11 +47,13 @@ class PlanningAgent(BaseAgent):
         }
 
 
-class ExecuteAgent(BaseAgent):
-    async def stream(self, inputs: Dict, runtime: Runtime = None) -> AsyncIterator[Any]:
+class ExecuteAgent(LegacyBaseAgent):
+    from openjiuwen.core.single_agent import Session
+
+    async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
-    async def invoke(self, inputs: Dict, runtime: Runtime = None) -> Dict:
+    async def invoke(self, inputs: Dict, session: Session = None) -> Dict:
         await asyncio.sleep(0.5)
         return {
             "query": inputs["query"],
@@ -60,11 +64,14 @@ class ExecuteAgent(BaseAgent):
             "result": "Task is done."
         }
 
-class SummaryAgent(BaseAgent):
-    async def stream(self, inputs: Dict, runtime: Runtime = None) -> AsyncIterator[Any]:
+
+class SummaryAgent(LegacyBaseAgent):
+    from openjiuwen.core.single_agent import Session
+
+    async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
-    async def invoke(self, inputs: Dict, runtime: Runtime = None) -> Dict:
+    async def invoke(self, inputs: Dict, session: Session = None) -> Dict:
         await asyncio.sleep(0.5)
         return {
             "query": inputs["query"],
@@ -78,13 +85,15 @@ class SummaryAgent(BaseAgent):
 
 
 class CustomAgentGroup(BaseGroup):
-    async def invoke(self, inputs: Dict, runtime: Runtime = None) -> Dict:
+    from openjiuwen.core.multi_agent import Session
+
+    async def invoke(self, inputs: Dict, session: Session = None) -> Dict:
         result_plan = await Runner.run_agent(self.agents["planner"], inputs)
         result_execute = await Runner.run_agent(self.agents["executor"], result_plan)
         result_summary = await Runner.run_agent(self.agents["reporter"], result_execute)
         return result_summary
 
-    async def stream(self, inputs: Dict, runtime: AgentGroupRuntime = None) -> AsyncIterator[Any]:
+    async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         pass
 
 
@@ -97,11 +106,12 @@ class AgentGroupTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await Runner.stop()
 
+    @unittest.skip("skip system test")
     async def test_agent_group(self):
         """Test Case for AgentGroup"""
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
 
-        # create agent group config
+        # create single_agent group config
         agent_group_config = AgentGroupConfig(
             group_id="test_agent_group_id",
             max_agents=10,

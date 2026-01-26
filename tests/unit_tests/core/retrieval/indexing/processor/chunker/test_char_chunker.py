@@ -2,12 +2,12 @@
 """
 Fixed-size chunker test cases
 """
+
 from unittest.mock import MagicMock, patch
 
-import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval import CharChunker
+from openjiuwen.core.retrieval import TextChunk
 
 
 class TestCharChunker:
@@ -42,9 +42,7 @@ class TestCharChunker:
         assert len(chunks) == 2
         assert chunks[0] == "chunk 1"
         assert chunks[1] == "chunk 2"
-        mock_splitter_class.assert_called_once_with(
-            chunk_size=10, chunk_overlap=2
-        )
+        mock_splitter_class.assert_called_once_with(chunk_size=10, chunk_overlap=2)
 
     @staticmethod
     def test_chunk_text_empty():
@@ -59,4 +57,3 @@ class TestCharChunker:
         chunker = CharChunker()
         chunks = chunker.chunk_text(None)
         assert chunks == []
-

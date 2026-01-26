@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import secrets
+
 from Crypto.Cipher import AES
 
 NONCE_LENGTH = 12

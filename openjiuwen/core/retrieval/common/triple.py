@@ -5,17 +5,17 @@ Triple Data Model
 
 Contains Triple data model.
 """
-from typing import Dict, Any, Optional
+
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
 
 class Triple(BaseModel):
     """Triple data model"""
+
     subject: str = Field(..., description="Subject")
     predicate: str = Field(..., description="Predicate")
     object: str = Field(..., description="Object")
     confidence: Optional[float] = Field(None, description="Confidence")
-    metadata: Dict[str, Any] = Field(
-        default_factory=dict, description="Metadata"
-    )
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata")

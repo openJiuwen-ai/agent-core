@@ -2,12 +2,11 @@
 """
 Document parser abstract base class test cases
 """
-from unittest.mock import AsyncMock
+
 
 import pytest
 
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
-from openjiuwen.core.retrieval.common.document import Document
+from openjiuwen.core.retrieval import Parser
 
 
 class ConcreteParser(Parser):
@@ -35,6 +34,7 @@ class TestParser:
     @pytest.mark.asyncio
     async def test_parse_empty_content(self):
         """Test parsing empty content"""
+
         class EmptyParser(Parser):
             async def _parse(self, file_path: str):
                 return None
@@ -76,4 +76,3 @@ class TestParser:
         parser = ConcreteParser()
         assert parser.supports("file.test") is True
         assert parser.supports("file.txt") is False
-
