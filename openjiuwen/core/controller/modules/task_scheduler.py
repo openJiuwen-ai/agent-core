@@ -20,24 +20,15 @@ Core workflow:
 import asyncio
 from typing import Callable, Dict, Optional
 
-from pydantic.v1 import BaseModel
+from pydantic import BaseModel
 
 from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.controller.base import ControllerConfig
+from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules.event_queue import EventQueue
 from openjiuwen.core.controller.modules.task_executor import TaskExecutor
 from openjiuwen.core.controller.modules.task_manager import TaskManager
 from openjiuwen.core.session import Session
 from openjiuwen.core.single_agent.agent import AbilityManager
-
-
-class TaskExecutorInfo(BaseModel):
-    task_type: str
-    config: ControllerConfig
-    ability_manager: AbilityManager
-    context_engine: ContextEngine
-    task_manager: TaskManager
-    event_queue: EventQueue
 
 
 class TaskExecutorRegistry:
@@ -82,7 +73,7 @@ class TaskExecutorRegistry:
 
     def get_task_executor(
             self,
-            task_executor_info: TaskExecutorInfo
+            task_executor_info
     ) -> TaskExecutor:
         """Build a concrete task executor instance.
 

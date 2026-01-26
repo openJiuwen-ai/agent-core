@@ -22,10 +22,10 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.controller.base import ControllerConfig
-from openjiuwen.core.controller.schema.event import Event
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.schema import Event
 from openjiuwen.core.session import Session
-from openjiuwen.core.single_agent.base import AbilityManager
+from openjiuwen.core.single_agent.agent import AbilityManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.task_manager import TaskManager
@@ -42,6 +42,9 @@ class EventHandlerInput(BaseModel):
         event: Event object.
         session: Session object.
     """
+    model_config = {"arbitrary_types_allowed": True}
+
+
     event: Event
     session: Session
 

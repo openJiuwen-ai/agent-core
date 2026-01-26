@@ -12,7 +12,7 @@ This module defines the core configuration and runtime controller:
 The controller is responsible for handling events, managing the lifecycle of
 tasks, and coordinating intent recognition and processing.
 """
-from typing import AsyncIterator, Optional, List, Callable
+from typing import AsyncIterator, Optional, List, Callable, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -27,7 +27,7 @@ from openjiuwen.core.controller.modules.task_executor import TaskExecutor
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent import AgentCard
-from openjiuwen.core.single_agent.base import AbilityManager
+from openjiuwen.core.single_agent.agent import AbilityManager
 
 
 class ControllerConfig(BaseModel):

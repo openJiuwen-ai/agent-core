@@ -29,7 +29,7 @@ from openjiuwen.core.workflow import WorkflowCard
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
 
 
-class AbilityKit:
+class AbilityManager:
     """Agent Ability Manager
 
     Responsibilities:
@@ -302,7 +302,7 @@ class BaseAgent(ABC):
 
     Attributes:
         card: Agent card (required)
-        _ability_kit: Ability manager
+        _ability_manager: Ability manager
     """
 
     def __init__(
@@ -315,7 +315,7 @@ class BaseAgent(ABC):
             card: Agent card (required)
         """
         self.card = card
-        self._ability_kit = AbilityKit()
+        self._ability_manager = AbilityManager()
 
     # ========== Configuration Interface ==========
     @abstractmethod
@@ -325,8 +325,8 @@ class BaseAgent(ABC):
 
     # ========== Ability Management Interface ==========
     @property
-    def ability_kit(self) -> AbilityKit:
-        return self._ability_kit
+    def ability_manager(self) -> AbilityManager:
+        return self._ability_manager
 
     def add_ability(self, ability: Union[Ability, List[Ability]]) -> 'BaseAgent':
         """Add an ability
@@ -339,7 +339,7 @@ class BaseAgent(ABC):
         """
         abilities = [ability] if not isinstance(ability, list) else ability
         for ab in abilities:
-            self._ability_kit.add(ab)
+            self._ability_manager.add(ab)
         return self
 
     def remove_ability(self, name: Union[str, List[str]]) -> 'BaseAgent':
@@ -353,7 +353,7 @@ class BaseAgent(ABC):
         """
         names = [name] if isinstance(name, str) else name
         for n in names:
-            self._ability_kit.remove(n)
+            self._ability_manager.remove(n)
         return self
 
     def get_ability(self, name: str) -> Optional[Ability]:
@@ -365,7 +365,7 @@ class BaseAgent(ABC):
         Returns:
             Ability Card, or None if not found
         """
-        return self._ability_kit.get(name)
+        return self._ability_manager.get(name)
 
     def list_abilities(self) -> List[Ability]:
         """List all ability Cards
@@ -373,7 +373,7 @@ class BaseAgent(ABC):
         Returns:
             List of ability Cards
         """
-        return self._ability_kit.list()
+        return self._ability_manager.list()
 
     async def list_tool_info(
             self,
@@ -387,7 +387,7 @@ class BaseAgent(ABC):
         Returns:
             List of ToolInfo objects
         """
-        return await self._ability_kit.list_tool_info(names=names)
+        return await self._ability_manager.list_tool_info(names=names)
 
     # ========== Query Interface ==========
     def get_tool_info(self) -> ToolInfo:
@@ -435,7 +435,7 @@ class BaseAgent(ABC):
 
         # Execute all tool calls in parallel
         tasks = [
-            self._ability_kit.execute(tool_call, session)
+            self._ability_manager.execute(tool_call, session)
             for tool_call in tool_calls
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)

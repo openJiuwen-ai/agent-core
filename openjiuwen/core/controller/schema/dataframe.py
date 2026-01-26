@@ -1,63 +1,62 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-
-
-"""Data frame data model definitions.
-
-This module defines data models related to data frames (``DataFrame``),
-which are used to transfer heterogeneous data types inside the controller.
-
-Supported data frame types:
-- TextDataFrame: text data.
-- FileDataFrame: file data (supports both bytes and URI).
-- JsonDataFrame: JSON data.
-
-``DataFrame`` is the basic unit for data exchange in the controller, used in
-events, task inputs/outputs and other scenarios.
 """
-from typing import Literal, Optional, Dict, Any, Union
+DataFrame Data Model Definitions
 
+This module defines DataFrame-related data models for transmitting
+different types of data in the controller.
+
+Supported Data Types:
+- TextDataFrame: Text data
+- FileDataFrame: File data (supports both bytes and URI methods)
+- JsonDataFrame: JSON format data
+
+DataFrame is the basic unit for data transmission in the controller,
+used for passing data in scenarios such as events, task input/output, etc.
+"""
+
+from typing import Literal, Optional, Dict, Any, Union
 from pydantic import BaseModel
 
 
 class BaseDataFrame(BaseModel):
-    """Base class for all data frames.
+    """Base DataFrame Class
 
-    Defines the common structure for data frames, which can be text, file or
-    JSON. All concrete data frame types inherit from this base class.
+    Defines the basic structure of a DataFrame, supporting three types: text, file, and JSON.
+    All specific DataFrame types inherit from this class.
 
     Attributes:
-        type: Data frame type, must be one of ``"text"``, ``"file"`` or
-            ``"json"``.
+        type: DataFrame type, must be one of "text", "file", or "json"
     """
     type: Literal["text", "file", "json"]
 
 
 class TextDataFrame(BaseDataFrame):
-    """Text data frame.
+    """Text DataFrame
 
-    Used to transport plain text content (e.g. user input, task descriptions).
+    Used for transmitting text-type data.
+    Suitable for transmitting plain text content, such as user input, task descriptions, etc.
 
     Attributes:
-        type: Data frame type, fixed to ``"text"``.
-        text: Text content.
+        type: DataFrame type, fixed as "text"
+        text: Text content
     """
     type: Literal["text", "file", "json"] = "text"
     text: str
 
 
 class FileDataFrame(BaseDataFrame):
-    """File data frame.
+    """File DataFrame
 
-    Used to transport file contents and metadata, supporting either inline
-    bytes or an external URI.
+    Used for transmitting file-type data, supporting both bytes and URI methods.
+    Suitable for transmitting file content, such as images, documents, etc.
 
     Attributes:
-        type: Data frame type, fixed to ``"file"``.
-        name: File name.
-        mimeType: MIME type such as ``"image/png"`` or ``"application/pdf"``.
-        bytes: Raw file bytes (optional, mutually exclusive with ``uri``).
-        uri: File URI (optional, mutually exclusive with ``bytes``).
+        type: DataFrame type, fixed as "file"
+        name: File name
+        mimeType: MIME type, such as "image/png", "application/pdf", etc.
+        bytes: Byte data of file content (optional, mutually exclusive with uri)
+        uri: File URI (optional, mutually exclusive with bytes)
     """
     type: Literal["text", "file", "json"] = "file"
     name: str
@@ -67,21 +66,17 @@ class FileDataFrame(BaseDataFrame):
 
 
 class JsonDataFrame(BaseDataFrame):
-    """JSON data frame.
+    """JSON DataFrame
 
-    Used to transport structured JSON data (e.g. configuration, API
-    responses).
+    Used for transmitting JSON format data.
+    Suitable for transmitting structured data, such as configuration information, API responses, etc.
 
     Attributes:
-        type: Data frame type, fixed to ``"json"``.
-        data: JSON payload as a dictionary.
+        type: DataFrame type, fixed as "json"
+        data: JSON data dictionary
     """
     type: Literal["text", "file", "json"] = "json"
     data: Dict[str, Any]
 
 
 DataFrame = Union[TextDataFrame, FileDataFrame, JsonDataFrame]
-
-
-
-

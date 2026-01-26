@@ -26,11 +26,8 @@ Supported event types:
 """
 from typing import Optional, Callable, Awaitable
 
-from openjiuwen.core.controller.base import ControllerConfig
 from openjiuwen.core.controller.schema.event import Event, EventType
-from openjiuwen.core.controller.modules.event_handler import EventHandlerInput, EventHandler
-from openjiuwen.core.runner import Runner
-from openjiuwen.core.runner.message_queue.message_queue import MessageQueueBase
+from openjiuwen.core.controller.modules.event_handler import EventHandler, EventHandlerInput
 
 
 class EventQueue:
@@ -50,7 +47,7 @@ class EventQueue:
     
     def __init__(
             self,
-            config: ControllerConfig,
+            config,
     ):
         """Initialize the event queue.
 
@@ -58,7 +55,7 @@ class EventQueue:
             config: Controller configuration.
         """
         self._config = config
-        self._queue: MessageQueueBase = Runner().pubsub()
+        self._queue = None
         self._event_handler: Optional[EventHandler] = None
 
     def set_event_handler(self, event_handler: EventHandler):

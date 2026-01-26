@@ -16,7 +16,7 @@ from openjiuwen.core.application.llm_agent import (
 from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
-from openjiuwen.core.controller import Task, TaskInput
+from openjiuwen.core.controller.legacy import Task, TaskInput
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.foundation.llm import ModelConfig, ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.workflow import End, WorkflowCard

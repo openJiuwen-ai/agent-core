@@ -16,7 +16,7 @@ This package contains the core building blocks used by the controller:
 """
 from openjiuwen.core.controller.modules.event_handler import EventHandlerInput, EventHandler
 from openjiuwen.core.controller.modules.event_queue import EventQueue
-from openjiuwen.core.controller.modules.task_manager import TaskManagerState, TaskManager
+from openjiuwen.core.controller.modules.task_manager import TaskManagerState, TaskManager, TaskFilter
 from openjiuwen.core.controller.modules.task_scheduler import TaskExecutor, TaskExecutorRegistry, TaskScheduler
 from openjiuwen.core.controller.modules.intent_reconizer import IntentRecognizer, EventHandlerWithIntentRecognition
 
@@ -29,6 +29,7 @@ __all__ = [
     # Task management
     "TaskManagerState",
     "TaskManager",
+    "TaskFilter",
     # Task execution and scheduling
     "TaskExecutor",
     "TaskExecutorRegistry",
