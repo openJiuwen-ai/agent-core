@@ -7,7 +7,7 @@ Responsible for building, updating and deleting ChromaDB indices.
 """
 
 import asyncio
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 import chromadb
 
@@ -28,14 +28,13 @@ class ChromaIndexer(Indexer):
 
     def __init__(
         self,
+        config: VectorStoreConfig,
         chroma_path: str,
         text_field: str = "content",
         vector_field: str | ChromaVectorField = "embedding",
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
-        database_name: str = "",
-        distance_metric: Literal["cosine", "euclidean", "dot"] = "cosine",
         doc_index_callback: type[BaseCallback] = TqdmCallback,
         **kwargs: Any,
     ):
@@ -43,14 +42,13 @@ class ChromaIndexer(Indexer):
         Initialize ChromaDB index manager
 
         Args:
+            config: Vector store configuration
             chroma_path: ChromaDB persistence path
             text_field: Text field name
             vector_field: Vector field name (str) or definition (ChromaVectorField)
             sparse_vector_field: Sparse vector field name
             metadata_field: Metadata field name
             doc_id_field: Document ID field name
-            database_name: name of the database to use
-            distance_metric: distance metric for vector search
             doc_index_callback: class of callback object to use, must be subclass of BaseCallback
         """
         if not chroma_path or not chroma_path.strip():
@@ -63,19 +61,7 @@ class ChromaIndexer(Indexer):
         self.sparse_vector_field = sparse_vector_field
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
-        self.database_name = database_name
-        match distance_metric:
-            case "cosine":
-                self._distance_metric = "cosine"
-            case "euclidean":
-                self._distance_metric = "l2"
-            case "dot":
-                self._distance_metric = "ip"
-            case _:
-                raise build_error(
-                    StatusCode.RETRIEVAL_INDEXING_DISTANCE_METRIC_INVALID,
-                    error_msg=f'expecting one of ["cosine", "euclidean", "dot"], but got "{distance_metric}"',
-                )
+        self.database_name = config.database_name
         if isinstance(vector_field, str):
             self.vector_field = ChromaVectorField(vector_field=vector_field)
         elif isinstance(vector_field, ChromaVectorField):
@@ -85,6 +71,7 @@ class ChromaIndexer(Indexer):
                 StatusCode.RETRIEVAL_INDEXING_VECTOR_FIELD_INVALID,
                 error_msg="vector_field must be either a str or ChromaVectorField instance",
             )
+        self._distance_metric = config.distance_metric.replace("dot", "ip").replace("euclidean", "l2")
         self._construct_config = self.vector_field.to_dict(stage="construct")
         self._construct_config["space"] = self._distance_metric
         self._search_config = self.vector_field.to_dict(stage="search")
@@ -99,7 +86,7 @@ class ChromaIndexer(Indexer):
             )
 
         self._client = ChromaVectorStore.create_client(
-            database_name=database_name,
+            database_name=self.database_name,
             path_or_uri=chroma_path,
         )
 
@@ -166,7 +153,7 @@ class ChromaIndexer(Indexer):
 
             # Convert TextChunk to ChromaDB required fields
             data = []
-            for idx, chunk in enumerate(chunks):
+            for chunk in chunks:
                 meta = chunk.metadata or {}
                 item = {
                     "id": chunk.id_,
