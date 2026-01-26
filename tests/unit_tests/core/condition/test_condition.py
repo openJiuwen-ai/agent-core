@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, Mock
 import pytest
 
 from openjiuwen.core.common.constants.constant import MAX_EXPRESSION_LENGTH, MAX_AST_DEPTH
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow import Condition, FuncCondition, AlwaysTrue
@@ -398,7 +399,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if syntax error is handled correctly
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition.invoke({}, self.mock_session)
     
     def test_expression_eval_error(self):
@@ -411,7 +412,7 @@ class TestExpressionCondition(TestConditionBase):
         expr_condition = ExpressionCondition(expression)
         
         # Test if evaluation error is handled correctly
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition.invoke({}, self.mock_session)
     
     def test_disallowed_operations(self):
@@ -419,21 +420,21 @@ class TestExpressionCondition(TestConditionBase):
         # Test disallowed variable
         expression_1 = "disallowed_var > 5"
         expr_condition_1 = ExpressionCondition(expression_1)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_1.invoke({}, self.mock_session)
         
         # Test disallowed attribute access
         expression_2 = "${a}.disallowed_attr"
         self.mock_state.get_global.side_effect = lambda x: object() if x == "a" else None
         expr_condition_2 = ExpressionCondition(expression_2)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_2.invoke({}, self.mock_session)
         
         # Test disallowed function call
         expression_3 = "str(${a})"
         self.mock_state.get_global.side_effect = lambda x: 5 if x == "a" else None
         expr_condition_3 = ExpressionCondition(expression_3)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_3.invoke({}, self.mock_session)
 
     def test_complex_nested_expressions(self):
@@ -454,25 +455,25 @@ class TestExpressionCondition(TestConditionBase):
         # Test prohibited module import
         expression_1 = "__import__('os').system('ls')"
         expr_condition_1 = ExpressionCondition(expression_1)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_1.invoke({}, self.mock_session)
         
         # Test prohibited system command
         expression_2 = "import('os').system('ls')"
         expr_condition_2 = ExpressionCondition(expression_2)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_2.invoke({}, self.mock_session)
         
         # Test prohibited file operation
         expression_3 = "open('test.txt', 'r')"
         expr_condition_3 = ExpressionCondition(expression_3)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_3.invoke({}, self.mock_session)
         
         # Test prohibited nested eval
         expression_4 = "eval('2 + 2')"
         expr_condition_4 = ExpressionCondition(expression_4)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_4.invoke({}, self.mock_session)
     
     def test_prevent_object_method_escape(self):
@@ -483,7 +484,7 @@ class TestExpressionCondition(TestConditionBase):
         self.mock_state.get_global.side_effect = lambda x: mock_obj if x == "obj" else None
         expr_condition = ExpressionCondition(expression)
         
-        with pytest.raises(JiuWenBaseException) as excinfo:
+        with pytest.raises(BaseError) as excinfo:
             expr_condition.invoke({}, self.mock_session)
         # Either the regex check or the attribute access check will trigger
         assert "prohibited" in str(excinfo.value) or "Disallowed operation" in str(excinfo.value)
@@ -492,7 +493,7 @@ class TestExpressionCondition(TestConditionBase):
         expression = "${obj}.__class__.__subclasses__()"
         expr_condition = ExpressionCondition(expression)
         
-        with pytest.raises(JiuWenBaseException) as excinfo:
+        with pytest.raises(BaseError) as excinfo:
             expr_condition.invoke({}, self.mock_session)
         # Either the regex check or the attribute access check will trigger
         assert "prohibited" in str(excinfo.value) or "Disallowed operation" in str(excinfo.value)
@@ -503,10 +504,10 @@ class TestExpressionCondition(TestConditionBase):
         expression = "len.__module__"
         expr_condition = ExpressionCondition(expression)
         
-        with pytest.raises(JiuWenBaseException) as excinfo:
+        with pytest.raises(BaseError) as excinfo:
             expr_condition.invoke({}, self.mock_session)
         # This should be caught by the regex check for disallowed operations
-        assert "Disallowed operation" in str(excinfo.value)
+        assert "expression evaluation error" in str(excinfo.value)
         
         # Test access to __dict__ attribute
         expression = "${obj}.__dict__"
@@ -514,10 +515,10 @@ class TestExpressionCondition(TestConditionBase):
         self.mock_state.get_global.side_effect = lambda x: mock_obj if x == "obj" else None
         expr_condition = ExpressionCondition(expression)
         
-        with pytest.raises(JiuWenBaseException) as excinfo:
+        with pytest.raises(BaseError) as excinfo:
             expr_condition.invoke({}, self.mock_session)
         # Either the regex check or the attribute access check will trigger
-        assert "prohibited" in str(excinfo.value) or "Disallowed operation" in str(excinfo.value)
+        assert "expression evaluation error" in str(excinfo.value)
     
     def test_prevent_resource_exhaustion(self):
         """Test prevention of resource exhaustion attacks"""
@@ -525,7 +526,7 @@ class TestExpressionCondition(TestConditionBase):
         expression = "[0] * 1000000000"
         expr_condition = ExpressionCondition(expression)
         
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition.invoke({}, self.mock_session)
         
         # Test large dictionary creation
@@ -538,7 +539,7 @@ class TestExpressionCondition(TestConditionBase):
         # This would normally fail during parsing or execution due to resource limits
         try:
             expr_condition.invoke({}, self.mock_session)
-        except JiuWenBaseException:
+        except BaseError:
             pass  # Expected behavior
         
         # Test large slice operation - use a different approach that ensures we test our code
@@ -551,7 +552,7 @@ class TestExpressionCondition(TestConditionBase):
         # For this test, we just need to ensure it doesn't crash and raises the expected exception type
         try:
             expr_condition.invoke({}, self.mock_session)
-        except JiuWenBaseException:
+        except BaseError:
             pass  # Expected behavior
     
     def test_large_collection_protection(self):
@@ -559,7 +560,7 @@ class TestExpressionCondition(TestConditionBase):
         # Test large list multiplication operation (could cause memory exhaustion)
         expression_1 = "is_not_empty([0] * (10 ** 10))"
         expr_condition_1 = ExpressionCondition(expression_1)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_1.invoke({}, self.mock_session)
         
         # Test large list referenced by variable
@@ -567,13 +568,13 @@ class TestExpressionCondition(TestConditionBase):
         self.mock_state.get_global.return_value = large_list
         expression_2 = "is_not_empty(${large_list})"
         expr_condition_2 = ExpressionCondition(expression_2)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_2.invoke({}, self.mock_session)
         
         # Test large exponentiation protection
         expression_3 = "2 ** 1000"
         expr_condition_3 = ExpressionCondition(expression_3)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_3.invoke({}, self.mock_session)
     
     def test_large_list_literal_protection(self):
@@ -590,7 +591,7 @@ class TestExpressionCondition(TestConditionBase):
         self.mock_state.get_global.side_effect = lambda x: [0] * 100001 if x == "very_large_list" else None
         expression_large = "${very_large_list} * 2"
         expr_condition_large = ExpressionCondition(expression_large)
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             expr_condition_large.invoke({}, self.mock_session)
     
     def test_expression_length_limit(self):
@@ -607,12 +608,12 @@ class TestExpressionCondition(TestConditionBase):
         # The safe expression should initialize successfully
         try:
             safe_condition.invoke({}, self.mock_session)
-        except JiuWenBaseException as e:
+        except BaseError as e:
             if "length exceeds maximum allowed length" in str(e):
                 pytest.fail("Expression within length limit was rejected")
         
         # The too long expression should raise an exception during initialization
-        with pytest.raises(JiuWenBaseException) as excinfo:
+        with pytest.raises(BaseError) as excinfo:
             ExpressionCondition(too_long_expression)
         assert "length exceeds maximum allowed length" in str(excinfo.value)
     
@@ -627,7 +628,7 @@ class TestExpressionCondition(TestConditionBase):
         # This should raise an exception during evaluation due to excessive nesting
         self.mock_state.get_global.side_effect = lambda x: 1 if x == "a" else None
         deep_condition = ExpressionCondition(too_deep_nesting)
-        with pytest.raises(JiuWenBaseException) as excinfo:
+        with pytest.raises(BaseError) as excinfo:
             deep_condition.invoke({}, self.mock_session)
         assert "nesting depth exceeds maximum allowed depth" in str(excinfo.value)
     
@@ -650,7 +651,7 @@ class TestExpressionCondition(TestConditionBase):
         
         expr_condition = ExpressionCondition(nested_expr)
         self.mock_state.get_global.side_effect = lambda x: 5 if x == "a" else None
-        with pytest.raises(JiuWenBaseException) as excinfo:
+        with pytest.raises(BaseError) as excinfo:
             expr_condition.invoke({}, self.mock_session)
         assert "nesting depth exceeds maximum allowed depth" in str(excinfo.value)
 

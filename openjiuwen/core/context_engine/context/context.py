@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import ContextError
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.token.base import TokenCounter
@@ -80,9 +80,9 @@ class SessionModelContext(ModelContext):
 
     def pop_messages(self, size: int = 1, with_history: bool = True) -> List[BaseMessage]:
         if size is not None and size < 0:
-            raise ContextError(
-                StatusCode.CONTEXT_POP_MESSAGE_ERROR,
-                msg="pop size should be larger than 0"
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg="pop size should be larger than 0"
             )
 
         popped_messages = self._message_buffer.pop_back(size, with_history)
@@ -90,9 +90,9 @@ class SessionModelContext(ModelContext):
 
     def get_messages(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
         if size is not None and size < 0:
-            raise ContextError(
-                StatusCode.CONTEXT_GET_MESSAGE_ERROR,
-                msg="get size should be larger than 0"
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg="get size should be larger than 0"
             )
 
         messages = self._message_buffer.get_back(size, with_history=with_history)
@@ -114,15 +114,15 @@ class SessionModelContext(ModelContext):
                                  **kwargs
                                  ) -> ContextWindow:
         if window_size is not None and window_size <= 0:
-            raise ContextError(
-                StatusCode.CONTEXT_GET_CONTEXT_WINDOW_ERROR,
-                msg="window size should be larger than 0"
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg="window size should be larger than 0"
             )
 
         if dialogue_round is not None and dialogue_round <= 0:
-            raise ContextError(
-                StatusCode.CONTEXT_GET_CONTEXT_WINDOW_ERROR,
-                msg="dialogue round should be larger than 0"
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg="dialogue round should be larger than 0"
             )
 
         system_messages = system_messages or []
@@ -256,14 +256,14 @@ class SessionModelContext(ModelContext):
         if isinstance(messages, list):
             for msg in messages:
                 if not isinstance(msg, BaseMessage):
-                    raise ContextError(
-                        StatusCode.CONTEXT_MESSAGE_VALIDATION_ERROR,
-                        msg="messages should be a BaseMessage or a list of BaseMessage"
+                    raise build_error(
+                        StatusCode.CONTEXT_MESSAGE_INVALID,
+                        error_msg="messages should be a BaseMessage or a list of BaseMessage"
                     )
             return
-        raise ContextError(
-            StatusCode.CONTEXT_MESSAGE_VALIDATION_ERROR,
-            msg="messages should be a BaseMessage or a list of BaseMessage"
+        raise build_error(
+            StatusCode.CONTEXT_MESSAGE_INVALID,
+                error_msg="messages should be a BaseMessage or a list of BaseMessage"
         )
 
     @staticmethod

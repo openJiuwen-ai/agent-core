@@ -5,7 +5,7 @@ from typing import Optional, Union, Any
 
 from openjiuwen.core.multi_agent import BaseGroup
 from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
-from openjiuwen.core.single_agent.legacy import AgentConfig, LegacyBaseAgent as BaseAgent
+from openjiuwen.core.single_agent import BaseAgent, LegacyBaseAgent
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
@@ -15,12 +15,14 @@ from openjiuwen.core.runner.drunner.dmessage_queue.message_queue_factory import 
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.runner_config import RunnerConfig, DEFAULT_RUNNER_CONFIG, set_runner_config, \
     get_runner_config
-from openjiuwen.core.session import StaticAgentSession
+
 from openjiuwen.core.session import get_default_inmemory_checkpointer
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 from openjiuwen.core.session import Session
-from openjiuwen.core.session import WorkflowSession
-from openjiuwen.core.session import TaskSession
+from openjiuwen.core.workflow import Session as WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
+from openjiuwen.core.single_agent import Session as AgentSession, AgentCard
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.workflow import generate_workflow_key
 from openjiuwen.core.workflow import Workflow
@@ -133,7 +135,6 @@ class Runner:
                            *,
                            session: Optional[str | Session] = None,
                            context: ModelContext = None,
-                           user_id: Optional[str] = None,
                            envs: Optional[dict[str, Any]] = None):
         """
         Execute a workflow with given inputs.
@@ -143,7 +144,6 @@ class Runner:
             inputs: Input data for the workflow
             session: Existing session ID or Session instance for context persistence
             context: model context
-            user_id: User identifier for the execution
             envs: Environment variables or configuration overrides,
         """
         workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
@@ -156,7 +156,6 @@ class Runner:
                                      session: Optional[str | Session] = None,
                                      context: ModelContext = None,
                                      stream_modes: list[BaseStreamMode] = None,
-                                     user_id: Optional[str] = None,
                                      envs: Optional[dict[str, Any]] = None):
         """
         Execute a workflow with streaming output support.
@@ -167,7 +166,6 @@ class Runner:
             session: Existing session ID or Session instance for context persistence
             context: model context
             stream_modes: Types of streaming data to output
-            user_id: User identifier for the execution
             envs: Environment variables or configuration overrides
         """
         workflow_instance, workflow_session = await self._prepare_workflow(workflow, session)
@@ -176,12 +174,11 @@ class Runner:
             yield chunk
 
     async def run_agent(self,
-                        agent: str | BaseAgent,
+                        agent: str | BaseAgent | LegacyBaseAgent,
                         inputs: Any,
                         *,
                         session: Optional[str | Session] = None,
                         context: ModelContext = None,
-                        user_id: Optional[str] = None,
                         envs: Optional[dict[str, Any]] = None,
                         ):
         """
@@ -192,28 +189,26 @@ class Runner:
             inputs: Input data for the agent
             session: Existing session ID or Session instance for context persistence
             context: model context
-            user_id: User identifier for the execution
             envs: Environment variables or configuration overrides
         """
         agent_instance, agent_session = await self._prepare_agent(agent, inputs)
         if isinstance(agent_instance, RemoteAgent):
             res = await agent_instance.invoke(inputs)
-        elif isinstance(agent_instance, BaseAgent):
+        elif isinstance(agent_instance, LegacyBaseAgent):
             # ControllerAgent handles its own session lifecycle
             res = await agent_instance.invoke(inputs, session=None)
         else:
             res = await agent_instance.invoke(inputs, agent_session)
-            await agent_session.post_run()
+            await getattr(agent_session, "_inner").post_run()
         return res
 
     async def run_agent_streaming(self,
-                                  agent: str | BaseAgent,
+                                  agent: str | BaseAgent | LegacyBaseAgent,
                                   inputs: Any,
                                   *,
                                   session: Optional[str | Session] = None,
                                   context: ModelContext = None,
                                   stream_modes: list[BaseStreamMode] = None,
-                                  user_id: Optional[str] = None,
                                   envs: Optional[dict[str, Any]] = None):
         """
            Execute a single agent with streaming output support.
@@ -224,17 +219,20 @@ class Runner:
                session: Existing session ID or Session instance for context persistence
                context: model context
                stream_modes: Types of streaming data to output
-               user_id: User identifier for the execution
                envs: Environment variables or configuration override
         """
-        agent_instance, agent_session = await self._prepare_agent(agent, inputs)
+        agent_instance, agent_session = await self._prepare_agent(agent, inputs, session)
         if isinstance(agent_instance, RemoteAgent):
             async for chunk in agent_instance.stream(inputs):
                 yield chunk
-        elif isinstance(agent_instance, BaseAgent):
+        elif isinstance(agent_instance, LegacyBaseAgent):
             # ControllerAgent handles its own session lifecycle
             async for chunk in agent_instance.stream(inputs, session=None):
                 yield chunk
+        else:
+            async for chunk in agent_instance.stream(inputs, session=agent_session):
+                yield chunk
+            await getattr(agent_session, "_inner").post_run()
 
     async def run_agent_group(self,
                               agent_group: str | BaseGroup,
@@ -242,7 +240,6 @@ class Runner:
                               *,
                               session: Optional[str | Session] = None,
                               context: ModelContext = None,
-                              user_id: Optional[str] = None,
                               envs: Optional[dict[str, Any]] = None
                               ):
         """
@@ -252,11 +249,10 @@ class Runner:
             agent_group: AgentGroup name or instance to execute
             inputs: Input data for the agent group
             session: Existing session ID or Session instance for context persistence
-            context: model context
-            user_id: User identifier for the execution
+            context: model contex
             envs: Environment variables or configuration overrides
         """
-        agent_group_instance = self._prepare_agent_group(agent_group)
+        agent_group_instance = await self._prepare_agent_group(agent_group)
         return await agent_group_instance.invoke(inputs)
 
     async def run_agent_group_streaming(self,
@@ -266,7 +262,6 @@ class Runner:
                                         session: Optional[str | Session] = None,
                                         context: ModelContext = None,
                                         stream_modes: list[BaseStreamMode] = None,
-                                        user_id: Optional[str] = None,
                                         envs: Optional[dict[str, Any]] = None,
                                         ):
         """
@@ -278,10 +273,9 @@ class Runner:
             session: Existing session ID or Session instance for context persistence
             context: model context
             stream_modes: Types of streaming data to output
-            user_id: User identifier for the execution
             envs: Environment variables or configuration overrides
         """
-        agent_group_instance = self._prepare_agent_group(agent_group)
+        agent_group_instance = await self._prepare_agent_group(agent_group)
         async for chunk in agent_group_instance.stream(inputs):
             yield chunk
 
@@ -294,71 +288,84 @@ class Runner:
         """
         await get_default_inmemory_checkpointer().release(session_id)
 
-    def _check_is_agent_workflow(self, session, workflow_key) -> bool:
-        if not self._is_called_by_agent(session):
-            return True
-        agent_config: AgentConfig = session.get_agent_config()
-
-        for workflow_schema in agent_config.workflows:
-            if generate_workflow_key(workflow_schema.id, workflow_schema.version) == workflow_key:
-                return True
-        return False
-
     @classmethod
     def _is_called_by_agent(cls, session: Session) -> bool:
-        return session and isinstance(session, TaskSession)
+        return session and isinstance(session, AgentSession)
 
     @classmethod
     def _create_workflow_session(cls, session):
         # Convert workflow session
         if not session:
-            workflow_session = WorkflowSession()
-        elif isinstance(session, TaskSession):
+            workflow_session = create_workflow_session()
+        elif isinstance(session, str):
+            workflow_session = create_workflow_session(session_id=session)
+        elif isinstance(session, AgentSession):
             workflow_session = session.create_workflow_session()
         else:
             workflow_session = session
         return workflow_session
 
-    async def _prepare_agent(self, agent: Union[str, BaseAgent], inputs: Any):
-        session_id = inputs.get(self._AGENT_CONVERSATION_ID, self._DEFAULT_AGENT_SESSION_ID)
+    async def _prepare_agent(self, agent: Union[str, BaseAgent], inputs: Any, session: Optional[str | Session] = None):
+        session_id = inputs.get(self._AGENT_CONVERSATION_ID,
+                                session if isinstance(session, str) else self._DEFAULT_AGENT_SESSION_ID)
         if isinstance(agent, str):
-            agent_with_session = await self._resource_manager.get_agent(id=agent)
-            if agent_with_session is None:
+            agent_instance = await self._resource_manager.get_agent(agent_id=agent)
+            if agent_instance is None:
                 raise JiuWenBaseException(StatusCode.AGENT_NOT_FOUND.code,
                                           StatusCode.AGENT_NOT_FOUND.errmsg.format(agent))
-            if isinstance(agent_with_session, RemoteAgent):
+            if isinstance(agent_instance, RemoteAgent):
                 # Remote single_agent does not add session, keep sessionId in input
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
-                return agent_with_session, None
-            task_session = TaskSession(
-                inner=(await agent_with_session.session.create_agent_session(session_id, inputs)))
-            return agent_with_session.agent, task_session
-        agent_session = StaticAgentSession(agent.config(), resource_mgr=self._resource_manager)
-        task_session = TaskSession(inner=await agent_session.create_agent_session(session_id, inputs))
+                return agent_instance, None
+            if hasattr(agent_instance, "card"):
+                card = agent_instance.card
+            else:
+                # LegacyBaseAgent does not have card attribute
+                card = AgentCard(id=agent_instance.config().get_agent_config().id)
+            task_session = create_agent_session(session_id=session_id,
+                                                envs=getattr(agent_instance.config(), "_env"), card=card)
+            await get_default_inmemory_checkpointer().pre_agent_execute(
+                getattr(getattr(task_session, "_inner"), "_inner"), inputs)
+            return agent_instance, task_session
+
+        if hasattr(agent, "card"):
+            card = agent.card
+        else:
+            # LegacyBaseAgent does not have card attribute
+            card = AgentCard(id=agent.config().get_agent_config().id)
+
+        if callable(getattr(agent, "config", None)):
+            config_obj = agent.config()
+        else:
+            config_obj = agent.config
+
+        task_session = create_agent_session(session_id=session_id,
+                                            envs=getattr(config_obj, "_env", None), card=card)
+        await get_default_inmemory_checkpointer().pre_agent_execute(getattr(getattr(task_session, "_inner"), "_inner"),
+                                                                    inputs)
         return agent, task_session
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],
-                                session: Union[Session, WorkflowSession]) -> tuple[Workflow, WorkflowSession]:
+                                session: str | Session | WorkflowSession) -> tuple[Workflow, WorkflowSession]:
         if isinstance(workflow, str):
             workflow_key = workflow
         else:
             workflow_key = generate_workflow_key(workflow.card.id, workflow.card.version)
 
-        if not self._check_is_agent_workflow(session, workflow_key):
-            raise JiuWenBaseException(StatusCode.WORKFLOW_NOT_BOUND_TO_AGENT.code,
-                                      StatusCode.WORKFLOW_NOT_BOUND_TO_AGENT.errmsg)
-
         workflow_session = self._create_workflow_session(session)
         if isinstance(workflow, str):
-            workflow_instance = await self._resource_manager.get_workflow(id=workflow_key, session=workflow_session)
+            workflow_instance = await self._resource_manager.get_workflow(workflow_id=workflow_key,
+                                                                          session=workflow_session)
         else:
             workflow_instance = workflow
         return workflow_instance, workflow_session
 
-    def _prepare_agent_group(self, agent_group: Union[str, BaseGroup]):
+    async def _prepare_agent_group(self, agent_group: Union[str, BaseGroup]):
         if isinstance(agent_group, str):
-            return self._resource_manager.get_agent_group(id=agent_group)
+            return await self._resource_manager.get_agent_group(
+                group_id=agent_group
+            )
         return agent_group
 
 

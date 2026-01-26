@@ -106,12 +106,13 @@ class SubscriptionInMemory(SubscriptionBase):
 
 
 class MessageQueueInMemory(MessageQueueBase):
-    def __init__(self, queue_max_size=10000):
+    def __init__(self, queue_max_size=10000, timeout=120000.0):
         self._is_running = False
         self._subscribers: ThreadSafeDict[str, SubscriptionInMemory] = ThreadSafeDict()
         self._queue_max_size = queue_max_size
         self._queue = asyncio.Queue(maxsize=self._queue_max_size)
         self._consume_task = None
+        self._timeout = timeout
 
     def start(self):
         if not self._is_running:
@@ -134,7 +135,7 @@ class MessageQueueInMemory(MessageQueueBase):
     def subscribe(self, topic: str) -> SubscriptionInMemory:
         if topic in self._subscribers:
             raise ValueError(f"Topic '{topic}' is already subscribed.")
-        subscription = SubscriptionInMemory(max_size=self._queue_max_size)
+        subscription = SubscriptionInMemory(max_size=self._queue_max_size, timeout=self._timeout)
         self._subscribers[topic] = subscription
         return subscription
 

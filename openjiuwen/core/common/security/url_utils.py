@@ -18,17 +18,17 @@ class UrlUtils:
     def check_url_is_valid(url):
         """check url is valid"""
         if not url:
-            ExceptionUtils.raise_exception(StatusCode.URL_INVALID_ERROR, 'url is empty')
+            ExceptionUtils.raise_exception(StatusCode.COMMON_URL_INPUT_INVALID, 'url is empty')
         parsed_url = urlparse(url)
         hostname = parsed_url.hostname
         if not re.match(r"^https?://.*$", url):
-            ExceptionUtils.raise_exception(StatusCode.URL_INVALID_ERROR, 'illegal url protocol')
+            ExceptionUtils.raise_exception(StatusCode.COMMON_URL_INPUT_INVALID, 'illegal url protocol')
         try:
             ip_address = socket.gethostbyname(hostname)
         except socket.error:
-            ExceptionUtils.raise_exception(StatusCode.URL_INVALID_ERROR, f"resolving IP address failed")
+            ExceptionUtils.raise_exception(StatusCode.COMMON_URL_INPUT_INVALID, f"resolving IP address failed")
         if UrlUtils._is_inner_ipaddress(ip_address):
-            ExceptionUtils.raise_exception(StatusCode.URL_INVALID_ERROR, f"illegal ip address")
+            ExceptionUtils.raise_exception(StatusCode.COMMON_URL_INPUT_INVALID, f"illegal ip address")
 
     @staticmethod
     def get_global_proxy_url(url: str) -> Optional[str]:

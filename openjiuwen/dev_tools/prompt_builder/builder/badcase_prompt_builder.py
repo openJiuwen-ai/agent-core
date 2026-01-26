@@ -3,9 +3,9 @@
 import re
 from typing import Optional, List, AsyncGenerator
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import prompt_builder_logger, LogEventType
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, AssistantMessage
 
@@ -69,7 +69,11 @@ class BadCasePromptBuilder(BasePromptBuilder):
         intent = re.findall(r"<intent>((?:(?!<intent>).)*?)</intent>", response.content, re.DOTALL)
         intent = [intent_text.strip() for intent_text in intent]
         if "false" in intent:
-            logger.warning("Failed to get intent")
+            prompt_builder_logger.warning(
+                "Failed to get intent",
+                event_type=LogEventType.AGENT_ERROR,
+                input_data=response,
+            )
         text_match = re.findall(r"<summary>((?:(?!</summary>).)*?)</summary>", response.content, re.DOTALL)
         parse_summary = text_match[-1].strip() if len(text_match) >= 1 else response.content
         return parse_summary
@@ -89,30 +93,22 @@ class BadCasePromptBuilder(BasePromptBuilder):
 
     def _validate_input(self, prompt: str, cases: List[EvaluatedCase]):
         if prompt is None:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"prompt cannot be None"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"prompt cannot be None"
             )
         if not prompt.strip():
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"prompt cannot be empty"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"prompt cannot be empty"
             )
         if not cases:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"The cases cannot be empty"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"The cases cannot be empty"
             )
         if len(cases) > MAX_CASES_LIMIT:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR.errmsg.format(
-                    error_msg=f"The number of cases cannot exceed {MAX_CASES_LIMIT}"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR,
+                error_msg=f"The number of cases cannot exceed {MAX_CASES_LIMIT}"
             )

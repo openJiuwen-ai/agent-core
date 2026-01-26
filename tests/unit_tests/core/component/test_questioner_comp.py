@@ -8,8 +8,7 @@ import pytest
 
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
 from openjiuwen.core.session import InteractionOutput
-from openjiuwen.core.session import Session
-from openjiuwen.core.session import TaskSession
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.foundation.llm import ModelConfig, ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.workflow import End
@@ -22,6 +21,7 @@ from openjiuwen.core.session.stream import TraceSchema, OutputSchema
 from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
+from openjiuwen.core.single_agent import create_agent_session
 
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
@@ -77,11 +77,12 @@ class TestQuestionComp:
 
     @staticmethod
     def _create_context(session_id):
-        return TaskSession(trace_id=session_id)
+        return Session(session_id=session_id)
 
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_invoke_questioner_component_in_workflow_initial_ask(self, mock_get_model, mock_init_prompt,
                                                                  mock_llm_inputs,
@@ -95,7 +96,7 @@ class TestQuestionComp:
         mock_llm_inputs.return_value = mock_prompt_template
         mock_extraction.return_value = dict(location="hangzhou")
 
-        context = TaskSession(trace_id="test")
+        context = Session(session_id="test")
         flow = Workflow()
 
         key_fields = [
@@ -103,13 +104,7 @@ class TestQuestionComp:
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         questioner_config = QuestionerConfig(
@@ -132,11 +127,12 @@ class TestQuestionComp:
 
         result = self.invoke_workflow({"query": "查询杭州的天气"}, context, flow)
         assert result == WorkflowOutput(
-            result={'responseContent': "hangzhou | today"},
+            result={'response': "hangzhou | today"},
             state=WorkflowExecutionState.COMPLETED)
 
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_invoke_questioner_component_in_workflow_repeat_ask(self, mock_get_model, mock_llm_inputs,
                                                                 mock_extraction):
@@ -158,13 +154,7 @@ class TestQuestionComp:
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         questioner_config = QuestionerConfig(
@@ -186,7 +176,7 @@ class TestQuestionComp:
         flow.add_connection("questioner", "e")
 
         session_id = "test_questioner"
-        workflow_context = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_context = Session(session_id=session_id).create_workflow_session()
         first_question = self.invoke_workflow_with_workflow_context({"query": "你好"}, workflow_context, flow)
         first_question = first_question.result[0] if first_question else dict()
         payload = first_question.payload
@@ -197,14 +187,15 @@ class TestQuestionComp:
         user_input = InteractiveInput()
         user_input.update(component_id, "地点是杭州")  # 第一个入参是组件id
 
-        workflow_context = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_context = Session(session_id=session_id).create_workflow_session()
         final_result = self.invoke_workflow_with_workflow_context(user_input, workflow_context,
                                                                   flow)  # workflow实例、session id保持一致
-        assert final_result.result.get("responseContent") == "hangzhou | today"
+        assert final_result.result.get("response") == "hangzhou | today"
 
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     def test_stream_questioner_component_in_workflow_initial_ask_with_tracer(self, mock_get_model, mock_init_prompt,
                                                                              mock_llm_inputs, mock_extraction):
@@ -228,7 +219,7 @@ class TestQuestionComp:
         mock_llm_inputs.return_value = mock_prompt_template
         mock_extraction.return_value = dict(location="hangzhou")
 
-        context = TaskSession(trace_id="test")
+        context = Session(session_id="test")
         flow = Workflow()
 
         key_fields = [
@@ -236,13 +227,7 @@ class TestQuestionComp:
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         questioner_config = QuestionerConfig(
@@ -278,8 +263,9 @@ class TestQuestionComp:
 class TestQuestionerStream:
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_invoke_questioner_component_in_workflow_repeat_ask_with_stream_writer_and_context_engine(
             self,
@@ -304,13 +290,7 @@ class TestQuestionerStream:
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         questioner_config = QuestionerConfig(
@@ -335,7 +315,7 @@ class TestQuestionerStream:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="questioner_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = Session(session_id=session_id).create_workflow_session()
         interaction_output_schema = []
         async for chunk in flow.stream({"query": "你好"}, workflow_session, workflow_context):
             if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
@@ -348,122 +328,15 @@ class TestQuestionerStream:
             for item in interaction_output_schema:
                 component_id = item.payload.id
                 user_input.update(component_id, "杭州")
-            workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+            workflow_session = Session(session_id=session_id).create_workflow_session()
             async for chunk in flow.stream(user_input, workflow_session, workflow_context):
                 print(f"stream output >>> {chunk}")
-
-    @unittest.skip("skip system test")
-    @pytest.mark.asyncio  # 新增
-    async def test_real_workflow_stream_start_questioner_end_with_interaction(self):
-        flow = Workflow()
-
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
-        end_component = End({"responseTemplate": "{{location}} | {{time}}"})
-
-        key_fields = [
-            FieldInfo(field_name="location", description="地点", required=True),
-            FieldInfo(field_name="time", description="时间", required=True, default_value="today")
-        ]
-        questioner_config = QuestionerConfig(
-            model_config=_create_model_request_config(),
-            model_client_config=_create_model_client_config(),
-            question_content="",
-            extract_fields_from_response=True,
-            field_names=key_fields,
-            with_chat_history=True
-        )
-        questioner_component = QuestionerComponent(questioner_comp_config=questioner_config)
-
-        flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}"})
-        flow.set_end_comp("e", end_component,
-                          inputs_schema={"location": "${questioner.location}", "time": "${questioner.time}"})
-        flow.add_workflow_comp("questioner", questioner_component, inputs_schema={"query": "${s.query}"})
-
-        flow.add_connection("s", "questioner")
-        flow.add_connection("questioner", "e")
-
-        session_id = "test_questioner"
-        config = ContextEngineConfig()
-        ce_engine = ContextEngine(config)
-        workflow_context = await ce_engine.create_context(context_id="questioner_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
-        interaction_output_schema = list()
-        async for chunk in flow.stream({"query": "时间为2025-10-01"}, workflow_session, workflow_context):
-            if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
-                interaction_output_schema.append(chunk)
-
-        if interaction_output_schema:
-            user_input = InteractiveInput()
-            for item in interaction_output_schema:
-                component_id = item.payload.id
-                user_input.update(component_id, "地点是杭州")
-            workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
-            async for chunk in flow.stream(user_input, workflow_session, workflow_context):
-                print(f"stream output >>> {chunk}")
-
-    @unittest.skip("skip system test")
-    @pytest.mark.asyncio  # 新增
-    async def test_real_workflow_invoke_start_questioner_end_with_interaction(self):
-        flow = Workflow()
-
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
-        end_component = End({"responseTemplate": "{{location}} | {{time}}"})
-
-        key_fields = [
-            FieldInfo(field_name="location", description="地点", required=True),
-            FieldInfo(field_name="time", description="时间", required=True, default_value="today")
-        ]
-        questioner_config = QuestionerConfig(
-            model_config=_create_model_request_config(),
-            model_client_config=_create_model_client_config(),
-            question_content="",
-            extract_fields_from_response=True,
-            field_names=key_fields,
-            with_chat_history=True
-        )
-        questioner_component = QuestionerComponent(questioner_comp_config=questioner_config)
-
-        flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}"})
-        flow.set_end_comp("e", end_component,
-                          inputs_schema={"location": "${questioner.location}", "time": "${questioner.time}"})
-        flow.add_workflow_comp("questioner", questioner_component, inputs_schema={"query": "${s.query}"})
-
-        flow.add_connection("s", "questioner")
-        flow.add_connection("questioner", "e")
-
-        session_id = "test_questioner"
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
-        workflow_result = await flow.invoke({"query": "时间为2025-10-01"}, workflow_session)
-        assert workflow_result.state == WorkflowExecutionState.INPUT_REQUIRED
-
-        time.sleep(3)
-
-        if workflow_result.state == WorkflowExecutionState.INPUT_REQUIRED:
-            component_id = workflow_result.result[0].payload.id
-            assert component_id == "questioner"
-            workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
-            user_feedback = InteractiveInput()
-            user_feedback.update(component_id, "地点是杭州")
-            workflow_result = await flow.invoke(user_feedback, workflow_session)
-            assert workflow_result.state == WorkflowExecutionState.COMPLETED
-            assert workflow_result.result.get("responseContent", "") == "杭州 | 2025-10-01"
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._invoke_llm_for_extraction")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
-    @patch("openjiuwen.core.workflow.components.llm_related.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
     @patch("openjiuwen.core.foundation.llm.model.Model")
     async def test_questioner_state_reset_on_second_workflow_invocation(
             self, mock_get_model, mock_init_prompt, mock_llm_inputs, mock_extraction
@@ -498,14 +371,10 @@ class TestQuestionerStream:
             FieldInfo(field_name="name", description="用户姓名", required=True),
         ]
         
-        start_component = Start({
-            "inputs": [
-                {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-            ]
-        })
+        start_component = Start()
         
         end_component = End({"responseTemplate": "{{name}}"})
-        
+
         questioner_config = QuestionerConfig(
             model_config=_create_model_request_config(),
             model_client_config=_create_model_client_config(),
@@ -528,7 +397,7 @@ class TestQuestionerStream:
         
         # ========== 第一次调用 workflow ==========
         session_id = "test_questioner_state_reset"
-        workflow_session_1 = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session_1 = Session(session_id=session_id).create_workflow_session()
         
         # 第一次调用：触发中断
         workflow_result_1 = await flow.invoke({"query": "请收集用户信息"}, workflow_session_1)
@@ -539,7 +408,7 @@ class TestQuestionerStream:
         assert component_id_1 == "questioner"
         
         # 第一次回答："张三"（需要创建新的 session）
-        workflow_session_1_resume = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session_1_resume = Session(session_id=session_id).create_workflow_session()
         user_feedback_1 = InteractiveInput()
         user_feedback_1.update(component_id_1, "张三")
         
@@ -547,7 +416,7 @@ class TestQuestionerStream:
         
         # 验证：第一次应该完成并返回 "张三"
         assert workflow_result_2.state == WorkflowExecutionState.COMPLETED
-        response_content_1 = workflow_result_2.result.get("responseContent", "")
+        response_content_1 = workflow_result_2.result.get("response", "")
         assert "张三" in response_content_1
         print(f"[OK] 第一次调用完成，返回结果: {response_content_1}")
         
@@ -556,7 +425,7 @@ class TestQuestionerStream:
         mock_extraction.side_effect = [{}, {"name": "李四"}]
         
         # 使用新的 workflow session
-        workflow_session_2 = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session_2 = Session(session_id=session_id).create_workflow_session()
         
         # 第二次调用：应该重新触发中断（而不是使用第一次的状态）
         workflow_result_3 = await flow.invoke({"query": "再次收集用户信息"}, workflow_session_2)
@@ -569,7 +438,7 @@ class TestQuestionerStream:
         print(f"[OK] 第二次调用成功触发中断（重新提问）")
         
         # 第二次回答："李四"（需要创建新的 session）
-        workflow_session_2_resume = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session_2_resume = Session(session_id=session_id).create_workflow_session()
         user_feedback_2 = InteractiveInput()
         user_feedback_2.update(component_id_2, "李四")
         
@@ -577,7 +446,7 @@ class TestQuestionerStream:
         
         # 验证：第二次应该完成并返回 "李四"
         assert workflow_result_4.state == WorkflowExecutionState.COMPLETED
-        response_content_2 = workflow_result_4.result.get("responseContent", "")
+        response_content_2 = workflow_result_4.result.get("response", "")
         assert "李四" in response_content_2
         
         # 关键验证：第二次结果不应该包含第一次的数据
@@ -588,3 +457,190 @@ class TestQuestionerStream:
         print("✅ 测试通过：Questioner 组件状态在第二次 workflow 调用时正确重置！")
         print("   - 第一次调用：张三 ✓")
         print("   - 第二次调用：李四 ✓（未残留张三）")
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._create_llm_instance")
+    async def test_questioner_type_conversion_with_multiple_types(self, mock_create_llm):
+        """
+        Test questioner correctly validates and converts multiple basic data types.
+
+        Scenario:
+        - LLM returns string representations for various types
+        - string "25" for integer field -> should convert to 25
+        - string "98.5" for number field -> should convert to 98.5
+        - string "true" for boolean field -> should convert to True
+        - "Alice" for string field -> should keep as "Alice"
+
+        This test covers the type validation and conversion logic in _validate_and_convert_fields.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        # Create mock LLM that returns JSON string with various types
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        # LLM returns string representations that need type conversion
+        mock_response.content = '''```json
+{
+    "name": "Alice",
+    "age": "25",
+    "score": "98.5",
+    "is_vip": "true"
+}
+```'''
+        mock_llm.invoke = AsyncMock(return_value=mock_response)
+        mock_create_llm.return_value = mock_llm
+
+        # Build workflow: start -> questioner -> end
+        flow = Workflow()
+
+        key_fields = [
+            FieldInfo(field_name="name", description="User name", type="string", required=True),
+            FieldInfo(field_name="age", description="User age", type="integer", required=True),
+            FieldInfo(field_name="score", description="User score", type="number", required=True),
+            FieldInfo(field_name="is_vip", description="VIP status", type="boolean", required=True),
+        ]
+        
+        start_component = Start()
+        
+        # Use responseTemplate to output all extracted fields
+        end_component = End({"responseTemplate": "name={{name}},age={{age}},score={{score}},is_vip={{is_vip}}"})
+
+        questioner_config = QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=key_fields,
+            with_chat_history=False,
+        )
+
+        questioner_comp = QuestionerComponent(questioner_config)
+
+        # Register components
+        flow.set_start_comp("start", start_component, inputs_schema={"query": "${query}"})
+        flow.add_workflow_comp("questioner", questioner_comp, inputs_schema={"query": "${start.query}"})
+        flow.set_end_comp("end", end_component, inputs_schema={
+            "name": "${questioner.name}",
+            "age": "${questioner.age}",
+            "score": "${questioner.score}",
+            "is_vip": "${questioner.is_vip}"
+        })
+
+        # Connect topology
+        flow.add_connection("start", "questioner")
+        flow.add_connection("questioner", "end")
+
+        # Execute workflow
+        session_id = "test_type_conversion"
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
+
+        result = await flow.invoke({"query": "Extract user info with multiple types"}, workflow_session)
+
+        # Verify workflow completed successfully
+        assert result.state == WorkflowExecutionState.COMPLETED
+
+        response_content = result.result.get("response", "")
+        print(f"[INFO] Response content: {response_content}")
+
+        # Verify all fields are present and correctly converted
+        # string field: "Alice" -> "Alice"
+        assert "name=Alice" in response_content
+
+        # integer field: "25" -> 25 (converted from string)
+        assert "age=25" in response_content
+
+        # number field: "98.5" -> 98.5 (converted from string)
+        assert "score=98.5" in response_content
+
+        # boolean field: "true" -> True (converted from string)
+        assert "is_vip=True" in response_content
+
+        print("✅ Test passed: Questioner correctly converts multiple basic data types!")
+        print("   - string: 'Alice' -> 'Alice' ✓")
+        print("   - integer: '25' -> 25 ✓")
+        print("   - number: '98.5' -> 98.5 ✓")
+        print("   - boolean: 'true' -> True ✓")
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._create_llm_instance")
+    async def test_questioner_type_validation_failure_triggers_continue_ask(self, mock_create_llm):
+        """
+        Test that type validation failure triggers continue-ask for required fields.
+
+        Scenario:
+        - LLM returns float 3.14 for an integer field "age"
+        - Float 3.14 cannot be converted to integer (not a whole number)
+        - The "age" field is treated as not extracted
+        - Since "age" is required, questioner should trigger continue-ask
+
+        This test verifies that invalid type values are properly rejected
+        and the workflow enters INPUT_REQUIRED state to ask user again.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        # Create mock LLM that returns invalid type for integer field
+        mock_llm = MagicMock()
+        mock_response = MagicMock()
+        # LLM returns float for integer field - this should fail validation
+        mock_response.content = '''```json
+{
+    "name": "Bob",
+    "age": 3.14
+}
+```'''
+        mock_llm.invoke = AsyncMock(return_value=mock_response)
+        mock_create_llm.return_value = mock_llm
+
+        # Build workflow: start -> questioner -> end
+        flow = Workflow()
+
+        key_fields = [
+            FieldInfo(field_name="name", description="User name", type="string", required=True),
+            FieldInfo(field_name="age", description="User age", type="integer", required=True),
+        ]
+        
+        start_component = Start()
+        
+        end_component = End({"responseTemplate": "name={{name}},age={{age}}"})
+
+        questioner_config = QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=key_fields,
+            with_chat_history=False,
+        )
+
+        questioner_comp = QuestionerComponent(questioner_config)
+
+        # Register components
+        flow.set_start_comp("start", start_component, inputs_schema={"query": "${query}"})
+        flow.add_workflow_comp("questioner", questioner_comp, inputs_schema={"query": "${start.query}"})
+        flow.set_end_comp("end", end_component, inputs_schema={
+            "name": "${questioner.name}",
+            "age": "${questioner.age}"
+        })
+
+        # Connect topology
+        flow.add_connection("start", "questioner")
+        flow.add_connection("questioner", "end")
+
+        # Execute workflow
+        session_id = "test_type_validation_failure"
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
+
+        result = await flow.invoke({"query": "My name is Bob, I am 3.14 years old"}, workflow_session)
+
+        # Verify workflow requires user input because age validation failed
+        assert result.state == WorkflowExecutionState.INPUT_REQUIRED, \
+            "Workflow should require input because integer field 'age' received float 3.14"
+
+        # Verify the interaction is triggered by questioner component
+        component_id = result.result[0].payload.id
+        assert component_id == "questioner"
+
+        print("✅ Test passed: Type validation failure correctly triggers continue-ask!")
+        print("   - Expected type: integer")
+        print("   - LLM returned: 3.14 (float)")
+        print("   - Result: Field rejected, workflow asks user again ✓")

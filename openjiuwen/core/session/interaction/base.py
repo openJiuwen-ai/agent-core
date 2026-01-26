@@ -7,8 +7,6 @@ from abc import ABC, ABCMeta, abstractmethod
 from typing import Any
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
-from openjiuwen.core.graph.store import Store
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.session import BaseSession
 
 
@@ -47,40 +45,6 @@ class BaseInteraction(ABC, metaclass=ABCMeta):
 
     async def user_latest_input(self, value):
         pass
-
-
-class Checkpointer(ABC):
-    @staticmethod
-    def get_thread_id(session: BaseSession) -> str:
-        return ":".join([session.session_id(), session.workflow_id()])
-
-    @abstractmethod
-    async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
-        ...
-
-    @abstractmethod
-    async def post_workflow_execute(self, session: BaseSession, result, exception):
-        ...
-
-    @abstractmethod
-    async def pre_agent_execute(self, session: BaseSession, inputs):
-        ...
-
-    @abstractmethod
-    async def interrupt_agent_execute(self, session: BaseSession):
-        ...
-
-    @abstractmethod
-    async def post_agent_execute(self, session: BaseSession):
-        ...
-
-    @abstractmethod
-    async def release(self, session_id: str):
-        ...
-
-    @abstractmethod
-    def graph_store(self) -> Store:
-        ...
 
 
 class AgentInterrupt(Exception):

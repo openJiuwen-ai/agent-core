@@ -7,18 +7,20 @@ from typing import Any, Union, List, Dict, AsyncIterator
 import pytest
 from unittest.mock import Mock
 
+
 from openjiuwen.core.common.constants.enums import ControllerType
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.workflow import ComponentAbility, End, WorkflowCard
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, SystemMessage, UserMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.workflow import Workflow
-from openjiuwen.core.workflow.components.llm_related.llm_comp import LLMExecutable
+from openjiuwen.core.workflow.components.llm.llm_comp import LLMExecutable
 
 fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
@@ -36,7 +38,9 @@ from unittest.mock import patch, AsyncMock
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.workflow import LLMCompConfig, LLMComponent
 from openjiuwen.core.session import WorkflowSession, NodeSession
-from openjiuwen.core.session import WrappedNodeSession, TaskSession
+from openjiuwen.core.session.node import Session
+from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
@@ -51,7 +55,7 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 
 @pytest.fixture
 def fake_node_ctx():
-    return WrappedNodeSession(NodeSession(WorkflowSession(), "test"))
+    return Session(NodeSession(WorkflowSession(), "test"))
 
 
 @pytest.fixture
@@ -115,11 +119,10 @@ class FakeModel(Model):
 
 
 @patch(
-    "openjiuwen.core.workflow.components.llm_related.llm_comp.Model",
+    "openjiuwen.core.workflow.components.llm.llm_comp.Model",
     autospec=True,
 )
 class TestLLMExecutableInvoke:
-
     @pytest.mark.asyncio
     async def test_invoke_success(
             self,
@@ -197,8 +200,8 @@ class TestLLMExecutableInvoke:
                                response_format={"type": "text"},)
         try:
             exe = LLMExecutable(config)
-        except JiuWenBaseException as e:
-            assert e.error_code == StatusCode.COMPONENT_LLM_CONFIG_INVALID.code
+        except BaseError as e:
+            assert e.code == StatusCode.COMPONENT_LLM_RESPONSE_CONFIG_INVALID.code
 
     @pytest.mark.asyncio  # 新增
     async def test_llm_in_workflow(
@@ -208,7 +211,7 @@ class TestLLMExecutableInvoke:
             fake_model_client_config
     ):
         """LLM 节点在完整工作流中的异步测试"""
-        session = WorkflowSession()
+        session = create_workflow_session()
 
         # 1. 打桩 LLM
         fake_llm = FakeModel(api_key="fake-key", api_base="http://fake.api.com")
@@ -254,13 +257,7 @@ class TestLLMExecutableInvoke:
 
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -280,9 +277,10 @@ class TestLLMExecutableInvoke:
         flow.add_connection("s", "llm")
         flow.add_connection("llm", "e")
 
-        context = WorkflowSession()
+        context = create_workflow_session()
         result = await flow.invoke(inputs={"query": "yzq test query"}, session=context)
         print(f"This is invoke result:{result}")
+
 
 class TestLLMExecutableInvokeNew:
     @unittest.skip("skip system test")
@@ -294,13 +292,7 @@ class TestLLMExecutableInvokeNew:
         name = "poem"
         flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         model_config = ModelConfig(model_provider=MODEL_PROVIDER,
@@ -361,13 +353,7 @@ class TestLLMExecutableInvokeNew:
     async def test_real_workflow_invoke_start_llm_end_with_stream_writer(self):
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         model_config = ModelConfig(model_provider=MODEL_PROVIDER,
@@ -400,7 +386,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         result = await flow.invoke(inputs={"query": "please write a 3-line poem"},
                                    session=workflow_session, context=workflow_context)
         print(f"invoke result >>> {result}")
@@ -411,13 +397,7 @@ class TestLLMExecutableInvokeNew:
                                                 fake_model_config, fake_model_client_config):
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -451,7 +431,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         result = await flow.invoke(
             inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"},
             session=workflow_session, context=workflow_context)
@@ -463,13 +443,7 @@ class TestLLMExecutableInvokeNew:
                                                 fake_model_config, fake_model_client_config):
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -495,7 +469,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         async for chunk in flow.stream(inputs={"query": "please write a 3-line poem"}, session=workflow_session, context=workflow_context):
             print(f"stream chunk >>> {chunk}")
 
@@ -505,13 +479,7 @@ class TestLLMExecutableInvokeNew:
                                                                         fake_model_config, fake_model_client_config):
         flow = Workflow()
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -546,7 +514,7 @@ class TestLLMExecutableInvokeNew:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         async for chunk in flow.stream(inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"}, session=workflow_session,
                                        context=workflow_context):
             print(f"stream chunk >>> {chunk}")
@@ -560,13 +528,7 @@ class TestLLMExecutableInvokeNew:
         name = "poem"
         flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         config = LLMCompConfig(
@@ -611,3 +573,144 @@ class TestLLMExecutableInvokeNew:
 
         result = await agent.invoke({"query": "please write a 3-line poem", "conversation_id": "c123"})
         print(f"single_agent invoke result >>> {result}")
+
+
+class TestLLMExecutable(LLMExecutable):
+    async def prepare_model_inputs(self, input_):
+        return await super()._prepare_model_inputs(input_)
+
+
+class TestLLMModelInputs:
+    @pytest.mark.asyncio
+    async def test_system_exists_user_missing_appends_empty_user(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[{"role": "user", "content": "Hello {query}"}],
+            system_prompt_template=SystemMessage(content="system prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+
+        assert isinstance(model_inputs[0], SystemMessage)
+        assert model_inputs[0].content == "system prompt template"
+        assert isinstance(model_inputs[1], UserMessage)
+        assert model_inputs[1].content == ""
+
+    @pytest.mark.asyncio
+    async def test_system_exists_user_exists_keeps_user(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[{"role": "user", "content": "Hello {query}"}],
+            system_prompt_template=SystemMessage(content="system prompt template"),
+            user_prompt_template=UserMessage(content="user prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+
+        assert isinstance(model_inputs[0], SystemMessage)
+        assert model_inputs[0].content == "system prompt template"
+        assert isinstance(model_inputs[1], UserMessage)
+        assert model_inputs[1].content == "user prompt template"
+
+    @pytest.mark.asyncio
+    async def test_system_missing_user_exists_keeps_user(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[{"role": "user", "content": "Hello {query}"}],
+            user_prompt_template=UserMessage(content="user prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert isinstance(model_inputs[0], UserMessage)
+        assert len(model_inputs) == 1
+        assert model_inputs[0].content == "user prompt template"
+
+    @pytest.mark.asyncio
+    async def test_prepare_model_inputs_system_and_user_keeps_both(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[{"role": "user", "content": "Hello {query}"}],
+            system_prompt_template=SystemMessage(content="system prompt template"),
+            user_prompt_template=UserMessage(content="user prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert isinstance(model_inputs[0], SystemMessage)
+        assert model_inputs[0].content == "system prompt template"
+        assert isinstance(model_inputs[1], UserMessage)
+        assert model_inputs[1].content == "user prompt template"
+
+    @pytest.mark.asyncio
+    async def test_prepare_model_inputs_system_missing_user_missing(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[{"role": "system", "content": "hello {query}"},
+                              {"role": "user", "content": "Hello {query}"}],
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert isinstance(model_inputs[0], BaseMessage)
+        assert model_inputs[0].content == "hello {query}"
+        assert isinstance(model_inputs[1], BaseMessage)
+        assert model_inputs[1].content == "Hello {query}"
+

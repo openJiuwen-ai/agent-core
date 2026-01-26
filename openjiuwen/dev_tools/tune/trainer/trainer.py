@@ -10,8 +10,8 @@ from tqdm import tqdm
 
 from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.dev_tools.tune.base import EvaluatedCase, TuneConstant, Case
@@ -47,11 +47,9 @@ class Trainer:
               **kwargs
               ) -> Optional[BaseAgent]:
         if not self._check_trainable(agent):
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_TRAINER_TRAIN_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_TRAINER_TRAIN_ERROR.errmsg.format(
-                    error_msg=f"trainer only support current Agent right now"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_TRAINER_EXECUTION_ERROR,
+                error_msg=f"trainer only support current Agent right now"
             )
         progress: Progress = self._pre_train(agent, **kwargs)
         if not val_cases:

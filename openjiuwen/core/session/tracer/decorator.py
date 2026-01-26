@@ -50,7 +50,8 @@ def decorate_workflow_with_trace(workflow, agent_session):
     if not _should_decorate(workflow, agent_session):
         return workflow
     wrapped_workflow = create_wrapper_class(workflow, "WrappedWorkflow")
-    metadata = dict(id=wrapped_workflow.card.id, name=wrapped_workflow.card.name, description=wrapped_workflow.card.description,
+    metadata = dict(id=wrapped_workflow.card.id, name=wrapped_workflow.card.name,
+                    description=wrapped_workflow.card.description,
                     version=wrapped_workflow.card.version) if wrapped_workflow else {}
     try:
         workflow_name = workflow.card.name
@@ -106,7 +107,16 @@ def async_trace(func, session, invoke_type: InvokeType, instance_info,
                                  instance_info=instance_info)
 
             args = args[1:]
-            result = await func(*args, **kwargs)
+
+            # record llm request data
+            async def tracer_record_data(**record_kwargs):
+                await tracer.trigger("tracer_agent", "on_" + invoke_type.value + "_request", span=span, **record_kwargs)
+
+            call_kwargs = dict(kwargs)
+            if invoke_type.value == InvokeType.LLM.value:
+                call_kwargs["tracer_record_data"] = tracer_record_data
+            result = await func(*args, **call_kwargs)
+
             await tracer.trigger("tracer_agent", "on_" + invoke_type.value + "_end", span=span,
                                  outputs={"outputs": result})
             return result
@@ -162,7 +172,16 @@ def async_trace_stream(func, session, invoke_type: InvokeType, instance_info,
                                  else kwargs.get(inputs_field_name, {})},
                                  instance_info=instance_info)
             args = args[1:]
-            result = func(*args, **kwargs)
+
+            # record llm request data
+            async def tracer_record_data(**record_kwargs):
+                await tracer.trigger("tracer_agent", "on_" + invoke_type.value + "_request", span=span, **record_kwargs)
+
+            call_kwargs = dict(kwargs)
+            if invoke_type.value == InvokeType.LLM.value:
+                call_kwargs["tracer_record_data"] = tracer_record_data
+            result = func(*args, **call_kwargs)
+
             results = []
             if hasattr(result, "__aiter__") or hasattr(result, "__anext__"):
                 async for item in result:

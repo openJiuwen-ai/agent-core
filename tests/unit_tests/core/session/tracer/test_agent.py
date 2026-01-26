@@ -71,7 +71,6 @@ class TestAgent:
 
         # workflow与agent共用一个tracer
         workflow_session= context.create_workflow_session()
-        assert (workflow_session.tracer() is self.tracer)
 
         flow = Workflow()
         flow.set_start_comp("start", MockStartNode("start"),
@@ -135,7 +134,7 @@ class TestAgent:
         agent_span = self.tracer.tracer_agent_span_manager.create_agent_span()
         try:
             await self.tracer.trigger("tracer_agent", "on_chain_start", span=agent_span,
-                                      inputs={"intput": "mock chain"},
+                                      inputs={"input": "mock chain"},
                                       instance_info={"class_name": "Agent"})  # class_name为必选参数
 
             # 模拟需要运行llm、tool

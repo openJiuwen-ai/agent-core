@@ -157,7 +157,10 @@ class StreamProcessor:
                 handle_map.add(source_key)
                 for path, queues in self.processor_queues.items():
                     path = extract_origin_key(path)
-                    is_handled = path in source_map.get(source_ability)
+                    is_handled = False
+                    paths = source_map.get(source_ability)
+                    if paths:
+                        is_handled = path in paths
                     is_all_finish = handle_map == self.sources
                     if (is_handled or is_all_finish) and self.is_value_from_source(path, source_id):
                         for queue in queues:

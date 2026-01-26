@@ -6,7 +6,8 @@
 from typing import List
 import pytest
 
-from openjiuwen.core.common.exception.errors import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ModelContext
 from openjiuwen.core.foundation.llm import (
     BaseMessage, SystemMessage, UserMessage, AssistantMessage, ToolMessage, ToolCall
@@ -42,14 +43,14 @@ class TestModelContext:
         context = await self.create_context()
         try:
             await context.add_messages(123)
-        except Exception as e:
-            assert e.status == StatusCode.CONTEXT_MESSAGE_VALIDATION_ERROR
+        except BaseError as e:
+            assert e.code == StatusCode.CONTEXT_MESSAGE_INVALID.code
 
         try:
             invalid_messages = [UserMessage(content="test"), {"role": "user", "content": "test"}]
             await context.add_messages(invalid_messages)
-        except Exception as e:
-            assert e.status == StatusCode.CONTEXT_MESSAGE_VALIDATION_ERROR
+        except BaseError as e:
+            assert e.code == StatusCode.CONTEXT_MESSAGE_INVALID.code
 
     @pytest.mark.asyncio
     async def test_model_context_add_batch_messages(self):
@@ -103,8 +104,8 @@ class TestModelContext:
         context = await self.create_context()
         try:
             await context.get_messages(size=-1)
-        except Exception as e:
-            assert e.status == StatusCode.CONTEXT_GET_MESSAGE_ERROR
+        except BaseError as e:
+            assert e.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     @pytest.mark.asyncio
     async def test_model_context_get_empty_messages_with_history(self):
@@ -287,8 +288,8 @@ class TestModelContext:
         context = await self.create_context()
         try:
             context.pop_messages(size=-1)
-        except Exception as e:
-            assert e.status == StatusCode.CONTEXT_POP_MESSAGE_ERROR
+        except BaseError as e:
+            assert e.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     @pytest.mark.asyncio
     async def test_model_context_pop_messages_with_history(self):
@@ -381,14 +382,14 @@ class TestModelContext:
         context = await self.create_context()
         try:
             context.set_messages(123)
-        except Exception as e:
-            assert e.status == StatusCode.CONTEXT_MESSAGE_VALIDATION_ERROR
+        except BaseError as e:
+            assert e.code == StatusCode.CONTEXT_MESSAGE_INVALID.code
 
         try:
             invalid_messages = [UserMessage(content="test"), {"role": "user", "content": "test"}]
             await context.set_messages(invalid_messages)
-        except Exception as e:
-            assert e.status == StatusCode.CONTEXT_MESSAGE_VALIDATION_ERROR
+        except BaseError as e:
+            assert e.code == StatusCode.CONTEXT_MESSAGE_INVALID.code
 
     @pytest.mark.asyncio
     async def test_model_context_set_empty_context_window(self):
@@ -403,8 +404,8 @@ class TestModelContext:
         context = await self.create_context()
         try:
             await context.get_context_window(window_size=-1)
-        except Exception as e:
-            assert e.status == StatusCode.CONTEXT_GET_CONTEXT_WINDOW_ERROR
+        except BaseError as e:
+            assert e.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
     @pytest.mark.asyncio
     async def test_model_context_set_context_window_with_system_messages(self):

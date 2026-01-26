@@ -3,10 +3,9 @@ import uuid
 import unittest
 from datetime import datetime
 
-from openjiuwen.core.single_agent.legacy import WorkflowSchema
 from openjiuwen.core.application.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
 from openjiuwen.core.workflow import WorkflowComponent, WorkflowCard
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import QuestionerComponent, QuestionerConfig, FieldInfo
 from openjiuwen.core.workflow import Start
@@ -157,13 +156,12 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
                 id=workflow_id,
                 version="1.0",
                 description=workflow_desc,
-                inputs_schema=dict(
+                input_params=dict(
                 type="object",
                 properties={
                     "query": {
                         "type": "string",
-                        "description": "天气查询用户输入",
-                        "required": True
+                        "description": "天气查询用户输入"
                     }
                 },
                 required=['query']
@@ -176,28 +174,20 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
 
         interactive = InteractiveConfirmComponent("interactive")
         end_component = End({"responseTemplate": "{{location}} | {{time}} | confirm={{confirm_result}}"})
-
-        model_config = ModelConfig(model_provider=MODEL_PROVIDER,
-                                   model_info=BaseModelInfo(
-                                       model=MODEL_NAME,
-                                       api_base=API_BASE,
-                                       api_key=API_KEY,
-                                       temperature=0.7,
-                                       top_p=0.9,
-                                       timeout=30  # 添加超时设置
-                                   ))
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_client_config=ModelClientConfig(
+                client_provider=MODEL_PROVIDER,
+                api_key=API_KEY,
+                api_base=API_BASE,
+                verify_ssl=False
+            ),
+            model_config=ModelRequestConfig(
+                model=MODEL_NAME
+            ),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -230,13 +220,12 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
                 id="questioner_weather_workflow",
                 version="1.0",
                 description="天气查询",
-                inputs_schema=dict(
+                input_params=dict(
                 type="object",
                 properties={
                     "query": {
                         "type": "string",
-                        "description": "天气查询用户输入",
-                        "required": True
+                        "description": "天气查询用户输入"
                     }
                 },
                 required=['query']
@@ -250,13 +239,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         model_config = ModelConfig(model_provider=MODEL_PROVIDER,
@@ -269,7 +252,15 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
                                        timeout=30  # 添加超时设置
                                    ))
         questioner_config = QuestionerConfig(
-            model=model_config,
+            model_client_config=ModelClientConfig(
+                client_provider=MODEL_PROVIDER,
+                api_key=API_KEY,
+                api_base=API_BASE,
+                verify_ssl=False
+            ),
+            model_config=ModelRequestConfig(
+                model=MODEL_NAME
+            ),
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -284,23 +275,6 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
 
         flow.add_connection("s", "questioner")
         flow.add_connection("questioner", "e")
-
-        workflow_schema = WorkflowSchema(
-            id=flow.card.id,
-            name=flow.card.name,
-            version=flow.card.version,
-            description="追问器工作流",
-            inputs={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "用户输入",
-                        "required": True
-                    }
-                }
-            }
-        )
 
         llm_agent_config = create_llm_agent_config(
             agent_id="llm_agent_123",
@@ -323,7 +297,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
 
         return llm_agent
 
-    @unittest.skip("requires network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_workflow_interrupt_agent_invoke(self):
         llm_agent = self._setup_test_environment_and_agent()
 
@@ -352,7 +326,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
         else:
             self.fail(f"未预期的返回类型: {type(result)}")
 
-    @unittest.skip("requires network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_workflow_interrupt_with_stream(self):
         llm_agent = self._setup_test_environment_and_agent()
 
@@ -376,7 +350,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("杭州", final_chunk.payload["output"], "应该包含杭州")
             print(f"✅ 第二次调用校验通过：恢复中断工作流完成，返回结果正确")
 
-    @unittest.skip("requires network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_workflow_interrupt_dict_with_stream(self):
         llm_agent = self._setup_test_environment_and_agent()
 
@@ -400,7 +374,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn("杭州", final_chunk.payload["output"], "应该包含杭州")
             print(f"✅ 第二次调用校验通过：恢复中断工作流完成，返回结果正确")
 
-    @unittest.skip("require network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_workflow_interrupt_agent_invoke_multi_rounds(self):
         llm_agent = self._setup_test_environment_and_agent()
 
@@ -424,7 +398,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['result_type'], 'answer', "应该返回answer类型")
         print(f"✅ 第三次调用校验通过：恢复中断工作流完成，返回结果正确")
 
-    @unittest.skip("require network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_workflow_interrupt_agent_stream_multi_rounds(self):
         llm_agent = self._setup_test_environment_and_agent()
 
@@ -449,7 +423,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("上海", final_chunk.payload["output"], "应该包含上海")
         print(f"✅ 第三次调用校验通过：恢复中断工作流完成，返回结果正确")
 
-    @unittest.skip("require network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_multiple_interrupt_nodes_workflow(self):
         """
         构建包含interactive和questioner2个中断组件的workflow
@@ -549,7 +523,7 @@ class LLMAgentInterruptTest(unittest.IsolatedAsyncioTestCase):
 
         print(f"✅ 调用校验通过：恢复中断工作流完成，返回结果正确")
 
-    @unittest.skip("require network")
+    @unittest.skip("skip system test")
     async def test_llm_agent_with_multiple_interrupt_nodes_workflow_resume_once(self):
         """
         构建包含interactive和questioner2个中断组件的workflow

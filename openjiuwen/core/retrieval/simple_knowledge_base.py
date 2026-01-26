@@ -6,24 +6,23 @@ Simple Knowledge Base Implementation
 Provides complete knowledge base functionality including document parsing, chunking, index building, and retrieval.
 """
 
-from typing import Any, List, Optional, Dict
 import uuid
+from typing import Any, Dict, List, Optional
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
-from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig, RetrievalConfig
+from openjiuwen.core.retrieval.common.config import IndexConfig, KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
-from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
-from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
+from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
+from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
+from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
+from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
 from openjiuwen.core.retrieval.retriever.base import Retriever
-from openjiuwen.core.retrieval.common.config import IndexConfig
+from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
 class SimpleKnowledgeBase(KnowledgeBase):
@@ -76,7 +75,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> List[Document]:
         """Parse files from file paths into a list of Document objects"""
         if not self.parser:
-            raise JiuWenBaseException(StatusCode.KB_PARSER_REQUIRED_ERROR.code, "parser is required for parse_files")
+            raise build_error(StatusCode.RETRIEVAL_KB_PARSER_NOT_FOUND, error_msg="parser is required for parse_files")
 
         all_documents = []
         for file_path in file_paths:
@@ -103,13 +102,15 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> List[str]:
         """Add documents to the knowledge base"""
         if not self.chunker:
-            raise JiuWenBaseException(
-                StatusCode.KB_CHUNKER_REQUIRED_ERROR.code, "chunker is required for add_documents"
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_CHUNKER_NOT_FOUND, error_msg="chunker is required for add_documents"
             )
         if not self.index_manager:
-            raise JiuWenBaseException(
-                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code, "index_manager is required for add_documents"
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_INDEX_MANAGER_NOT_FOUND, error_msg="index_manager is required for add_documents"
             )
+        if self.strict_validation and self.vector_store:
+            self.vector_store.check_vector_field()
 
         # Chunk documents
         chunks = self.chunker.chunk_documents(documents)
@@ -133,7 +134,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
         )
 
         if not success:
-            raise JiuWenBaseException(StatusCode.KB_BUILD_INDEX_FAILED_ERROR.code, "Failed to build index")
+            raise build_error(StatusCode.RETRIEVAL_KB_INDEX_BUILD_EXECUTION_ERROR, error_msg="Failed to build index")
 
         # Return document ID list
         doc_ids = [doc.id_ for doc in documents]
@@ -150,8 +151,9 @@ class SimpleKnowledgeBase(KnowledgeBase):
         if not self.retriever:
             # Auto-create retriever
             if not self.vector_store:
-                raise JiuWenBaseException(
-                    StatusCode.KB_VECTOR_STORE_REQUIRED_ERROR.code, "vector_store or retriever is required for retrieve"
+                raise build_error(
+                    StatusCode.RETRIEVAL_KB_VECTOR_STORE_NOT_FOUND,
+                    error_msg="vector_store or retriever is required for retrieve",
                 )
 
             # Select appropriate retriever based on index_type
@@ -203,9 +205,12 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> bool:
         """Delete documents"""
         if not self.index_manager:
-            raise JiuWenBaseException(
-                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code, "index_manager is required for delete_documents"
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_INDEX_MANAGER_NOT_FOUND,
+                error_msg="index_manager is required for delete_documents",
             )
+        if self.strict_validation and self.vector_store:
+            self.vector_store.check_vector_field()
 
         index_name = f"kb_{self.config.kb_id}_chunks"
         success = True
@@ -227,13 +232,16 @@ class SimpleKnowledgeBase(KnowledgeBase):
     ) -> List[str]:
         """Update documents"""
         if not self.chunker:
-            raise JiuWenBaseException(
-                StatusCode.KB_CHUNKER_REQUIRED_ERROR.code, "chunker is required for update_documents"
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_CHUNKER_NOT_FOUND, error_msg="chunker is required for update_documents"
             )
         if not self.index_manager:
-            raise JiuWenBaseException(
-                StatusCode.KB_INDEX_MANAGER_REQUIRED_ERROR.code, "index_manager is required for update_documents"
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_INDEX_MANAGER_NOT_FOUND,
+                error_msg="index_manager is required for update_documents",
             )
+        if self.strict_validation and self.vector_store:
+            self.vector_store.check_vector_field()
 
         # Chunk documents
         chunks = self.chunker.chunk_documents(documents)

@@ -7,10 +7,11 @@ from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Executable, Input, Output
-from openjiuwen.core.session import Session, is_ref_path, extract_origin_key
+from openjiuwen.core.session import is_ref_path, extract_origin_key
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, WorkflowComponent
+from openjiuwen.core.workflow.components import Session
 
 
 class MockNodeBase(WorkflowComponent):
@@ -21,7 +22,7 @@ class MockNodeBase(WorkflowComponent):
 
 class MockStartNode(Start):
     def __init__(self, node_id: str):
-        super().__init__({})
+        super().__init__()
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         return inputs
@@ -97,7 +98,7 @@ class StreamNodeWithSubWorkflow(MockNodeBase):
 
 class MockStartNode4Cp(Start):
     def __init__(self, node_id: str):
-        super().__init__({})
+        super().__init__()
         self.runtime = 0
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
@@ -345,13 +346,13 @@ class ComputeExecutor2(ComponentExecutable):
         return results
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        exec_id = session.executable_id()
+        exec_id = session.get_executable_id()
         a = int(inputs.get("a"))
         b = int(inputs.get("b"))
         return {"result": a + b}
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
-        exec_id = session.executable_id()
+        exec_id = session.get_executable_id()
         logger.info(f"{exec_id} start")
 
         inputs_a = inputs.get("a")
@@ -375,7 +376,7 @@ class ComputeExecutor2(ComponentExecutable):
         logger.info(f"{exec_id} stream done")
 
     async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        exec_id = session.executable_id()
+        exec_id = session.get_executable_id()
         step = 1
         tasks = []
         for data_source_key, obj in inputs.items():
@@ -391,7 +392,7 @@ class ComputeExecutor2(ComponentExecutable):
         return {'result_collect': result}
 
     async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
-        exec_id = session.executable_id()
+        exec_id = session.get_executable_id()
         step = 1
         tasks = []
         for data_source_key, obj in inputs.items():

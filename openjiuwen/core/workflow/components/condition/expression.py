@@ -5,8 +5,9 @@ import operator
 import re
 from typing import Any, Optional
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.session import BaseSession
 from openjiuwen.core.graph.executable import Input, Output
@@ -32,12 +33,9 @@ class ExpressionCondition(Condition):
         self._matches = re.findall(pattern, self._expression)
         # Check expression length limit
         if len(expression) > MAX_EXPRESSION_LENGTH:
-            raise JiuWenBaseException(
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                    expression="<expression_too_long>",
-                    error_msg=f"Expression length exceeds maximum allowed length of {MAX_EXPRESSION_LENGTH}"
-                )
+            raise build_error(
+                StatusCode.EXPRESSION_EVAL_ERROR,
+                error_msg=f"expression length exceeds maximum allowed length of {MAX_EXPRESSION_LENGTH}"
             )
 
     def trace_info(self, session: BaseSession = None):
@@ -106,23 +104,26 @@ class ExpressionCondition(Condition):
 
             return result
         except SyntaxError as e:
-            raise JiuWenBaseException(
-                StatusCode.EXPRESSION_CONDITION_SYNTAX_ERROR.code,
-                StatusCode.EXPRESSION_CONDITION_SYNTAX_ERROR.errmsg.format(expression="<expression>", error_msg=str(e)),
+            raise build_error(
+                StatusCode.EXPRESSION_SYNTAX_ERROR,
+                error_msg=str(e),
+                cause=e
             ) from e
         except NameError as e:
             # Handle undefined variable cases
-            raise JiuWenBaseException(
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(expression="<expression>", error_msg=str(e)),
+            raise build_error(
+                StatusCode.EXPRESSION_EVAL_ERROR,
+                error_msg=str(e),
+                cause=e
             ) from e
         except JiuWenBaseException as e:
             # Re-raise existing JiuWenBaseException
             raise e
         except Exception as e:
-            raise JiuWenBaseException(
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(expression="<expression>", error_msg=str(e)),
+            raise build_error(
+                StatusCode.EXPRESSION_EVAL_ERROR,
+                error_msg=str(e),
+                cause=e
             ) from e
 
 
@@ -165,12 +166,9 @@ def _safe_is_empty(value):
         return True
     # Check if value is a non-collection type that shouldn't be checked for emptiness
     if isinstance(value, (int, float, bool)):
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                expression="<expression>",
-                error_msg=f"Cannot check emptiness of {type(value).__name__} type"
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"cannot check emptiness of {type(value).__name__} type"
         )
 
     # Check collection size limit
@@ -178,12 +176,9 @@ def _safe_is_empty(value):
         return False
     length = len(value)
     if length > MAX_COLLECTION_SIZE:
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                expression="<expression>",
-                error_msg=f"Collection size exceeds maximum allowed size of {MAX_COLLECTION_SIZE}",
-            ),
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"collection size exceeds maximum allowed size of {MAX_COLLECTION_SIZE}"
         )
     return length == 0
 
@@ -199,12 +194,9 @@ def _check_ast_depth(node: ast.AST, current_depth: int = 0) -> int:
     """
     # Check if current depth exceeds the maximum allowed depth
     if current_depth > MAX_AST_DEPTH:
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                expression="",
-                error_msg=f"Expression nesting depth exceeds maximum allowed depth of {MAX_AST_DEPTH}"
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"expression nesting depth exceeds maximum allowed depth of {MAX_AST_DEPTH}"
         )
     
     # Base case: if node is a leaf node
@@ -253,48 +245,48 @@ def _check_ast_depth(node: ast.AST, current_depth: int = 0) -> int:
     return max_depth
 
 
-def _evaluate_ast(node: Any, runtime: dict) -> Optional[Any]:
+def _evaluate_ast(node: Any, runtime: dict) -> Any:
     try:
+        result = None
         if isinstance(node, ast.BoolOp):
-            return _evaluate_bool_op(node, runtime)
+            result = _evaluate_bool_op(node, runtime)
         elif isinstance(node, ast.Compare):
-            return _evaluate_compare(node, runtime)
+            result = _evaluate_compare(node, runtime)
         elif isinstance(node, ast.Name):
-            return _evaluate_name(node, runtime)
+            result = _evaluate_name(node, runtime)
         elif isinstance(node, ast.Constant):
-            return node.value
+            result = node.value
         elif isinstance(node, ast.Subscript):
-            return _evaluate_subscript(node, runtime)
+            result = _evaluate_subscript(node, runtime)
         elif isinstance(node, ast.Attribute):
-            return _evaluate_attribute(node, runtime)
+            result = _evaluate_attribute(node, runtime)
         elif isinstance(node, ast.Call):
-            return _evaluate_call(node, runtime)
+            result = _evaluate_call(node, runtime)
         elif isinstance(node, ast.List):
-            return _evaluate_list(node, runtime)
+            result = _evaluate_list(node, runtime)
         elif isinstance(node, ast.Tuple):
-            return _evaluate_tuple(node, runtime)
+            result = _evaluate_tuple(node, runtime)
         elif isinstance(node, ast.Dict):
-            return _evaluate_dict(node, runtime)
+            result = _evaluate_dict(node, runtime)
         elif isinstance(node, ast.Expression):
-            return _evaluate_ast(node.body, runtime)
+            result = _evaluate_ast(node.body, runtime)
         elif isinstance(node, ast.UnaryOp):
-            return _evaluate_unary_op(node, runtime)
+            result = _evaluate_unary_op(node, runtime)
         elif isinstance(node, ast.BinOp):
-            return _evaluate_bin_op(node, runtime)
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                error_msg=f"Unsupported AST node type: {type(node).__name__}"
+            result = _evaluate_bin_op(node, runtime)
+        else:
+            raise build_error(
+                StatusCode.EXPRESSION_EVAL_ERROR,
+                error_msg=f"unsupported AST node type: {type(node).__name__}"
             )
-        )
+        return result
     except JiuWenBaseException:
         raise
     except Exception as e:
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                error_msg=f"Error evaluating AST: {str(e)}"
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"error evaluating AST: {str(e)}",
+            cause=e
         ) from e
 
 
@@ -309,12 +301,9 @@ def _evaluate_unary_op(node: ast.UnaryOp, runtime: dict) -> Any:
         return not operand
     elif isinstance(node.op, ast.Invert):
         return ~operand
-    raise JiuWenBaseException(
-        StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-        StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-            expression=f"{ast.unparse(node)}",
-            error_msg=f"Unsupported unary operator: {type(node.op).__name__}"
-        )
+    raise build_error(
+        StatusCode.EXPRESSION_EVAL_ERROR,
+        error_msg=f"unsupported unary operator: {type(node.op).__name__}"
     )
 
 
@@ -331,19 +320,17 @@ def _evaluate_bin_op(node: ast.BinOp, runtime: dict) -> Any:
         # Prevent creating excessively large data structures (e.g., [0] * 10000000000)
         if isinstance(left, (list, tuple)) and isinstance(right, int) and right > 0:
             if len(left) * right > MAX_COLLECTION_SIZE:
-                raise JiuWenBaseException(
-                    StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-                    StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                        error_msg=f"Operation would create collection exceeding maximum size of {MAX_COLLECTION_SIZE}"
-                    )
+                raise build_error(
+                    StatusCode.EXPRESSION_EVAL_ERROR,
+                    error_msg=f"operation would create collection exceeding "
+                              f"maximum size of {MAX_COLLECTION_SIZE}"
                 )
         elif isinstance(right, (list, tuple)) and isinstance(left, int) and left > 0:
             if len(right) * left > MAX_COLLECTION_SIZE:
-                raise JiuWenBaseException(
-                    StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-                    StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                        error_msg=f"Operation would create collection exceeding maximum size of {MAX_COLLECTION_SIZE}"
-                    )
+                raise build_error(
+                    StatusCode.EXPRESSION_EVAL_ERROR,
+                    error_msg=f"operation would create collection exceeding "
+                              f"maximum size of {MAX_COLLECTION_SIZE}"
                 )
         return left * right
     elif isinstance(node.op, ast.Div):
@@ -354,11 +341,9 @@ def _evaluate_bin_op(node: ast.BinOp, runtime: dict) -> Any:
         # Prevent excessively large exponentiation operations
         if isinstance(left, (int, float)) and isinstance(right, (int, float)):
             if right > 100:  # Limit exponent size
-                raise JiuWenBaseException(
-                    StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-                    StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                        error_msg="Exponent too large in power operation"
-                    )
+                raise build_error(
+                    StatusCode.EXPRESSION_EVAL_ERROR,
+                    error_msg="exponent too large in power operation"
                 )
         return left ** right
     elif isinstance(node.op, ast.FloorDiv):
@@ -373,12 +358,9 @@ def _evaluate_bin_op(node: ast.BinOp, runtime: dict) -> Any:
         return left ^ right
     elif isinstance(node.op, ast.BitAnd):
         return left & right
-    raise JiuWenBaseException(
-        StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-        StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-            expression=f"{ast.unparse(node)}",
-            error_msg=f"Unsupported binary operator: {type(node.op).__name__}"
-        )
+    raise build_error(
+        StatusCode.EXPRESSION_EVAL_ERROR,
+        error_msg=f"unsupported binary operator: {type(node.op).__name__}"
     )
 
 
@@ -424,11 +406,9 @@ def _compare_values(left: Any, right: Any, op: ast.operator) -> Any:
             return left not in right
         except TypeError:
             return False
-    raise JiuWenBaseException(
-        StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-        StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-            error_msg=f"Unsupported comparison operator: {type(op).__name__}"
-        )
+    raise build_error(
+        StatusCode.EXPRESSION_EVAL_ERROR,
+        error_msg=f"unsupported comparison operator: {type(op).__name__}"
     )
 
 
@@ -457,9 +437,10 @@ def _evaluate_name(node: ast.Name, runtime: dict) -> Any:
             elif node.id == 'None':
                 return None
             # According to test requirements, raise JiuWenBaseException instead of NameError
-            raise JiuWenBaseException(
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(error_msg=f"Name '{node.id}' is not defined")
+            raise build_error(
+                StatusCode.EXPRESSION_EVAL_ERROR,
+                error_msg=f"name '{node.id}' is not defined",
+                cause=e
             ) from e
 
 
@@ -468,11 +449,9 @@ def _evaluate_subscript(node: ast.Subscript, runtime: dict) -> Any:
 
     # Check if the value is a collection and has a safe size
     if hasattr(value, '__len__') and len(value) > MAX_COLLECTION_SIZE:
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                error_msg=f"Collection size exceeds maximum allowed size of {MAX_COLLECTION_SIZE}"
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"collection size exceeds maximum allowed size of {MAX_COLLECTION_SIZE}"
         )
 
     if isinstance(node.slice, ast.Slice):
@@ -483,11 +462,10 @@ def _evaluate_subscript(node: ast.Subscript, runtime: dict) -> Any:
         
         # Check for potential large slice operations
         if isinstance(lower, int) and isinstance(upper, int) and (upper - lower) > MAX_COLLECTION_SIZE:
-            raise JiuWenBaseException(
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-                StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                    error_msg=f"Slice operation would create collection exceeding maximum size of {MAX_COLLECTION_SIZE}"
-                )
+            raise build_error(
+                StatusCode.EXPRESSION_EVAL_ERROR,
+                error_msg=f"slice operation would create collection exceeding "
+                          f"maximum size of {MAX_COLLECTION_SIZE}"
             )
             
         slice_obj = slice(lower, upper, step)
@@ -502,22 +480,19 @@ def _evaluate_attribute(node: ast.Attribute, runtime: dict) -> Any:
     value = _evaluate_ast(node.value, runtime)
     # Block access to special attributes (dunder methods/properties)
     if node.attr.startswith('__') and node.attr.endswith('__'):
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                expression=f"{ast.unparse(node)}",
-                error_msg=f"Disallowed operation: Access to special attribute '{node.attr}' is prohibited"
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"disallowed operation: access to special attribute "
+                      f"'{node.attr}' is prohibited"
         )
+
     # Block access to sensitive attributes even if not full dunder
     sensitive_attributes = ['__class__', '__bases__', '__subclasses__', '__module__', '__dict__']
     if node.attr in sensitive_attributes:
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                expression=f"{ast.unparse(node)}",
-                error_msg=f"Disallowed operation: Access to sensitive attribute '{node.attr}' is prohibited"
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"disallowed operation: Access to sensitive attribute "
+                      f"'{node.attr}' is prohibited"
         )
 
     try:
@@ -528,12 +503,10 @@ def _evaluate_attribute(node: ast.Attribute, runtime: dict) -> Any:
         if isinstance(value, dict) and node.attr in value:
             return value[node.attr]
         # If both fail, raise an error
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                expression=f"${{data.{node.attr}}}",
-                error_msg=f"'dict' object has no attribute '{node.attr}'",
-            ),
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"'dict' object has no attribute '{node.attr}'",
+            cause=e
         ) from e
 
 
@@ -541,12 +514,9 @@ def _evaluate_call(node: ast.Call, runtime: dict) -> Any:
     func = _evaluate_ast(node.func, runtime)
     args = [_evaluate_ast(arg, runtime) for arg in node.args]
     if func is None or not callable(func):
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                expression=f"{ast.unparse(node)}",
-                error_msg=f"Function {func} is not defined or not callable."
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"function {func} is not defined or not callable"
         )
     return func(*args)
 
@@ -554,11 +524,10 @@ def _evaluate_call(node: ast.Call, runtime: dict) -> Any:
 def _evaluate_list(node: ast.List, runtime: dict) -> Any:
     # Check if list contains too many elements
     if len(node.elts) > MAX_COLLECTION_SIZE:
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                error_msg=f"List contains too many elements, maximum allowed is {MAX_COLLECTION_SIZE}"
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"list contains too many elements, "
+                      f"maximum allowed is {MAX_COLLECTION_SIZE}"
         )
     return [_evaluate_ast(item, runtime) for item in node.elts]
 
@@ -570,11 +539,10 @@ def _evaluate_tuple(node: ast.Tuple, runtime: dict) -> Any:
 def _evaluate_dict(node: ast.Dict, runtime: dict) -> Any:
     # Check if dictionary has too many key-value pairs
     if len(node.keys) > MAX_COLLECTION_SIZE:
-        raise JiuWenBaseException(
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code,
-            StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.errmsg.format(
-                error_msg=f"Dictionary contains too many key-value pairs, maximum allowed is {MAX_COLLECTION_SIZE}"
-            )
+        raise build_error(
+            StatusCode.EXPRESSION_EVAL_ERROR,
+            error_msg=f"dictionary contains too many key-value pairs, "
+                      f"maximum allowed is {MAX_COLLECTION_SIZE}"
         )
 
     evaluation_dict = {}

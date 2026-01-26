@@ -53,8 +53,10 @@ class ConfigManager:
                 
                 if is_sensitive_path(real_path):
                     raise JiuWenBaseException(
-                        error_code=StatusCode.LOG_PATH_SENSITIVE_ERROR.code,
-                        message=StatusCode.LOG_PATH_SENSITIVE_ERROR.errmsg.format(path=real_path)
+                        error_code=StatusCode.COMMON_LOG_PATH_INVALID.code,
+                        message=StatusCode.COMMON_LOG_PATH_INVALID.errmsg.format(
+                            error_msg=f'the path is {real_path}'
+                        )
                     )
                 
                 try:
@@ -62,9 +64,9 @@ class ConfigManager:
                         config_dict = yaml.safe_load(f)
                 except OSError as e:
                     raise JiuWenBaseException(
-                        error_code=StatusCode.LOG_CONFIG_LOAD_ERROR.code,
-                        message=StatusCode.LOG_CONFIG_LOAD_ERROR.errmsg.format(
-                            error_msg=f"Failed to read configuration file: {e}")
+                        error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
+                        message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
+                            error_msg=f"failed to read configuration file: {e}")
                     ) from e
 
             if 'logging' in config_dict:
@@ -83,15 +85,15 @@ class ConfigManager:
             raise
         except yaml.YAMLError as e:
             raise JiuWenBaseException(
-                error_code=StatusCode.LOG_CONFIG_LOAD_ERROR.code,
-                message=StatusCode.LOG_CONFIG_LOAD_ERROR.errmsg.format(
+                error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
+                message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
                     error_msg=f"YAML configuration file format is incorrect: {e}")
             ) from e
         except Exception as e:
             raise JiuWenBaseException(
-                error_code=StatusCode.LOG_CONFIG_LOAD_ERROR.code,
-                message=StatusCode.LOG_CONFIG_LOAD_ERROR.errmsg.format(
-                    error_msg=f"Unexpected error while loading configuration file: {e}")
+                error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
+                message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
+                    error_msg=f"unexpected error while loading configuration file: {e}")
             ) from e
 
     def get(self, key: str, default: Any = None) -> Any:

@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import SystemMessage, UserMessage, BaseMessage
 
@@ -307,6 +307,5 @@ def get_string_prompt(prompt: str | PromptTemplate):
         else:
             return "\n".join("\n".join(item.values()) for item in prompt.content)
     else:
-        raise JiuWenBaseException(StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.code,
-                                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.errmsg.format(
-                                    error_msg=f"Prompt type {str(type(prompt))} is not supported"))
+        raise build_error(StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR,
+                                error_msg=f"Prompt type {str(type(prompt))} is not supported")

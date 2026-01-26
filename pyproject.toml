@@ -1,9 +1,19 @@
 [project]
 name = "openjiuwen"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.1.4"
+description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
+classifiers = [
+    'Development Status :: 4 - Beta',
+    'Programming Language :: Python',
+    'Programming Language :: Python :: Implementation :: CPython',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3 :: Only',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.13',
+]
 dependencies = [
     # HTTP clients
     "aiohttp>=3.11.12",
@@ -38,12 +48,19 @@ dependencies = [
     "pdfplumber>=0.11.8",
 
     # Utilities
+    "numpy!=2.4.0",
     "cacheout>=0.16.0",
     "mermaid-py>=0.8.0",
     "pycryptodome>=3.23.0",
     "charset-normalizer>=3.4.4",
     "pysbd>=0.3.4",
 ]
+
+[project.urls]
+Homepage = "https://openjiuwen.com"
+Documentation = "https://openjiuwen.com/docs-page"
+Repository = "https://gitcode.com/openJiuwen/agent-core.git"
+Changelog = "https://gitcode.com/openJiuwen/agent-core/releases"
 
 [tool.uv]
 default-groups = ['dev']

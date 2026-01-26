@@ -49,8 +49,8 @@ class Drawable:
     def add_node(self, node_id: str, component: ComponentComposable):
         """convert component to DrawableNode & save it to self._graph.nodes"""
         from openjiuwen.core.workflow import LoopComponent
-        from openjiuwen.core.workflow.components.flow_related.loop.loop_comp import AdvancedLoopComponent
-        from openjiuwen.core.workflow.components.flow_related.workflow_comp import SubWorkflowComponent
+        from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
+        from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
         from openjiuwen.core.workflow import BranchComponent
         from openjiuwen.core.workflow import IntentDetectionComponent
         if isinstance(component, LoopComponent) or isinstance(component, AdvancedLoopComponent):

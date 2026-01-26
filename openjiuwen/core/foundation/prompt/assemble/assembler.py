@@ -3,8 +3,8 @@
 
 from typing import Union, List
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.prompt.assemble.variables.textable import TextableVariable
 from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variable
@@ -21,7 +21,7 @@ class PromptAssembler:
         self.template_content = prompt_template_content
         self.placeholder_prefix = placeholder_prefix
         self.placeholder_suffix = placeholder_suffix
-        self.template_formater: List[Variable] = self._get_formater_list()
+        self.template_formatter: List[Variable] = self._get_formatter_list()
         self.variables = self._get_variables_with_verify(variables)
 
     @property
@@ -32,11 +32,11 @@ class PromptAssembler:
             keys.extend(variable.input_keys)
         return list(set(keys))
 
-    def _get_formater_list(self):
-        """get prompt template content formater"""
-        template_formater_list = []
+    def _get_formatter_list(self):
+        """get prompt template content formatter"""
+        template_formatter_list = []
         if isinstance(self.template_content, str):
-            template_formater_list.append(
+            template_formatter_list.append(
                 TextableVariable(
                     self.template_content,
                     name="__inner__",
@@ -44,15 +44,15 @@ class PromptAssembler:
                     suffix=self.placeholder_suffix
                 )
             )
-            return template_formater_list
+            return template_formatter_list
         else:
             for msg in self.template_content:
                 # Process BaseMessage type
                 if isinstance(msg, BaseMessage):
                     if not isinstance(msg.content, str):
-                        template_formater_list.append(None)
+                        template_formatter_list.append(None)
                         continue
-                    template_formater_list.append(
+                    template_formatter_list.append(
                         TextableVariable(
                             msg.content,
                             name="__inner__",
@@ -61,26 +61,26 @@ class PromptAssembler:
                         )
                     )
                     continue
-        return template_formater_list
+        return template_formatter_list
 
     def _get_variables_with_verify(self, variables):
         """verify input variables and summarize with prompt template content variables"""
         input_keys = []
-        for formater in self.template_formater:
-            if not formater:
+        for formatter in self.template_formatter:
+            if not formatter:
                 continue
-            input_keys.extend(formater.input_keys)
+            input_keys.extend(formatter.input_keys)
         input_keys = list(set(input_keys))
         for name, variable in variables.items():
             if name not in input_keys:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR.code,
-                    message=f"Variable {name} is not defined in the PromptTemplate."
+                raise build_error(
+                    StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
+                    error_msg=f"variable {name} is not defined in the promptTemplate"
                 )
             if not isinstance(variable, Variable):
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR.code,
-                    message=f"Variable {name} must be instantiated as a `Variable` object."
+                raise build_error(
+                    StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
+                    error_msg=f"variable {name} must be instantiated as a `variable` object"
                 )
         for placeholder in input_keys:
             if placeholder in variables:
@@ -111,15 +111,15 @@ class PromptAssembler:
         """Update the variables based on the arguments passed in as key-value pairs"""
         missing_keys = set(self.input_keys) - set(kwargs.keys())
         if missing_keys:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_ASSEMBLER_TEMPLATE_FORMAT_ERROR.code,
-                message=f"Missing keys for updating the prompt assembler: {list(missing_keys)}"
+            raise build_error(
+                StatusCode.PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR,
+                error_msg=f"missing keys for updating the prompt assembler: {list(missing_keys)}"
             )
         unexpected_keys = set(kwargs.keys()) - set(self.input_keys)
         if unexpected_keys:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_ASSEMBLER_TEMPLATE_FORMAT_ERROR.code,
-                message=f"Unexpected keys for updating the prompt assembler: {list(unexpected_keys)}"
+            raise build_error(
+                StatusCode.PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR,
+                error_msg=f"unexpected keys for updating the prompt assembler: {list(unexpected_keys)}"
             )
         for variable in self.variables.values():
             input_kwargs = {k: v for k, v in kwargs.items() if k in variable.input_keys}
@@ -128,10 +128,10 @@ class PromptAssembler:
     def _format(self) -> Union[str, List[BaseMessage]]:
         """Substitute placeholders in the prompt template with variables values and get formatted prompt."""
         format_kwargs = {var.name: var.value for var in self.variables.values()}
-        for idx, formater in enumerate(self.template_formater):
-            if not formater:
+        for idx, formatter in enumerate(self.template_formatter):
+            if not formatter:
                 continue
-            formatted_prompt = formater.eval(**format_kwargs)
+            formatted_prompt = formatter.eval(**format_kwargs)
             if isinstance(self.template_content, str):
                 self.template_content = formatted_prompt
                 break

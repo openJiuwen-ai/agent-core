@@ -1,119 +1,61 @@
-# -*- coding: UTF-8 -*-
+# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import uuid
+from typing import Any, TYPE_CHECKING, Union, AsyncIterator
 
-from typing import Any
+from openjiuwen.core.session import Config
+from openjiuwen.core.session.internal.wrapper import TaskSession
+from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.session.workflow import Session as WorkflowSession
 
-from openjiuwen.core.session.agent_state import StateCollection
-from openjiuwen.core.session.config import Config
-from openjiuwen.core.session.interaction.base import Checkpointer
-from openjiuwen.core.session.base import get_default_inmemory_checkpointer
-from openjiuwen.core.session.callback_manager import CallbackManager
-
-from openjiuwen.core.session.session import BaseSession
-from openjiuwen.core.session.state import State, InMemoryCommitState
-from openjiuwen.core.session.workflow import WorkflowSession
-from openjiuwen.core.session.workflow_state import InMemoryState
-from openjiuwen.core.session.stream.emitter import StreamEmitter
-from openjiuwen.core.session.stream.manager import StreamWriterManager
-from openjiuwen.core.session.tracer.tracer import Tracer
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent import AgentCard
 
 
-class StaticAgentSession(BaseSession):
-    def __init__(self, config: Config = None, resource_mgr = None):
-        self._config = config if config is not None else Config()
-        if resource_mgr:
-            self._resource_manager = resource_mgr
-        else:
-            from openjiuwen.core.runner import Runner
-            self._resource_manager = Runner.resource_mgr
-        self._checkpointer = get_default_inmemory_checkpointer()
-
-    def config(self) -> Config:
-        return self._config
-
-    def resource_manager(self) -> "ResourceMgr":
-        return self._resource_manager
-
-    def checkpointer(self) -> Checkpointer:
-        return self._checkpointer
-
-    def state(self) -> State:
-        pass
-
-    def tracer(self) -> Any:
-        pass
-
-    def stream_writer_manager(self) -> StreamWriterManager:
-        pass
-
-    def callback_manager(self) -> CallbackManager:
-        pass
-
-    def session_id(self) -> str:
-        pass
-
-    async def create_agent_session(self, session_id: str, inputs=None) -> BaseSession:
-        session = AgentSession(session_id, self._config, self._resource_manager, self._checkpointer)
-        await self._checkpointer.pre_agent_execute(session, inputs)
-        return session
-
-
-class AgentSession(BaseSession):
-    def __init__(
-            self,
-            session_id: str,
-            config: Config = None,
-            resource_manager: "ResourceMgr" = None,
-            checkpointer: Checkpointer | None = None):
+class Session:
+    def __init__(self, session_id: str = None, envs: dict[str, Any] = None, card: "AgentCard" = None):
+        if session_id is None:
+            session_id = str(uuid.uuid4())
         self._session_id = session_id
-        self._config = config
-        if resource_manager:
-            self._resource_manager = resource_manager
-        else:
-            from openjiuwen.core.runner import Runner
-            self._resource_manager = Runner.resource_mgr
-        self._state = StateCollection()
-        self._stream_writer_manager = StreamWriterManager(StreamEmitter())
-        self._callback_manager = CallbackManager()
-        tracer = Tracer()
-        tracer.init(self._stream_writer_manager, self._callback_manager)
-        self._tracer = tracer
-        self._checkpointer = get_default_inmemory_checkpointer() if checkpointer is None else checkpointer
-        self._agent_span = self._tracer.tracer_agent_span_manager.create_agent_span() if self._tracer else None
+        config = Config()
+        if envs is not None:
+            config.set_envs(envs)
+        self._inner = TaskSession(session_id=session_id, config=config, card=card)
+        self._card = card
 
-    def config(self) -> Config:
-        return self._config
-
-    def state(self) -> State:
-        return self._state
-
-    def tracer(self) -> Any:
-        return self._tracer
-
-    def span(self):
-        return self._agent_span
-
-    def stream_writer_manager(self) -> StreamWriterManager:
-        return self._stream_writer_manager
-
-    def callback_manager(self) -> CallbackManager:
-        return self._callback_manager
-
-    def session_id(self) -> str:
+    def get_session_id(self) -> str:
         return self._session_id
 
-    def resource_manager(self) -> "ResourceMgr":
-        return self._resource_manager
+    def get_envs(self):
+        return self._inner.get_envs()
 
-    def checkpointer(self) -> Checkpointer:
-        return self._checkpointer
+    def get_agent_id(self):
+        return self._card.id
+
+    def get_agent_name(self):
+        return self._card.name
+
+    def get_agent_description(self):
+        return self._card.description
+
+    async def write_stream(self, data: Union[dict, OutputSchema]):
+        await self._inner.write_stream(data)
+
+    async def write_custom_stream(self, data: dict):
+        await self._inner.write_custom_stream(data)
+
+    def stream_iterator(self) -> AsyncIterator[Any]:
+        return self._inner.stream_iterator()
+
+    async def post_run(self):
+        await self._inner.post_run()
 
     def create_workflow_session(self) -> WorkflowSession:
-        state = self._state.global_state
-        return WorkflowSession(
-            parent=self,
-            state=InMemoryState(InMemoryCommitState(state)),
-            session_id=self._session_id)
+        return WorkflowSession(parent=self, session_id=self.get_session_id())
 
-    def agent_id(self):
-        return self._config.get_agent_config().id
+    async def interact(self, value):
+        await self._inner.interact(value)
+
+
+def create_agent_session(session_id: str = None, envs: dict[str, Any] = None, card: "AgentCard" = None) -> Session:
+    return Session(session_id=session_id, envs=envs, card=card)

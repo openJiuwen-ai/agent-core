@@ -15,9 +15,10 @@ from openjiuwen.core.controller.legacy.event.event import Event
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.message_queue_base import InvokeQueueMessage
 from openjiuwen.core.runner.message_queue_inmemory import MessageQueueInMemory
+from openjiuwen.core.session.agent_group import Session
 
 if TYPE_CHECKING:
-    from openjiuwen.core.multi_agent.legacy import BaseGroup, AgentGroupSession
+    from openjiuwen.core.multi_agent.legacy import BaseGroup
 
 
 class BaseGroupController(ABC):
@@ -75,7 +76,7 @@ class BaseGroupController(ABC):
             f"group_id={group.group_id}"
         )
 
-    async def invoke(self, event: Event, session: 'AgentGroupSession') -> Any:
+    async def invoke(self, event: Event, session: Session) -> Any:
         """Synchronous invocation entry
         
         Process:
@@ -163,7 +164,7 @@ class BaseGroupController(ABC):
     async def handle_event(
         self,
         event: Event,
-        session: 'AgentGroupSession'
+        session: Session
     ) -> Any:
         """Core method for message processing (must be implemented)
         
@@ -237,7 +238,7 @@ class BaseGroupController(ABC):
         self,
         event: Event,
         agent_id: str,
-        session: 'AgentGroupSession'
+        session: Session
     ) -> Any:
         """Send message to specified Agent (point-to-point, streaming)
         
@@ -321,7 +322,7 @@ class BaseGroupController(ABC):
     async def publish(
         self,
         event: Event,
-        session: 'AgentGroupSession'
+        session: Session
     ) -> List[Any]:
         """Publish message to all subscribers (broadcast)
         
@@ -391,7 +392,7 @@ class DefaultGroupController(BaseGroupController):
     async def handle_event(
         self,
         event: Event,
-        session: 'AgentGroupSession'
+        session: Session
     ) -> Any:
         """Handle message - Dispatch to corresponding Agent based on type
         

@@ -14,8 +14,10 @@ import pytest
 from typing import List
 
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, workflow_provider
-from openjiuwen.core.session import TaskSession
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.foundation.llm import (
+    ModelConfig, BaseModelInfo, ModelClientConfig, ModelRequestConfig
+)
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import IntentDetectionComponent, IntentDetectionCompConfig
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
@@ -32,7 +34,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.application.workflow_agent import WorkflowAgent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Output, Input
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
@@ -136,13 +138,36 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
+    def _create_model_client_config() -> ModelClientConfig:
+        """创建模型客户端配置。"""
+        return ModelClientConfig(
+            client_provider=MODEL_PROVIDER,
+            api_key=API_KEY,
+            api_base=API_BASE,
+            timeout=120,
+            max_retries=3,
+            verify_ssl=False
+        )
+
+    @staticmethod
+    def _create_model_request_config() -> ModelRequestConfig:
+        """创建模型请求配置。"""
+        return ModelRequestConfig(
+            model=MODEL_NAME,
+            temperature=0.7,
+            top_p=0.9
+        )
+
+    @staticmethod
     def _create_intent_detection_component() -> IntentDetectionComponent:
         """创建意图识别组件。"""
-        model_config = WorkflowAgentTest._create_model_config()
+        model_client_config = WorkflowAgentTest._create_model_client_config()
+        model_request_config = WorkflowAgentTest._create_model_request_config()
         config = IntentDetectionCompConfig(
             user_prompt="请判断用户意图，识别是否为天气查询请求",
             category_name_list=["查询某地天气"],
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
         )
         component = IntentDetectionComponent(config)
         # 分支配置：
@@ -155,7 +180,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _create_llm_component() -> LLMComponent:
         """创建 LLM 组件，提取结构化字段（location/date）并改写query。"""
-        model_config = WorkflowAgentTest._create_model_config()
+        model_client_config = WorkflowAgentTest._create_model_client_config()
+        model_request_config = WorkflowAgentTest._create_model_request_config()
         current_date = build_current_date()
         user_prompt = (
                 "\n原始query为：{{query}}\n\n"
@@ -165,7 +191,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                                                                                              "3. query: 改写后的完整query（地名改为英文，保留其他中文信息）\n"
         )
         config = LLMCompConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             template_content=[{"role": "user", "content": user_prompt}],
             response_format={"type": "json"},
             output_config={
@@ -188,9 +215,11 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                 default_value="today",
             ),
         ]
-        model_config = WorkflowAgentTest._create_model_config()
+        model_client_config = WorkflowAgentTest._create_model_client_config()
+        model_request_config = WorkflowAgentTest._create_model_request_config()
         config = QuestionerConfig(
-            model=model_config,
+            model_config=model_request_config,
+            model_client_config=model_client_config,
             question_content="",
             extract_fields_from_response=True,
             field_names=key_fields,
@@ -201,9 +230,10 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _create_plugin_component() -> ToolComponent:
         """创建插件组件，真正调用外部 RESTful API。"""
-        tool_config = ToolComponentConfig()
+        tool_config = ToolComponentConfig(tool_id="weather_tool")
         weather_tool = RestfulApi(
             card=RestfulApiCard(
+                id="weather_tool",
                 name="WeatherReporter",
                 description="天气查询插件",
                 input_params={
@@ -219,11 +249,12 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                 method="GET",
             ),
         )
-        return ToolComponent(tool_config).bind_tool(weather_tool)
+        Runner.resource_mgr.add_tool(weather_tool)
+        return ToolComponent(tool_config)
 
     @staticmethod
     def _create_start_component():
-        return Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        return Start()
 
     @staticmethod
     def _create_end_component():
@@ -247,7 +278,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(
             card=card
         )
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -312,7 +343,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(
             card=card
         )
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -369,7 +400,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         flow = Workflow(card=card)
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -473,7 +504,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.invoke 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置30秒超时）
@@ -513,7 +545,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(result2, dict, "第二次调用应该返回字典")
             self.assertEqual(result2['result_type'], 'answer', "应该返回answer类型")
             self.assertEqual(result2['output'].state.value, 'COMPLETED', "工作流应该完成")
-            self.assertEqual(result2['output'].result['responseContent'], '上海', "应该返回上海")
+            self.assertEqual(result2['output'].result['response'], '上海', "应该返回上海")
             print(f"✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
             return result, result2  # 返回结果用于比对
@@ -527,7 +559,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.stream 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置50秒超时）
@@ -595,9 +628,9 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                     self.fail(f"工作流执行失败: {error_msg}")
 
             # 校验正常响应 - 透传模式下 payload 是 End 组件的直接输出
-            # payload 格式: {'responseContent': '...', 'output': {}}
-            self.assertIn('responseContent', workflow_final_chunk.payload, "应该包含responseContent")
-            self.assertEqual(workflow_final_chunk.payload['responseContent'], '上海', "应该返回上海")
+            # payload 格式: {'response': '...', 'output': {}}
+            self.assertIn('response', workflow_final_chunk.payload, "应该包含response")
+            self.assertEqual(workflow_final_chunk.payload['response'], '上海', "应该返回上海")
             print(f"✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
             return first_chunks, second_chunks  # 返回结果用于比对
@@ -611,7 +644,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.stream 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置50秒超时）
@@ -679,9 +713,9 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                     self.fail(f"工作流执行失败: {error_msg}")
 
             # 校验正常响应 - 透传模式下 payload 是 End 组件的直接输出
-            # payload 格式: {'responseContent': '...', 'output': {}}
-            self.assertIn('responseContent', workflow_final_chunk.payload, "应该包含responseContent")
-            self.assertEqual(workflow_final_chunk.payload['responseContent'], '上海', "应该返回上海")
+            # payload 格式: {'response': '...', 'output': {}}
+            self.assertIn('response', workflow_final_chunk.payload, "应该包含response")
+            self.assertEqual(workflow_final_chunk.payload['response'], '上海', "应该返回上海")
             print(f"✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
             return first_chunks, second_chunks  # 返回结果用于比对
@@ -695,7 +729,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.invoke 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置30秒超时）
@@ -735,7 +770,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(result2, dict, "第二次调用应该返回字典")
             self.assertEqual(result2['result_type'], 'answer', "应该返回answer类型")
             self.assertEqual(result2['output'].state.value, 'COMPLETED', "工作流应该完成")
-            self.assertEqual(result2['output'].result['responseContent'], '上海', "应该返回上海")
+            self.assertEqual(result2['output'].result['response'], '上海', "应该返回上海")
             print(f"✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
             return result, result2  # 返回结果用于比对
@@ -749,7 +784,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         print("=== 测试 WorkflowAgent.stream 方法 ===")
         _, workflow = self.build_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
-            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)), workflow)
+            WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
+            lambda: workflow)
         agent = self._create_agent(workflow)
 
         # 第一次调用 - 应该触发中断（设置50秒超时）
@@ -817,9 +853,9 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                     self.fail(f"工作流执行失败: {error_msg}")
 
             # 校验正常响应 - 透传模式下 payload 是 End 组件的直接输出
-            # payload 格式: {'responseContent': '...', 'output': {}}
-            self.assertIn('responseContent', workflow_final_chunk.payload, "应该包含responseContent")
-            self.assertEqual(workflow_final_chunk.payload['responseContent'], '上海', "应该返回上海")
+            # payload 格式: {'response': '...', 'output': {}}
+            self.assertIn('response', workflow_final_chunk.payload, "应该包含response")
+            self.assertEqual(workflow_final_chunk.payload['response'], '上海', "应该返回上海")
             print(f"✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
             return first_chunks, second_chunks  # 返回结果用于比对
@@ -876,8 +912,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
 
         # 使用新的 add_workflows 方法，传入装饰器包装的 WorkflowFactory
         agent.add_workflows([create_interrupt_workflow_instance])
-        toolinfos = Runner.resource_mgr.get_tool_infos(
-            id=[generate_workflow_key(workflow_id="test_provider_workflow", workflow_version="1.0")])
+        toolinfos = await Runner.resource_mgr.get_tool_infos(
+            tool_id=[generate_workflow_key(workflow_id="test_provider_workflow", workflow_version="1.0")])
         print(toolinfos)
 
         # 验证注册到了 _providers
@@ -1068,7 +1104,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         _, workflow = self.build_multiple_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
             WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
-            workflow
+            lambda: workflow
         )
         agent = self._create_agent(workflow)
 
@@ -1186,8 +1222,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                 self.fail(f"工作流执行失败: {error_msg}")
 
         # 校验正常响应
-        self.assertIn('responseContent', workflow_final_chunk.payload, "应该包含responseContent")
-        response_content = workflow_final_chunk.payload['responseContent']
+        self.assertIn('response', workflow_final_chunk.payload, "应该包含response")
+        response_content = workflow_final_chunk.payload['response']
         self.assertIn('上海', response_content, "应该包含location信息")
         self.assertIn('确认操作', response_content, "应该包含confirm信息")
         print(f"✅ 第三次调用校验通过：工作流完成，返回结果正确")
@@ -1213,7 +1249,7 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
         _, workflow = self.build_multiple_interrupt_workflow()
         Runner.resource_mgr.add_workflow(
             WorkflowCard(id=generate_workflow_key(workflow.card.id, workflow.card.version)),
-            workflow
+            lambda: workflow
         )
         agent = self._create_agent(workflow)
 
@@ -1284,8 +1320,8 @@ class WorkflowAgentTest(unittest.IsolatedAsyncioTestCase):
                 self.fail(f"工作流执行失败: {error_msg}")
 
         # 校验正常响应
-        self.assertIn('responseContent', workflow_final_chunk.payload, "应该包含responseContent")
-        response_content = workflow_final_chunk.payload['responseContent']
+        self.assertIn('response', workflow_final_chunk.payload, "应该包含response")
+        response_content = workflow_final_chunk.payload['response']
         self.assertIn('北京', response_content, "应该包含location信息")
         self.assertIn('确认操作', response_content, "应该包含confirm信息")
         print(f"✅ 第二次调用校验通过：工作流直接完成，返回结果正确")

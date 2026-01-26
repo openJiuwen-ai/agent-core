@@ -3,7 +3,6 @@
 Vector store abstract base class test cases
 """
 
-
 import pytest
 
 from openjiuwen.core.retrieval import VectorStore
@@ -15,6 +14,9 @@ class ConcreteVectorStore(VectorStore):
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> None:
         pass
+
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
 
     async def add(self, data, batch_size=None, **kwargs):
         pass
@@ -30,6 +32,12 @@ class ConcreteVectorStore(VectorStore):
 
     async def delete(self, ids=None, filter_expr=None, **kwargs):
         return True
+
+    async def table_exists(self, table_name: str) -> bool:
+        pass
+
+    async def delete_table(self, table_name: str) -> None:
+        pass
 
 
 class TestVectorStore:

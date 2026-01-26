@@ -269,7 +269,7 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
         not_exist = agent.get_ability("not_exist")
         self.assertIsNone(not_exist)
 
-    def test_list_tool_info(self):
+    async def test_list_tool_info(self):
         """测试获取 ToolInfo 列表"""
         with patch.object(
             ReActAgent,
@@ -280,7 +280,7 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             agent.add_ability(self._create_add_tool_card())
             agent.add_ability(self._create_multiply_tool_card())
 
-        tool_infos = agent.list_tool_info()
+        tool_infos = await agent.list_tool_info()
         self.assertEqual(len(tool_infos), 2)
 
         names = [t.name for t in tool_infos]
@@ -340,14 +340,17 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
     def _create_mock_session(self):
         """创建 mock session"""
         mock_session = MagicMock()
-        mock_session.get_tool = MagicMock(return_value=None)
-        mock_session.get_tool_info = MagicMock(return_value=[])
         return mock_session
 
+
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool_infos')
     @pytest.mark.asyncio
-    async def test_invoke_pure_conversation(self):
+    async def test_invoke_pure_conversation(self, mock_get_tool, mock_get_tool_infos):
         """测试纯对话场景（无工具调用）"""
         mock_llm = MockLLMModel()
+        mock_get_tool.return_value = MagicMock(return_value=None)
+        mock_get_tool_infos.return_value = MagicMock(return_value=[])
         mock_llm.set_responses([
             create_text_response("你好！我是数学计算助手，有什么可以帮助你的吗？"),
         ])
@@ -413,7 +416,6 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         mock_session = MagicMock()
         mock_tool = MagicMock()
         mock_tool.invoke = AsyncMock(return_value=3)
-        mock_session.get_tool = MagicMock(return_value=mock_tool)
 
         with patch.object(
             ReActAgent,
@@ -436,8 +438,9 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         self.assertIn('3', result['output'])
         self.assertEqual(mock_llm.call_count, 2)
 
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
     @pytest.mark.asyncio
-    async def test_invoke_multi_turn_tool_calls(self):
+    async def test_invoke_multi_turn_tool_calls(self, mock_get_tool):
         """测试多轮工具调用场景"""
         mock_llm = MockLLMModel()
         mock_llm.set_responses([
@@ -469,7 +472,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
                 mock_tool.invoke = AsyncMock(return_value=9)
             return mock_tool
 
-        mock_session.get_tool = MagicMock(side_effect=get_tool_side_effect)
+        mock_get_tool.return_value = MagicMock(side_effect=get_tool_side_effect)
 
         with patch.object(
             ReActAgent,
@@ -493,8 +496,9 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         self.assertIn('9', result['output'])
         self.assertEqual(mock_llm.call_count, 3)
 
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
     @pytest.mark.asyncio
-    async def test_invoke_max_iterations_reached(self):
+    async def test_invoke_max_iterations_reached(self, mock_get_tool):
         """测试达到最大迭代次数"""
         mock_llm = MockLLMModel()
         # 每次都返回工具调用，不返回最终答案
@@ -520,7 +524,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         mock_session = MagicMock()
         mock_tool = MagicMock()
         mock_tool.invoke = AsyncMock(return_value=3)
-        mock_session.get_tool = MagicMock(return_value=mock_tool)
+        mock_get_tool.return_value = MagicMock(return_value=mock_tool)
 
         # 设置 max_iterations 为 2
         config = (
@@ -638,11 +642,27 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
         )
 
     def _create_mock_session(self):
-        """创建 mock session"""
+        """创建 mock session，模拟真实 Session 的 write_stream/stream_iterator 行为"""
+        import asyncio
         mock_session = MagicMock()
-        mock_session.get_tool = MagicMock(return_value=None)
-        mock_session.get_tool_info = MagicMock(return_value=[])
-        mock_session.write_stream = AsyncMock()
+        data_queue = asyncio.Queue()
+
+        async def mock_write_stream(data):
+            await data_queue.put(data)
+
+        async def mock_post_run():
+            await data_queue.put(None)  # 发送结束信号
+
+        async def mock_stream_iterator():
+            while True:
+                data = await data_queue.get()
+                if data is None:
+                    break
+                yield data
+
+        mock_session.write_stream = mock_write_stream
+        mock_session.post_run = mock_post_run
+        mock_session.stream_iterator = mock_stream_iterator
         return mock_session
 
     @pytest.mark.asyncio
@@ -687,10 +707,12 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
 
         # 验证有结果返回
         self.assertGreater(len(results), 0)
-        # 验证最终结果
+        # 验证最终结果是 OutputSchema（新版本行为）
         final_result = results[-1]
-        self.assertIsInstance(final_result, dict)
-        self.assertEqual(final_result['result_type'], 'answer')
+        from openjiuwen.core.session.stream.base import OutputSchema
+        self.assertIsInstance(final_result, OutputSchema)
+        self.assertEqual(final_result.type, 'answer')
+        self.assertEqual(final_result.payload['result_type'], 'answer')
 
 
 class TestNewReActAgentGetToolInfo(unittest.IsolatedAsyncioTestCase):

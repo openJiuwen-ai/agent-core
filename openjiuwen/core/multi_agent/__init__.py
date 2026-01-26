@@ -9,8 +9,7 @@ New API (recommended):
     from openjiuwen.core.multi_agent import (
         GroupCard,
         GroupConfig,
-        BaseGroup,
-        AgentGroupSession
+        BaseGroup
     )
 
 Legacy API (deprecated, for backward compatibility only):
@@ -18,13 +17,11 @@ Legacy API (deprecated, for backward compatibility only):
         AgentGroupConfig,
         BaseGroup,
         ControllerGroup,
-        AgentGroupSession,
         GroupCard
     )
 """
 
 from openjiuwen.core.multi_agent.group import (
-    AgentGroupSession,
     BaseGroup
 )
 from openjiuwen.core.multi_agent.config import GroupConfig
@@ -33,10 +30,16 @@ from openjiuwen.core.multi_agent.schema.group_card import (
     EventDrivenGroupCard
 )
 
+from openjiuwen.core.session.agent_group import (
+    Session,
+    create_agent_group_session,
+)
+
 __all__ = [
     "GroupCard",
     "EventDrivenGroupCard",
     "GroupConfig",
-    "AgentGroupSession",
+    "Session",
     "BaseGroup",
+    "create_agent_group_session"
 ]

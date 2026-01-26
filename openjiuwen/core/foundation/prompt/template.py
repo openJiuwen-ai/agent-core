@@ -5,8 +5,8 @@ from typing import Union, List
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
 
@@ -47,9 +47,9 @@ class PromptTemplate(BaseModel):
             return [UserMessage(content=self.content)]
 
         if not all(isinstance(msg, BaseMessage) for msg in self.content):
-            raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_TEMPLATE_INCORRECT_ERROR.code,
-                message=f"Prompt template type must be in str or list[BaseMessage]."
+            raise build_error(
+                StatusCode.PROMPT_TEMPLATE_INVALID,
+                error_msg="prompt template type must be in str or list[BaseMessage]"
             )
 
         return [copy.deepcopy(msg) for msg in self.content]

@@ -64,7 +64,7 @@ class RunnerConfig:
 
 
 DEFAULT_RUNNER_CONFIG = RunnerConfig(
-    distributed_mode=True,
+    distributed_mode=False,
     distributed_config=DistributedConfig(
         request_timeout=30.0,
         message_queue_config=MessageQueueConfig(

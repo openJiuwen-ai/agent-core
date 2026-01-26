@@ -24,7 +24,6 @@ class TextPreprocessor(ABC):
         Returns:
             The processed text
         """
-        pass
 
     def __call__(self, text: str) -> str:
         """Allow preprocessor to be called as a function."""

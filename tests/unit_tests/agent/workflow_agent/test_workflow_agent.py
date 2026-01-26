@@ -9,8 +9,7 @@ import unittest
 
 import pytest
 
-from openjiuwen.core.common.constants.enums import ControllerType
-from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
+from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig
 from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
@@ -71,19 +70,16 @@ class TestWorkflowAgent(unittest.IsolatedAsyncioTestCase):
         description = "test_workflow"
 
         workflow = self._build_workflow(name, workflow_id, version)
-        test_workflow_schema = WorkflowSchema(
-            id=workflow_id,
-            version=version,
-            name=name,
-            description=description,
-            inputs={"query": {"type": "string"}},
-        )
+
+        # 使用新 API: add_workflows() 自动从 workflow.card 提取 schema
         workflow_config = WorkflowAgentConfig(
-            workflows=[test_workflow_schema],
-            controller_type=ControllerType.WorkflowController
+            id="test_workflow_agent",
+            version="0.1.0",
+            description=description,
+            workflows=[],
         )
         agent = WorkflowAgent(workflow_config)
-        agent.bind_workflows([workflow])
+        agent.add_workflows([workflow])
 
         inputs = {"query": "hi"}
         result = await agent.invoke(inputs)

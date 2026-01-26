@@ -14,10 +14,11 @@ from openjiuwen.core.workflow import IntentDetectionCompConfig, \
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
 from openjiuwen.core.session import NodeSession, WorkflowSession
-from openjiuwen.core.session import WrappedNodeSession, TaskSession
+from openjiuwen.core.session.node import Session
+from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.workflow import Workflow
-from openjiuwen.core.workflow.components.llm_related.intent_detection_comp import IntentDetectionExecutable
+from openjiuwen.core.workflow.components.llm.intent_detection_comp import IntentDetectionExecutable
 
 fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
@@ -56,7 +57,7 @@ def _create_model_client_config() -> ModelClientConfig:
 
 @pytest.fixture
 def fake_ctx():
-    return WrappedNodeSession(NodeSession(WorkflowSession(), "test-id"))
+    return Session(NodeSession(WorkflowSession(), "test-id"))
 
 
 @pytest.fixture
@@ -113,13 +114,7 @@ class TestIntentDetectionComponent:
         name = "intent"
         flow = Workflow(card=WorkflowCard(name=name, id=id, version=version))
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         model_config = ModelConfig(model_provider=MODEL_PROVIDER,
@@ -163,6 +158,6 @@ class TestIntentDetectionComponent:
         config = ContextEngineConfig()
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="intent_detection_workflow")
-        workflow_session = TaskSession(trace_id=session_id).create_workflow_session()
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         async for chunk in flow.stream({"query": "我的意图是查询景点"}, workflow_session, workflow_context):
             print(chunk)

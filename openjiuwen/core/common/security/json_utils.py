@@ -14,13 +14,13 @@ class JsonUtils:
             try:
                 return json.loads(json_string, **kwargs)
             except json.JSONDecodeError as e:
-                ExceptionUtils.raise_exception(StatusCode.JSON_LOADS_ERROR, f"JSON decode error", e)
+                ExceptionUtils.raise_exception(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, f"JSON decode error", e)
             except TypeError as e:
-                ExceptionUtils.raise_exception(StatusCode.JSON_LOADS_ERROR, f"JSON type error", e)
+                ExceptionUtils.raise_exception(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, f"JSON type error", e)
             except ValueError as e:
-                ExceptionUtils.raise_exception(StatusCode.JSON_LOADS_ERROR, f"JSON value error", e)
+                ExceptionUtils.raise_exception(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, f"JSON value error", e)
             except Exception as e:
-                ExceptionUtils.raise_exception(StatusCode.JSON_LOADS_ERROR, f"JSON operation error", e)
+                ExceptionUtils.raise_exception(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, f"JSON operation error", e)
         else:
             result = default
             try:
@@ -42,11 +42,23 @@ class JsonUtils:
             try:
                 return json.dumps(obj, **kwargs)
             except TypeError as e:
-                ExceptionUtils.raise_exception(StatusCode.JSON_DUMPS_ERROR, f"JSON serialization type error", e)
+                ExceptionUtils.raise_exception(
+                    StatusCode.COMMON_JSON_EXECUTION_PROCESS_ERROR,
+                    f"JSON serialization type error",
+                    e
+                )
             except ValueError as e:
-                ExceptionUtils.raise_exception(StatusCode.JSON_DUMPS_ERROR, f"JSON serialization value error", e)
+                ExceptionUtils.raise_exception(
+                    StatusCode.COMMON_JSON_EXECUTION_PROCESS_ERROR,
+                    f"JSON serialization value error",
+                    e
+                )
             except Exception as e:
-                ExceptionUtils.raise_exception(StatusCode.JSON_DUMPS_ERROR, f"JSON serialization error", e)
+                ExceptionUtils.raise_exception(
+                    StatusCode.COMMON_JSON_EXECUTION_PROCESS_ERROR,
+                    f"JSON serialization error",
+                    e
+                )
         else:
             result = default
             try:

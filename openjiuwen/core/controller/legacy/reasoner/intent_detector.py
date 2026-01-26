@@ -220,16 +220,17 @@ class IntentDetector:
             llm_inputs: Union[List[BaseMessage], str]
     ) -> str:
         try:
-            model = ReasonerUtils.get_model(
-                self.agent_config.model, self.session
+            model = await ReasonerUtils.get_model(
+                self.agent_config.model
             )
-            llm_output = await model.ainvoke(
-                self.agent_config.model.model_info.model_name, llm_inputs
+            llm_output = await model.invoke(
+                llm_inputs,
+                model=self.agent_config.model.model_info.model_name
             )
             llm_output_content = llm_output.content.strip()
         except Exception as e:
             ExceptionUtils.raise_exception(
-                StatusCode.CONTROLLER_INVOKE_LLM_FAILED, str(e), e
+                StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED, str(e), e
             )
 
         return llm_output_content

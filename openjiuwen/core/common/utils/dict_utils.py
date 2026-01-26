@@ -36,6 +36,12 @@ def create_nested_dict(path: str, value: Any = None, separator: str = '.') -> di
     return result
 
 
+def flatten_dict(data: dict[str, Any]):
+    nodes = extract_leaf_nodes(data)
+    result = {format_path(node[0]): node[1] for node in nodes}
+    return result
+
+
 def extract_leaf_nodes(data: Any, current_path: Optional[List[str]] = None) -> List[Tuple[List[str], Any]]:
     """Extract all leaf nodes from a nested structure of dicts/lists.
 

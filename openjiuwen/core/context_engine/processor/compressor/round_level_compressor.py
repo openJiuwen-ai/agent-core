@@ -3,7 +3,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Union, Tuple
+from typing import List, Optional, Union, Tuple, Dict, Any
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
@@ -24,7 +24,8 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 
 
-CL_PATTERN = re.compile(r'^\[CL=(\d+)\]\s*')
+_COMPRESS_LEVEL = "compress_level"
+
 
 DEFAULT_ROUND_COMPRESSION_PROMPT: str = """
 You are a Context Conversation Round Compression Assistant.
@@ -45,17 +46,6 @@ Your task: compress and summarize the following consecutive conversation rounds 
     "summary": "<refined content>"
 }
 """
-
-
-def extract_cl(msg: BaseMessage) -> Optional[int]:
-    if not msg.content:
-        return None
-    m = CL_PATTERN.match(msg.content)
-    return int(m.group(1)) if m else None
-
-
-def wrap_with_cl(content: str, level: int) -> str:
-    return f"[CL={level}]\n{content}"
 
 
 def filter_out_latest_round(rounds: List["DialogueRound"], preserve: bool) -> List["DialogueRound"]:
@@ -79,6 +69,9 @@ class RoundLevelCompressorConfig(BaseModel):
     Maximum number of consecutive dialogue rounds allowed before compression is triggered.
     Only takes effect when the number of contiguous, same-level dialogue rounds exceeds this threshold.
     """
+
+    tokens_threshold: int = Field(default=10000, gt=0)
+    """Maximum accumulated token count before offloading is triggered."""
 
     keep_last_round: bool = Field(default=True)
     """
@@ -106,7 +99,6 @@ class RoundLevelCompressorConfig(BaseModel):
 
 @ContextEngine.register_processor()
 class RoundLevelCompressor(ContextProcessor):
-
     def __init__(self, config: RoundLevelCompressorConfig):
         super().__init__(config)
         self._rounds_threshold = config.rounds_threshold
@@ -129,9 +121,18 @@ class RoundLevelCompressor(ContextProcessor):
             **kwargs
     ) -> bool:
         all_messages = context.get_messages() + messages_to_add
-        rounds = list(self._iter_rounds(all_messages))
+        rounds = self._iter_rounds(all_messages)
         filtered_rounds = filter_out_latest_round(rounds, self._keep_last_round)
-        return self._find_best_round_window(filtered_rounds) is not None
+        token_counter = context.token_counter()
+        tokens = 0
+        is_exceed_token_limit = False
+        if token_counter:
+            context_token = token_counter.count_messages(context.get_messages())
+            messages_to_add_token = token_counter.count_messages(messages_to_add)
+            tokens = messages_to_add_token + context_token
+        if tokens > self._config.tokens_threshold:
+            is_exceed_token_limit = True
+        return self._find_best_round_window(filtered_rounds) and is_exceed_token_limit
 
     async def on_add_messages(
             self,
@@ -142,7 +143,7 @@ class RoundLevelCompressor(ContextProcessor):
 
         all_messages = context.get_messages() + messages_to_add
 
-        rounds = list(self._iter_rounds(all_messages))
+        rounds = self._iter_rounds(all_messages)
 
         filtered_rounds = filter_out_latest_round(rounds, self._keep_last_round)
 
@@ -154,12 +155,12 @@ class RoundLevelCompressor(ContextProcessor):
             )
             return None, messages_to_add
 
-        new_messages, start_inx, end_idx = await self._compress_rounds(all_messages, target_rounds, context)
-        context.set_messages(new_messages)
+        new_messages, start_idx, end_idx = await self._compress_rounds(all_messages, target_rounds, context)
 
         event = ContextEvent(event_type=self.processor_type())
-        for start, end in (start_inx, end_idx):
+        for start, end in zip(start_idx, end_idx):
             event.messages_to_modify += list(range(start, end + 1))
+        context.set_messages(new_messages)
         return event, []
 
     def _iter_rounds(self, messages: List[BaseMessage]):
@@ -173,7 +174,7 @@ class RoundLevelCompressor(ContextProcessor):
                     DialogueRound(
                         user=u,
                         ai=a,
-                        level=extract_cl(a),
+                        level=self._get_compress_level(a),
                         start_idx=i,
                         end_idx=i + 1
                     )
@@ -185,22 +186,14 @@ class RoundLevelCompressor(ContextProcessor):
         return result
 
     @staticmethod
-    def _is_valid_dialogue_round(self, u: BaseMessage, a: BaseMessage) -> bool:
-        condition1 = (
-                isinstance(u, UserMessage)
-                and isinstance(a, AssistantMessage)
-                and not a.tool_calls
+    def _is_valid_dialogue_round(u: BaseMessage, a: BaseMessage) -> bool:
+        return (
+            isinstance(u, UserMessage)
+            and isinstance(a, AssistantMessage)
+            and not a.tool_calls
         )
-        condition2 = (
-                isinstance(u, OffloadMixin)
-                and u.role == "user"
-                and isinstance(a, OffloadMixin)
-                and a.role == "assistant"
-        )
-        return condition1 or condition2
 
     def _find_best_round_window(self, rounds: List[DialogueRound]) -> List[List[DialogueRound]]:
-
         all_qualified_windows = []
         window: List[DialogueRound] = []
 
@@ -249,14 +242,11 @@ class RoundLevelCompressor(ContextProcessor):
             users = [r.user for r in window]
             ais = [r.ai for r in window]
 
-            user = users[0].role
-            ai = ais[0].role
-
             base_level = window[0].level or 0
             new_level = base_level + 1
 
-            new_user = await self._compress_messages(users, user, context)
-            new_ai = await self._compress_messages(ais, ai, context)
+            new_user = await self._compress_messages(users, "user", context)
+            new_ai = await self._compress_messages(ais, "assistant", context)
 
             if new_user is None or new_ai is None:
                 logger.warning("[RoundLevelCompressor] Compression failed, return original messages")
@@ -264,8 +254,8 @@ class RoundLevelCompressor(ContextProcessor):
                 all_ends.append(window[-1].end_idx)
                 continue
 
-            new_user.content = wrap_with_cl(new_user.content, new_level)
-            new_ai.content = wrap_with_cl(new_ai.content, new_level)
+            new_user.metadata[_COMPRESS_LEVEL] = new_level
+            new_ai.metadata[_COMPRESS_LEVEL] = new_level
 
             start, end = window[0].start_idx, window[-1].end_idx
 
@@ -315,4 +305,16 @@ class RoundLevelCompressor(ContextProcessor):
         else:
             logger.warning("[RoundLevelCompressor] Invalid summary from model")
             return None
+
+    @staticmethod
+    def _get_compress_level(message: BaseMessage) -> int:
+        if not isinstance(message, OffloadMixin):
+            return 0
+        return message.metadata.get(_COMPRESS_LEVEL, 0)
+
+    def load_state(self, state: Dict[str, Any]) -> None:
+        pass
+
+    def save_state(self) -> Dict[str, Any]:
+        pass
 

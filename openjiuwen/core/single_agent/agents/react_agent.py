@@ -9,7 +9,7 @@ Author: huenrui1@huawei.com
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from pydantic import Field, BaseModel
 
@@ -54,7 +54,7 @@ class ReActAgentConfig(BaseModel):
         default_factory=list,
         description="Prompt template list"
     )
-    context_window_limit: int = Field(
+    context_window_limit: Optional[int] = Field(
         default=20,
         description="Context window limit"
     )
@@ -69,6 +69,8 @@ class ReActAgentConfig(BaseModel):
         default=None,
         description="Model request configuration"
     )
+
+    sys_operation_id: Optional[str] = None
 
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
         """Configure model name
@@ -131,7 +133,7 @@ class ReActAgentConfig(BaseModel):
         self.prompt_template = prompt_template
         return self
 
-    def configure_context_limit(self, limit: int) -> 'ReActAgentConfig':
+    def configure_context_limit(self, limit: Optional[int]) -> 'ReActAgentConfig':
         """Configure context window limit
 
         Args:
@@ -243,6 +245,9 @@ class ReActAgent(BaseAgent):
         )
         self._llm = None
         self._init_memory_scope()
+        # 延迟导入以避免循环依赖：skills -> runner -> single_agent -> skills
+        from openjiuwen.core.skills.skill_util import SkillUtil
+        self._skill_util = SkillUtil(self.config.sys_operation_id)
         super().__init__(card)
 
     def _init_memory_scope(self) -> None:
@@ -291,6 +296,10 @@ class ReActAgent(BaseAgent):
         if old_config.mem_scope_id != config.mem_scope_id:
             self._init_memory_scope()
 
+        # Reset sys operation id if changed
+        if old_config.sys_operation_id != config.sys_operation_id:
+            self._skill_util.set_sys_operation_id(config.sys_operation_id)
+
         return self
 
     def _get_llm(self) -> Model:
@@ -314,6 +323,10 @@ class ReActAgent(BaseAgent):
             )
         return self._llm
 
+    async def register_skill(self, skill_path: Union[str, List[str]]):
+        """Register a skill"""
+        await self._skill_util.register_skills(skill_path, self)
+
     async def _call_llm(
         self,
         messages: List,
@@ -334,6 +347,7 @@ class ReActAgent(BaseAgent):
             messages=messages,
             tools=tools
         )
+
 
     async def invoke(
             self,
@@ -375,8 +389,13 @@ class ReActAgent(BaseAgent):
             if msg.get("role") == "system"
         ]
 
+        if len(system_messages) > 0 and self._skill_util.has_skill():
+            skill_prompt = self._skill_util.get_skill_prompt()
+            last_msg = system_messages[-1]
+            last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
+
         # Get tool info from _ability_kit
-        tools = self.list_tool_info()
+        tools = await self.list_tool_info()
 
         # ReAct loop
         for iteration in range(self.config.max_iterations):
@@ -444,20 +463,13 @@ class ReActAgent(BaseAgent):
         """Stream execute ReAct process
 
         Args:
-            inputs: User input, supports the following formats:
-                - dict (legacy): {"query": "...", "conversation_id": "..."}
-                - dict (new): {"user_input": "...", "session_id": "..."}
-                - str: Used directly as user_input
-            session: Session object (optional)
+            inputs: User input (required in new version)
+            session: Session object (required in new version)
             stream_modes: Stream output modes (optional)
 
         Yields:
-            Legacy compatible format - OutputSchema objects or final result dict
+            OutputSchema objects from stream_iterator
         """
-        # Determine if we own the stream
-        own_stream = session is None
-
-        # Store final result for yielding
         final_result_holder = {"result": None}
 
         async def stream_process():
@@ -480,20 +492,19 @@ class ReActAgent(BaseAgent):
                     "output": str(e),
                     "result_type": "error"
                 }
+            finally:
+                # Close stream
+                if session is not None and hasattr(session, 'post_run'):
+                    await session.post_run()
 
         task = asyncio.create_task(stream_process())
 
-        # If we own the stream, read from session's stream iterator
-        if own_stream and session is not None:
-            if hasattr(session, 'stream_iterator'):
-                async for result in session.stream_iterator():
-                    yield result
+        # Read from stream_iterator and yield
+        if session is not None and hasattr(session, 'stream_iterator'):
+            async for result in session.stream_iterator():
+                yield result
 
         await task
-
-        # Yield final result
-        if final_result_holder["result"] is not None:
-            yield final_result_holder["result"]
 
 
 __all__ = [

@@ -36,14 +36,16 @@ API_KEY = os.getenv("API_KEY", "sk-fake")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 
+
 def build_current_date():
     current_datetime = datetime.now()
     return current_datetime.strftime("%Y-%m-%d")
 
+
 class MockLLMModel:
     def model_provider(self):
         return MODEL_PROVIDER
-    
+
     def invoke(self, model_name, messages, tools=None):
         """Mock invoke method for Questioner component"""
         # Return a mock response with extracted fields
@@ -54,8 +56,7 @@ class MockLLMModel:
         )
 
 
-@patch.dict(os.environ, {FORCE_DEL_WORKFLOW_STATE_ENV_KEY: "True"})
-class TestReActAgentInterrupt:  # ① 关键改动
+class TestReActAgentInterrupt:
     @staticmethod
     def _create_model():
         return ModelConfig(model_provider=MODEL_PROVIDER,
@@ -97,20 +98,26 @@ class TestReActAgentInterrupt:  # ① 关键改动
         ]
 
     # 临时关闭
-    @unittest.skip("skip system test")
-    @pytest.mark.asyncio
-    @patch("openjiuwen.single_agent.llm_agent.llm_controller.LLMController._generate_plan_from_llm")
+    # @unittest.skip("skip system test")
+    @patch.dict(os.environ, {FORCE_DEL_WORKFLOW_STATE_ENV_KEY: "True"})
+    @patch("openjiuwen.core.application.llm_agent.llm_controller.LLMController._generate_plan_from_llm")
     @patch(
-        "openjiuwen.core.workflow.components.llm_related.questioner_comp."
+        "openjiuwen.core.workflow.components.llm.questioner_comp."
         "QuestionerDirectReplyHandler._invoke_llm_for_extraction"
     )
     @patch(
-        "openjiuwen.core.workflow.component.basic_components.questioner_comp."
+        "openjiuwen.core.workflow.components.llm.questioner_comp."
         "QuestionerDirectReplyHandler._build_llm_inputs"
     )
     @patch("openjiuwen.core.foundation.llm.model.Model")
-    async def test_react_agent_invoke_with_workflow_interrupt(self, mock_get_model, mock_llm_inputs,
-                                                               mock_extraction, mock_generate_plan_from_llm):
+    def test_react_agent_invoke_with_workflow_interrupt(self, mock_get_model, mock_llm_inputs,
+                                                        mock_extraction, mock_generate_plan_from_llm):
+        import asyncio
+        asyncio.run(self._async_test_react_agent_invoke_with_workflow_interrupt(
+            mock_get_model, mock_llm_inputs, mock_extraction, mock_generate_plan_from_llm))
+
+    async def _async_test_react_agent_invoke_with_workflow_interrupt(self, mock_get_model, mock_llm_inputs,
+                                                                     mock_extraction, mock_generate_plan_from_llm):
         mock_get_model.return_value = MockLLMModel()
 
         react_agent_prompt_template = self._create_prompt_template()
@@ -124,10 +131,21 @@ class TestReActAgentInterrupt:  # ① 关键改动
         mock_extraction.return_value = dict(location="hangzhou")
 
         questioner_workflow_card = WorkflowCard(
-                name="questioner",
-                id="questioner_workflow",
-                version="1.0",
+            name="questioner",
+            id="questioner_workflow",
+            version="1.0",
+            description="追问器工作流",
+            input_params=dict(
+                type="object",
+                properties={
+                    "query": {
+                        "type": "string",
+                        "description": "用户输入"
+                    }
+                },
+                required=['query']
             )
+        )
 
         flow = Workflow(card=questioner_workflow_card)
 
@@ -136,13 +154,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
 
         model_config = self._create_model()
@@ -164,22 +176,12 @@ class TestReActAgentInterrupt:  # ① 关键改动
         flow.add_connection("s", "questioner")
         flow.add_connection("questioner", "e")
 
-        workflow_schema = WorkflowSchema(
-            id=flow.card.id,
-            name=flow.card.name,
-            version=flow.card.version,
-            description="追问器工作流",
-            inputs={"query": {
-                "type": "string",
-            }}
-        )
-
         task = Task(
-            id = workflow_schema.id,
-            task_type = TaskType.WORKFLOW,
-            input = TaskInput(
-                target_id = f"{workflow_schema.id}_{workflow_schema.version}",
-                target_name = workflow_schema.name,
+            id=flow.card.id,
+            task_type=TaskType.WORKFLOW,
+            input=TaskInput(
+                target_id=f"{flow.card.id}_{flow.card.version}",
+                target_name=flow.card.name,
             )
         )
 
@@ -188,7 +190,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
             agent_version="0.0.1",
             description="AI助手",
             plugins=[],
-            workflows=[workflow_schema],
+            workflows=[flow.card],
             model=model_config,
             prompt_template=react_agent_prompt_template
         )
@@ -226,7 +228,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
     async def test_real_react_agent_invoke_with_workflow_interrupt(self, mock_set_scope, mock_get_model):
         # Mock LLM model
         mock_get_model.return_value = MockLLMModel()
-        
+
         react_agent_prompt_template = self._create_prompt_template()
 
         prompt_template = [
@@ -235,10 +237,10 @@ class TestReActAgentInterrupt:  # ① 关键改动
         ]
 
         questioner_workflow_card = WorkflowCard(
-                name="questioner",
-                id="questioner_workflow",
-                version="1.0",
-            )
+            name="questioner",
+            id="questioner_workflow",
+            version="1.0",
+        )
 
         flow = Workflow(card=questioner_workflow_card)
 
@@ -247,13 +249,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         model_config = ModelConfig(model_provider="OpenAI",
@@ -332,10 +328,9 @@ class TestReActAgentInterrupt:  # ① 关键改动
         except JiuWenBaseException:
             assert True
 
-
     @pytest.mark.asyncio
     @patch(
-        "openjiuwen.core.workflow.components.llm_related.questioner_comp."
+        "openjiuwen.core.workflow.components.llm.questioner_comp."
         "QuestionerDirectReplyHandler._invoke_llm_for_extraction"
     )
     @patch("openjiuwen.core.foundation.llm.model.Model")
@@ -344,11 +339,22 @@ class TestReActAgentInterrupt:  # ① 关键改动
         mock_get_model.return_value = MockLLMModel()
         # Mock extraction to return expected fields
         mock_extraction.return_value = {"location": "hangzhou", "time": "today"}
-        
+
         questioner_workflow_card = WorkflowCard(
-                name="questioner",
-                id="questioner_workflow",
-                version="1.0",
+            name="questioner",
+            id="questioner_workflow",
+            version="1.0",
+            description="追问器工作流",
+            input_params=dict(
+                type="object",
+                properties={
+                    "query": {
+                        "type": "string",
+                        "description": "用户输入"
+                    }
+                },
+                required=['query']
+            )
         )
 
         flow = Workflow(card=questioner_workflow_card)
@@ -358,25 +364,8 @@ class TestReActAgentInterrupt:  # ① 关键改动
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
-
-
-        model_config = ModelConfig(model_provider="OpenAI",
-                                   model_info=BaseModelInfo(
-                                       model="gpt-4",
-                                       api_base="mock-url",
-                                       api_key="mock-key",
-                                       temperature=0.7,
-                                       top_p=0.9,
-                                       timeout=30
-                                   ))
 
         questioner_config = QuestionerConfig(
             model_config=self._create_model_request_config(),
@@ -397,33 +386,16 @@ class TestReActAgentInterrupt:  # ① 关键改动
         flow.add_connection("s", "questioner")
         flow.add_connection("questioner", "e")
 
-        workflow_schema = WorkflowSchema(
-            id=flow.card.id,
-            name=flow.card.name,
-            version=flow.card.version,
-            description="追问器工作流",
-            inputs={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "用户输入",
-                        "required": True
-                    }
-                }
-            }
-        )
-
         config = WorkflowAgentConfig(
             id="write_agent",
             version="0.1.0",
             description="interrupt workflow single_agent",
-            workflows=[workflow_schema],
+            workflows=[],
             controller_type=ControllerType.WorkflowController,
         )
 
         workflow_agent = WorkflowAgent(config)
-        workflow_agent.bind_workflows([flow])
+        workflow_agent.add_workflows([flow])
 
         result = await workflow_agent.invoke({"conversation_id": "12345", "query": "查询今天天气"})
         print(f"WorkflowAgent 第一次输出结果：{result}")
@@ -436,7 +408,7 @@ class TestReActAgentInterrupt:  # ① 关键改动
 
     @pytest.mark.asyncio
     @patch(
-        "openjiuwen.core.workflow.components.llm_related.questioner_comp."
+        "openjiuwen.core.workflow.components.llm.questioner_comp."
         "QuestionerDirectReplyHandler._invoke_llm_for_extraction"
     )
     @patch("openjiuwen.core.foundation.llm.model.Model")
@@ -445,12 +417,22 @@ class TestReActAgentInterrupt:  # ① 关键改动
         mock_get_model.return_value = MockLLMModel()
         # Mock extraction to return expected fields
         mock_extraction.return_value = {"location": "hangzhou", "time": "today"}
-        
-        questioner_workflow_card = WorkflowCard(
-                name="questioner",
-                id="questioner_workflow",
-                version="1.0",
 
+        questioner_workflow_card = WorkflowCard(
+            name="questioner",
+            id="questioner_workflow",
+            version="1.0",
+            description="追问器工作流",
+            input_params=dict(
+                type="object",
+                properties={
+                    "query": {
+                        "type": "string",
+                        "description": "用户输入"
+                    }
+                },
+                required=['query']
+            )
         )
 
         flow = Workflow(card=questioner_workflow_card)
@@ -460,25 +442,8 @@ class TestReActAgentInterrupt:  # ① 关键改动
             FieldInfo(field_name="time", description="时间", required=True, default_value="today")
         ]
 
-        start_component = Start(
-            {
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            }
-        )
+        start_component = Start()
         end_component = End({"responseTemplate": "{{location}} | {{time}}"})
-
-
-        model_config = ModelConfig(model_provider="OpenAI",
-                                   model_info=BaseModelInfo(
-                                       model="gpt-4",
-                                       api_base="mock-url",
-                                       api_key="mock-key",
-                                       temperature=0.7,
-                                       top_p=0.9,
-                                       timeout=30
-                                   ))
 
         questioner_config = QuestionerConfig(
             model_config=self._create_model_request_config(),
@@ -499,40 +464,22 @@ class TestReActAgentInterrupt:  # ① 关键改动
         flow.add_connection("s", "questioner")
         flow.add_connection("questioner", "e")
 
-        workflow_schema = WorkflowSchema(
-            id=flow.card.id,
-            name=flow.card.name,
-            version=flow.card.version,
-            description="追问器工作流",
-            inputs={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "用户输入",
-                        "required": True
-                    }
-                }
-            }
-        )
-
         config = WorkflowAgentConfig(
             id="write_agent",
             version="0.1.0",
             description="interrupt workflow single_agent",
-            workflows=[workflow_schema],
+            workflows=[],
             controller_type=ControllerType.WorkflowController,
         )
 
         workflow_agent = WorkflowAgent(config)
-        workflow_agent.bind_workflows([flow])
+        workflow_agent.add_workflows([flow])
 
         interaction_output_schema = []
         async for result in workflow_agent.stream({"conversation_id": "12345", "query": "查询今天天气"}):
             print(f"WorkflowAgent stream 第一次输出结果：{result}")
             if isinstance(result, OutputSchema) and result.type == "__interaction__":
                 interaction_output_schema.append(result)
-
 
         if interaction_output_schema:
             user_input = InteractiveInput()
@@ -541,4 +488,3 @@ class TestReActAgentInterrupt:  # ① 关键改动
                 user_input.update(component_id, "杭州")
             async for chunk in workflow_agent.stream({"conversation_id": "12345", "query": user_input}):
                 print(f"WorkflowAgent 第二次输出结果 >>> {chunk}")
-

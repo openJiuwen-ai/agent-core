@@ -1,8 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import asyncio
 import inspect
-import json
 import os
 import re
 import uuid
@@ -14,20 +12,23 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.workflow.components.component import ComponentComposable
-from openjiuwen.core.workflow.components.branch_router import BranchRouter, WORKFLOW_DRAWABLE
+from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter, WORKFLOW_DRAWABLE
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph, Router, ExecutableGraph
 
-from openjiuwen.core.session import BaseSession, ProxySession
+from openjiuwen.core.session import ProxySession
 from openjiuwen.core.session import Transformer
-from openjiuwen.core.session import WorkflowSession, SubWorkflowSession
+from openjiuwen.core.session import SubWorkflowSession
 from openjiuwen.core.session import RouterSession
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session import WorkflowSession
 
 from openjiuwen.core.graph.stream_actor.base import StreamGraph
 from openjiuwen.core.workflow.workflow_config import WorkflowConfig
 from openjiuwen.core.common.schema.workflow_spec import CompIOConfig, NodeSpec
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.graph.graph import PregelGraph
+
 
 @dataclass
 class EdgeTopology:
@@ -46,15 +47,18 @@ class EdgeTopology:
                 set(self.target_stream_map.keys())
         )
 
+
 class ConnectionType(Enum):
     """Type of workflow connection."""
     CONNECTION = "connection"
     STREAM_CONNECTION = "stream_connection"
 
+
 class BaseWorkflow:
     def __init__(self, workflow_config: WorkflowConfig = None, new_graph: Graph = None):
         self._graph = new_graph if new_graph else PregelGraph()
-        self._workflow_config = workflow_config if workflow_config else WorkflowConfig(card=WorkflowCard(id=uuid.uuid4().hex))
+        self._workflow_config = workflow_config if workflow_config else WorkflowConfig(
+            card=WorkflowCard(id=uuid.uuid4().hex))
         self._workflow_spec = self._workflow_config.spec
         self._stream_actor = StreamGraph()
         self._session = ProxySession()
@@ -214,12 +218,12 @@ class BaseWorkflow:
                 raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.code,
                                           StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
                                               error_msg=f"main workflow config is not exit,"
-                                                     f" main workflow_id={session.main_workflow_id()}"))
+                                                        f" main workflow_id={session.main_workflow_id()}"))
             if session.workflow_nesting_depth() > main_workflow_config.workflow_max_nesting_depth:
                 raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.code,
                                           StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
                                               error_msg=f"workflow nesting hierarchy is too big, must <= "
-                                                     f"{main_workflow_config.workflow_max_nesting_depth}"))
+                                                        f"{main_workflow_config.workflow_max_nesting_depth}"))
         self._session.set_session(session)
         return self._graph.compile(session, context=context)
 

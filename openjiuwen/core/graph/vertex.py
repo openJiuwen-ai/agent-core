@@ -6,6 +6,7 @@ from asyncio import CancelledError
 from typing import Any, Optional, AsyncIterator, Literal
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT, END_NODE_STREAM, INPUTS_KEY, CONFIG_KEY
+from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
@@ -117,18 +118,14 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             raise JiuWenBaseException(
                 StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
                 StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-                    node_id=self._node_id,
-                    ability=ability.name,
-                    error_msg=e.message,
+                    error_msg=f"node_id: {self._node_id}, ability: {ability.name}, error: {e}"
                 ),
             ) from e
         except Exception as e:
             raise JiuWenBaseException(
                 StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
                 StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-                    node_id=self._node_id,
-                    ability=ability.name,
-                    error_msg=e,
+                    error_msg=f"node_id: {self._node_id}, ability: {ability.name}, error: {e}"
                 ),
             ) from e
         finally:
@@ -176,7 +173,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                     results = {key: value for key, value in results.items() if value is not None}
         else:
             results = outputs_transformer(results)
-        self._session.state().set_outputs(results)
+        if results is not None:
+            self._session.state().set_outputs(results)
         await self.__trace_component_outputs__(results)
         self._clear_interactive()
         return results
@@ -201,6 +199,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         is_sub_graph = self._session.parent_id() != ''
         actor_manager = self._session.actor_manager()
         output_schema = self._node_config.stream_io_configs.outputs_schema if self._node_config.stream_io_configs else None
+        output_transformer = None
         if not isinstance(output_schema, dict):
             output_transformer = output_schema
         end_stream_index = 0

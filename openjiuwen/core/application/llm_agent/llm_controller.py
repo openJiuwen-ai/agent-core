@@ -7,17 +7,17 @@ from datetime import datetime, timezone
 
 from typing import Dict, Optional, List, Any
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.single_agent.legacy import (
-    LegacyReActAgentConfig as ReActAgentConfig,
+    LegacyReActAgentConfig as ReActAgentConfig, PluginSchema,
 )
 from openjiuwen.core.controller import BaseController, Event, EventType, Task, TaskResult, TaskStatus
 from openjiuwen.core.controller.legacy.utils import MessageHandlerUtils
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.common.constants.enums import TaskType
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.common.security.json_utils import JsonUtils
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.security.user_config import UserConfig
@@ -72,12 +72,13 @@ class LLMController(BaseController):
             self,
             config: ReActAgentConfig,
             context_engine,
-            session,
-            enable_memory=False
+            session
     ):
         super().__init__(config, context_engine, session)
         self.config = config
-        self.enable_memory = enable_memory
+        self._enable_memory = self.config.agent_memory_config.enable_long_term_mem
+        self._long_term_memory_instance = LongTermMemory()
+        self._memory_inited = False
 
     async def handle_event(self, event: Event, session: Session) -> Optional[Dict]:
         """Handle Message - only handles user input
@@ -95,8 +96,10 @@ class LLMController(BaseController):
         """
         if event.event_type != EventType.USER_INPUT:
             logger.warning(f"Unexpected event type: {event.event_type}, expected USER_INPUT")
-            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_HANDLE_USER_INPUT_ERROR.code,
-                                           f"{event.event_type} is unexpected event type, should be USER_INPUT")
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_USER_INPUT_PROCESS_ERROR,
+                error_msg=f"{event.event_type} is unexpected event type, should be USER_INPUT"
+            )
 
         try:
             return await self._handle_user_input(event, session)
@@ -105,7 +108,11 @@ class LLMController(BaseController):
             if isinstance(e, JiuWenBaseException):
                 raise e
             else:
-                ExceptionUtils.raise_exception(StatusCode.CONTROLLER_RUNTIME_ERROR, str(e), e)
+                raise build_error(
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                    error_msg=str(e),
+                    cause=e
+                ) from e
 
     async def _handle_user_input(self, event: Event, session: Session) -> Optional[Dict]:
         """Handle user input - ReAct core: LLM reasoning to generate plan
@@ -508,9 +515,9 @@ class LLMController(BaseController):
                 return await self._execute_plugin_task(task, session)
             else:
                 logger.warning(f"Unknown task type: {task.task_type}")
-                raise JiuWenBaseException(
-                    error_code=StatusCode.TASK_NOT_SUPPORT_ERROR.code,
-                    message=StatusCode.TASK_NOT_SUPPORT_ERROR.errmsg.format(msg=str(task.task_type))
+                raise build_error(
+                    StatusCode.AGENT_TASK_NOT_SUPPORT,
+                    error_msg=str(task.task_type)
                 )
         except Exception as e:
             logger.error(f"Error executing task {task.task_id}: {e}")
@@ -596,25 +603,30 @@ class LLMController(BaseController):
                 )
         except JiuWenBaseException as e:
             logger.error(f"Error executing workflow task {task.input.target_name}: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.WORKFLOW_EXECUTION_ERROR.code,
-                message=e.message
-            )
+            raise build_error(
+                StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR,
+                error_msg=e.message,
+                cause=e
+            ) from e
         except Exception as e:
             logger.error(f"Error executing workflow {task.input.target_name}: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.WORKFLOW_EXECUTION_ERROR.code,
-                message=StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(msg=str(e))
-            )
+            raise build_error(
+                StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def _execute_plugin_task(self, task: Task, session: Session) -> TaskResult:
         """Execute plugin task - return result dictionary"""
-        tool = session.get_tool(task.input.target_name)
+        tool = None
+        tool_id = self._find_plugin_id_by_name(task.input.target_name)
+        if tool_id:
+            tool = Runner.resource_mgr.get_tool(tool_id)
         if not tool:
             logger.error("Tool not found")
-            raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_NOT_FOUND_ERROR.code,
-                message=StatusCode.TOOL_NOT_FOUND_ERROR.errmsg
+            raise build_error(
+                StatusCode.AGENT_TOOL_NOT_FOUND,
+                error_msg=f"tool '{task.input.target_name}' is not registered in session"
             )
         try:
             result = await tool.invoke(task.input.arguments)
@@ -636,22 +648,24 @@ class LLMController(BaseController):
             )
         except JiuWenBaseException as e:
             logger.error(f"Error executing plugin task {task.input.target_name}: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_EXECUTION_ERROR.code,
-                message=e.message
-            )
+            raise build_error(
+                StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+                error_msg=e.message,
+                cause=e
+            ) from e
         except Exception as e:
             logger.error(f"Error executing plugin task {task.input.target_name}: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_EXECUTION_ERROR.code,
-                message=StatusCode.TOOL_EXECUTION_ERROR.errmsg.format(msg=str(e))
-            )
+            raise build_error(
+                StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def _generate_plan_from_llm(self, event: Event, session: Session):
         """Call LLM to generate plan - ReAct core method"""
         inputs = event.get_display_content()
         user_id = event.source.user_id
-        tools = session.get_tool_info()
+        tools = await Runner.resource_mgr.get_tool_infos()
         logger.info(f"Loaded {len(tools)} Tool(s) for generating plans")
         system_prompt_keywords = await self._get_system_prompt_keywords(inputs, user_id)
         chat_history = MessageUtils.get_chat_history(self._context_engine, session, self.config)
@@ -663,7 +677,7 @@ class LLMController(BaseController):
             logger.info(f"React llm inputs: {llm_inputs}")
 
         try:
-            model = self._get_model(session)
+            model = await self._get_model(session=session.get_inner_session())
             llm_output = await self._call_llm_get_output(
                 model,
                 self.config.model.model_info.model_name,
@@ -684,7 +698,11 @@ class LLMController(BaseController):
             if isinstance(e, JiuWenBaseException):
                 raise e
             else:
-                ExceptionUtils.raise_exception(StatusCode.CONTROLLER_INVOKE_LLM_FAILED, str(e), e)
+                raise build_error(
+                    StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED,
+                    error_msg=str(e),
+                    cause=e
+                ) from e
 
         return tasks, llm_output
 
@@ -750,8 +768,10 @@ class LLMController(BaseController):
 
             # Check for empty response
             if accumulated_chunk is None:
-                ExceptionUtils.raise_exception(StatusCode.CONTROLLER_INVOKE_LLM_FAILED,
-                                               "LLM returned empty response")
+                raise build_error(
+                    StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED,
+                    error_msg="LLM returned empty response"
+                )
 
             # Convert accumulated chunk to AIMessage
             return AssistantMessage(
@@ -768,7 +788,7 @@ class LLMController(BaseController):
             logger.error(f"Failed to stream LLM output: {e}")
             raise
 
-    def _get_model(self, session: Session):
+    async def _get_model(self, session=None):
         """Get model instance"""
         model_id = generate_key(
             self.config.model.model_info.api_key,
@@ -776,7 +796,7 @@ class LLMController(BaseController):
             self.config.model.model_provider
         )
 
-        model = session.get_model(model_id=model_id)
+        model = await Runner.resource_mgr.get_model(model_id=model_id, session=session)
 
         if model is None:
             model_client_config = ModelClientConfig(
@@ -792,11 +812,15 @@ class LLMController(BaseController):
                 model=self.config.model.model_info.model_name,
                 temperature=self.config.model.model_info.temperature,
                 top_p=self.config.model.model_info.top_p,
+                **(self.config.model.model_info.model_extra or {})
             )
-            model = Model(model_client_config=model_client_config, model_config=model_request_config)
-            session.add_model(model_id=model_id, model=model)
 
-        return session.get_model(model_id=model_id)
+            def model_provider():
+                return Model(model_client_config=model_client_config, model_config=model_request_config)
+
+            Runner.resource_mgr.add_model(model_id=model_id, model=model_provider)
+
+        return await Runner.resource_mgr.get_model(model_id=model_id, session=session)
 
     def _get_workflow_id_from_schema(self, workflow_name: str) -> Optional[str]:
         """Get workflow_id from workflow schema by name
@@ -947,7 +971,7 @@ class LLMController(BaseController):
             Workflow object, None if not found
         """
         try:
-            workflow = await session.get_workflow(workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id)
             return workflow
         except Exception as e:
             logger.error(f"Failed to find workflow {workflow_id}: {e}")
@@ -1115,7 +1139,11 @@ class LLMController(BaseController):
             return final_stream
         except Exception as e:
             logger.error(f"Failed to send final stream data: {e}")
-            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_SEND_STREAM_FAILED, str(e), e)
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_EXECUTION_CALL_FAILED,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def _send_error_stream(self, error_msg: str, session: Session):
         """Send error result stream and return OutputSchema"""
@@ -1133,7 +1161,11 @@ class LLMController(BaseController):
             return error_stream
         except Exception as e:
             logger.error(f"Failed to send error stream: {e}")
-            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_SEND_STREAM_FAILED, str(e), e)
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_EXECUTION_CALL_FAILED,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     def _unwrap_result(self, result):
         """Unwrap result - unify return format"""
@@ -1259,28 +1291,30 @@ class LLMController(BaseController):
 
     async def _get_system_prompt_keywords(self, inputs: Any, user_id: str):
         result = {}
-        if self.enable_memory:
+        if self._enable_memory:
+            if not self._memory_inited:
+                await self._init_memory_config()
             memory_keywords = await self._get_keywords_from_memory(inputs, user_id)
             result.update(memory_keywords)
         return result
 
     async def _get_keywords_from_memory(self, inputs: Any, user_id: str):
         result = {}
-        group_id = f"{self._config.id}"
+        scope_id = f"{self._config.id}"
         if isinstance(inputs, str):
             query = inputs
         elif isinstance(inputs, dict):
             query = inputs.get("query", "")
         else:
             query = ""
-        logger.info(f"group_id: {group_id} | user_id: {user_id} | inputs: {inputs}")
+        logger.info(f"scope_id: {scope_id} | user_id: {user_id} | inputs: {inputs}")
         memory_engine = LongTermMemory()
         if not memory_engine:
             return result
-        if user_id and group_id:
-            memory_variables = await memory_engine.list_user_variables(
+        if user_id and scope_id:
+            memory_variables = await memory_engine.get_variables(
                 user_id=user_id,
-                group_id=group_id
+                scope_id=scope_id
             )
             if memory_variables:
                 filter_memory_variables = {k: v for k, v in memory_variables.items()
@@ -1292,15 +1326,12 @@ class LLMController(BaseController):
             try:
                 long_term_memory = await memory_engine.search_user_mem(
                     user_id=user_id,
-                    group_id=group_id,
+                    scope_id=scope_id,
                     query=query,
                     num=10
                 )
                 if long_term_memory:
-                    memory_contents = [{
-                        "mem": mem.get("mem", ""),
-                        "timestamp": convert_timestamp(mem.get("timestamp", "")),
-                    } for mem in long_term_memory]
+                    memory_contents = [mem.mem_info.content for mem in long_term_memory]
                     result.update(
                         {"sys_long_term_memory": JsonUtils.safe_json_dumps(memory_contents, ensure_ascii=False)})
                 logger.info(f"long_term_memory: {long_term_memory}")
@@ -1407,4 +1438,23 @@ class LLMController(BaseController):
             f"_find_interrupted_task_by_node_id: "
             f"no match found for node_id={node_ids}"
         )
+        return None
+
+    async def _init_memory_config(self):
+        scope_id = f"{self.config.id}"
+        memory_scope_config = self.config.memory_config
+        logger.info(f"When init Memory Engine, scope_id: {scope_id}")
+        if memory_scope_config is not None:
+            if (self._long_term_memory_instance and
+                    hasattr(memory_scope_config, 'model_cfg') and
+                    memory_scope_config.model_cfg is not None):
+                await self._long_term_memory_instance.set_scope_config(scope_id, memory_scope_config)
+            self._memory_inited = True
+
+    def _find_plugin_id_by_name(self, tool_name: str) -> Optional[str]:
+        config = self.config
+        if hasattr(config, "plugins"):
+            for plugin in config.plugins:
+                if isinstance(plugin, PluginSchema) and tool_name == plugin.name:
+                    return plugin.id
         return None

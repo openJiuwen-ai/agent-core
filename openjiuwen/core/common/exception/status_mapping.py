@@ -31,6 +31,7 @@ def _get_exception_class_registry() -> Dict[str, Type]:
         "ToolError": _errors.ToolError,
         "GraphError": _errors.GraphError,
         "SessionError": _errors.SessionError,
+        "SysOperationError": _errors.SysOperationError,
         "ToolchainError": _errors.ToolchainError,
         "ContextError": _errors.ContextError,
         "RunnerError": _errors.RunnerError,
@@ -55,7 +56,8 @@ RANGE_RULES = [
     ((150000, 159999), "ContextError"),
     ((160000, 179999), "ToolchainError"),
     ((180000, 189999), "FrameworkError"),
-    ((190000, 199999), "SessionError"),
+    ((190000, 198999), "SessionError"),
+    ((199000, 199999), "SysOperationError"),
 ]
 
 # Manual overrides expressed as names to avoid failing import when some legacy names are absent.

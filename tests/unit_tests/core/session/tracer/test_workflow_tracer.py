@@ -12,16 +12,16 @@ from openjiuwen.core.workflow import Input, Output, WorkflowCard
 from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import WorkflowComponent
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.intermediate_loop_var import IntermediateLoopVarCallback
-from openjiuwen.core.workflow.components.flow_related.loop.loop_callback.output import OutputCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
+from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
 from openjiuwen.core.workflow import LoopGroup
-from openjiuwen.core.workflow import SetVariableComponent
+from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
-from openjiuwen.core.workflow.components.flow_related.workflow_comp import SubWorkflowComponent
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
 from openjiuwen.core.workflow import ComponentAbility
-from openjiuwen.core.workflow.components.flow_related.loop.loop_comp import AdvancedLoopComponent
+from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
 from tests.unit_tests.core.workflow.mock_nodes import AddTenNode, CommonNode, MockStartNode, MockEndNode, StreamCompNode
 
 fake_base = types.ModuleType("base")
@@ -36,7 +36,7 @@ sys.modules["openjiuwen.core.common.exception.base"] = fake_exception_module
 from tests.unit_tests.core.session.tracer.mock_node_with_tracer import StreamNodeWithTracer
 from openjiuwen.core.common.logging import logger
 
-from openjiuwen.core.session.workflow import WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.session.stream import CustomSchema, OutputSchema, TraceSchema, BaseStreamMode
 
@@ -82,7 +82,7 @@ class TestTraceWorkflow:
             workflow.add_connection("start", "node")
             workflow.add_connection("node", "end")
             chunks = []
-            async for chunk in workflow.stream(inputs={"inputs": inputs}, session=WorkflowSession(),
+            async for chunk in workflow.stream(inputs={"inputs": inputs}, session=create_workflow_session(),
                                                stream_modes=[BaseStreamMode.TRACE]):
                 chunks.append(chunk)
             assert chunks[-2].payload.get("streamOutputs") == [
@@ -127,7 +127,7 @@ class TestTraceWorkflow:
                           'outputs': None, 'streamOutputs': [], 'workflowId': 'test', 'componentId': None}]
 
         chunks = []
-        async for chunk in workflow.stream(inputs={"inputs": [1, 2, 3]}, session=WorkflowSession(),
+        async for chunk in workflow.stream(inputs={"inputs": [1, 2, 3]}, session=create_workflow_session(),
                                            stream_modes=[BaseStreamMode.TRACE]):
             payload: dict = chunk.payload
             selected_keys = ["invokeId", "status", 'inputs', 'streamInputs', "outputs", "streamOutputs", "workflowId",
@@ -185,7 +185,7 @@ class TestTraceWorkflow:
         index_dict = {key: 0 for key in expected_datas_model.keys()}
 
         async for chunk in flow.stream({"a": 1, "b": "haha"},
-                                       WorkflowSession()):
+                                       create_workflow_session()):
             if isinstance(chunk, CustomSchema):
                 node_id = chunk.node_id
                 index = index_dict[node_id]
@@ -247,7 +247,7 @@ class TestTraceWorkflow:
         }
         index_dict = {key: 0 for key in expected_datas_model.keys()}
         async for chunk in flow.stream({"a": 1, "b": "haha"},
-                                       WorkflowSession()):
+                                       create_workflow_session()):
             if isinstance(chunk, CustomSchema):
                 node_id = chunk.node_id
                 index = index_dict[node_id]
@@ -311,7 +311,7 @@ class TestTraceWorkflow:
 
         index = 0
         async for chunk in main_workflow.stream({"a": 1, "b": "haha"},
-                                                WorkflowSession()):
+                                                create_workflow_session()):
             if not isinstance(chunk, (TraceSchema, OutputSchema)):
                 assert chunk == expected_datas_model[index], f"Mismatch at index {index}"
                 logger.info(f"stream chunk: {chunk}")
@@ -385,7 +385,7 @@ class TestTraceWorkflow:
         main_workflow.add_connection("b", "end")
 
         async for chunk in main_workflow.stream({"a": 1, "b": "haha"},
-                                                WorkflowSession()):
+                                                create_workflow_session()):
             if isinstance(chunk, TraceSchema):
                 print(f"stream chunk: {chunk}")
                 tracer_chunks.append(chunk)
@@ -501,7 +501,7 @@ class TestTraceWorkflow:
         main_workflow.add_connection("b", "end")
 
         async for chunk in main_workflow.stream({"a": 1, "b": "haha"},
-                                                WorkflowSession()):
+                                                create_workflow_session()):
             if isinstance(chunk, TraceSchema):
                 print(f"stream chunk: {chunk}")
                 tracer_chunks.append(chunk)
@@ -527,7 +527,7 @@ class TestTraceWorkflow:
         loop_group.add_workflow_comp("1", AddTenNode("1"), inputs_schema={"source": "${l.item}"})
         loop_group.add_workflow_comp("2", AddTenNode("2"),
                                      inputs_schema={"source": "${l.user_var}"})
-        loop_group.add_workflow_comp("3", SetVariableComponent(
+        loop_group.add_workflow_comp("3", LoopSetVariableComponent(
             {"${l.user_var}": "${2.result}"}))
         loop_group.start_comp("1")
         loop_group.end_comp("3")
@@ -549,7 +549,7 @@ class TestTraceWorkflow:
         flow.add_connection("b", "e")
 
         async for chunk in flow.stream({"input_array": [1, 2, 3], "input_number": 1},
-                                       WorkflowSession()):
+                                       create_workflow_session()):
             if isinstance(chunk, TraceSchema):
                 print(f"stream chunk: {chunk}")
                 tracer_chunks.append(chunk)
@@ -572,7 +572,7 @@ class TestTraceWorkflow:
 
     async def test_workflow_strean_with_node_exception_with_tracer(self):
         flow = Workflow()
-        start = Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        start = Start()
         flow.set_start_comp("start", start,
                             inputs_schema={
                                 "query": "${a}",
@@ -597,15 +597,13 @@ class TestTraceWorkflow:
 
         results = []
         with pytest.raises(JiuWenBaseException) as e:
-            async for chunk in flow.stream({"a": 1, "b": "haha"}, WorkflowSession(),
+            async for chunk in flow.stream({"a": 1, "b": "haha"}, create_workflow_session(),
                                            stream_modes=[BaseStreamMode.TRACE]):
                 logger.info("stream chunk: {%s}", chunk)
                 results.append(chunk)
         assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
         assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-            node_id="end",
-            ability="stream",
-            error_msg=RuntimeError("mocked stream error"),
+            error_msg="node_id: end, ability: stream, error: mocked stream error"
         )
 
         assert len(results) == 8
@@ -619,7 +617,6 @@ class TestTraceWorkflow:
                end_error_chunk.payload["error"] == {
                    'error_code': StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
                    "message": StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-                       node_id="end",
-                       ability="stream",
-                       error_msg=str(RuntimeError("mocked stream error")),
-                   )}
+                       error_msg="node_id: end, ability: stream, error: mocked stream error"
+                   )
+               }

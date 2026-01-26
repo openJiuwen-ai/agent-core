@@ -10,40 +10,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, AsyncIterator, Optional, Union, List
 
-from openjiuwen.core.single_agent.legacy import AgentSession, LegacyBaseAgent as BaseAgent
+from openjiuwen.core.session.agent_group import Session
+from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.multi_agent.config import GroupConfig
 from openjiuwen.core.multi_agent.schema.group_card import GroupCard
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session import Config
-
-
-class AgentGroupSession(AgentSession):
-    """AgentGroup Session
-
-    Inherits from AgentSession, reuses all capabilities including
-    TaskSession from pre_run().
-    """
-
-    def __init__(
-        self,
-        config: Optional[Config] = None,
-        resource_mgr=None
-    ):
-        """Initialize AgentGroupSession
-
-        Args:
-            config: Config object (optional, auto-created)
-            resource_mgr: Resource manager (optional, auto-created)
-        """
-        if config is None:
-            from openjiuwen.core.single_agent.legacy import AgentConfig
-            config = Config()
-            agent_config = AgentConfig(id="agent_group_session")
-            config.set_agent_config(agent_config)
-
-        super().__init__(config, resource_mgr)
 
 
 class BaseGroup(ABC):
@@ -220,7 +193,7 @@ class BaseGroup(ABC):
     async def invoke(
         self,
         message,
-        session: Optional[AgentGroupSession] = None
+        session: Optional[Session] = None
     ) -> Any:
         """Execute synchronous operation on the agent group.
 
@@ -239,7 +212,7 @@ class BaseGroup(ABC):
     async def stream(
         self,
         message,
-        session: Optional[AgentGroupSession] = None
+        session: Optional[Session] = None
     ) -> AsyncIterator[Any]:
         """Execute streaming operation on the agent group.
 

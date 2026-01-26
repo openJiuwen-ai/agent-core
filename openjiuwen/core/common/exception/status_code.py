@@ -2,12 +2,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from enum import Enum
 
-from openjiuwen.core.common.exception.code_template import generate_error_message_template
-
 
 class StatusCode(Enum):
     """Status code enum"""
 
+    TAG_REMOVE_ERROR = None
     SUCCESS = (0, "success")
     ERROR = (-1, "error")
 
@@ -35,20 +34,13 @@ class StatusCode(Enum):
 
     ## LLMComponent  101000 - 101049
     COMPONENT_LLM_TEMPLATE_CONFIG_ERROR = (101000, "component llm_template config error, reason: {error_msg}")
-    COMPONENT_LLM_CONFIG_INVALID = (101001, "component llm_config is invalid, reason: {error_msg}")
+    COMPONENT_LLM_RESPONSE_CONFIG_INVALID = (101001, "component llm_response_config is invalid, reason: {error_msg}")
     COMPONENT_LLM_CONFIG_ERROR = (101002, "component llm config error, reason: {error_msg}")
     COMPONENT_LLM_INVOKE_CALL_FAILED = (101003, "component llm_invoke call failed, reason: {error_msg}")
     COMPONENT_LLM_EXECUTION_PROCESS_ERROR = (101004, "component llm_execution process error, reason: {error_msg}")
     COMPONENT_LLM_INIT_FAILED = (101005, "component llm initialization failed, reason: {error_msg}")
     COMPONENT_LLM_TEMPLATE_PROCESS_ERROR = (101006, "component llm_template process error, reason: {error_msg}")
-    COMPONENT_LLM_TEMPLATE_INVALID = (101007, "component llm_template is invalid, reason: {error_msg}")
-
-
-    ## LLM Service 102001 - 102999
-    MODEL_SERVICE_CONFIG_ERROR = (102001, "model service config error, reason: {error_msg}")
-    MODEL_CONFIG_ERROR = (102002, "model config error, reason: {error_msg}")
-    MODEL_INVOKE_PARAM_ERROR = (102003, "model invoke parameter error, reason: {error_msg}")
-    MODEL_CLIENT_CONFIG_INVALID = (102004, "model client_config is invalid, reason: {error_msg}")
+    COMPONENT_LLM_CONFIG_INVALID = (101007, "component llm_config is invalid, reason: {error_msg}")
 
     ## IntentDetectionComponent 101050 - 101069
     COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR = (101050,
@@ -94,6 +86,7 @@ class StatusCode(Enum):
     ## ToolComponent  102000 - 102019
     COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
+    COMPONENT_TOOL_INIT_FAILED = (102002, "component tool initialization failed, reason: {error_msg}")
 
     ## StartComponent  102100 - 102119
     COMPONENT_START_INPUT_INVALID = (102100, "component start_input is invalid, reason: {error_msg}")
@@ -108,38 +101,56 @@ class StatusCode(Enum):
     GRAPH_SET_END_NODE_FAILED = (110002, "Graph create error, caused by end node set failed, detail: {detail}")
     GRAPH_ADD_NODE_FAILED = (110003, "Graph create error, caused by add node failed, detail: {detail}")
     GRAPH_ADD_EDGE_FAILED = (110004, "Graph create error, caused by add edge failed, detail: {detail}")
-    GRAPH_ADD_CONDITION_EDGE_FAILED = (110005,
-                                       "Graph create error, caused by add conditional edge failed, detail: {detail}")
+    GRAPH_ADD_CONDITION_EDGE_FAILED = (
+        110005,
+        "Graph create error, caused by add conditional edge failed, detail: {detail}",
+    )
     WORKFLOW_COMPONENT_CONFIG_ERROR = (110006, "Workflow component config error: {error_msg}")
-    DRAWABLE_GRAPH_SET_START_NODE_FAILED = (110021, "Drawable Graph create error, caused by start node set failed, "\
-                                                    "node id: {node_id}")
-    DRAWABLE_GRAPH_SET_END_NODE_FAILED = (110022, "Drawable Graph create error, caused by end node set failed, "\
-                                                    "node id: {node_id}")
-    DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED = (110023, "Drawable Graph create error, caused by break node set failed, "\
-                                                    "node id: {node_id}")
+    DRAWABLE_GRAPH_SET_START_NODE_FAILED = (
+        110021,
+        "Drawable Graph create error, caused by start node set failed, node id: {node_id}",
+    )
+    DRAWABLE_GRAPH_SET_END_NODE_FAILED = (
+        110022,
+        "Drawable Graph create error, caused by end node set failed, node id: {node_id}",
+    )
+    DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED = (
+        110023,
+        "Drawable Graph create error, caused by break node set failed, node id: {node_id}",
+    )
     DRAWABLE_GRAPH_INVALID_TITLE = (110024, "Invalid value of argument 'title', expected a str")
-    DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH = (110025, "Invalid value of argument 'expand_subgraph', "\
-                                              "expected a boolean or a non-negative integer")
-    DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION = (110026, "Invalid value of argument 'enable_animation', "\
-                                              "expected a boolean")
+    DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH = (
+        110025,
+        "Invalid value of argument 'expand_subgraph', expected a boolean or a non-negative integer",
+    )
+    DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION = (
+        110026,
+        "Invalid value of argument 'enable_animation', expected a boolean",
+    )
 
     # Workflow - Exception Handling 111000 - 111999
     # Agent Orchestration 120000 - 129999
     # Agent Orchestration - ReAct Agent Orchestration And Execution 120000 - 120999
-    TOOL_NOT_FOUND_ERROR = (120000, "Tool not found error")
-    TOOL_EXECUTION_ERROR = (120001, "Tool execution error: {msg}")
-    TASK_NOT_SUPPORT_ERROR = (120002, "Get unknown task type: {msg}")
-    WORKFLOW_EXECUTION_ERROR = (120003, "Workflow execution error: {msg}")
-    PROMPT_PARAMS_CHECK_ERROR = (120004, "Prompt params check error: {msg}")
+    AGENT_TOOL_NOT_FOUND = (120000, "agent tool not found, reason: {error_msg}")
+    AGENT_TOOL_EXECUTION_ERROR = (120001, "agent tool execution error, reason: {error_msg}")
+    AGENT_TASK_NOT_SUPPORT = (120002, "agent task is not supported, reason: {error_msg}")
+    AGENT_WORKFLOW_EXECUTION_ERROR = (120003, "agent workflow execution error, reason: {error_msg}")
+    AGENT_PROMPT_PARAM_ERROR = (120004, "agent prompt parameter error, reason: {error_msg}")
     # Agent Orchestration - Workflow Agent Orchestration And Execution 121000 - 121999
     # Agent Orchestration - Custom Agent Interface 122000 - 122999
     # Agent Controller 123000 - 123999
-    CONTROLLER_INVOKE_LLM_FAILED = (123000, "Controller failed to call model, the reason is {error_msg}")
-    AGENT_SUB_TASK_TYPE_ERROR = (123001, "SubTask type {msg} is not supported")
-    CONTROLLER_HANDLE_USER_INPUT_ERROR = (123002, "ReAct Agent failed to handle user input, the reason is {error_msg}")
-    CONTROLLER_RUNTIME_ERROR = (123003, "Controller runtime error, the reason is {error_msg}")
-    CONTROLLER_SEND_STREAM_FAILED = (123004, "Controller failed to send stream, the reason is {error_msg}")
-    CONTROLLER_PARSE_TOOL_CALL_ERROR = (123005, "Controller failed to parse tool call, the reason is {error_msg}")
+    AGENT_CONTROLLER_INVOKE_CALL_FAILED = (123000, "agent controller_invoke call failed, reason: {error_msg}")
+    AGENT_SUB_TASK_TYPE_NOT_SUPPORT = (123001, "agent sub_task_type is not supported, reason: {error_msg}")
+    AGENT_CONTROLLER_USER_INPUT_PROCESS_ERROR = (
+        123002,
+        "agent controller_user_input process error, reason: {error_msg}")
+    AGENT_CONTROLLER_RUNTIME_ERROR = (123003, "agent controller runtime error, reason: {error_msg}")
+    AGENT_CONTROLLER_EXECUTION_CALL_FAILED = (
+        123004,
+        "agent controller_execution call failed, reason: {error_msg}")
+    AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR = (
+        123005,
+        "agent controller_tool_execution process error, reason: {error_msg}")
 
     # Multi-Agent Orchestration 130000 - 139999
     # Multi-Agent Orchestration - Multi-Agent Communication  130000 - 130999
@@ -170,73 +181,116 @@ class StatusCode(Enum):
     # GraphEngine 140000 - 149999
     # GraphEngine - Graph Orchestration and Execution 140000 - 140999
     # GraphEngine - Conditional Evaluation 140000 - 140019
-    EXPRESSION_CONDITION_SYNTAX_ERROR = (140000, "Expression condition has syntax error,"
-                                         " expression as {expression}, error as {error_msg}.")
+    EXPRESSION_CONDITION_SYNTAX_ERROR = (
+        140000,
+        "Expression condition has syntax error, expression as {expression}, error as {error_msg}.",
+    )
     EXPRESSION_CONDITION_EVAL_ERROR = (140001, "Expression condition eval error, as {error_msg}.")
     ARRAY_CONDITION_ERROR = (140002, "Array condition error")
     NUMBER_CONDITION_ERROR = (140003, "Number condition error")
-
 
     # ContextEngine 150000 - 154999
     # ContextEngine - Context Structured Storage and Retrieval 150000 - 150999
     # ContextEngine - Context Dynamic Assembly  151000 - 151999
     # ContextEngine - Context Asynchronous Processing 152000 - 152999
     # ContextEngine - Context Common 153000 - 153999
-    CONTEXT_ENGINE_MESSAGE_PROCESS_ERROR = (153000, "Message process error: {error_msg}")
-    CONTEXT_ENGINE_ADD_MESSAGE_ERROR = (153001, "Message add message error: {error_msg}")
-    CONTEXT_ENGINE_GET_MESSAGE_ERROR = (153002, "Message get message error: {error_msg}")
-    CONTEXT_ENGINE_POP_MESSAGE_ERROR = (153003, "Message pop message error: {error_msg}")
-    CONTEXT_ENGINE_GET_CONTEXT_WINDOW_ERROR = (153004, "Message get context window error: {error_msg}")
-    CONTEXT_ENGINE_MESSAGE_VALIDATION_ERROR = (153005, "Context engine message validation error: {error_msg}")
+    CONTEXT_MESSAGE_PROCESS_ERROR = (153000, "context message process error, reason: {error_msg}")
+    CONTEXT_EXECUTION_ERROR = (153001, "context execution execution error, reason: {error_msg}")
+    CONTEXT_MESSAGE_INVALID = (153003, "context message is invalid, reason: {error_msg}")
 
     # KnowledgeBase Retrieval 155000 - 157999
     # KnowledgeBase Retrieval - Embedding 155000 - 155099
-    EMBEDDING_EMPTY_INPUT_ERROR = (155000, "Empty text or texts list provided for embedding")
-    EMBEDDING_MODEL_NOT_FOUND_ERROR = (155001, "Embedding model not found: {error_msg}")
-    EMBEDDING_CONNECTION_ERROR = (155002, "Failed to connect to embedding service: {error_msg}")
-    EMBEDDING_RESPONSE_FORMAT_ERROR = (155003, "Invalid embedding response format: {error_msg}")
-    EMBEDDING_REQUEST_FAILED_ERROR = (155004, "Failed to get embedding after {max_retries} attempts: {error_msg}")
-    EMBEDDING_UNREACHABLE_ERROR = (155005, "Unreachable code in embedding: {error_msg}")
-    # KnowledgeBase Retrieval - Indexing 155100 - 155199
-    INDEXING_CHUNK_SIZE_ERROR = (155100, "Invalid chunk size: {error_msg}")
-    INDEXING_CHUNK_OVERLAP_ERROR = (155101, "Invalid chunk overlap: {error_msg}")
-    INDEXING_TOKENIZER_ERROR = (155102, "Tokenizer error: {error_msg}")
-    INDEXING_FILE_NOT_FOUND_ERROR = (155103, "File not found: {error_msg}")
-    INDEXING_UNSUPPORTED_FORMAT_ERROR = (155104, "Unsupported file format: {error_msg}")
-    INDEXING_EMBED_MODEL_REQUIRED_ERROR = (155105, "Embed model is required: {error_msg}")
-    INDEXING_DIMENSION_REQUIRED_ERROR = (155106, "Dimension is required: {error_msg}")
-    INDEXING_PATH_REQUIRED_ERROR = (155107, "Path is required and cannot be empty: {error_msg}")
-    # KnowledgeBase Retrieval - Retriever 155200 - 155299
-    RETRIEVER_UNSUPPORTED_MODE_ERROR = (155200, "Unsupported retrieval mode: {error_msg}")
-    RETRIEVER_SCORE_THRESHOLD_ERROR = (155201, "Score threshold is only supported when mode='vector': {error_msg}")
-    RETRIEVER_EMBED_MODEL_REQUIRED_ERROR = (155202, "Embed model is required: {error_msg}")
-    RETRIEVER_UNSUPPORTED_INDEX_TYPE_ERROR = (155203, "Unsupported index type: {error_msg}")
-    RETRIEVER_MODE_INCOMPATIBLE_ERROR = (155204, "Mode is incompatible with index type: {error_msg}")
-    RETRIEVER_NOT_SUPPORT_MODE_ERROR = (155205, "Retriever does not support mode: {error_msg}")
-    RETRIEVER_VECTOR_STORE_REQUIRED_ERROR = (155206, "Vector store is required: {error_msg}")
-    RETRIEVER_COLLECTION_REQUIRED_ERROR = (155207, "Collection is required: {error_msg}")
-    RETRIEVER_GRAPH_RETRIEVER_REQUIRED_ERROR = (155208, "Graph retriever is required: {error_msg}")
-    RETRIEVER_LLM_CLIENT_REQUIRED_ERROR = (155209, "LLM client is required: {error_msg}")
-    RETRIEVER_TOP_K_REQUIRED_ERROR = (155210, "top_k is required: {error_msg}")
-    # KnowledgeBase Retrieval - Utils 155300 - 155399
-    UTILS_CONFIG_FILE_NOT_FOUND_ERROR = (155300, "Configuration file not found: {error_msg}")
-    UTILS_PYYAML_REQUIRED_ERROR = (155301, "PyYAML is required: {error_msg}")
-    UTILS_UNSUPPORTED_CONFIG_FORMAT_ERROR = (155302, "Unsupported configuration file format: {error_msg}")
-    UTILS_NO_CONFIG_TO_SAVE_ERROR = (155303, "No configuration to save: {error_msg}")
-    UTILS_CONFIG_NOT_LOADED_ERROR = (155304, "Configuration not loaded: {error_msg}")
-    # KnowledgeBase Retrieval - Vector Store 155400 - 155499
-    VECTOR_STORE_PATH_REQUIRED_ERROR = (155400, "Path is required and cannot be empty: {error_msg}")
-    # KnowledgeBase Retrieval - Knowledge Base 155500 - 155599
-    KB_PARSER_REQUIRED_ERROR = (155500, "Parser is required: {error_msg}")
-    KB_CHUNKER_REQUIRED_ERROR = (155501, "Chunker is required: {error_msg}")
-    KB_INDEX_MANAGER_REQUIRED_ERROR = (155502, "Index manager is required: {error_msg}")
-    KB_VECTOR_STORE_REQUIRED_ERROR = (155503, "Vector store is required: {error_msg}")
-    KB_BUILD_INDEX_FAILED_ERROR = (155504, "Failed to build index: {error_msg}")
-    KB_BUILD_CHUNK_INDEX_FAILED_ERROR = (155505, "Failed to build chunk index: {error_msg}")
-    KB_VECTORSTORE_AND_INDEXER_DATABASE_MISMATCH_ERROR = (
-        155506,
-        "Vector store and index manager uses different database names: {error_msg}",
+    RETRIEVAL_EMBEDDING_INPUT_INVALID = (155000, "retrieval embedding_input is invalid, reason: {error_msg}")
+    RETRIEVAL_EMBEDDING_MODEL_NOT_FOUND = (155001, "retrieval embedding_model not found, reason: {error_msg}")
+    RETRIEVAL_EMBEDDING_CALL_FAILED = (155002, "retrieval embedding call failed, reason: {error_msg}")
+    RETRIEVAL_EMBEDDING_RESPONSE_INVALID = (155003, "retrieval embedding_response is invalid, reason: {error_msg}")
+    RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED = (
+        155004,
+        "retrieval embedding_request call failed, reason: {error_msg}",
     )
+    RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED = (155005, "retrieval embedding call failed, reason: {error_msg}")
+    RETRIEVAL_EMBEDDING_CALLBACK_INVALID = (155006, "retrieval embedding_callback is invalid, reason: {error_msg}")
+    # KnowledgeBase Retrieval - Indexing 155100 - 155199
+    RETRIEVAL_INDEXING_CHUNK_SIZE_INVALID = (155100, "retrieval indexing_chunk_size is invalid, reason: {error_msg}")
+    RETRIEVAL_INDEXING_CHUNK_OVERLAP_INVALID = (
+        155101,
+        "retrieval indexing_chunk_overlap is invalid, reason: {error_msg}",
+    )
+    RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR = (
+        155102,
+        "retrieval indexing_tokenizer process error, reason: {error_msg}",
+    )
+    RETRIEVAL_INDEXING_FILE_NOT_FOUND = (155103, "retrieval indexing_file not found, reason: {error_msg}")
+    RETRIEVAL_INDEXING_FORMAT_NOT_SUPPORT = (155104, "retrieval indexing_format is not supported, reason: {error_msg}")
+    RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND = (155105, "retrieval indexing_embed_model not found, reason: {error_msg}")
+    RETRIEVAL_INDEXING_DIMENSION_NOT_FOUND = (155106, "retrieval indexing_dimension not found, reason: {error_msg}")
+    RETRIEVAL_INDEXING_PATH_NOT_FOUND = (155107, "retrieval indexing_path not found, reason: {error_msg}")
+    RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR = (155109, "retrieval indexing_add_doc runtime error, reason: {error_msg}")
+    # KnowledgeBase Retrieval - Retriever 155200 - 155299
+    RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT = (155200, "retrieval retriever_mode is not supported, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_SCORE_THRESHOLD_INVALID = (
+        155201,
+        "retrieval retriever_score_threshold is invalid, reason: {error_msg}",
+    )
+    RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND = (
+        155202,
+        "retrieval retriever_embed_model not found, reason: {error_msg}",
+    )
+    RETRIEVAL_RETRIEVER_INDEX_TYPE_NOT_SUPPORT = (
+        155203,
+        "retrieval retriever_index_type is not supported, reason: {error_msg}",
+    )
+    RETRIEVAL_RETRIEVER_MODE_INVALID = (155204, "retrieval retriever_mode is invalid, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT = (
+        155205,
+        "retrieval retriever_capability is not supported, reason: {error_msg}",
+    )
+    RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND = (
+        155206,
+        "retrieval retriever_vector_store not found, reason: {error_msg}",
+    )
+    RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND = (155207, "retrieval retriever_collection not found, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_GRAPH_RETRIEVER_NOT_FOUND = (
+        155208,
+        "retrieval retriever_graph_retriever not found, reason: {error_msg}",
+    )
+    RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND = (155209, "retrieval retriever_llm_client not found, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_TOP_K_NOT_FOUND = (155210, "retrieval retriever_top_k not found, reason: {error_msg}")
+    # KnowledgeBase Retrieval - Utils 155300 - 155399
+    RETRIEVAL_UTILS_CONFIG_FILE_NOT_FOUND = (155300, "retrieval utils_config_file not found, reason: {error_msg}")
+    RETRIEVAL_UTILS_PYYAML_NOT_FOUND = (155301, "retrieval utils_pyyaml not found, reason: {error_msg}")
+    RETRIEVAL_UTILS_CONFIG_FORMAT_NOT_SUPPORT = (
+        155302,
+        "retrieval utils_config_format is not supported, reason: {error_msg}",
+    )
+    RETRIEVAL_UTILS_CONFIG_NOT_FOUND = (155303, "retrieval utils_config not found, reason: {error_msg}")
+    RETRIEVAL_UTILS_CONFIG_PROCESS_ERROR = (155304, "retrieval utils_config process error, reason: {error_msg}")
+    # KnowledgeBase Retrieval - Vector Store 155400 - 155499
+    RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND = (155400, "retrieval vector_store_path not found, reason: {error_msg}")
+    # KnowledgeBase Retrieval - Knowledge Base 155500 - 155599
+    RETRIEVAL_KB_PARSER_NOT_FOUND = (155500, "retrieval kb_parser not found, reason: {error_msg}")
+    RETRIEVAL_KB_CHUNKER_NOT_FOUND = (155501, "retrieval kb_chunker not found, reason: {error_msg}")
+    RETRIEVAL_KB_INDEX_MANAGER_NOT_FOUND = (155502, "retrieval kb_index_manager not found, reason: {error_msg}")
+    RETRIEVAL_KB_VECTOR_STORE_NOT_FOUND = (155503, "retrieval kb_vector_store not found, reason: {error_msg}")
+    RETRIEVAL_KB_INDEX_BUILD_EXECUTION_ERROR = (155504, "retrieval kb_index_build execution error, reason: {error_msg}")
+    RETRIEVAL_KB_CHUNK_INDEX_BUILD_EXECUTION_ERROR = (
+        155505,
+        "retrieval kb_chunk_index_build execution error, reason: {error_msg}",
+    )
+    RETRIEVAL_KB_TRIPLE_INDEX_BUILD_EXECUTION_ERROR = (
+        155506,
+        "retrieval kb_triple_index_build execution error, reason: {error_msg}",
+    )
+    RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR = (
+        155507,
+        "retrieval kb_triple_extraction process error, reason: {error_msg}",
+    )
+    RETRIEVAL_KB_DATABASE_CONFIG_INVALID = (
+        155508,
+        "retrieval kb_database_config is invalid, reason: Vector store and index manager have "
+        "incompatible {config_name} configs: {error_msg}",
+    )
+
 
     # Memory Engine 158000 - 159999
     MEMORY_STORE_REGISTER_FAILED = (158000, "failed to register {store_type} to memory engine, reason: {error_msg}")
@@ -260,61 +314,77 @@ class StatusCode(Enum):
 
     # Optimization Toolchain 170000 - 179999
     # Optimization Toolchain - Prompt Self-optimization 170000 - 170999
-    AGENT_BUILDER_AGENT_PARAMS_ERROR = (170000, "Parameters error: {error_msg}")
-    AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR = (170010, "Do optimizer's backward failed: {error_msg}")
-    AGENT_BUILDER_AGENT_OPTIMIZER_UPDATE_ERROR = (170011, "Do optimizer's update failed: {error_msg}")
-    AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR = (170012, "Agent optimizer parameters error: {error_msg}")
-    AGENT_BUILDER_AGENT_EVALUATOR_EVALUATE_ERROR = (170030, "Do evaluator's evaluate failed: {error_msg}")
-    AGENT_BUILDER_AGENT_TRAINER_TRAIN_ERROR = (170040, "Do trainer's train error: {error_msg}")
+    TOOLCHAIN_AGENT_PARAM_ERROR = (
+        170000, "toolchain agent parameter error, reason: {error_msg}"
+    )
+    TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR = (
+        170001, "toolchain optimizer_backword execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR = (
+        170002, "toolchain optimizer_update execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_OPTIMIZER_PARAM_ERROR = (170003, "toolchain optimizer parameter error, reason: {error_msg}")
+    TOOLCHAIN_EVALUATOR_EXECUTION_ERROR = (170004, "toolchain evaluator execution error, reason: {error_msg}")
+    TOOLCHAIN_TRAINER_EXECUTION_ERROR = (170005, "toolchain trainer execution error, reason: {error_msg}")
     # Optimization Toolchain - End-to-end Performance Optimization 171000 - 171999
     # Optimization Toolchain - AgentRL 172000 - 172999
     # Optimization Toolchain - Prompt Builder 173000 - 173999
-    AGENT_BUILDER_META_TEMPLATE_REGISTER_ERROR = (173000, "Meta-template register failed: {error_msg}")
-    AGENT_BUILDER_META_TEMPLATE_ERROR = (173001, "Meta-template builder  failed: {error_msg}")
-    AGENT_BUILDER_FEEDBACK_TEMPLATE_ERROR = (173002, "Feedback-template builder failed: {error_msg}")
-    AGENT_BUILDER_BAD_CASE_TEMPLATE_ERROR = (173003, "Bad case-template builder failed: {error_msg}")
-    # Common Capabilities 180000 - 189999
-    # Common Capabilities - Prompt Template 180000 - 180999
-    PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR = (180000, "Wrong arguments for initializing the variable")
-    PROMPT_ASSEMBLER_TEMPLATE_FORMAT_ERROR = (
-        180001,
-        "Errors occur when formatting the template content due to wrong format")
-    PROMPT_TEMPLATE_DUPLICATED_ERROR = (180002, "Template duplicated")
-    PROMPT_TEMPLATE_NOT_FOUND_ERROR = (180003, "Template not found")
-    PROMPT_TEMPLATE_INCORRECT_ERROR = (180004, "Template data incorrect")
+    TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR = (
+        173000, "toolchain meta_template execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_FEEDBACK_TEMPLATE_EXECUTION_ERROR = (
+        173001, "toolchain feedback_template execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR = (
+        173002, "toolchain bad_case_template execution error, reason: {error_msg}"
+    )
+    # Foundation 180000 - 189999
+    # Foundation - Prompt Template 180000 - 180999
+    PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED = (180000,
+                                             "prompt assembler_variable initialization failed, reason: {error_msg}")
+    PROMPT_ASSEMBLER_TEMPLATE_PARAM_ERROR = (
+        180001, "prompt assembler_template parameter error, reason: {error_msg}")
+    PROMPT_TEMPLATE_RUNTIME_ERROR = (180002, "prompt template runtime error, reason: {error_msg}")
+    PROMPT_TEMPLATE_NOT_FOUND = (180003, "prompt template not found, reason: {error_msg}")
+    PROMPT_TEMPLATE_INVALID = (180004, "prompt template is invalid, reason: {error_msg}")
 
-    # Common Capabilities - Model API 181000 - 181999
-    MODEL_PROVIDER_INVALID_ERROR = (181000, "Invalid model provider, the reason is {error_msg}")
-    MODEL_CALL_FAILED = (181001, "Failed to call model, the reason is: {error_msg}")
-    # Common Capabilities - Tool Definition and Execution 182000 - 182999
-    PLUGIN_UNEXPECTED_ERROR = (182000, "Plugin unexpected error")
-    PLUGIN_REQUEST_TIMEOUT_ERROR = (182001, "Plugin restful api request timed out")
-    PLUGIN_RESPONSE_FORMAT_ERROR = (182002, "Plugin restful api response format error")
-    PLUGIN_RESPONSE_TOO_BIG_ERROR = (182003,
-        "Plugin restful api  response too big, maxLength={max_length}, actualLength={actual_length}")
-    PLUGIN_RESPONSE_HTTP_CODE_ERROR = (182004, "Plugin restful api http code error")
-    PLUGIN_PARAMS_CHECK_FAILED = (182005, "Plugin params check failed")
-    PLUGIN_RESTFUL_API_METHOD_ERROR = (182006,
-        "Plugin restful api unsupported HTTP method: '{method}', only accepts: {support}")
+    # Foundation - Model API 181000 - 181999
+    MODEL_PROVIDER_INVALID = (181000, "model provider is invalid, reason: {error_msg}")
+    MODEL_CALL_FAILED = (181001, "model call failed, reason: {error_msg}")
+    MODEL_SERVICE_CONFIG_ERROR = (181002, "model service config error, reason: {error_msg}")
+    MODEL_CONFIG_ERROR = (181003, "model config error, reason: {error_msg}")
+    MODEL_INVOKE_PARAM_ERROR = (181004, "model invoke parameter error, reason: {error_msg}")
+    MODEL_CLIENT_CONFIG_INVALID = (181005, "model client_config is invalid, reason: {error_msg}")
+
+    # Foundation - Tool Definition and Execution 182000 - 182999
+    PLUGIN_EXECUTION_RUNTIME_ERROR = (182000, "plugin execution runtime error, reason: {error_msg}")
+    PLUGIN_REQUEST_TIMEOUT = (182001, "plugin request timeout ({timeout}s), reason: {error_msg}")
+    PLUGIN_RESPONSE_PROCESS_ERROR = (182002, "plugin response process error, reason: {error_msg}")
+    PLUGIN_RESPONSE_INVALID = (182003,
+                               "plugin response is invalid, reason: {error_msg}")
+    PLUGIN_RESPONSE_CALL_FAILED = (182004, "plugin response call failed, reason: {error_msg}")
+    PLUGIN_INPUT_PARAM_ERROR = (182005, "plugin input parameter error, reason: {error_msg}")
+    PLUGIN_RESTFUL_API_NOT_SUPPORT = (182006,
+                                      "plugin restful_api is not supported, reason: {error_msg}")
 
     # Common Capabilities - Logger 183000 - 183999
-    LOG_PATH_SENSITIVE_ERROR = (183000, "Log path is sensitive or unsafe: {path}")
-    LOG_PATH_CREATE_FAILED = (183001, "Failed to create log directory: {path}, error: {error_msg}")
-    LOG_CONFIG_LOAD_ERROR = (183002, "Failed to load log configuration file: {error_msg}")
-    LOG_CONFIG_INVALID_ERROR = (183003, "Log configuration is invalid: {error_msg}")
-    LOG_FILE_OPERATION_ERROR = (183004, "Log file operation failed: {error_msg}")
+    COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
+    COMMON_LOG_PATH_INIT_FAILED = (183001, "common log_path initialization failed, reason: {error_msg}")
+    COMMON_LOG_CONFIG_PROCESS_ERROR = (183002, "common log_config process error, reason: {error_msg}")
+    COMMON_LOG_CONFIG_INVALID = (183003, "common log_config is invalid, reason: {error_msg}")
+    COMMON_LOG_EXECUTION_RUNTIME_ERROR = (183004, "common log_execution runtime error, reason: {error_msg}")
     # Common Capabilities - Exception Handling 184000 - 184999
     # Common Capabilities - Support Mcp Tool 185000 - 185999
 
     # Common Capabilities - Common Utility 188000 - 188999
-    SSL_UTILS_CREATE_SSL_CONTEXT_ERROR = (188000, "ssl utils error, as {error_msg}")
-    USER_CONFIG_LOAD_ERROR = (188001, "User config load error, as {error_msg}")
-    JSON_LOADS_ERROR = (188002, "Json loads error, as {error_msg}")
-    JSON_DUMPS_ERROR = (188003, "Json dumps error, as {error_msg}")
-    URL_INVALID_ERROR = (188004, "Url invalid error, as {error_msg}")
-    INVALID_SSL_CERT_ERROR = (188005, "Invalid ssl cert error, as {error_msg}")
+    COMMON_SSL_CONTEXT_INIT_FAILED = (188000, "common ssl_context initialization failed, reason: {error_msg}")
+    COMMON_USER_CONFIG_PROCESS_ERROR = (188001, "common user_config process error, reason: {error_msg}")
+    COMMON_JSON_INPUT_PROCESS_ERROR = (188002, "common json_input process error, reason: {error_msg}")
+    COMMON_JSON_EXECUTION_PROCESS_ERROR = (188003, "common json_execution process error, reason: {error_msg}")
+    COMMON_URL_INPUT_INVALID = (188004, "common url_input is invalid, reason: {error_msg}")
+    COMMON_SSL_CERT_INVALID = (188005, "common ssl_cert is invalid, reason: {error_msg}")
 
-    # Session 190000 - 199999
+    # Session 190000 - 198999
     # Session - Resource Management 190000 - 190999
     SESSION_WORKFLOW_GET_FAILED = (190001, "failed to get workflow, reason: {reason}")
     SESSION_WORKFLOW_ADD_FAILED = (190002, "failed to add workflow, reason: {reason}")
@@ -326,10 +396,10 @@ class StatusCode(Enum):
     SESSION_AGENT_GROUP_ADD_FAILED = (190040, "failed to add single_agent group, reason: {reason}")
     SESSION_AGENT_GROUP_GET_FAILED = (190041, "failed to get single_agent group, reason: {reason}")
     SESSION_AGENT_GROUP_REMOVE_FAILED = (190042, "failed to remove single_agent group, reason: {reason}")
-    
+
     # Session - Resource Management - Workflow Additional
     SESSION_WORKFLOW_REMOVE_FAILED = (190003, "failed to remove workflow, reason: {reason}")
-    
+
     # Session - Resource Management - Agent 190050 - 190059
     SESSION_AGENT_ADD_FAILED = (190050, "failed to add single_agent, reason: {reason}")
     SESSION_AGENT_GET_FAILED = (190051, "failed to get single_agent, reason: {reason}")
@@ -338,14 +408,23 @@ class StatusCode(Enum):
     SESSION_TOOL_GET_FAILED = (190101, "failed to get tool, reason: {reason}")
     SESSION_TOOL_ADD_FAILED = (190102, "failed to add tool, reason: {reason}")
     SESSION_TOOL_TOOL_INFO_GET_FAILED = (190103, "failed to get toolInfo of tool, reason: {reason}")
+    SESSION_TOOL_REMOVED_FAILED = (190104, "failed to remove tool, reason: {reason}")
 
     SESSION_PROMPT_GET_FAILED = (190201, "failed to get prompt template, reason: {reason}")
     SESSION_PROMPT_ADD_FAILED = (190202, "failed to add prompt template, reason: {reason}")
+    SESSION_PROMPT_REMOVED_FAILED = (190203, "failed to remove prompt template, reason: {reason}")
 
     SESSION_MODEL_GET_FAILED = (190301, "failed to get model, reason: {reason}")
     SESSION_MODEL_ADD_FAILED = (190302, "failed to add model, reason: {reason}")
+    SESSION_MODEL_REMOVED_FAILED = (190303, "failed to remove model, reason: {reason}")
+
+    SESSION_MCP_SERVER_GET_FAILED = (190401, "failed to get mcp server, reason: {reason}")
+    SESSION_MCP_SERVER_ADD_FAILED = (190402, "failed to add mcp server, reason: {reason}")
+    SESSION_MCP_SERVER_REMOVED_FAILED = (190403, "failed to remove mcp server, reason: {reason}")
 
     SESSION_TAG_MANAGE_FAILED = (190401, "failed to manage tag, reason: {reason}")
+
+    SESSION_RESOURCE_REGISTRY_FAILED = (190501, "failed to registry resource, reason: {reason}")
 
     # Session - Tracer 191000 - 191999
     SESSION_TRACE_ERROR_FAILED = (191001, "failed to record error trace info, reason: {reason}")
@@ -356,8 +435,10 @@ class StatusCode(Enum):
     SESSION_STATE_INVALID_SESSION_TYPE = (192001, "Invalid session type: {session_type}, expected BaseSession")
     SESSION_STATE_INVALID_STATE_TYPE = (192002, "Invalid state type: {state_type}, expected CommitState")
     # Session - StreamWriter 193000 - 193999
-    STREAM_WRITER_WRITE_SCHEMA_FAILED = (193001,
-                                         "failed to write stream, stream schema validate failed, details: {detail}")
+    STREAM_WRITER_WRITE_SCHEMA_FAILED = (
+        193001,
+        "failed to write stream, stream schema validate failed, details: {detail}",
+    )
     STREAM_WRITER_WRITE_FAILED = (193002, "failed to write stream, reason: {reason}")
     STREAM_FRAME_TIMEOUT_FAILED = (193003, "stream frame is timeout ({timeout}s), no stream output")
     STREAM_FIRST_FRAME_TIMEOUT_FAILED = (193004, "stream first frame is timeout ({timeout}s), no stream output")
@@ -370,15 +451,17 @@ class StatusCode(Enum):
 
     # Session - Component Executable 196100 - 196199
     SESSION_COMPONENT_INVALID_SESSION_TYPE = (196100, "session should be NodeSession instance")
-    SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED = (196101, "Component ability '{ability}' is registered but '{method}' "
-                                                 "method is not implemented. Please implement the '{method}' method "
-                                                 "in your component class '{class_name}'.")
+    SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED = (
+        196101,
+        "Component ability '{ability}' is registered but '{method}' "
+        "method is not implemented. Please implement the '{method}' method "
+        "in your component class '{class_name}'.",
+    )
     SESSION_COMPONENT_ABILITY_NOT_SUPPORTED = (196102, "{ability} is not supported")
 
     # Session - Checkpointer 197000 - 197099
     SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR = (197000, "workflow store is None")
     SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR = (197001, "agent store is None")
-
 
     @property
     def code(self):

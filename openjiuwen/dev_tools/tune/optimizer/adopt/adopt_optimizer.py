@@ -13,9 +13,9 @@ from openjiuwen.dev_tools.tune.optimizer.base import BaseOptimizer
 from openjiuwen.dev_tools.tune.optimizer.base import TextualParameter
 from openjiuwen.dev_tools.tune.optimizer.instruction_optimizer import InstructionOptimizer
 from openjiuwen.dev_tools.tune.utils import TuneUtils
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.operator.llm_call import LLMCall
 from openjiuwen.core.foundation.llm import BaseMessage, Model
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -51,15 +51,22 @@ class AdoptOptimizer(BaseOptimizer):
                         return await self._model.invoke(messages, tools=tools, temperature=temperature,
                                                         top_p=top_p, model=model_name, **kwargs)
                     except Exception as e:
-                        logger.warning(f"Failed to invoke model while doing optimization: {str(e)}, "
-                                       f"retry {i}/{DEFAULT_MODEL_RETRY_NUM}")
+                        llm_logger.warning(
+                            "Failed to invoke model while doing optimization,retry",
+                            event_type=LogEventType.LLM_CALL_ERROR,
+                            model_name=model_name,
+                            exception=str(e),
+                            metadata={"retry_num": i / DEFAULT_MODEL_RETRY_NUM}
+                        )
                         continue
-                logger.error("Failed to invoke the model, please check if the model is available.")
-                return JiuWenBaseException(
-                    error_code=StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.code,
-                    message=StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.errmsg.format(
-                        error_msg="Failed to invoke the model"
-                    )
+                llm_logger.error(
+                    "Failed to invoke the model, please check if the model is available.",
+                    event_type=LogEventType.LLM_CALL_ERROR,
+                    model_name=model_name
+                )
+                return build_error(
+                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR,
+                    error_msg="Failed to invoke the model"
                 )
         self._model = ModelWithRetry(model)
         self._agent_description = kwargs.get("agent_description", "No description")
@@ -151,7 +158,12 @@ class AdoptOptimizer(BaseOptimizer):
         def generate_each_node_cases(case: EvaluatedCase):
             trace_nodes = self._history.get_llm_call_history(case_id=case.case_id, llm_call_id=node_name)
             if not trace_nodes:
-                logger.warn(f"failed to get trace nodes for node {case.case_id}-{node_name}")
+                llm_logger.warning(
+                    "failed to get trace nodes for node",
+                    event_type=LogEventType.LLM_CALL_ERROR,
+                    model_name=self._model_name,
+                    metadata={"case_id": case.case_id, "node_name": node_name}
+                )
                 return None
             input_list = [node.inputs for node in trace_nodes]
             output_list = [node.outputs for node in trace_nodes]
@@ -203,11 +215,9 @@ class AdoptOptimizer(BaseOptimizer):
     def _conclude_node(self, node_name: str) -> None:
         param = self._parameters.get(node_name)
         if not param:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.errmsg.format(
-                    error_msg=f"Cannot find parameter: {node_name}"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR,
+                error_msg=f"Cannot find parameter: {node_name}"
             )
         system_prompt = param.llm_call.get_system_prompt()
         user_prompt = param.llm_call.get_user_prompt()
@@ -260,11 +270,9 @@ class PartialOptimizer(InstructionOptimizer):
                               tools: Optional[list] = None) -> str:
         local_gradients = self._calculate_textual_gradient_by_bad_cases(param, tools)
         if not local_gradients:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR.errmsg.format(
-                    error_msg=f"Calculate local gradient of parameter: {name} failed."
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR,
+                error_msg=f"Calculate local gradient of parameter: {name} failed."
             )
         return self._reduce_textual_gradient(param, local_gradients)
 

@@ -463,7 +463,7 @@ class IntentDetectionController(BaseController):
 
         # Construct workflow_final frame payload (same format as End component)
         final_payload = {
-            "responseContent": default_text,
+            "response": default_text,
             "output": {}
         }
 

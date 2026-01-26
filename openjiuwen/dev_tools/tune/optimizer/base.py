@@ -7,9 +7,9 @@ import threading
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import agent_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.operator.llm_call import LLMCall
@@ -47,11 +47,9 @@ class BaseOptimizer:
             return
         for name, llm_call in parameters.items():
             if not llm_call:
-                raise JiuWenBaseException(
-                    StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.code,
-                    StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_PARAMS_ERROR.errmsg.format(
-                        error_msg=f"cannot bind a None parameter of {name}"
-                    )
+                raise build_error(
+                    StatusCode.TOOLCHAIN_OPTIMIZER_PARAM_ERROR,
+                    error_msg=f"cannot bind a None parameter of {name}"
                 )
             self._parameters[name] = TextualParameter(llm_call)
         self._history = OptimizeHistory()
@@ -67,33 +65,43 @@ class BaseOptimizer:
         except Exception as e:
             import traceback
             traceback.print_exc()
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_BACKWORD_ERROR.errmsg.format(
-                    error_msg=f"{str(e)}"
-                )
-            )
+            raise build_error(
+                StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR,
+                error_msg=f"{str(e)}",
+                cause=e
+            ) from e
 
     def update(self):
         self._validate_parameters()
         try:
             self._update()
             for name, param in self._parameters.items():
-                logger.info(f"[llm_call name]: {name}\n"
-                            f"[frozen]: {param.llm_call.get_freeze_system_prompt()}\n"
-                            f"[system prompt]: {str(param.llm_call.get_system_prompt().content)}")
-                logger.info(f"[llm_call name]: {name}\n"
-                            f"[frozen]: {param.llm_call.get_freeze_user_prompt()}\n"
-                            f"[user prompt]: {str(param.llm_call.get_user_prompt().content)}")
+                agent_logger.info(
+                    "LLM call basic system prompt info",
+                    metadata={
+                        "llm_call_name": name,
+                        "frozen_system_prompt": param.llm_call.get_freeze_system_prompt(),
+                        "system_prompt_content": str(param.llm_call.get_system_prompt().content)
+                    },
+                    event_type=LogEventType.AGENT_START
+                )
+                agent_logger.info(
+                    "LLM call basic user prompt info",
+                    metadata={
+                        "llm_call_name": name,
+                        "frozen_system_prompt": param.llm_call.get_freeze_user_prompt(),
+                        "system_prompt_content": str(param.llm_call.get_user_prompt().content)
+                    },
+                    event_type=LogEventType.AGENT_START
+                )
             self._history.clear_history()
         except Exception as e:
             self._history.clear_history()
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_UPDATE_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_OPTIMIZER_UPDATE_ERROR.errmsg.format(
-                    error_msg=f"{str(e)}"
-                )
-            )
+            raise build_error(
+                StatusCode.TOOLCHAIN_OPTIMIZER_UPDATE_EXECUTION_ERROR,
+                error_msg=f"{str(e)}",
+                cause=e
+            ) from e
 
     @abstractmethod
     def _update(self):
@@ -133,11 +141,9 @@ class BaseOptimizer:
 
     def _validate_parameters(self):
         if not self._parameters:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.errmsg.format(
-                    error_msg="cannot optimize empty parameters"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR,
+                error_msg="cannot optimize empty parameters"
             )
 
 

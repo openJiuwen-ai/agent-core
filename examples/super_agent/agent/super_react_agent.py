@@ -31,10 +31,10 @@ from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import Session
-from openjiuwen.core.foundation.llm import AIMessage
+from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
-from openjiuwen.core.protocols.mcp import McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.workflow import Workflow
 
 
@@ -186,7 +186,7 @@ class SuperReActAgent(BaseAgent):
                 card=ToolCard(
                     name=info.name,
                     description=getattr(info, "description", "") or f"MCP tool {info.name} from {server_name}",
-                    parameters=schema,
+                    input_params=schema,
                 ),
                 func=async_func,
             )
@@ -232,7 +232,7 @@ class SuperReActAgent(BaseAgent):
         session: Session,
         is_first_call: bool = False,
         step_id: int = 0
-    ) -> AIMessage:
+    ) -> AssistantMessage:
         """
         Call LLM for reasoning
 
@@ -264,7 +264,7 @@ class SuperReActAgent(BaseAgent):
         # tools = session.get_tool_info()
         
         # === 从 session 拿到所有工具 ===
-        all_tools = session.get_tool_info()
+        all_tools = await Runner.resource_mgr.get_tool_infos()
         tools = all_tools
 
         # === 计算当前 single_agent 允许使用的工具名集合 ===

@@ -7,8 +7,8 @@ from ast import literal_eval
 from typing import Optional, List, Dict, Any
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.dev_tools.tune.base import Case, EvaluatedCase
@@ -18,11 +18,9 @@ class TuneUtils:
     @staticmethod
     def validate_digital_parameter(param: float, param_name: str, lower: float, upper: float):
         if param < lower or param > upper:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.code,
-                StatusCode.AGENT_BUILDER_AGENT_PARAMS_ERROR.errmsg.format(
-                    error_msg=f"{param_name} should be between {lower} and {upper}"
-                )
+            raise build_error(
+                StatusCode.TOOLCHAIN_AGENT_PARAM_ERROR,
+                error_msg=f"{param_name} should be between {lower} and {upper}"
             )
 
     @staticmethod

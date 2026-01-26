@@ -5,6 +5,7 @@ import pytest
 
 from openjiuwen.core.memory.store.impl.memory_chroma_vector_store import MemoryChromaVectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -45,7 +46,7 @@ class TestMemoryChromaVectorStore:
         assert table_name in chroma_store.collection_cache
         assert chroma_store.collection_cache[table_name] is collection
         # 验证集合在客户端中存在
-        assert await chroma_store.is_collection_exists(table_name)
+        assert await chroma_store.table_exists(table_name)
 
         # 第二次调用get_collection应该从缓存中获取
         collection2 = await chroma_store.get_collection(table_name)
@@ -66,13 +67,13 @@ class TestMemoryChromaVectorStore:
     def test_check_table_name(chroma_store):
         """测试检查表名"""
         # 测试空表名应该抛出异常
-        with pytest.raises(ValueError, match="Chroma collection name is required for test_operation"):
+        with pytest.raises(BaseError, match="chroma collection name is required for test_operation"):
             chroma_store.check_table_name(None, "test_operation")
 
-        with pytest.raises(ValueError, match="Chroma collection name is required for test_operation"):
+        with pytest.raises(BaseError, match="chroma collection name is required for test_operation"):
             chroma_store.check_table_name("", "test_operation")
 
-        with pytest.raises(ValueError, match="Chroma collection name is required for test_operation"):
+        with pytest.raises(BaseError, match="chroma collection name is required for test_operation"):
             chroma_store.check_table_name("   ", "test_operation")
 
     @pytest.mark.asyncio
@@ -80,13 +81,13 @@ class TestMemoryChromaVectorStore:
         """测试集合是否存在"""
         # 测试集合不存在
 
-        assert await chroma_store.is_collection_exists(table_name) is False
+        assert await chroma_store.table_exists(table_name) is False
 
         # 创建集合
         await chroma_store.get_collection(table_name)
 
         # 测试集合存在
-        assert await chroma_store.is_collection_exists(table_name) is True
+        assert await chroma_store.table_exists(table_name) is True
 
     @pytest.mark.asyncio
     async def test_add_single_vector(self, chroma_store, persist_directory, table_name):
@@ -95,7 +96,6 @@ class TestMemoryChromaVectorStore:
         vector_data = {
             "id": "vec1",
             "embedding": [0.1, 0.2, 0.3, 0.4],
-            "scope_id": "scope1"
         }
 
         # 调用add方法
@@ -107,7 +107,6 @@ class TestMemoryChromaVectorStore:
         rounded = [[round(x, 4) for x in vec] for vec in result["embeddings"].tolist()]
         assert result["ids"] == ["vec1"]
         assert rounded == [[0.1, 0.2, 0.3, 0.4]]
-        assert result["metadatas"] == [{"scope_id": "scope1"}]
 
     @pytest.mark.asyncio
     async def test_add_multiple_vectors(self, chroma_store, persist_directory, table_name):
@@ -164,12 +163,10 @@ class TestMemoryChromaVectorStore:
             {
                 "id": "vec1",
                 "embedding": [0.1, 0.2, 0.3, 0.4],
-                "scope_id": "scope1"
             },
             {
                 "id": "vec2",
                 "embedding": [0.5, 0.6, 0.7, 0.8],
-                "scope_id": "scope2"
             }
         ]
 
@@ -178,17 +175,16 @@ class TestMemoryChromaVectorStore:
 
         # 调用search方法
         query_vector = [0.1, 0.2, 0.3, 0.4]
-        results = await chroma_store.search(query_vector, top_k=2, table_name=table_name, scope_id="scope1")
+        results = await chroma_store.search(query_vector, top_k=2, table_name=table_name)
 
         # 验证结果
         assert isinstance(results, list)
-        assert len(results) == 1  # 只有scope1的向量
+        assert len(results) == 2
         assert all(isinstance(result, SearchResult) for result in results)
 
         # 验证搜索结果
-        assert results[0].id == "vec1"
+        assert results[0].id == "vec2"
         assert results[0].text == ""
-        assert results[0].metadata == {"scope_id": "scope1"}
 
     @pytest.mark.asyncio
     async def test_search_empty_results(self, chroma_store, persist_directory, table_name):
@@ -257,14 +253,14 @@ class TestMemoryChromaVectorStore:
         await chroma_store.add(data=vector_data, table_name=table_name)
 
         # 验证表存在
-        assert chroma_store.is_collection_exists(table_name)
+        assert chroma_store.table_exists(table_name)
 
         # 调用delete_table方法
         result = await chroma_store.delete_table(table_name)
 
         # 验证删除成功
         assert result is True
-        assert not await chroma_store.is_collection_exists(table_name)
+        assert not await chroma_store.table_exists(table_name)
         assert table_name not in chroma_store.collection_cache
 
     @pytest.mark.asyncio

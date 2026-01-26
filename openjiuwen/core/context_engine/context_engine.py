@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import ContextError
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine.base import ModelContext
@@ -73,12 +73,11 @@ class ContextEngine:
         Returns:
             ModelContext: The newly created or cached context instance.
         """
-        session_id = session.session_id() if session else "default_session_id"
+        session_id = session.get_session_id() if session else "default_session_id"
         full_context_id = f"{session_id}_{context_id}"
-        states = session.get_state("context") if session else None
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
-            self._load_state_from_session(context, session, states)
+            self._load_state_from_session(context, session)
             return context
 
         processor_instances = [
@@ -94,7 +93,7 @@ class ContextEngine:
             processors=processor_instances,
             token_counter=token_counter,
         )
-        self._load_state_from_session(context, session, states, is_load_messages=(not history_messages))
+        self._load_state_from_session(context, session, is_load_messages=(not history_messages))
         self._context_pool[full_context_id] = context
         return context
 
@@ -164,7 +163,7 @@ class ContextEngine:
         if full_context_id not in self._context_pool:
             logger.warning(f"Delete context failed, context {session_id} does not exist")
 
-        del self._context_pool[context_id]
+        del self._context_pool[full_context_id]
 
     async def save_contexts(self,
                             context_ids: List[str],
@@ -180,7 +179,7 @@ class ContextEngine:
             context_ids: List of target context identifiers to save.
             session: Session object;
         """
-        session_id = session.session_id()
+        session_id = session.get_session_id()
         states = dict()
         for context_id in context_ids:
             full_context_id = f"{session_id}_{context_id}"
@@ -189,8 +188,7 @@ class ContextEngine:
                 continue
             context_state = context.save_state()
             states[context_id] = context_state
-        session.update_state({"context": None})
-        session.update_state({"context": states})
+        self._save_state_to_session(session, states)
 
     @classmethod
     def register_processor(cls, processor_class=None):
@@ -232,17 +230,18 @@ class ContextEngine:
     def _create_processor(self, processor_type: str, config: BaseModel):
         processor_class = self._PROCESSOR_MAP.get(processor_type)
         if not processor_class:
-            raise ContextError(
-                StatusCode.CONTEXT_CREATE_PROCESSOR_ERROR,
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
                 msg=f"cannot find processor type '{processor_type}'"
             )
 
         try:
             processor = processor_class(config)
         except Exception as e:
-            raise ContextError(
-                StatusCode.CONTEXT_CREATE_PROCESSOR_ERROR,
-                msg=f"init processor type '{processor_type}' failed"
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                msg=f"init processor type '{processor_type}' failed",
+                cause=e
             ) from e
 
         return processor
@@ -251,10 +250,15 @@ class ContextEngine:
     def _load_state_from_session(
             context: ModelContext,
             session: Session,
-            states: Dict[str, Any],
             *,
             is_load_messages: bool = True
     ):
+        states = None
+        if hasattr(session, "get_state"):
+            states = session.get_state()
+        elif hasattr(session, "_inner"):
+            states = getattr(session, "_inner").get_state("context") if session else None
+
         if not session or states is None:
             return
 
@@ -265,3 +269,16 @@ class ContextEngine:
             states.pop("messages")
 
         context.load_state(states)
+
+    @staticmethod
+    def _save_state_to_session(
+            session,
+            states: dict
+    ):
+        if hasattr(session, "update_state"):
+            session.update_state({"context": None})
+            session.update_state({"context": states})
+        elif hasattr(session, "_inner"):
+            getattr(session, "_inner").update_state({"context": None})
+            getattr(session, "_inner").update_state({"context": states})
+

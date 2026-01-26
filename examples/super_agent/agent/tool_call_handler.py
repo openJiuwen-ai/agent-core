@@ -10,6 +10,7 @@ import json
 from typing import Dict, Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import Session
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
@@ -200,7 +201,7 @@ class ToolCallHandler:
             Tool execution result
         """
         # Get tool from session
-        tool = session.get_tool(tool_name)
+        tool = Runner.resource_mgr.get_tool(tool_name)
         if not tool:
             raise ValueError(f"Tool not found: {tool_name}")
 

@@ -6,20 +6,22 @@ ChromaDB Vector Store Implementation
 Supports vector search, sparse search (text matching), and hybrid search.
 """
 
-import uuid
 import asyncio
 import json
+import uuid
 from typing import Any, List, Optional
+
 import chromadb
 from chromadb.config import DEFAULT_DATABASE, Settings
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.common.retrieval_result import SearchResult, RetrievalResult
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
+from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
+from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
+from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
 class ChromaVectorStore(VectorStore):
@@ -30,7 +32,7 @@ class ChromaVectorStore(VectorStore):
         config: VectorStoreConfig,
         chroma_path: str,
         text_field: str = "content",
-        vector_field: str = "embedding",
+        vector_field: str | ChromaVectorField = "embedding",
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
@@ -43,7 +45,7 @@ class ChromaVectorStore(VectorStore):
             config: Vector store configuration
             chroma_path: ChromaDB persistent path (required)
             text_field: Text field name
-            vector_field: Vector field name
+            vector_field: Vector field name (str) or definition (ChromaVectorField)
             sparse_vector_field: Sparse vector field name (stored as metadata in ChromaDB)
             metadata_field: Metadata field name
             doc_id_field: Document ID field name
@@ -53,44 +55,64 @@ class ChromaVectorStore(VectorStore):
         """
         # Validate chroma_path
         if not chroma_path or not chroma_path.strip():
-            raise JiuWenBaseException(
-                StatusCode.VECTOR_STORE_PATH_REQUIRED_ERROR.code, "chroma_path is required and cannot be empty"
+            raise build_error(
+                StatusCode.RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND,
+                error_msg="chroma_path is required and cannot be empty",
             )
 
         self.config = config
         self.collection_name = config.collection_name
         self.chroma_path = chroma_path
         self.text_field = text_field
-        self.vector_field = vector_field
         self.sparse_vector_field = sparse_vector_field
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
         self.database_name = self.config.database_name
+        self._distance_metric = config.distance_metric.replace("dot", "ip").replace("euclidean", "l2")
+
+        if isinstance(vector_field, str):
+            self.vector_field = ChromaVectorField(vector_field=vector_field)
+        elif isinstance(vector_field, ChromaVectorField):
+            self.vector_field = vector_field
+        else:
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_VECTOR_FIELD_INVALID,
+                error_msg="vector_field must be either a str or ChromaVectorField instance",
+            )
+        self._construct_config = self.vector_field.to_dict(stage="construct")
+        self._construct_config["space"] = self._distance_metric
+        self._search_config = self.vector_field.to_dict(stage="search")
 
         # Initialize ChromaDB persistent client
-        self._client = self.create_client(
+        self._client: chromadb.PersistentClient = self.create_client(
             database_name=self.config.database_name,
             path_or_uri=self.chroma_path,
         )
 
         # Get or create collection
         self._collection = self._client.get_or_create_collection(
-            name=self.collection_name, metadata={"hnsw:space": "cosine" if config.distance_metric == "cosine" else "l2"}
+            name=self.collection_name,
+            configuration={"hnsw": self._construct_config | self._search_config},
         )
 
     @property
-    def client(self):
+    def client(self) -> chromadb.PersistentClient:
         """Get ChromaDB client"""
         return self._client
 
     @property
-    def collection(self):
+    def collection(self) -> chromadb.Collection:
         """Get ChromaDB collection"""
         return self._collection
 
+    @property
+    def distance_metric(self) -> str:
+        """Get raw distance metric string"""
+        return self._distance_metric
+
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> chromadb.PersistentClient:
-        """Create Milvus client and ensure database exists"""
+        """Create Chroma client and ensure database exists"""
         if database_name and database_name != DEFAULT_DATABASE:
             admin_client = chromadb.AdminClient(Settings(is_persistent=True, persist_directory=path_or_uri))
             if database_name not in {db.get("name") for db in admin_client.list_databases()}:
@@ -99,6 +121,10 @@ class ChromaVectorStore(VectorStore):
         else:
             database_name = DEFAULT_DATABASE
         return chromadb.PersistentClient(path=path_or_uri, database=database_name)
+
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
+        self._check_configs_matching(self._construct_config, self.collection.configuration.get("hnsw", {}))
 
     async def add(
         self,
@@ -152,7 +178,7 @@ class ChromaVectorStore(VectorStore):
 
         for node in nodes:
             # Extract vector
-            embedding = node.get(self.vector_field, [])
+            embedding = node.get(self.vector_field.vector_field, [])
             if not embedding:
                 # If no vector, generate a warning but continue processing (may be allowed in some cases)
                 logger.warning(f"Node has no embedding, skipping: {node.get('id', 'unknown')}")
@@ -181,7 +207,6 @@ class ChromaVectorStore(VectorStore):
                         metadata.update(json.loads(raw_metadata))
                     except Exception:
                         logger.warning(f"Failed to load metadata: {raw_metadata}")
-                        pass
 
             # Add other fields to metadata
             if self.doc_id_field in node:
@@ -404,7 +429,7 @@ class ChromaVectorStore(VectorStore):
                     ids=ids,
                 )
                 return True
-            elif filter_expr:
+            if filter_expr:
                 # ChromaDB doesn't support complex filter_expr, need to query first then delete
                 # Simplified handling here, only supports simple where conditions
                 logger.warning(
@@ -412,9 +437,8 @@ class ChromaVectorStore(VectorStore):
                     "Please use ids parameter instead."
                 )
                 return False
-            else:
-                logger.warning("Either ids or filter_expr must be provided")
-                return False
+            logger.warning("Either ids or filter_expr must be provided")
+            return False
         except Exception as e:
             logger.error(f"Failed to delete vectors: {e}")
             return False
@@ -463,13 +487,15 @@ class ChromaVectorStore(VectorStore):
             if mode == "vector":
                 # ChromaDB returns distance, need to convert to similarity score
                 if raw_score_val is not None:
-                    # For cosine distance, similarity = 1 - distance
-                    # For L2 distance, need normalization
-                    if self.config.distance_metric == "cosine":
-                        raw_score_scaled = 1.0 - raw_score_val
+                    if self._distance_metric == "l2":
+                        # L2 distance, simple normalization (max distance is 4)
+                        raw_score_scaled = max(0.0, (4.0 - raw_score_val) / 4.0)
+                    elif self._distance_metric == "cosine":
+                        # For cosine distance, similarity = 1 - distance
+                        raw_score_scaled = (2.0 - raw_score_val) / 2.0
                     else:
-                        # L2 distance, simple normalization (assuming max distance is 2)
-                        raw_score_scaled = max(0.0, 1.0 - raw_score_val / 2.0)
+                        # Chroma ip is a distance: d = 1 - dot
+                        raw_score_scaled = 1.0 - raw_score_val
                     final_score = raw_score_scaled
             elif mode == "sparse":
                 # Text search score (ChromaDB may return similarity score or distance)
@@ -514,3 +540,14 @@ class ChromaVectorStore(VectorStore):
                 pass
             except Exception as e:
                 logger.warning(f"Failed to close ChromaDB client: {e}")
+
+    async def table_exists(self, table_name: str) -> bool:
+        """Check if a collection exists in current database"""
+        return bool([True for c in self._client.list_collections() if getattr(c, "name", None) == table_name])
+
+    async def delete_table(self, table_name: str) -> None:
+        """Delete a collection from current database"""
+        await asyncio.to_thread(
+            self._client.delete_collection,
+            name=table_name,
+        )

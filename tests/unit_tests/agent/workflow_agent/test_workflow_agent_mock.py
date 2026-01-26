@@ -20,13 +20,11 @@
 """
 import os
 import unittest
-from typing import List
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from openjiuwen.core.common.constants.enums import ControllerType
-from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
+from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig
 from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
@@ -43,7 +41,6 @@ from openjiuwen.core.runner import Runner
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
     create_json_response,
-    create_text_response,
 )
 from tests.unit_tests.core.workflow.mock_nodes import (
     MockStartNode,
@@ -153,16 +150,7 @@ class TestWorkflowAgentMock(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(card=workflow_card)
 
         # Start 组件
-        start = Start({
-            "inputs": [
-                {
-                    "id": "query",
-                    "type": "String",
-                    "required": "true",
-                    "sourceType": "ref"
-                }
-            ]
-        })
+        start = Start()
 
         # Questioner 组件（会触发中断）
         key_fields = [
@@ -223,27 +211,15 @@ class TestWorkflowAgentMock(unittest.IsolatedAsyncioTestCase):
             workflow_name="简单工作流"
         )
 
-        # 创建 workflow schema
-        workflow_schema = WorkflowSchema(
-            id="simple_workflow",
-            version="1.0",
-            name="简单工作流",
-            description="简单工作流测试",
-            inputs={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "用户输入"}
-                }
-            }
-        )
-
-        # 创建 WorkflowAgent
+        # 使用新 API: add_workflows() 自动从 workflow.card 提取 schema
         workflow_config = WorkflowAgentConfig(
-            workflows=[workflow_schema],
-            controller_type=ControllerType.WorkflowController
+            id="simple_workflow_agent",
+            version="1.0",
+            description="简单工作流测试",
+            workflows=[],
         )
         agent = WorkflowAgent(workflow_config)
-        agent.bind_workflows([workflow])
+        agent.add_workflows([workflow])
 
         # 执行
         result = await agent.invoke({"query": "hello"})
@@ -290,27 +266,15 @@ class TestWorkflowAgentMock(unittest.IsolatedAsyncioTestCase):
                 field_desc="地点名称"
             )
 
-            # 创建 workflow schema
-            workflow_schema = WorkflowSchema(
-                id="location_workflow",
-                version="1.0",
-                name="地点查询",
-                description="地点查询工作流",
-                inputs={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "用户输入"}
-                    }
-                }
-            )
-
-            # 创建 WorkflowAgent
+            # 使用新 API: add_workflows() 自动从 workflow.card 提取 schema
             workflow_config = WorkflowAgentConfig(
-                workflows=[workflow_schema],
-                controller_type=ControllerType.WorkflowController
+                id="location_workflow_agent",
+                version="1.0",
+                description="地点查询工作流",
+                workflows=[],
             )
             agent = WorkflowAgent(workflow_config)
-            agent.bind_workflows([workflow])
+            agent.add_workflows([workflow])
 
             # 执行 - 应该触发中断
             result = await agent.invoke(
@@ -361,27 +325,15 @@ class TestWorkflowAgentMock(unittest.IsolatedAsyncioTestCase):
                 field_desc="地点名称"
             )
 
-            # 创建 workflow schema
-            workflow_schema = WorkflowSchema(
-                id="location_workflow_resume",
-                version="1.0",
-                name="地点查询",
-                description="地点查询工作流",
-                inputs={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "用户输入"}
-                    }
-                }
-            )
-
-            # 创建 WorkflowAgent
+            # 使用新 API: add_workflows() 自动从 workflow.card 提取 schema
             workflow_config = WorkflowAgentConfig(
-                workflows=[workflow_schema],
-                controller_type=ControllerType.WorkflowController
+                id="location_workflow_resume_agent",
+                version="1.0",
+                description="地点查询工作流",
+                workflows=[],
             )
             agent = WorkflowAgent(workflow_config)
-            agent.bind_workflows([workflow])
+            agent.add_workflows([workflow])
 
             # 第一次调用 - 触发中断
             result1 = await agent.invoke(

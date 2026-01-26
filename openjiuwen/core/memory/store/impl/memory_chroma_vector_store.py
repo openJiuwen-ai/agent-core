@@ -9,6 +9,8 @@ from chromadb.errors import NotFoundError
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class MemoryChromaVectorStore(VectorStore):
@@ -47,9 +49,13 @@ class MemoryChromaVectorStore(VectorStore):
     def check_table_name(self, table_name: Optional[str] = None, operation: Optional[str] = None):
         """check table name"""
         if table_name is None or table_name.strip() == "":
-            raise ValueError(f"Chroma collection name is required for {operation}")
+            raise build_error(
+                StatusCode.MEMORY_STORE_VALIDATION_INVALID,
+                store_type="chroma vector store",
+                error_msg=f"chroma collection name is required for {operation}"
+            )
 
-    async def is_collection_exists(self, table_name: str) -> bool:
+    async def table_exists(self, table_name: str) -> bool:
         """Check whether the collection exists"""
         try:
             await asyncio.to_thread(
@@ -79,17 +85,15 @@ class MemoryChromaVectorStore(VectorStore):
         # Process in batches
         for i in range(0, len(data), batch_size):
             batch = data[i:i + batch_size]
-            ids, embeddings, metadatas = [], [], []
+            ids, embeddings = [], []
             for item in batch:
                 ids.append(item["id"])
                 embeddings.append(item["embedding"])
-                metadatas.append({"scope_id": item["scope_id"] if item.get("scope_id") else ""})
 
             await asyncio.to_thread(
                 collection.add,
                 ids=ids,
                 embeddings=embeddings,
-                metadatas=metadatas
             )
 
     async def search(
@@ -101,7 +105,6 @@ class MemoryChromaVectorStore(VectorStore):
     ) -> List[SearchResult]:
         """Vector search"""
         table_name = kwargs.get("table_name")
-        scope_id = kwargs.get("scope_id")
         self.check_table_name(table_name, "search")
 
         collection = await self.get_collection(table_name)
@@ -110,23 +113,20 @@ class MemoryChromaVectorStore(VectorStore):
             collection.query,
             query_embeddings=[query_vector],
             n_results=top_k,
-            where={"scope_id": scope_id} if scope_id is not None else None,
         )
 
         search_results = []
         if len(results['ids']) > 0 and results['ids'][0]:
             ids = results['ids'][0]
             distances = results['distances'][0] if results.get('distances') else [1.0] * len(ids)
-            metadatas = results['metadatas'][0] if results.get('metadatas') else [{}] * len(ids)
 
             # Convert distances to scores (higher is better)
-            for item_id, distance, metadata in zip(ids, distances, metadatas):
+            for item_id, distance in zip(ids, distances):
                 score = 1 - distance
                 search_results.append(SearchResult(
                     id=item_id,
                     text="",
                     score=score,
-                    metadata=metadata or {}
                 ))
 
         return search_results
@@ -140,7 +140,7 @@ class MemoryChromaVectorStore(VectorStore):
         """Delete vectors"""
         table_name = kwargs.get("table_name")
         self.check_table_name(table_name, "delete")
-        collection_is_exists = await self.is_collection_exists(table_name)
+        collection_is_exists = await self.table_exists(table_name)
         if not collection_is_exists:
             logger.debug(f"Chroma Collection {table_name} does not exist, skip delete vector")
             return True
@@ -155,7 +155,7 @@ class MemoryChromaVectorStore(VectorStore):
         return True
 
     async def delete_table(self, table_name: str) -> bool:
-        collection_is_exists = await self.is_collection_exists(table_name)
+        collection_is_exists = await self.table_exists(table_name)
         if not collection_is_exists:
             logger.debug(f"Chroma Collection {table_name} does not exist, skip delete collection")
             return True
@@ -185,3 +185,7 @@ class MemoryChromaVectorStore(VectorStore):
         **kwargs: Any,
     ) -> List[SearchResult]:
         pass
+
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
+        logger.error("check_vector_field not implemented in MemoryChromaVectorStore")

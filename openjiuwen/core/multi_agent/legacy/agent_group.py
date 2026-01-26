@@ -13,21 +13,22 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import Config
+from openjiuwen.core.session.agent_group import Session
 
 
 class AgentGroupSession(AgentSession):
     """AgentGroup Session
     
     Inherits from openjiuwen.core.single_agent.single_agent.AgentSession
-    Reuses all capabilities including TaskSession from pre_run()
+    Reuses all capabilities including Session from pre_run()
     
     Why direct inheritance:
     1. AgentSession(config, resource_mgr) has simple constructor
     2. Already includes write_stream() method
-    3. TaskSession from pre_run() has stream_iterator()
+    3. Session from pre_run() has stream_iterator()
     """
 
-    def __init__(self, config: Config = None, resource_mgr=None):
+    def __init__(self, config: Config = None):
         """Initialize AgentGroupSession
         
         Args:
@@ -43,7 +44,7 @@ class AgentGroupSession(AgentSession):
             config.set_agent_config(agent_config)
 
         # Call parent constructor
-        super().__init__(config, resource_mgr)
+        super().__init__(config)
 
     # write_stream() already implemented in parent AgentSession
     # No need to redefine
@@ -115,7 +116,7 @@ class BaseGroup(ABC):
         return len(self.agents)
 
     @abstractmethod
-    async def invoke(self, message, session: AgentGroupSession = None) -> Any:
+    async def invoke(self, message, session: Session = None) -> Any:
         """
         Execute a synchronous operation on the single_agent group.
 
@@ -135,7 +136,7 @@ class BaseGroup(ABC):
         )
 
     @abstractmethod
-    async def stream(self, message, session: AgentGroupSession = None) -> AsyncIterator[Any]:
+    async def stream(self, message, session: Session = None) -> AsyncIterator[Any]:
         """
         Execute a streaming operation on the single_agent group.
 
@@ -182,8 +183,7 @@ class ControllerGroup(BaseGroup):
         self.group_controller = group_controller
 
         # Initialize session (like BaseAgent)
-        from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
-        self._session = AgentGroupSession(resource_mgr=ResourceMgr())
+        self._session = AgentGroupSession()
 
         # Auto-configure group_controller
         if self.group_controller is not None:
@@ -204,7 +204,7 @@ class ControllerGroup(BaseGroup):
             )
         return message
 
-    async def invoke(self, message, session: AgentGroupSession = None) -> Any:
+    async def invoke(self, message, session: Session = None) -> Any:
         """Synchronous invocation - Fully delegated to group_controller
         
         Lifecycle: pre_run -> controller.invoke -> post_run
@@ -229,7 +229,10 @@ class ControllerGroup(BaseGroup):
             task_session = await self._session.pre_run(session_id=session_id)
             need_cleanup = True
         else:
-            task_session = session
+            if isinstance(session, Session):
+                task_session = getattr(session, "_inner")
+            else:
+                task_session = session
             need_cleanup = False
 
         try:
@@ -240,7 +243,7 @@ class ControllerGroup(BaseGroup):
             if need_cleanup:
                 await task_session.post_run()
 
-    async def stream(self, message, session: AgentGroupSession = None) -> AsyncIterator[Any]:
+    async def stream(self, message, session: Session = None) -> AsyncIterator[Any]:
         """Streaming invocation - real streaming output
         
         Design: 
@@ -272,7 +275,10 @@ class ControllerGroup(BaseGroup):
             task_session = await self._session.pre_run(session_id=session_id)
             need_cleanup = True
         else:
-            task_session = session
+            if isinstance(session, Session):
+                task_session = getattr(session, "_inner")
+            else:
+                task_session = session
             need_cleanup = False
 
         # Background task executes group_controller.invoke

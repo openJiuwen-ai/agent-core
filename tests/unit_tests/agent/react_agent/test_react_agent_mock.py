@@ -77,6 +77,7 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
         """创建加法工具"""
         return LocalFunction(
             card=ToolCard(
+                id="add",
                 name="add",
                 description="加法运算",
                 input_params={
@@ -96,6 +97,7 @@ class TestReActAgentMock(unittest.IsolatedAsyncioTestCase):
         """创建乘法工具"""
         return LocalFunction(
             card=ToolCard(
+                id="multiply",
                 name="multiply",
                 description="乘法运算",
                 input_params={

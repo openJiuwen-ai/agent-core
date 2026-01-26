@@ -5,15 +5,17 @@ Ollama Embedding Model Implementation
 
 Implementation of Ollama embedding model.
 """
+
 from typing import Any, List, Optional
 
 import requests
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.retrieval.embedding.base import Embedding
+from openjiuwen.core.retrieval.common.callbacks import BaseCallback
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
+from openjiuwen.core.retrieval.embedding.base import Embedding
 
 
 class OllamaEmbedding(Embedding):
@@ -26,6 +28,8 @@ class OllamaEmbedding(Embedding):
         timeout: int = 60,
         max_retries: int = 3,
         extra_headers: Optional[dict] = None,
+        max_batch_size: int = 8,
+        dimension: Optional[int] = None,
     ):
         """
         Initialize Ollama embedder.
@@ -44,11 +48,16 @@ class OllamaEmbedding(Embedding):
         self.max_retries = max_retries
         self.embed_url = f"{self.base_url}/api/embed"
         self._headers = extra_headers or {}
-        
+        self.max_batch_size = max_batch_size
+        self._dimension: Optional[int] = None
+        if dimension is not None:
+            self._dimension = dimension
+
         # Initialize tokenizer if provided
         if hf_tokenizer_name:
             try:
                 from transformers import AutoTokenizer
+
                 self._tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_name)
             except ImportError:
                 logger.warning("transformers not available, tokenizer disabled")
@@ -56,9 +65,6 @@ class OllamaEmbedding(Embedding):
         else:
             self._tokenizer = None
 
-        # Cache dimension
-        self._dimension: Optional[int] = None
-        
         # Test connection and model availability
         self._verify_model_availability()
 
@@ -78,15 +84,16 @@ class OllamaEmbedding(Embedding):
             model_names = [model["name"] for model in models]
 
             if self.model_name not in model_names:
-                raise JiuWenBaseException(
-                    StatusCode.EMBEDDING_MODEL_NOT_FOUND_ERROR.code,
-                    f"Model '{self.model_name}' not found in available models: {model_names}. "
-                    f"Make sure to pull the model first: ollama pull {self.model_name}"
+                raise build_error(
+                    StatusCode.RETRIEVAL_EMBEDDING_MODEL_NOT_FOUND,
+                    error_msg=f"Model '{self.model_name}' not found in available models: {model_names}. "
+                    f"Make sure to pull the model first: ollama pull {self.model_name}",
                 )
         except requests.exceptions.RequestException as e:
-            raise JiuWenBaseException(
-                StatusCode.EMBEDDING_CONNECTION_ERROR.code,
-                f"Could not connect to Ollama at {self.base_url}. Is Ollama running?"
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_CALL_FAILED,
+                error_msg=f"Could not connect to Ollama at {self.base_url}. Is Ollama running?",
+                cause=e,
             ) from e
 
     @property
@@ -96,14 +103,13 @@ class OllamaEmbedding(Embedding):
             # Get dimension by embedding a test text
             try:
                 import asyncio
+
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     # If event loop is running, use default value
                     self._dimension = 768
                 else:
-                    test_embedding = loop.run_until_complete(
-                        self._get_ollama_embedding("X")
-                    )
+                    test_embedding = loop.run_until_complete(self._get_ollama_embedding("X"))
                     if test_embedding:
                         self._dimension = len(test_embedding[0])
                     else:
@@ -115,9 +121,8 @@ class OllamaEmbedding(Embedding):
 
     async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
         if not text.strip():
-            raise JiuWenBaseException(
-                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
-                "Empty text provided for embedding"
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text provided for embedding"
             )
 
         embeddings = await self._get_ollama_embedding(text, **kwargs)
@@ -130,51 +135,56 @@ class OllamaEmbedding(Embedding):
         **kwargs: Any,
     ) -> List[List[float]]:
         if not texts:
-            raise JiuWenBaseException(
-                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
-                "Empty texts list provided"
+            raise build_error(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty texts list provided")
+        callback_cls = kwargs.pop("callback_cls", BaseCallback)
+        if not isinstance(callback_cls, type) or not issubclass(callback_cls, BaseCallback):
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID,
+                error_msg=(
+                    f"callback_cls in OllamaEmbedding.embed_documents must be a subclass of "
+                    f"BaseCallback, got {type(callback_cls)}"
+                ),
             )
 
         # Filter out empty texts
         non_empty_texts = [text for text in texts if text.strip()]
         if len(non_empty_texts) != len(texts):
-            raise JiuWenBaseException(
-                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
-                f"{len(texts) - len(non_empty_texts)} chunks are empty while embedding"
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
+                error_msg=f"{len(texts) - len(non_empty_texts)} chunks are empty while embedding",
             )
 
         if not non_empty_texts:
-            raise JiuWenBaseException(
-                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
-                "All texts are empty after filtering"
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="All texts are empty after filtering"
             )
 
         # Process in batches if batch_size is specified
         if batch_size is not None and batch_size > 0:
             all_embeddings = []
-            for i in range(0, len(non_empty_texts), batch_size):
+            indices = list(range(0, len(non_empty_texts), batch_size))
+            callback_obj = callback_cls(seq=indices)
+            for i in indices:
                 j = i + batch_size
                 batch_texts = non_empty_texts[i:j]
-                batch_embeddings = await self._get_ollama_embedding(
-                    batch_texts, **kwargs
-                )
+                batch_embeddings = await self._get_ollama_embedding(batch_texts, **kwargs)
                 all_embeddings.extend(batch_embeddings)
+                callback_obj(start_idx=i, end_idx=j, batch=batch_texts)
             embeddings = all_embeddings
         else:
+            callback_obj = callback_cls(seq=[None])
             embeddings = await self._get_ollama_embedding(non_empty_texts, **kwargs)
+            callback_obj(batch=non_empty_texts)
 
         return embeddings
 
-    async def _get_ollama_embedding(
-        self, text: str | List[str], **kwargs
-    ) -> List[List[float]]:
+    async def _get_ollama_embedding(self, text: str | List[str], **kwargs) -> List[List[float]]:
         """Get ollama embedding"""
         import asyncio
-        
+
         if not text:
-            raise JiuWenBaseException(
-                StatusCode.EMBEDDING_EMPTY_INPUT_ERROR.code,
-                "Empty text or list provided for embedding"
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text or list provided for embedding"
             )
 
         payload = {
@@ -196,22 +206,22 @@ class OllamaEmbedding(Embedding):
                 response.raise_for_status()
                 result = response.json()
                 if "embeddings" not in result:
-                    raise JiuWenBaseException(
-                        StatusCode.EMBEDDING_RESPONSE_FORMAT_ERROR.code,
-                        f"No embeddings in response: {result}"
+                    raise build_error(
+                        StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID,
+                        error_msg=f"No embeddings in response: {result}",
                     )
 
                 return result["embeddings"]
 
             except requests.exceptions.RequestException as e:
                 if attempt == self.max_retries - 1:
-                    raise JiuWenBaseException(
-                        StatusCode.EMBEDDING_REQUEST_FAILED_ERROR.code,
-                        f"Failed to get embedding after {self.max_retries} attempts"
+                    raise build_error(
+                        StatusCode.RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED,
+                        error_msg=f"Failed to get embedding after {self.max_retries} attempts",
+                        cause=e,
                     ) from e
                 logger.warning(f"Attempt {attempt + 1} failed, retrying: {e}")
 
-        raise JiuWenBaseException(
-            StatusCode.EMBEDDING_UNREACHABLE_ERROR.code,
-            "This should never be reached"
+        raise build_error(
+            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED, error_msg="This should never be reached"
         )

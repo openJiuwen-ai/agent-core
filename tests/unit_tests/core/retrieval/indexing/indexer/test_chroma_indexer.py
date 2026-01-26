@@ -7,10 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval import ChromaIndexer
-from openjiuwen.core.retrieval import IndexConfig
-from openjiuwen.core.retrieval import TextChunk
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.retrieval import ChromaIndexer, IndexConfig, TextChunk, VectorStoreConfig
 
 
 @pytest.fixture
@@ -31,22 +29,26 @@ class TestChromaIndexer:
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         assert indexer.chroma_path == "/tmp/test_chroma"
         assert indexer.client == mock_client
-        mock_client_class.assert_called_once_with(path="/tmp/test_chroma", database="default_database")
+        # Note: create_client is called by ChromaVectorStore.create_client, not directly
+        # The actual call is made through ChromaVectorStore.create_client
 
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
     def test_init_with_empty_path(self, mock_client_class):
         """Test initialization with empty path"""
-        with pytest.raises(JiuWenBaseException, match="chroma_path is required"):
-            ChromaIndexer(chroma_path="")
+        config = VectorStoreConfig(collection_name="test_collection")
+        with pytest.raises(BaseError, match="chroma_path is required"):
+            ChromaIndexer(config=config, chroma_path="")
 
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
     def test_init_with_whitespace_path(self, mock_client_class):
         """Test initialization with whitespace-only path"""
-        with pytest.raises(JiuWenBaseException, match="chroma_path is required"):
-            ChromaIndexer(chroma_path="   ")
+        config = VectorStoreConfig(collection_name="test_collection")
+        with pytest.raises(BaseError, match="chroma_path is required"):
+            ChromaIndexer(config=config, chroma_path="   ")
 
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
     def test_init_with_custom_fields(self, mock_client_class):
@@ -54,15 +56,33 @@ class TestChromaIndexer:
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
+        config = VectorStoreConfig(collection_name="test_collection")
         indexer = ChromaIndexer(
+            config=config,
             chroma_path="/tmp/test_chroma",
             text_field="custom_text",
             vector_field="custom_vector",
             doc_id_field="custom_doc_id",
         )
         assert indexer.text_field == "custom_text"
-        assert indexer.vector_field == "custom_vector"
+        assert indexer.vector_field.vector_field == "custom_vector"
         assert indexer.doc_id_field == "custom_doc_id"
+
+    @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
+    def test_init_with_invalid_vector_field(self, mock_client_class):
+        """Test initialization with custom fields"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        config = VectorStoreConfig(collection_name="test_collection")
+        with pytest.raises(BaseError, match="vector_field must be either a str or ChromaVectorField instance"):
+            _ = ChromaIndexer(
+                config=config,
+                chroma_path="/tmp/test_chroma",
+                text_field="custom_text",
+                vector_field=dict(vector_field="custom_vector"),
+                doc_id_field="custom_doc_id",
+            )
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
@@ -74,14 +94,17 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
+        mock_store.collection = MagicMock(get=MagicMock(return_value={"ids": [], "documents": []}))
         mock_store_class.return_value = mock_store
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         chunks = [
             TextChunk(id_="1", text="chunk 1", doc_id="doc_1"),
             TextChunk(id_="2", text="chunk 2", doc_id="doc_1"),
         ]
         config = IndexConfig(index_name="test_index", index_type="vector")
+        await indexer.delete_index("doc_1", "test_index")
 
         result = await indexer.build_index(chunks, config, mock_embed_model)
         assert result is True
@@ -98,9 +121,11 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
+        mock_store.collection = MagicMock(get=MagicMock(return_value={"ids": [], "documents": []}))
         mock_store_class.return_value = mock_store
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="bm25")
 
@@ -118,9 +143,11 @@ class TestChromaIndexer:
 
         mock_store = AsyncMock()
         mock_store.add = AsyncMock()
+        mock_store.collection = MagicMock(get=MagicMock(return_value={"ids": [], "documents": []}))
         mock_store_class.return_value = mock_store
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         chunks = [
             TextChunk(id_="1", text="chunk 1", doc_id="doc_1"),
             TextChunk(id_="2", text="chunk 2", doc_id="doc_1"),
@@ -134,12 +161,19 @@ class TestChromaIndexer:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
-    async def test_build_index_vector_type_without_embed_model(self, mock_client_class):
+    @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.ChromaVectorStore")
+    async def test_build_index_vector_type_without_embed_model(self, mock_store_class, mock_client_class):
         """Test vector index but without embedding model"""
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        mock_store = AsyncMock()
+        mock_store.add = AsyncMock()
+        mock_store.collection = MagicMock(get=MagicMock(return_value={"ids": [], "documents": []}))
+        mock_store_class.return_value = mock_store
+
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
@@ -153,7 +187,8 @@ class TestChromaIndexer:
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
@@ -164,12 +199,28 @@ class TestChromaIndexer:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
+    async def test_build_index_with_duplicate_doc_ids(self, mock_client_class):
+        """Test vector index but without embedding model"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
+        chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
+        config = IndexConfig(index_name="test_index", index_type="vector")
+
+        with pytest.raises(BaseError, match="some documents with same doc_id already exist"):
+            await indexer.build_index(chunks, config)
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
     async def test_update_index(self, mock_client_class, mock_embed_model):
         """Test updating index"""
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         chunks = [TextChunk(id_="1", text="updated chunk", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
@@ -192,7 +243,8 @@ class TestChromaIndexer:
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         chunks = [TextChunk(id_="1", text="updated chunk", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
@@ -222,7 +274,8 @@ class TestChromaIndexer:
 
         mock_to_thread.side_effect = mock_to_thread_impl
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         result = await indexer.delete_index("doc_1", "test_index")
         assert result is True
         mock_collection.delete.assert_called_once_with(ids=["id1", "id2"])
@@ -247,7 +300,8 @@ class TestChromaIndexer:
 
         mock_to_thread.side_effect = mock_to_thread_impl
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         result = await indexer.delete_index("doc_1", "test_index")
         assert result is False
 
@@ -268,7 +322,8 @@ class TestChromaIndexer:
 
         mock_to_thread.side_effect = mock_to_thread_impl
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         result = await indexer.delete_index("doc_1", "test_index")
         assert result is False
 
@@ -287,7 +342,8 @@ class TestChromaIndexer:
 
         mock_to_thread.side_effect = mock_to_thread_impl
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         result = await indexer.delete_index("doc_1", "test_index")
         assert result is False
 
@@ -307,7 +363,8 @@ class TestChromaIndexer:
 
         mock_to_thread.side_effect = mock_to_thread_impl
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         result = await indexer.index_exists("test_index")
         assert result is True
 
@@ -319,7 +376,8 @@ class TestChromaIndexer:
         mock_client.get_collection.side_effect = Exception("Collection not found")
         mock_client_class.return_value = mock_client
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         result = await indexer.index_exists("nonexistent_index")
         assert result is False
 
@@ -341,7 +399,8 @@ class TestChromaIndexer:
 
         mock_to_thread.side_effect = mock_to_thread_impl
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         info = await indexer.get_index_info("test_index")
         assert info["exists"] is True
         assert info["collection_name"] == "test_index"
@@ -363,7 +422,8 @@ class TestChromaIndexer:
 
         mock_to_thread.side_effect = mock_to_thread_impl
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         info = await indexer.get_index_info("nonexistent_index")
         assert info["exists"] is False
 
@@ -384,7 +444,8 @@ class TestChromaIndexer:
 
         mock_to_thread.side_effect = mock_to_thread_impl
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         info = await indexer.get_index_info("test_index")
         assert info["exists"] is False
         assert "error" in info
@@ -395,6 +456,7 @@ class TestChromaIndexer:
         mock_client = MagicMock()
         mock_client_class.return_value = mock_client
 
-        indexer = ChromaIndexer(chroma_path="/tmp/test_chroma")
+        config = VectorStoreConfig(collection_name="test_collection")
+        indexer = ChromaIndexer(config=config, chroma_path="/tmp/test_chroma")
         # Should not raise exception (ChromaDB client doesn't have close method)
         indexer.close()

@@ -2,21 +2,21 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import uuid
-from typing import List, Optional, Any, Dict
+from typing import Any, Dict, List, Optional
 
 import tiktoken
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
+from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.text_preprocessor import (
     PreprocessingPipeline,
     URLEmailRemover,
     WhitespaceNormalizer,
 )
-from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.tokenizer_chunker import TokenizerChunker
 
 
@@ -34,7 +34,7 @@ class TextChunker(Chunker):
     ):
         """
         Initialize fixed size chunker
-        
+
         Args:
             chunk_size: Chunk size (number of characters)
             chunk_overlap: Chunk overlap size (number of characters)
@@ -53,10 +53,7 @@ class TextChunker(Chunker):
         self.pipeline = PreprocessingPipeline(preprocessors)
         self.chunker = self.get_chunker(chunk_size, chunk_overlap, chunk_unit, embed_model)
 
-    def get_chunker(self, chunk_size: int,
-        chunk_overlap: int,
-        chunk_unit: str,
-        embed_model: Optional[Any]):
+    def get_chunker(self, chunk_size: int, chunk_overlap: int, chunk_unit: str, embed_model: Optional[Any]):
         if chunk_unit == "char":
             return CharChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         else:
@@ -67,19 +64,20 @@ class TextChunker(Chunker):
             # If embed_model doesn't have a tokenizer, try to use tiktoken
             if tokenizer is None:
                 if tiktoken is None:
-                    raise JiuWenBaseException(
-                        StatusCode.INDEXING_TOKENIZER_ERROR.code,
-                        "chunk_unit='token' requires embed_model with tokenizer or tiktoken to be installed"
+                    raise build_error(
+                        StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR,
+                        error_msg="chunk_unit='token' requires embed_model with tokenizer or tiktoken to be installed",
                     )
                 try:
                     tokenizer = tiktoken.get_encoding("cl100k_base")
                     logger.info("Using tiktoken(cl100k_base) as tokenizer")
                 except Exception as exc:
-                    raise JiuWenBaseException(
-                        StatusCode.INDEXING_TOKENIZER_ERROR.code,
-                        f"Failed to load tokenizer for token-based chunking: {exc}"
+                    raise build_error(
+                        StatusCode.RETRIEVAL_INDEXING_TOKENIZER_PROCESS_ERROR,
+                        error_msg=f"Failed to load tokenizer for token-based chunking: {exc}",
+                        cause=exc,
                     ) from exc
-            
+
             # Check if chunk_size needs adjustment
             if (
                 hasattr(tokenizer, "model_max_length")
@@ -96,14 +94,13 @@ class TextChunker(Chunker):
 
             return TokenizerChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap, tokenizer=tokenizer)
 
-
     def chunk_documents(self, documents: List[Document]) -> List[TextChunk]:
         """
         Chunk document list
-        
+
         Args:
             documents: List of documents
-            
+
         Returns:
             List of document chunks
         """
@@ -112,14 +109,16 @@ class TextChunker(Chunker):
             doc_text = self.pipeline(doc.text)
             texts = self.chunker.chunk_text(doc_text)
             for i, text in enumerate(texts):
+                uid = str(uuid.uuid4())
                 chunk = TextChunk(
-                    id_=str(uuid.uuid4()),
+                    id_=uid,
                     text=text,
                     doc_id=doc.id_,
                     metadata={
                         **doc.metadata,
                         "chunk_index": i,
                         "total_chunks": len(texts),
+                        "chunk_id": uid,
                     },
                 )
                 chunks.append(chunk)

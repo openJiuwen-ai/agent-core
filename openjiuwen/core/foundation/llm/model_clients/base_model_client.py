@@ -6,7 +6,7 @@ from typing import List, Optional, AsyncIterator, Union, Dict, Any
 from openjiuwen.core.common.exception.status_code import StatusCode
 
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
@@ -221,15 +221,48 @@ class BaseModelClient(ABC):
         # Add other parameters (filter out internal parameters)
         # parser and output_parser are for internal use and should not be passed to model API
         internal_params = {"parser", "output_parser"}
+        
+        # Get all fields from model_config (including extra fields)
+        extra_params = self.model_config.model_dump(
+            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude_none=True
+        )
+        params.update(extra_params)
+        
+        # Then add kwargs parameters (will override model_config params with same key)
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in internal_params}
         params.update(filtered_kwargs)
 
         # Logging
         client_name = self._get_client_name()
         if UserConfig.is_sensitive():
-            logger.info(f"Before request {client_name} chat model, request params is ready.")
+            llm_logger.info(
+                "Before request chat model, LLM request params ready.",
+                event_type=LogEventType.LLM_CALL_START,
+                model_name=model if model else self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                temperature=final_temperature,
+                top_p=final_top_p,
+                max_tokens=final_max_tokens,
+                is_stream=stream,
+                metadata={"client_name": client_name},
+                extra_params=extra_params
+            )
         else:
-            logger.info(f"Before request {client_name} chat model, request params is ready. params:  {params}")
+            llm_logger.info(
+                "Before request chat model, LLM request params ready.",
+                event_type=LogEventType.LLM_CALL_START,
+                model_name=model if model else self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                messages=messages_dict,
+                tools=tools_dict,
+                temperature=final_temperature,
+                top_p=final_top_p,
+                max_tokens=final_max_tokens,
+                is_stream=stream,
+                metadata={"client_name": client_name},
+                extra_params=extra_params
+            )
 
         return params
 
@@ -300,3 +333,4 @@ class BaseModelClient(ABC):
             AssistantMessageChunk: Streaming response chunk
         """
         pass
+

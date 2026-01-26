@@ -234,11 +234,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
                 FieldInfo(field_name="time", description="时间", required=True, default_value="today")
             ]
             
-            start_component = Start({
-                "inputs": [
-                    {"id": "query", "type": "String", "required": "true", "sourceType": "ref"}
-                ]
-            })
+            start_component = Start()
             end_component = End({"responseTemplate": "{{location}} | {{time}}"})
             
             model_config = self._create_model()
@@ -297,7 +293,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
             # 绑定 workflow
             Runner.resource_mgr.add_workflow(
                 WorkflowCard(id=generate_workflow_key(flow.card.id, flow.card.version)),
-                flow
+                lambda: flow
             )
             
             # ==================== 第一次调用：触发中断 ====================

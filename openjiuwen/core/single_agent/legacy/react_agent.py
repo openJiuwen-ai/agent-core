@@ -15,11 +15,11 @@ from typing import Dict, Any, AsyncIterator, List
 
 from pydantic import ValidationError
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.single_agent.legacy.agent import BaseAgent
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.legacy.config import (
     LegacyReActAgentConfig,
@@ -81,6 +81,9 @@ class LegacyReActAgent(BaseAgent):
             )
             model_request_config = ModelRequestConfig(
                 model=self.agent_config.model.model_info.model_name,
+                temperature=self.agent_config.model.model_info.temperature,
+                top_p=self.agent_config.model.model_info.top_p,
+                **(self.agent_config.model.model_info.model_extra or {})
             )
             self._llm = Model(model_client_config=model_client_config, model_config=model_request_config)
 
@@ -103,16 +106,17 @@ class LegacyReActAgent(BaseAgent):
                 prompt_dict = prompt.model_dump(exclude_none=True)
                 messages.append(prompt_dict)
         except ValidationError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PROMPT_PARAMS_CHECK_ERROR.code,
-                message=StatusCode.PROMPT_PARAMS_CHECK_ERROR.errmsg.format(msg=str(e))
+            raise build_error(
+                StatusCode.AGENT_PROMPT_PARAM_ERROR,
+                error_msg=str(e),
+                cause=e
             ) from e
 
         for msg in chat_history:
             msg_dict = msg.model_dump(exclude_none=True)
             messages.append(msg_dict)
-
-        tools = session.get_tool_info()
+        from openjiuwen.core.runner import Runner
+        tools = await Runner.resource_mgr.get_tool_infos()
         llm = self._get_llm()
         llm_output = await llm.invoke(
             messages,
@@ -134,8 +138,8 @@ class LegacyReActAgent(BaseAgent):
             tool_args = json.loads(tool_call.arguments) if isinstance(tool_call.arguments, str) else tool_call.arguments
         except (json.JSONDecodeError, AttributeError):
             tool_args = {}
-
-        tool = session.get_tool(tool_name)
+        from openjiuwen.core.runner import Runner
+        tool = Runner.resource_mgr.get_tool(tool_id=tool_name)
         if not tool:
             raise ValueError(f"Tool not found: {tool_name}")
 
@@ -212,10 +216,10 @@ class LegacyReActAgent(BaseAgent):
             agent_session = session
             need_cleanup = False
             own_stream = False
-
+            from openjiuwen.core.runner import Runner
             if hasattr(self, '_tools') and self._tools:
-                tools_to_add = [(tool.name, tool) for tool in self._tools]
-                agent_session.add_tools(tools_to_add)
+                tools_to_add = [(tool.card.name, tool) for tool in self._tools]
+                Runner.resource_mgr.add_tools(tools_to_add)
         await self.context_engine.create_context(session=agent_session)
 
         final_result_holder = {"result": None}

@@ -7,9 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval import GraphRetriever
-from openjiuwen.core.retrieval import RetrievalResult
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.retrieval import GraphRetriever, RetrievalResult
+from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
+from openjiuwen.core.retrieval.retriever.graph_retriever import TripleBeamSearch
 
 
 @pytest.fixture
@@ -101,7 +102,7 @@ class TestGraphRetriever:
         """Test using score threshold in non-vector mode"""
         retriever = GraphRetriever(chunk_retriever=mock_chunk_retriever)
 
-        with pytest.raises(JiuWenBaseException, match="score_threshold is only supported"):
+        with pytest.raises(BaseError, match="score_threshold is only supported"):
             await retriever.retrieve("test query", top_k=5, mode="sparse", score_threshold=0.8)
 
     @pytest.mark.asyncio
@@ -152,3 +153,90 @@ class TestGraphRetriever:
         retriever = GraphRetriever(chunk_retriever=mock_retriever)
         # Should not raise exception
         await retriever.close()
+
+
+class TestTripleBeamSearch:
+    """TripleBeamSearch tests - testing critical beam search functionality"""
+
+    @pytest.fixture
+    def mock_retriever_with_embed(self):
+        """Create mock retriever with embed model"""
+        retriever = AsyncMock()
+        embed_model = AsyncMock()
+        embed_model.max_batch_size = 32
+        embed_model.embed_documents = AsyncMock()
+        retriever.embed_model = embed_model
+        retriever.retrieve = AsyncMock()
+        return retriever
+
+    @classmethod
+    def test_init_invalid_max_length(cls, mock_retriever_with_embed):
+        """Test TripleBeamSearch validation"""
+        with pytest.raises(BaseError, match="expect max_length >= 1"):
+            TripleBeamSearch(
+                retriever=mock_retriever_with_embed,
+                max_length=0,
+            )
+
+    @pytest.mark.asyncio
+    async def test_beam_search_no_embed_model(self):
+        """Test beam search fails gracefully without embed model"""
+        retriever = AsyncMock()
+        retriever.embed_model = None
+        search = TripleBeamSearch(retriever=retriever)
+
+        triples = [RetrievalResult(text="triple1", score=0.9)]
+
+        with pytest.raises(BaseError, match="embed_model is required"):
+            await search.beam_search("test query", triples)
+
+    @pytest.mark.asyncio
+    async def test_beam_search_basic(self, mock_retriever_with_embed):
+        """Test beam search core algorithm"""
+        # Setup mock embeddings - need to handle multiple calls
+        # First call: initial embedding of triples + query
+        # Second call: embedding of beam paths during expansion
+        mock_retriever_with_embed.embed_model.embed_documents = AsyncMock(
+            side_effect=[
+                # First call: embed triples + query
+                [
+                    [0.1, 0.2, 0.3],  # triple1 embedding
+                    [0.2, 0.3, 0.4],  # triple2 embedding
+                    [0.15, 0.25, 0.35],  # query embedding
+                ],
+                # Second call: embed beam paths (2 beams without expansion)
+                [
+                    [0.1, 0.2, 0.3],  # beam1 path
+                    [0.2, 0.3, 0.4],  # beam2 path
+                ],
+            ]
+        )
+
+        # Mock retrieve to return empty (no candidates for expansion)
+        mock_retriever_with_embed.retrieve = AsyncMock(return_value=[])
+
+        triples = [
+            RetrievalResult(
+                text="entity1 relation entity2",
+                score=0.9,
+                metadata={"triple": '["entity1", "relation", "entity2"]'},
+            ),
+            RetrievalResult(
+                text="entity3 relation entity4",
+                score=0.8,
+                metadata={"triple": '["entity3", "relation", "entity4"]'},
+            ),
+        ]
+
+        search = TripleBeamSearch(
+            retriever=mock_retriever_with_embed,
+            num_beams=2,
+            max_length=2,
+        )
+
+        beams = await search.beam_search("test query", triples)
+
+        assert len(beams) == 2
+        assert all(isinstance(b, TripleBeam) for b in beams)
+        # Since there are no candidates, beams remain at length 1 (no expansion happened)
+        assert all(len(b) == 1 for b in beams)

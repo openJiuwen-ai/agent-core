@@ -19,7 +19,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from openjiuwen.core.session.wrapper import TaskSession
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.workflow import BranchComponent
 from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
 from openjiuwen.core.workflow import End
@@ -236,7 +236,7 @@ class RealWorkflowTest(unittest.TestCase):
         # 2. 初始化工作流与上下文
         flow = Workflow(
         )
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 3. 实例化各组件
         start = MockStartNode("start")
@@ -297,7 +297,7 @@ class RealWorkflowTest(unittest.TestCase):
     # ------------------------------------------------------------------ #
     @unittest.skip("skip system test")
     @patch("openjiuwen.core.foundation.tool.service_api.restful_api.RestfulApi.invoke")
-    @patch("openjiuwen.core.workflow.components.tool_related.tool_comp.ToolExecutable.get_tool")
+    @patch("openjiuwen.core.workflow.components.tool.tool_comp.ToolExecutable.get_tool")
     def test_workflow_llm_questioner_plugin(
             self,
             mock_plugin_get_tool,
@@ -326,10 +326,10 @@ class RealWorkflowTest(unittest.TestCase):
         """
         测试LLM组件通过StreamWriter流出数据
         """
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(session_id="test")
         flow = Workflow()
 
-        start = Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        start = Start()
         end_component = End({"responseTemplate": "{{output}}"})
 
         llm_config = LLMCompConfig(

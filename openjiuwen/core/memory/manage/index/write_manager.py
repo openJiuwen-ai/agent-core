@@ -1,0 +1,79 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from typing import Tuple
+
+from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+
+
+class WriteManager:
+    def __init__(self, managers: dict[str, BaseMemoryManager], mem_store: UserMemStore):
+        self.managers = managers
+        self.mem_store = mem_store
+
+    async def add_mem(self, mem_units: list[BaseMemoryUnit], llm: Tuple[str, Model] | None) -> None:
+        has_inner_exception = False
+        for mem_unit in mem_units:
+            mem_type = mem_unit.mem_type.value
+            if mem_type in self.managers:
+                try:
+                    await self.managers[mem_type].add(mem_unit, llm)
+                except ValueError as e:
+                    logger.error(f"Failed to add {mem_type}, error: {str(e)}")
+                    has_inner_exception = True
+                except Exception as e:
+                    logger.error(f"Failed to add {mem_type}, error: {str(e)}")
+                    has_inner_exception = True
+            else:
+                logger.warning(f"Unsupported memory type: {mem_type}")
+
+        if has_inner_exception:
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="user profile",
+                error_msg=f"memory engine add mem has exception",
+            )
+
+    async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str):
+        mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)
+        if mem_type is None:
+            logger.warning(f"Skipping this update due to failure in getting memory type, mem_id:{mem_id}, "
+                           f"user_id:{user_id}, scope_id:{scope_id}")
+            return
+        await self.managers[mem_type].update(user_id, scope_id, mem_id, memory)
+
+    async def delete_mem_by_id(self, user_id: str, scope_id: str, mem_id: str):
+        mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)
+        if mem_type is None:
+            logger.warning(f"Skipping this deletion due to failure in getting memory type, mem_id:{mem_id}, "
+                           f"user_id:{user_id}, scope_id:{scope_id}")
+            return
+        await self.managers[mem_type].delete(user_id, scope_id, mem_id)
+
+    async def delete_mem_by_user_id(self, user_id: str, scope_id: str):
+        for manager in self.managers:
+            await self.managers[manager].delete_by_user_id(user_id=user_id, scope_id=scope_id)
+
+    async def __get_mem_type_from_store(self, user_id: str, scope_id: str, mem_id: str) -> str | None:
+        data = None
+        try:
+            data = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
+        except Exception as e:
+            logger.error(f"Failed to get memory: {e}")
+            return None
+        if data is None:
+            logger.warning(f"Nonexistent memory, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
+            return None
+        if "mem_type" not in data:
+            logger.warning(f"The mem_type field doesn't exist, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
+            return None
+        mem_type = data['mem_type']
+        if mem_type not in self.managers:
+            logger.warning(f"Unsupported mem_type:{mem_type}, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
+            return None
+        return mem_type

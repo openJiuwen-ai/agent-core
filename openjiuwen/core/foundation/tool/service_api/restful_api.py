@@ -1,20 +1,20 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
+import json
 from typing import AsyncIterator, ClassVar, Dict, Any, Literal, Set
 
+import aiohttp
 from oauthlib.common import urlencode
 from pydantic import Field, field_validator
-import aiohttp
-import json
-import asyncio
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.security.ssl_utils import SslUtils
+from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool.base import Input, Output, ToolCard
-from openjiuwen.core.common.security.ssl_utils import SslUtils
-from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.tool.service_api.api_param_mapper import APIParamLocation, APIParamMapper
 
 
@@ -84,7 +84,8 @@ class RestfulApi(Tool):
         query_params = [(k, v) for k, v in map_results.get(APIParamLocation.QUERY, {}).items()]
         if query_params:
             url = f'{url}?{urlencode(query_params)}'
-        async with aiohttp.ClientSession(connector=connector) as session:
+        proxy = UrlUtils.get_global_proxy_url(url)
+        async with aiohttp.ClientSession(proxy=proxy, connector=connector) as session:
             async with session.request(
                     self._method,
                     url,

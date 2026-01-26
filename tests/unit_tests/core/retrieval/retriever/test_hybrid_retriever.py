@@ -9,7 +9,7 @@ import pytest
 
 from openjiuwen.core.retrieval import HybridRetriever
 from openjiuwen.core.retrieval import SearchResult
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ class TestHybridRetriever:
     async def test_retrieve_vector_mode_without_embed_model(self, mock_vector_store):
         """Test vector mode but without embedding model"""
         retriever = HybridRetriever(vector_store=mock_vector_store)
-        with pytest.raises(JiuWenBaseException, match="embed_model is required"):
+        with pytest.raises(BaseError, match="embed_model is required"):
             await retriever.retrieve("test query", mode="vector")
 
     @pytest.mark.asyncio
@@ -116,7 +116,7 @@ class TestHybridRetriever:
             vector_store=mock_vector_store,
             embed_model=mock_embed_model,
         )
-        with pytest.raises(JiuWenBaseException, match="score_threshold is only supported"):
+        with pytest.raises(BaseError, match="score_threshold is only supported"):
             await retriever.retrieve("test query", mode="hybrid", score_threshold=0.5)
 
     @pytest.mark.asyncio

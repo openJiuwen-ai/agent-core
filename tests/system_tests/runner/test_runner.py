@@ -16,11 +16,12 @@ from openjiuwen.core.workflow import QuestionerComponent, FieldInfo, QuestionerC
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.workflow import generate_workflow_key
-from openjiuwen.core.session import BaseSession
-from openjiuwen.core.session import TaskSession
+from openjiuwen.core.workflow import Session
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.protocols.mcp import McpServerConfig, SseClient, StdioClient, PlaywrightClient
+from openjiuwen.core.foundation.tool import SseClient, StdioClient, PlaywrightClient
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
 
@@ -124,13 +125,13 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _create_start_component():
-        return Start({"inputs": [{"id": "query", "type": "String", "required": "true", "sourceType": "ref"}]})
+        return Start()
 
     @staticmethod
     def _create_end_component():
         return End({"responseTemplate": "{{output}}"})
 
-    def _build_interrupt_workflow(self) -> tuple[BaseSession, Workflow]:
+    def _build_interrupt_workflow(self) -> tuple[Session, Workflow]:
         """
         构建包含交互式组件的工作流，用于测试中断恢复功能。
 
@@ -148,7 +149,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(
             card=card
         )
-        context = TaskSession(trace_id="test")
+        context = create_agent_session(session_id="test")
 
         # 2. 实例化各组件
         start = self._create_start_component()
@@ -257,7 +258,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(result2, dict, "第二次调用应该返回字典")
             self.assertEqual(result2['result_type'], 'answer', "应该返回answer类型")
             self.assertEqual(result2['output'].state.value, 'COMPLETED', "工作流应该完成")
-            self.assertEqual(result2['output'].result['responseContent'], '上海', "应该返回上海")
+            self.assertEqual(result2['output'].result['response'], '上海', "应该返回上海")
             print(f"✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
             return result, result2  # 返回结果用于比对
@@ -314,7 +315,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
                         self.assertIsInstance(result2, dict, "第二次调用应该返回字典")
                         self.assertEqual(result2['result_type'], 'answer', "应该返回answer类型")
                         self.assertEqual(result2['output'].state.value, 'COMPLETED', "工作流应该完成")
-                        self.assertEqual(result2['output'].result['responseContent'], '上海', "应该返回上海")
+                        self.assertEqual(result2['output'].result['response'], '上海', "应该返回上海")
                         print("✅ 第二次调用校验通过：工作流完成，返回结果正确")
 
                     except asyncio.TimeoutError:
@@ -364,6 +365,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         mock_tools = [
             McpToolCard(
                 name="browser_navigate",
+                server_name="my_server",
                 description="Navigate to a URL",
                 input_params={
                     "type": "object",
@@ -373,6 +375,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             ),
             McpToolCard(
                 name="browser_extract_text",
+                server_name="my_server",
                 description="Extract text from the current page",
                 input_params={
                     "type": "object",
@@ -401,7 +404,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             assert ok_list == [True]
 
             # -------------------- 工具列表校验 --------------------
-            server_tools = Runner.resource_mgr.get_tool_infos(tool_server_name="browser-use-server")
+            server_tools = await Runner.resource_mgr.get_tool_infos(tool_server_name="browser-use-server")
             assert len(server_tools) == 2
             assert server_tools[0].name == "browser-use-server.browser_navigate"
 
@@ -444,6 +447,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         mock_tools = [
             McpToolCard(
                 name="doubter",
+                server_name="my_server",
                 description="Doubter tool via stdio",
                 input_params={
                     "type": "object",
@@ -453,6 +457,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             ),
             McpToolCard(
                 name="checker",
+                server_name="my_server",
                 description="Checker tool via stdio",
                 input_params={
                     "type": "object",
@@ -528,6 +533,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         mock_tools = [
             McpToolCard(
                 name="browser_navigate",
+                server_name="my_server",
                 description="Navigate to a URL via Playwright",
                 input_params={
                     "type": "object",
@@ -537,6 +543,7 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
             ),
             McpToolCard(
                 name="browser_click",
+                server_name="my_server",
                 description="Click an element via Playwright",
                 input_params={
                     "type": "object",

@@ -27,9 +27,7 @@ from openjiuwen.core.single_agent.legacy import (
     AgentConfig,
     ControllerAgent,
     WorkflowAgentConfig,
-    WorkflowSchema,
 )
-from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
@@ -170,16 +168,7 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         flow = Workflow(card=workflow_card)
 
         # Start 组件
-        start = Start({
-            "inputs": [
-                {
-                    "id": "query",
-                    "type": "String",
-                    "required": "true",
-                    "sourceType": "ref"
-                }
-            ]
-        })
+        start = Start()
 
         # Questioner 组件（会触发中断）
         key_fields = [
@@ -228,7 +217,7 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         agent_id: str,
         description: str,
         workflow: Workflow,
-        workflow_id: str
+        workflow_id: str  # noqa: ARG002 - 保留参数兼容性
     ) -> WorkflowAgent:
         """创建 WorkflowAgent
 
@@ -236,35 +225,20 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
             agent_id: Agent ID
             description: Agent 描述
             workflow: Workflow 实例
-            workflow_id: Workflow ID（用于创建 WorkflowSchema）
+            workflow_id: Workflow ID（未使用，保留参数兼容性）
 
         Returns:
             WorkflowAgent 实例
         """
-        # 创建 workflow schema
-        workflow_schema = WorkflowSchema(
-            id=workflow_id,
-            version="1.0",
-            name=workflow_id,
-            description=description,
-            inputs={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "用户输入"}
-                }
-            }
-        )
-
-        # 创建 WorkflowAgent
+        # 使用新 API: add_workflows() 自动从 workflow.card 提取 schema
         workflow_config = WorkflowAgentConfig(
             id=agent_id,
             version="1.0",
             description=description,
-            workflows=[workflow_schema],
-            controller_type=ControllerType.WorkflowController
+            workflows=[],
         )
         agent = WorkflowAgent(workflow_config)
-        agent.bind_workflows([workflow])
+        agent.add_workflows([workflow])
         return agent
 
     def _create_llm_agent(
@@ -463,7 +437,7 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         ])
 
         with patch(
-            "openjiuwen.core.workflow.components.llm_related."
+            "openjiuwen.core.workflow.components.llm."
             "questioner_comp.Model"
         ) as mock_model_class, patch(
             "openjiuwen.core.memory.long_term_memory."

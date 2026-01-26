@@ -13,7 +13,7 @@ from openjiuwen.core.session.tracer.handler import TracerHandlerName
 class TracerWorkflowUtils:
     @staticmethod
     def _get_workflow_metadata(session) -> dict:
-        executable_id = session._workflow_id
+        executable_id = session.workflow_id()
         workflow_config = session.config().get_workflow_config(executable_id)
         workflow_metadata = workflow_config.card if workflow_config else None
         return {
@@ -49,7 +49,7 @@ class TracerWorkflowUtils:
         if tracer is None:
             return
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, event_name="on_call_start",
-                             invoke_id=session._workflow_id,
+                             invoke_id=session.workflow_id(),
                              parent_node_id='',
                              metadata=TracerWorkflowUtils._get_workflow_metadata(session),
                              inputs=inputs,
@@ -128,7 +128,7 @@ class TracerWorkflowUtils:
         tracer = session.tracer()
         if tracer is None:
             return
-        executable_id = session._workflow_id
+        executable_id = session.workflow_id()
         parent_id = ""
         await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_call_done",
                              invoke_id=executable_id,

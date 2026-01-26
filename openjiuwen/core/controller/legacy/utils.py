@@ -5,6 +5,7 @@ import copy
 from typing import List, Dict, Any, Optional
 
 from openjiuwen.core.common.constants.enums import TaskType
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.controller.legacy.event.event import Event
 from openjiuwen.core.controller.legacy.task.task import Task, TaskInput
@@ -91,12 +92,12 @@ class MessageHandlerUtils:
                     except Exception as e:
                         if UserConfig.is_sensitive():
                             logger.error("LLM Agent parse tool call workflow's arguments error")
-                            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_PARSE_TOOL_CALL_ERROR,
+                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
                                                            "LLM-generated workflow arguments are invalid", e)
                         else:
                             logger.error(f"LLM Agent parse tool call workflow({tool_name})'s arguments error: "
                                          f"{tool_call.arguments}")
-                            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_PARSE_TOOL_CALL_ERROR,
+                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
                                                            f"LLM-generated workflow ({tool_name}) arguments "
                                                            f"are invalid: {tool_call.arguments}", e)
 
@@ -119,12 +120,12 @@ class MessageHandlerUtils:
                     except Exception as e:
                         if UserConfig.is_sensitive():
                             logger.error("LLM Agent parse tool call plugin's arguments error")
-                            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_PARSE_TOOL_CALL_ERROR,
+                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
                                                            "LLM-generated plugin arguments are invalid", e)
                         else:
                             logger.error(f"LLM Agent parse tool call plugin({tool_name})'s arguments error: "
                                          f"{tool_call.arguments}")
-                            ExceptionUtils.raise_exception(StatusCode.CONTROLLER_PARSE_TOOL_CALL_ERROR,
+                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
                                                            f"LLM-generated plugin ({tool_name}) arguments "
                                                            f"are invalid: {tool_call.arguments}", e)
                     result.append(Task(
@@ -138,8 +139,8 @@ class MessageHandlerUtils:
                     break
         if not result:
             raise JiuWenBaseException(
-                error_code=StatusCode.TOOL_NOT_FOUND_ERROR.code,
-                message=StatusCode.TOOL_NOT_FOUND_ERROR.errmsg
+                error_code=StatusCode.AGENT_TOOL_NOT_FOUND.code,
+                message=StatusCode.AGENT_TOOL_NOT_FOUND.errmsg
             )
         return result
 
@@ -153,7 +154,7 @@ class MessageHandlerUtils:
             if tool_name == plugin.name:
                 return TaskType.PLUGIN
 
-        raise JiuWenBaseException(StatusCode.TOOL_NOT_FOUND_ERROR.code, f"not find tool call type: {tool_name}")
+        raise JiuWenBaseException(StatusCode.AGENT_TOOL_NOT_FOUND.code, f"not find tool call type: {tool_name}")
 
     @staticmethod
     def is_interaction_result(exec_result: Any) -> bool:
@@ -255,7 +256,7 @@ class MessageHandlerUtils:
 
     @staticmethod
     async def add_workflow_message_to_chat_history(message: BaseMessage, workflow_id: str,
-                                             context_engine: ContextEngine, session: Session):
+                                                   context_engine: ContextEngine, session: Session):
         """Add message to workflow chat history"""
         workflow_context = context_engine.get_context(
             context_id=workflow_id,
@@ -274,7 +275,7 @@ class ReasonerUtils:
         return chat_history[-2 * chat_history_max_turn:]
 
     @staticmethod
-    def get_model(model_config: ModelConfig, session: Session):
+    async def get_model(model_config: ModelConfig):
         """Get model instance by config"""
         model_id = generate_key(
             model_config.model_info.api_key,
@@ -282,12 +283,18 @@ class ReasonerUtils:
             model_config.model_provider
         )
 
-        model = session.get_model(model_id=model_id)
+        model = await Runner.resource_mgr.get_model(model_id=model_id)
 
         if model is None:
+            # Normalize client_provider to correct case (OpenAI, SiliconFlow)
+            provider = model_config.model_provider
+            if provider and provider.lower() == 'openai':
+                provider = 'OpenAI'
+            elif provider and provider.lower() == 'siliconflow':
+                provider = 'SiliconFlow'
             model_client_config = ModelClientConfig(
                 client_id=model_id,
-                client_provider=model_config.model_provider,
+                client_provider=provider,
                 api_key=model_config.model_info.api_key,
                 api_base=model_config.model_info.api_base,
                 timeout=model_config.model_info.timeout,
@@ -295,11 +302,17 @@ class ReasonerUtils:
                 ssl_cert=None,
             )
             model_request_config = ModelRequestConfig(
-                model=model_config.model_info.model,
+                model=model_config.model_info.model_name,
                 temperature=model_config.model_info.temperature,
                 top_p=model_config.model_info.top_p,
+                **(model_config.model_info.model_extra or {})
             )
-            model = Model(model_client_config=model_client_config, model_config=model_request_config)
-            session.add_model(model_id=model_id, model=model)
+
+            def create_model():
+                return Model(model_client_config=model_client_config, model_config=model_request_config)
+
+            Runner.resource_mgr.add_model(model_id=model_id, model=create_model)
+
+            model = await Runner.resource_mgr.get_model(model_id=model_id)
 
         return model

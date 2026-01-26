@@ -1,9 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from openjiuwen.core.session.agent import StaticAgentSession
+from openjiuwen.core.session.internal.agent import StaticAgentSession
 from openjiuwen.core.session.base import get_default_inmemory_checkpointer
-from openjiuwen.core.session.config import Config, workflow_session_vars
+from openjiuwen.core.session.config.base import Config, workflow_session_vars
 from openjiuwen.core.session.constants import (
     COMP_STREAM_CALL_TIMEOUT_KEY,
     END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY,
@@ -16,12 +16,13 @@ from openjiuwen.core.session.constants import (
     WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT,
     WORKFLOW_STREAM_FRAME_TIMEOUT
 )
-from openjiuwen.core.session.interaction.base import AgentInterrupt, Checkpointer
-from openjiuwen.core.session.interaction.checkpointer import InMemoryCheckpointer
+from openjiuwen.core.session.interaction.base import AgentInterrupt
+from openjiuwen.core.session.checkpointer.base import Checkpointer
+from openjiuwen.core.session.checkpointer.checkpointer import InMemoryCheckpointer
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.session import BaseSession, ProxySession, Session
-from openjiuwen.core.session.state import Transformer
+from openjiuwen.core.session.state.base import Transformer
 from openjiuwen.core.session.utils import (
     EndFrame,
     NESTED_PATH_SPLIT,
@@ -30,14 +31,12 @@ from openjiuwen.core.session.utils import (
     get_value_by_nested_path,
     is_ref_path
 )
-from openjiuwen.core.session.workflow import NodeSession, SubWorkflowSession, WorkflowSession
+from openjiuwen.core.session.internal.workflow import NodeSession, SubWorkflowSession, WorkflowSession
 
-from openjiuwen.core.session.workflow_state import CommitState
-from openjiuwen.core.session.wrapper import (
+from openjiuwen.core.session.state.workflow_state import CommitState
+from openjiuwen.core.session.internal.wrapper import (
     RouterSession,
     StaticWrappedSession,
-    TaskSession,
-    WrappedNodeSession,
     WrappedSession
 )
 
@@ -53,11 +52,9 @@ __all__ = [
     "NodeSession",
     "SubWorkflowSession",
     "RouterSession",
-    "WrappedNodeSession",
     "workflow_session_vars",
 
     # agent session
-    "TaskSession",
     "StaticAgentSession",
     "StaticWrappedSession",
     "CommitState",

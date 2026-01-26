@@ -17,6 +17,7 @@ from openjiuwen.core.session import Checkpointer
 from openjiuwen.core.session import get_default_inmemory_checkpointer
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session.workflow import Session
 from openjiuwen.core.graph.pregel import Pregel, PregelBuilder, PregelConfig, MAX_RECURSIVE_LIMIT, START, END
 from openjiuwen.core.graph.store import GraphStore
 
@@ -189,7 +190,7 @@ class CompiledGraph(ExecutableGraph):
         elif exception is not None:
             raise exception
 
-    async def stream(self, inputs: Input, session: BaseSession) -> AsyncIterator[Output]:
+    async def stream(self, inputs: Input, session: Session) -> AsyncIterator[Output]:
         pass
 
     async def interrupt(self, message: dict):

@@ -5,17 +5,18 @@ Extractor Abstract Base Class
 
 Inherits from Processor, used for extracting triples, etc.
 """
-from abc import abstractmethod
-from typing import List, Any
 
-from openjiuwen.core.retrieval.indexing.processor.base import Processor
+from abc import abstractmethod
+from typing import Any, List
+
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.common.triple import Triple
+from openjiuwen.core.retrieval.indexing.processor.base import Processor
 
 
 class Extractor(Processor):
     """Extractor abstract base class (inherits from Processor, used for extracting triples, etc.)"""
-    
+
     @abstractmethod
     async def extract(
         self,
@@ -24,24 +25,23 @@ class Extractor(Processor):
     ) -> List[Triple]:
         """
         Extract information (e.g., triples)
-        
+
         Args:
             chunks: Text chunk list
             **kwargs: Additional parameters
-            
+
         Returns:
             Extraction result list (e.g., triple list)
         """
-        pass
-    
+
     async def process(self, chunks: List[TextChunk], **kwargs: Any) -> List[Triple]:
         """
         Process text chunks (implements Processor's process method)
-        
+
         Args:
             chunks: Text chunk list
             **kwargs: Additional parameters
-            
+
         Returns:
             Extraction result list
         """

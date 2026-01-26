@@ -1,16 +1,30 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Any, AsyncIterator
+import uuid
+from typing import Any, AsyncIterator, Dict
 
-from pydantic import Field
+from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
 
+NO_TIMEOUT = -1
+
+
+class McpServerConfig(BaseModel):
+    server_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    server_name: str
+    server_path: str
+    client_type: str = 'sse'
+    params: Dict[str, Any] = Field(default_factory=dict)
+    auth_headers: dict = Field(default_factory=dict)
+    auth_query_params: Dict[str, str] = Field(default_factory=dict)
+
 
 class McpToolCard(ToolCard):
-    server_name: str = Field(default="")
+    server_name: str
+    server_id: str = ''
 
 
 class MCPTool(Tool):

@@ -7,6 +7,7 @@ import os
 import pytest
 
 from openjiuwen.core.common.constants.enums import ControllerType
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.legacy import (
     LegacyReActAgent,
@@ -113,7 +114,7 @@ class TestAdapterTest:
             client = RemoteAgent(agent_id="weather-single_agent-stream")
             chunks = []
             async for chunk in client.stream({"query": "你好"}):
-                print(f"Stream chunk received: {chunk}")
+                logger.info(f"Stream chunk received: {chunk}")
                 chunks.append(chunk)
                 assert isinstance(chunk, (OutputSchema, TraceSchema)), \
                     f"Chunk must be OutputSchema, TraceSchema, or CustomSchema, got {type(chunk)}"
@@ -171,7 +172,7 @@ class TestAdapterTest:
             client = RemoteAgent(agent_id="workflow-single_agent")
             Runner.resource_mgr.add_agent(AgentCard(id="remote-workflow-single_agent"), agent=client)
             response = await Runner.run_agent("remote-workflow-single_agent", {"query": "London"})
-            print(f"response: {response}")
+            logger.info(f"response: {response}")
             assert response['result_type'] == 'answer'
             assert response['output'].result == {'result': 'London'}
             assert response['output'].state.name == 'COMPLETED'

@@ -7,8 +7,20 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval import KnowledgeBase
-from openjiuwen.core.retrieval import KnowledgeBaseConfig
+from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
+from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig
+
+KNOWLEDGE_BASE_ATTRIBUTES = [
+    "database_name",
+    "distance_metric",
+    "index_type",
+    "text_field",
+    "vector_field",
+    "sparse_vector_field",
+    "metadata_field",
+    "doc_id_field",
+]
 
 
 class ConcreteKnowledgeBase(KnowledgeBase):
@@ -61,8 +73,9 @@ class TestKnowledgeBase:
         mock_extractor = MagicMock()
         mock_index_manager = MagicMock()
         mock_llm_client = MagicMock()
-        mock_vector_store.database_name = "database_name"
-        mock_index_manager.database_name = "database_name"
+        for attr in KNOWLEDGE_BASE_ATTRIBUTES:
+            setattr(mock_vector_store, attr, "test_value")
+            setattr(mock_index_manager, attr, "test_value")
 
         kb = ConcreteKnowledgeBase(
             config=config,
@@ -82,6 +95,66 @@ class TestKnowledgeBase:
         assert kb.index_manager == mock_index_manager
         assert kb.llm_client == mock_llm_client
 
+    @staticmethod
+    def test_init_with_mismatch_metrics():
+        """Test initialization with mismatching distance metric"""
+        config = KnowledgeBaseConfig(kb_id="test_kb")
+        mock_vector_store = MagicMock()
+        mock_embed_model = MagicMock()
+        mock_parser = MagicMock()
+        mock_chunker = MagicMock()
+        mock_extractor = MagicMock()
+        mock_index_manager = MagicMock()
+        mock_llm_client = MagicMock()
+        for attr in KNOWLEDGE_BASE_ATTRIBUTES:
+            setattr(mock_vector_store, attr, "test_value")
+            setattr(mock_index_manager, attr, "test_value")
+        mock_vector_store.distance_metric = "some_metric"
+        mock_index_manager.distance_metric = "different_metric"
+
+        with pytest.raises(BaseError, match="incompatible distance_metric configs"):
+            kb = ConcreteKnowledgeBase(
+                config=config,
+                vector_store=mock_vector_store,
+                embed_model=mock_embed_model,
+                parser=mock_parser,
+                chunker=mock_chunker,
+                extractor=mock_extractor,
+                index_manager=mock_index_manager,
+                llm_client=mock_llm_client,
+            )
+            del kb
+
+    @staticmethod
+    def test_init_with_mismatch_names():
+        """Test initialization with mismatching database names"""
+        config = KnowledgeBaseConfig(kb_id="test_kb")
+        mock_vector_store = MagicMock()
+        mock_embed_model = MagicMock()
+        mock_parser = MagicMock()
+        mock_chunker = MagicMock()
+        mock_extractor = MagicMock()
+        mock_index_manager = MagicMock()
+        mock_llm_client = MagicMock()
+        for attr in KNOWLEDGE_BASE_ATTRIBUTES:
+            setattr(mock_vector_store, attr, "test_value")
+            setattr(mock_index_manager, attr, "test_value")
+        mock_vector_store.database_name = "database_name"
+        mock_index_manager.database_name = "different_name"
+
+        with pytest.raises(BaseError, match="incompatible database_name configs"):
+            kb = ConcreteKnowledgeBase(
+                config=config,
+                vector_store=mock_vector_store,
+                embed_model=mock_embed_model,
+                parser=mock_parser,
+                chunker=mock_chunker,
+                extractor=mock_extractor,
+                index_manager=mock_index_manager,
+                llm_client=mock_llm_client,
+            )
+            del kb
+
     @pytest.mark.asyncio
     async def test_close_with_async_close(self):
         """Test close (async close method)"""
@@ -90,8 +163,9 @@ class TestKnowledgeBase:
         mock_vector_store.close = AsyncMock()
         mock_index_manager = AsyncMock()
         mock_index_manager.close = AsyncMock()
-        mock_vector_store.database_name = "database_name"
-        mock_index_manager.database_name = "database_name"
+        for attr in KNOWLEDGE_BASE_ATTRIBUTES:
+            setattr(mock_vector_store, attr, "test_value")
+            setattr(mock_index_manager, attr, "test_value")
 
         kb = ConcreteKnowledgeBase(
             config=config,
@@ -110,8 +184,9 @@ class TestKnowledgeBase:
         mock_vector_store.close = MagicMock()
         mock_index_manager = MagicMock()
         mock_index_manager.close = MagicMock()
-        mock_vector_store.database_name = "database_name"
-        mock_index_manager.database_name = "database_name"
+        for attr in KNOWLEDGE_BASE_ATTRIBUTES:
+            setattr(mock_vector_store, attr, "test_value")
+            setattr(mock_index_manager, attr, "test_value")
 
         kb = ConcreteKnowledgeBase(
             config=config,

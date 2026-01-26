@@ -18,8 +18,8 @@ from typing import List, Any, AsyncIterator, Union, Optional, Tuple, Dict
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.tool.base import ToolCard
-from openjiuwen.core.protocols.mcp import McpServerConfig
+from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -58,7 +58,7 @@ class AbilityKit:
         elif isinstance(ability, AgentCard):
             self._agents[ability.name] = ability
         elif isinstance(ability, McpServerConfig):
-            self._mcp_servers[ability.name] = ability
+            self._mcp_servers[ability.server_name] = ability
         else:
             logger.warning(f"Unknown ability type: {type(ability)}")
 
@@ -113,7 +113,7 @@ class AbilityKit:
         abilities.extend(self._mcp_servers.values())
         return abilities
 
-    def list_tool_info(
+    async def list_tool_info(
             self,
             names: Optional[List[str]] = None,
             mcp_server_name: Optional[str] = None
@@ -170,7 +170,18 @@ class AbilityKit:
                 )
                 tool_infos.append(tool_info)
 
-        # TODO: Handle MCP servers if needed
+        # Handle MCP servers if needed
+        for mcp_server_name, mcp_server in self._mcp_servers.items():
+            mcp_server_id = mcp_server.server_id
+            from openjiuwen.core.runner import Runner
+            if names is None:
+                mcp_tool_infos = await Runner.resource_mgr.get_mcp_tool_infos(server_id=mcp_server_id)
+                for mcp_tool in mcp_tool_infos:
+                    mcp_tool_name = mcp_tool.name
+                    mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{mcp_tool_name}'
+                    self._tools[mcp_tool.name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
+                                                          description=mcp_tool.description)
+                    tool_infos.append(mcp_tool)
 
         return tool_infos
 
@@ -212,7 +223,7 @@ class AbilityKit:
             # Execute Tool - get instance from Runner.resource_mgr
             tool_card = self._tools[tool_name]
             tool_id = tool_card.id or tool_card.name
-            tool = Runner.resource_mgr.get_tool(id=tool_id)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_id)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)
@@ -313,6 +324,9 @@ class BaseAgent(ABC):
         pass
 
     # ========== Ability Management Interface ==========
+    @property
+    def ability_kit(self) -> AbilityKit:
+        return self._ability_kit
 
     def add_ability(self, ability: Union[Ability, List[Ability]]) -> 'BaseAgent':
         """Add an ability
@@ -361,7 +375,7 @@ class BaseAgent(ABC):
         """
         return self._ability_kit.list()
 
-    def list_tool_info(
+    async def list_tool_info(
             self,
             names: Optional[List[str]] = None
     ) -> List[ToolInfo]:
@@ -373,7 +387,7 @@ class BaseAgent(ABC):
         Returns:
             List of ToolInfo objects
         """
-        return self._ability_kit.list_tool_info(names=names)
+        return await self._ability_kit.list_tool_info(names=names)
 
     # ========== Query Interface ==========
     def get_tool_info(self) -> ToolInfo:

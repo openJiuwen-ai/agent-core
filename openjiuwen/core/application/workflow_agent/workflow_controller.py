@@ -6,6 +6,7 @@ import asyncio
 from typing import Dict, List, Optional, Union
 
 from openjiuwen.core.common.constants.enums import TaskType
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.legacy import AgentConfig, WorkflowSchema
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.controller import (
@@ -846,7 +847,7 @@ class WorkflowController(IntentDetectionController):
     ) -> Task:
         """Create new workflow task
         
-        Extract query from message and filter parameters based on workflow.inputs
+        Extract query from message and filter parameters based on workflow.input_params
         """
         # Get query
         query = event.content.get_query() if hasattr(event.content, 'get_query') else ""
@@ -855,7 +856,7 @@ class WorkflowController(IntentDetectionController):
         user_data = {"query": query}
         user_data.update(event.content.extensions or {})
         filtered_inputs = self._filter_workflow_inputs(
-            workflow.inputs or {},
+            workflow.input_params or {},
             user_data
         )
 
@@ -1077,8 +1078,8 @@ class WorkflowController(IntentDetectionController):
                         f"{chunk.payload.id if hasattr(chunk.payload, 'id') else 'unknown'}"
                     )
             else:
-                # 保留非 __interaction__ 类型的 chunk（如 tracer）
-                result.append(chunk)
+                if not isinstance(chunk, CustomSchema):  # filter custom stream data, avoid repeat output
+                    result.append(chunk)
         
         return result
 
@@ -1118,11 +1119,8 @@ class WorkflowController(IntentDetectionController):
         try:
             from openjiuwen.core.runner import Runner
             logger.info(f"Trying to find workflow from resource_mgr: {workflow_id}")
-            # List all available workflows
-            all_workflows = Runner.resource_mgr.workflow().get_all_workflows()
-            logger.info(f"Available workflows in resource_mgr: {list(all_workflows.keys())}")
 
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id, session.base())
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, session=session.base())
             logger.info(f"Found workflow from resource_mgr: {workflow is not None}")
             if workflow:
                 return workflow
@@ -1131,8 +1129,9 @@ class WorkflowController(IntentDetectionController):
 
         # Then try to get from controller's _session
         try:
+            from openjiuwen.core.runner import Runner
             logger.info(f"Trying to find workflow from controller._session: {workflow_id}")
-            workflow = await self._session.get_workflow(workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id)
             logger.info(f"Found workflow from controller._session: {workflow is not None}")
             return workflow
         except Exception as e:
@@ -1152,7 +1151,7 @@ class WorkflowController(IntentDetectionController):
             Workflow object, None if not found
         """
         try:
-            workflow = await session.get_workflow(workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id)
             return workflow
         except Exception as e:
             logger.error(f"Failed to find workflow {workflow_id}: {e}")

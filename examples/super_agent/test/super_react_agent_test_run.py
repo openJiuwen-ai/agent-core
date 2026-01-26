@@ -38,7 +38,7 @@ from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
-from openjiuwen.core.protocols.mcp import McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from mcp import StdioServerParameters
 

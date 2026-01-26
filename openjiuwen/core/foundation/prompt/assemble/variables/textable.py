@@ -2,13 +2,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import re
-import logging
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.logging import prompt_logger, LogEventType
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variable
-
-logger = logging.getLogger(__name__)
 
 
 class TextableVariable(Variable):
@@ -24,9 +22,9 @@ class TextableVariable(Variable):
         for match in pattern.finditer(text):
             placeholder = match.group(1).strip()
             if len(placeholder) == 0:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR.code,
-                    message="Placeholders cannot be empty string"
+                raise build_error(
+                    StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
+                    error_msg="placeholders cannot be empty string"
                 )
             if placeholder not in placeholders:
                 placeholders.append(placeholder)
@@ -57,13 +55,20 @@ class TextableVariable(Variable):
                     else:
                         value = getattr(value, node)
             except Exception as e:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_ERROR.code,
-                    message=f"Error parsing the placeholder `{placeholder}`."
+                raise build_error(
+                    StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
+                    error_msg=f"error parsing the placeholder `{placeholder}`",
+                    cause=e
                 ) from e
             if not isinstance(value, (str, int, float, bool)):
-                logger.info(f"Converting non-string value `{placeholder}` using str()."
-                            f" Please check if the style is describe.")
+                prompt_logger.info(
+                    "Converting non-string value using str()."
+                    "Please check if the style is describe.",
+                    type_event=LogEventType.AGENT_START,
+                    input_data=kwargs,
+                    output_data=self.value,
+                    metadata={"placeholder": placeholder}
+                    )
             placeholder_str = f"{self.prefix}{placeholder}{self.suffix}"
             formatted_text = formatted_text.replace(placeholder_str, str(value))
         self.value = formatted_text

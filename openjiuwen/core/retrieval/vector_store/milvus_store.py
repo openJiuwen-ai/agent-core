@@ -9,13 +9,16 @@ Supports vector search, sparse search (BM25), and hybrid search.
 import asyncio
 from typing import Any, List, Optional
 
-from pymilvus import AnnSearchRequest, MilvusClient, RRFRanker
+from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
+from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
+from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
 class MilvusVectorStore(VectorStore):
@@ -27,7 +30,7 @@ class MilvusVectorStore(VectorStore):
         milvus_uri: str,
         milvus_token: Optional[str] = None,
         text_field: str = "content",
-        vector_field: str = "embedding",
+        vector_field: str | MilvusVectorField = "embedding",
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
@@ -41,7 +44,7 @@ class MilvusVectorStore(VectorStore):
             milvus_uri: Milvus URI
             milvus_token: Milvus Token (optional)
             text_field: Text field name
-            vector_field: Vector field name
+            vector_field: Vector field name (str) or definition (MilvusVectorField)
             sparse_vector_field: Sparse vector field name
             metadata_field: Metadata field name
         """
@@ -50,11 +53,27 @@ class MilvusVectorStore(VectorStore):
         self.milvus_uri = milvus_uri
         self.milvus_token = milvus_token
         self.text_field = text_field
-        self.vector_field = vector_field
         self.sparse_vector_field = sparse_vector_field
         self.metadata_field = metadata_field
         self.doc_id_field = doc_id_field
         self.database_name = self.config.database_name
+        self._distance_metric = config.distance_metric.replace("dot", "ip").replace("euclidean", "l2").upper()
+
+        if isinstance(vector_field, str):
+            self.vector_field = MilvusAUTO(vector_field=vector_field)
+        elif isinstance(vector_field, MilvusVectorField):
+            self.vector_field = vector_field
+        else:
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_VECTOR_FIELD_INVALID,
+                error_msg="vector_field must be either a str or MilvusVectorField instance",
+            )
+        if self.vector_field.index_type == "auto":
+            self._construct_config = {}
+        else:
+            self._construct_config = self.vector_field.to_dict(stage="construct")
+        self._construct_config["metric_type"] = self._distance_metric
+        self._search_config = self.vector_field.to_dict(stage="search")
 
         # Initialize Milvus client & database
         self._client = self.create_client(
@@ -68,6 +87,11 @@ class MilvusVectorStore(VectorStore):
         """Get Milvus client"""
         return self._client
 
+    @property
+    def distance_metric(self) -> str:
+        """Get raw distance metric string"""
+        return self._distance_metric
+
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> MilvusClient:
         """Create Milvus client and ensure database exists"""
@@ -77,6 +101,43 @@ class MilvusVectorStore(VectorStore):
                 client.create_database(database_name)
             client.use_database(database_name)
         return client
+
+    def get_search_params(self, top_k: int) -> dict[str, Any]:
+        """Get correct parameters for searches"""
+        search_params = self._search_config
+        if "efSearchFactor" in self._search_config:
+            search_params = search_params.copy()
+            search_params["ef"] = round(top_k * search_params.pop("efSearchFactor"))
+        return search_params
+
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
+        if not self._client.has_collection(self.collection_name):
+            return
+        index_type = self.vector_field.index_type
+        variant = str(getattr(self.vector_field, "variant", "") or "")
+        field_name = self.vector_field.vector_field
+        actual = self._client.describe_index(self.collection_name, field_name) or {}
+        if not actual:
+            collection_fields = self._client.describe_collection(self.collection_name).get("fields", [])
+            v_fields = [v_field for v_field in collection_fields if v_field["type"] == DataType.FLOAT_VECTOR]
+            v_fields_list = "\n".join("- [{field_id}] {name}: {params}".format(**v_field) for v_field in v_fields)
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
+                error_msg=f"MilvusVectorStore has vector_field at {field_name} while actual database has "
+                f"vector field(s) at:\n{v_fields_list}\nYou may want to call delete_collection method on "
+                f'collection "{self.collection_name}"',
+            )
+
+        if index_type != "auto":
+            returned_type: str = actual.get("index_type", "unknown")
+            if not (returned_type.startswith(index_type.upper()) and returned_type.endswith(variant)):
+                raise build_error(
+                    StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
+                    error_msg=f"MilvusVectorStore has index_type of {index_type} while actual database has "
+                    f"index_type of {returned_type}, do not change index_type after Knowledge Base is constructed.",
+                )
+        self._check_configs_matching(self._construct_config, actual)
 
     async def add(
         self,
@@ -133,7 +194,7 @@ class MilvusVectorStore(VectorStore):
         **kwargs: Any,
     ) -> List[SearchResult]:
         """Vector search"""
-        output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
+        output_fields = [self.text_field, self.metadata_field, self.doc_id_field, "chunk_id"]
 
         # Build filter expression
         filter_expr = None
@@ -153,10 +214,10 @@ class MilvusVectorStore(VectorStore):
             self._client.search,
             collection_name=self.collection_name,
             data=[query_vector],
-            anns_field=self.vector_field,
+            anns_field=self.vector_field.vector_field,
             limit=top_k,
             output_fields=output_fields,
-            search_params={"metric_type": "COSINE", "params": {}},
+            search_params={"metric_type": self._distance_metric, "params": self.get_search_params(top_k)},
             filter=filter_expr,
         )
 
@@ -238,8 +299,8 @@ class MilvusVectorStore(VectorStore):
             if query_vector is not None:
                 dense_req = AnnSearchRequest(
                     data=[query_vector],
-                    anns_field=self.vector_field,
-                    param={"metric_type": "COSINE", "params": {}},
+                    anns_field=self.vector_field.vector_field,
+                    param={"metric_type": self._distance_metric, "params": self.get_search_params(top_k)},
                     limit=top_k,
                 )
                 search_requests.append(dense_req)
@@ -288,7 +349,7 @@ class MilvusVectorStore(VectorStore):
         task_vector = (
             asyncio.create_task(self.search(query_vector, top_k, None))
             if query_vector
-            else asyncio.create_task(asyncio.coroutine(lambda: [])())
+            else asyncio.create_task(asyncio.sleep(0, result=[]))
         )
         task_text = asyncio.create_task(self.sparse_search(query_text, top_k, None))
 
@@ -357,7 +418,15 @@ class MilvusVectorStore(VectorStore):
 
             if mode == "vector":
                 if raw_score_val is not None:
-                    raw_score_scaled = (raw_score_val + 1.0) / 2.0
+                    if self._distance_metric == "L2":
+                        # Milvus L2 returns squared L2 distance
+                        raw_score_scaled = (4.0 - raw_score_val) / 4.0
+                    elif self._distance_metric == "COSINE":
+                        # Milvus COSINE returns similarity in [-1, 1]
+                        raw_score_scaled = (raw_score_val + 1.0) / 2.0
+                    else:
+                        # Milvus IP returns raw inner product (unbounded)
+                        raw_score_scaled = raw_score_val
                     final_score = raw_score_scaled
             elif mode == "sparse":
                 if raw_score_val is not None:
@@ -388,3 +457,14 @@ class MilvusVectorStore(VectorStore):
             self._client.close()
         except Exception as e:
             logger.warning(f"Failed to close Milvus client: {e}")
+
+    async def table_exists(self, table_name: str) -> bool:
+        """Check if a collection exists in current database"""
+        return self._client.has_collection(table_name)
+
+    async def delete_table(self, table_name: str) -> None:
+        """Delete a collection from current database"""
+        await asyncio.to_thread(
+            self._client.drop_collection,
+            collection_name=table_name,
+        )

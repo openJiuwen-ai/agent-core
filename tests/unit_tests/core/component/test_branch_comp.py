@@ -1,8 +1,9 @@
 import pytest
 
 from openjiuwen.core.common.constants.constant import CONFIG_KEY
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import BranchComponent
 from openjiuwen.core.workflow import BranchRouter
@@ -10,7 +11,7 @@ from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import Session
-from openjiuwen.core.session import WorkflowSession
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowComponent
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, Node1
@@ -27,7 +28,8 @@ class MockSubWorkflowComponent(WorkflowComponent):
         results = []
         for i in range (0,8):
             workflow = self.sub_workflow()
-            results.append(await workflow.invoke({"a": "1", "b": 2}, session.base(), config=inputs.get(CONFIG_KEY), is_sub=True))
+            results.append(await workflow.invoke({"a": "1", "b": 2}, session, config=inputs.get(CONFIG_KEY),
+                                                 is_sub=True))
         output = {"results": results}
         print(output)
         return output
@@ -71,20 +73,20 @@ class TestBranchComponent:
         workflow.add_connection("sub_workflow", "e")
 
         inputs = {"data":'aaa'}
-        results = await workflow.invoke(inputs, WorkflowSession())
+        results = await workflow.invoke(inputs, create_workflow_session())
         print(results)
 
     async def test_add_branch_error(self):
         branch = BranchComponent()
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition=None, target="a", branch_id='')
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition="sss", target='', branch_id='')
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition="sss", target=None, branch_id='')
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition="sss", target=['', "xxx"], branch_id='')
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             branch.add_branch(condition="sss", target=["xxx", None], branch_id='')
 
 
@@ -101,40 +103,39 @@ class TestBranchComponent:
         workflow.add_connection("print_inputs", "end")
 
         inputs = {"data": value}
-        print(await workflow.invoke(inputs, WorkflowSession()))
+        print(await workflow.invoke(inputs, create_workflow_session()))
 
     async def test_expression_is_empty(self):
-       await self.run_with_expression("is_empty(${start.input})", None)
-       await  self.run_with_expression("is_empty(${start.input})", [])
-       await  self.run_with_expression("is_empty(${start.input})", '')
-       await self.run_with_expression("is_empty(${start.input})", {})
-       with pytest.raises(JiuWenBaseException) as error:
+        await self.run_with_expression("is_empty(${start.input})", None)
+        await self.run_with_expression("is_empty(${start.input})", [])
+        await self.run_with_expression("is_empty(${start.input})", '')
+        await self.run_with_expression("is_empty(${start.input})", {})
+        with pytest.raises(BaseError) as error:
            await self.run_with_expression("is_empty(${start.input})", 0)
-       assert error.value.error_code == StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code
-       print(error.value)
+        assert str(StatusCode.EXPRESSION_EVAL_ERROR.code) in str(error.value)
+        print(error.value)
 
-       with pytest.raises(JiuWenBaseException) as error:
+        with pytest.raises(BaseError) as error:
            await self.run_with_expression("is_not_empty(${start.input})", 1.2)
-       assert error.value.error_code == StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code
-       print(error.value)
+        assert str(StatusCode.EXPRESSION_EVAL_ERROR.code) in str(error.value)
+        print(error.value)
 
-       await self.run_with_expression("is_empty(${start.input}[0])", [None, 'y'])
-       await self.run_with_expression("is_empty(${start.input}['x'])", {'x': None})
-       await self.run_with_expression("is_empty(${start.input}['x'][0])", {'x': [None]})
+        await self.run_with_expression("is_empty(${start.input}[0])", [None, 'y'])
+        await self.run_with_expression("is_empty(${start.input}['x'])", {'x': None})
+        await self.run_with_expression("is_empty(${start.input}['x'][0])", {'x': [None]})
 
     async def test_expression_is_not_empty(self):
         await self.run_with_expression("is_not_empty(${start.input})", 'x')
         await self.run_with_expression("is_not_empty(${start.input})", {'a':'a'})
         await self.run_with_expression("is_not_empty(${start.input})", ['a'])
         await self.run_with_expression("is_not_empty(${start.input})", (1,2))
-        with pytest.raises(JiuWenBaseException) as error:
+        with pytest.raises(BaseError) as error:
             await self.run_with_expression("is_not_empty(${start.input})", None)
-        print(error.value)
-        assert error.value.error_code == StatusCode.COMPONENT_BRANCH_EXECUTION_ERROR.code
+        assert str(StatusCode.COMPONENT_BRANCH_EXECUTION_ERROR.code) in str(error.value)
 
-        with pytest.raises(JiuWenBaseException) as error:
+        with pytest.raises(BaseError) as error:
             await self.run_with_expression("is_not_empty(${start.input})", 1.2)
-        assert error.value.error_code == StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code
+        assert str(StatusCode.EXPRESSION_EVAL_ERROR.code) in str(error.value)
         print(error.value)
 
         await self.run_with_expression("is_not_empty(${start.input}[0])", ['x', 'y'])
@@ -142,9 +143,9 @@ class TestBranchComponent:
         await self.run_with_expression("is_not_empty(${start.input}['x'][0])", {'x' : ['x']})
 
     async def test_expression_length(self):
-        with pytest.raises(JiuWenBaseException) as error:
+        with pytest.raises(BaseError) as error:
             await self.run_with_expression("length(${start.input}) == 0", 0)
-        assert error.value.error_code == StatusCode.EXPRESSION_CONDITION_EVAL_ERROR.code
+        assert str(StatusCode.EXPRESSION_EVAL_ERROR.code) in str(error.value)
         print(error.value)
         await self.run_with_expression("length(${start.input}) == 0", {})
         await self.run_with_expression("length(${start.input}) == 0", [])
@@ -167,4 +168,4 @@ class TestBranchComponent:
     #     workflow.add_connection("print_inputs", "end")
     #
     #     inputs = {"data4": {"k2": {"k": "v"}, "k3": {"k": True, "arr": [1]}}}
-    #     print(await workflow.invoke(inputs, WorkflowSession()))
+    #     print(await workflow.invoke(inputs, create_workflow_session()))

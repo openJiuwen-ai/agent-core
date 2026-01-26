@@ -9,7 +9,7 @@ import pytest
 
 from openjiuwen.core.retrieval import SparseRetriever
 from openjiuwen.core.retrieval import SearchResult
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ class TestSparseRetriever:
     async def test_retrieve_invalid_mode(self, mock_vector_store):
         """Test invalid retrieval mode"""
         retriever = SparseRetriever(vector_store=mock_vector_store)
-        with pytest.raises(JiuWenBaseException, match="only supports 'sparse' mode"):
+        with pytest.raises(BaseError, match="only supports 'sparse' mode"):
             await retriever.retrieve("test query", mode="vector")
 
     @pytest.mark.asyncio
