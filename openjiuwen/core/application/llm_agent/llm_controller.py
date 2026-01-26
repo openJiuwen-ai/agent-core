@@ -812,6 +812,7 @@ class LLMController(BaseController):
                 model=self.config.model.model_info.model_name,
                 temperature=self.config.model.model_info.temperature,
                 top_p=self.config.model.model_info.top_p,
+                **(self.config.model.model_info.model_extra or {})
             )
 
             def model_provider():

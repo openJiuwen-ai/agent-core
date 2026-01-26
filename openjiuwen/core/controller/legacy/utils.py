@@ -305,6 +305,7 @@ class ReasonerUtils:
                 model=model_config.model_info.model_name,
                 temperature=model_config.model_info.temperature,
                 top_p=model_config.model_info.top_p,
+                **(model_config.model_info.model_extra or {})
             )
 
             def create_model():

@@ -280,6 +280,7 @@ class LLMEvent(BaseLogEvent):
     latency_ms: Optional[float] = None  # Latency (milliseconds)
     is_stream: bool = False  # Whether it's a streaming call
     chunk_index: Optional[int] = None  # Chunk index (for streaming calls)
+    extra_params: Dict[str, Any] = None # extra LLM parameters
 
     def __post_init__(self):
         super().__post_init__()

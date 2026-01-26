@@ -81,6 +81,9 @@ class LegacyReActAgent(BaseAgent):
             )
             model_request_config = ModelRequestConfig(
                 model=self.agent_config.model.model_info.model_name,
+                temperature=self.agent_config.model.model_info.temperature,
+                top_p=self.agent_config.model.model_info.top_p,
+                **(self.agent_config.model.model_info.model_extra or {})
             )
             self._llm = Model(model_client_config=model_client_config, model_config=model_request_config)
 

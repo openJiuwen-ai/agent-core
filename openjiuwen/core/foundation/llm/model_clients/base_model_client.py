@@ -223,10 +223,11 @@ class BaseModelClient(ABC):
         internal_params = {"parser", "output_parser"}
         
         # Get all fields from model_config (including extra fields)
-        params.update(self.model_config.model_dump(
+        extra_params = self.model_config.model_dump(
             exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
             exclude_none=True
-        ))
+        )
+        params.update(extra_params)
         
         # Then add kwargs parameters (will override model_config params with same key)
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in internal_params}
@@ -244,7 +245,8 @@ class BaseModelClient(ABC):
                 top_p=final_top_p,
                 max_tokens=final_max_tokens,
                 is_stream=stream,
-                metadata={"client_name": client_name}
+                metadata={"client_name": client_name},
+                extra_params=extra_params
             )
         else:
             llm_logger.info(
@@ -258,7 +260,8 @@ class BaseModelClient(ABC):
                 top_p=final_top_p,
                 max_tokens=final_max_tokens,
                 is_stream=stream,
-                metadata={"client_name": client_name}
+                metadata={"client_name": client_name},
+                extra_params=extra_params
             )
 
         return params
