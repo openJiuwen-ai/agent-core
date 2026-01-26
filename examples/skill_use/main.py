@@ -66,8 +66,7 @@ async def main():
     from openjiuwen.core.runner.runner import Runner
     runner = Runner
 
-    from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, OperationMode
-    from openjiuwen.core.sys_operation.local.config import LocalWorkConfig
+    from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 
     sysop_card = SysOperationCard(
         id=sys_operation_id,

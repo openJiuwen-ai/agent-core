@@ -9,11 +9,9 @@ import tempfile
 import pytest
 import pytest_asyncio
 
-from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, SysOperation
-from openjiuwen.core.sys_operation.base import OperationMode
-from openjiuwen.core.sys_operation.local.config import LocalWorkConfig
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 
 
 @pytest.fixture

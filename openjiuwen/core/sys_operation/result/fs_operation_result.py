@@ -4,7 +4,7 @@ from typing import Union, Literal, List, Optional
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.sys_operation.base import BaseResult
+from openjiuwen.core.sys_operation.result import BaseResult
 
 
 class ReadFileData(BaseModel):

@@ -384,7 +384,7 @@ class StatusCode(Enum):
     COMMON_URL_INPUT_INVALID = (188004, "common url_input is invalid, reason: {error_msg}")
     COMMON_SSL_CERT_INVALID = (188005, "common ssl_cert is invalid, reason: {error_msg}")
 
-    # Session 190000 - 199999
+    # Session 190000 - 198999
     # Session - Resource Management 190000 - 190999
     SESSION_WORKFLOW_GET_FAILED = (190001, "failed to get workflow, reason: {reason}")
     SESSION_WORKFLOW_ADD_FAILED = (190002, "failed to add workflow, reason: {reason}")

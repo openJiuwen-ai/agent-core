@@ -1,19 +1,18 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+from abc import abstractmethod, ABC
 from typing import Optional, Dict, Any, AsyncIterator
 
-from openjiuwen.core.sys_operation.shell import BaseShellOperation
-from openjiuwen.core.sys_operation.base import OperationMode
-from openjiuwen.core.sys_operation.registry import operation
+from openjiuwen.core.sys_operation.base import BaseOperation
 from openjiuwen.core.sys_operation.result import (
     ExecuteCmdResult, ExecuteCmdStreamResult
 )
 
 
-@operation(name="shell", mode=OperationMode.SANDBOX, description="sandbox shell operation")
-class ShellOperation(BaseShellOperation):
-    """Shell operation"""
+class BaseShellOperation(BaseOperation, ABC):
+    """Base shell operation"""
 
+    @abstractmethod
     async def execute_cmd(
             self,
             command: str,
@@ -36,7 +35,7 @@ class ShellOperation(BaseShellOperation):
         Returns:
             ExecuteCmdResult: Execution result.
         """
-        raise NotImplementedError("Shell operation sandbox mode is not implemented yet.")
+        pass
 
     async def execute_cmd_stream(
             self,
@@ -60,4 +59,4 @@ class ShellOperation(BaseShellOperation):
         Returns:
             AsyncIterator[ExecuteCmdStreamResult]: Streaming structured results.
         """
-        raise NotImplementedError("Shell operation sandbox mode is not implemented yet.")
+        pass

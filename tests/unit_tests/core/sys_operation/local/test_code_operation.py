@@ -2,13 +2,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import os
 from typing import Dict, List
+
 import pytest
 import pytest_asyncio
 
-from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.sys_operation.result.code_operation_result import ExecuteCodeResult
-from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, SysOperation
-from openjiuwen.core.sys_operation.base import OperationMode
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.sys_operation import OperationMode, SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation.result import ExecuteCodeResult
 from openjiuwen.core.common.exception.codes import StatusCode
 
 
@@ -152,7 +152,7 @@ print(os.getenv('COUNT'))
         result: ExecuteCodeResult = await sys_op.code().execute_code(code=code)
 
         assert result.code == StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
-        assert "Code execution failed" in result.message
+        assert "execution failed" in result.message
         assert result.data.exit_code != 0
         assert "SyntaxError" in result.data.stderr
         assert result.data.code_content == code
@@ -173,7 +173,7 @@ print(os.getenv('COUNT'))
         assert result.code == StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
         assert f"execution timeout after 1 seconds" in result.message
         assert result.data.exit_code == -1
-        assert result.data.stderr == result.message
+        assert result.data.stderr == f"execution timeout after 1 seconds"
 
     async def test_execute_long_running_valid_code(self, sys_op: SysOperation):
         """Test execution of long-running but non-timeout code"""

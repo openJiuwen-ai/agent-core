@@ -1,20 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-from typing import Optional, Dict, Any, Literal, AsyncIterator
+from abc import ABC, abstractmethod
+from typing import Literal, Optional, Dict, Any, AsyncIterator
 
-from openjiuwen.core.sys_operation.code import BaseCodeOperation
-from openjiuwen.core.sys_operation.base import OperationMode
-from openjiuwen.core.sys_operation.registry import operation
-from openjiuwen.core.sys_operation.result import (
-    ExecuteCodeResult,
-    ExecuteCodeStreamResult,
-)
+from openjiuwen.core.sys_operation.base import BaseOperation
+from openjiuwen.core.sys_operation.result import ExecuteCodeResult, ExecuteCodeStreamResult
 
 
-@operation(name="code", mode=OperationMode.SANDBOX, description="sandbox code operation")
-class CodeOperation(BaseCodeOperation):
-    """Code operation"""
+class BaseCodeOperation(BaseOperation, ABC):
+    """Base code operation"""
 
+    @abstractmethod
     async def execute_code(
             self,
             code: str,
@@ -37,8 +33,9 @@ class CodeOperation(BaseCodeOperation):
         Returns:
             ExecuteCodeResult: Execution result.
         """
-        raise NotImplementedError("Code operation sandbox mode is not implemented yet.")
+        pass
 
+    @abstractmethod
     async def execute_code_stream(
             self,
             code: str,
@@ -63,4 +60,4 @@ class CodeOperation(BaseCodeOperation):
         Returns:
             AsyncIterator[ExecuteCodeStreamResult]: Streaming structured results.
         """
-        raise NotImplementedError("Code operation sandbox mode is not implemented yet.")
+        pass

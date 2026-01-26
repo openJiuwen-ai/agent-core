@@ -5,9 +5,10 @@ import os
 from typing import Optional, Dict, Any, Literal, AsyncIterator, Callable, List
 import sys
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.sys_operation.base import BaseOperation, OperationMode
+from openjiuwen.core.sys_operation.code import BaseCodeOperation
+from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.registry import operation
-from openjiuwen.core.sys_operation.result.code_operation_result import (
+from openjiuwen.core.sys_operation.result import (
     ExecuteCodeResult,
     ExecuteCodeStreamResult,
     ExecuteCodeData,
@@ -20,7 +21,7 @@ _SUPPORT_LANGUAGE_CMD_MAP: Dict[str, Callable[[str], List[str]]] = {
 
 
 @operation(name="code", mode=OperationMode.LOCAL, description="local code operation")
-class CodeOperation(BaseOperation):
+class CodeOperation(BaseCodeOperation):
     """Code operation"""
 
     async def execute_code(
@@ -47,12 +48,16 @@ class CodeOperation(BaseOperation):
         """
         if not code or not code.strip():
             return ExecuteCodeResult(code=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code,
-                                     message="code can not be empty",
+                                     message=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.errmsg.format(
+                                         execution="execute_code",
+                                         error_msg="code can not be empty"),
                                      data=None)
 
         if language not in _SUPPORT_LANGUAGE_CMD_MAP:
             return ExecuteCodeResult(code=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code,
-                                     message=f"{language} is not supported",
+                                     message=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.errmsg.format(
+                                         execution="execute_code",
+                                         error_msg=f"{language} is not supported"),
                                      data=ExecuteCodeData(code_content=code, language=language))
 
         try:
@@ -78,15 +83,18 @@ class CodeOperation(BaseOperation):
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
+                stderr_content = f"execution timeout after {time_out} seconds"
                 return ExecuteCodeResult(
                     code=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code,
-                    message=f"execution timeout after {time_out} seconds",
+                    message=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.errmsg.format(
+                        execution="execute_code",
+                        error_msg=stderr_content),
                     data=ExecuteCodeData(
                         code_content=code,
                         language=language,
                         exit_code=-1,
                         stdout="",
-                        stderr=f"execution timeout after {time_out} seconds"
+                        stderr=stderr_content
                     )
                 )
 
@@ -95,10 +103,12 @@ class CodeOperation(BaseOperation):
             stderr_text = stderr.decode('utf-8', errors='replace') if stderr else ""
 
             # Create result
-            executed_message = "Code executed successfully" if exit_code == 0 else \
-                f"Code execution failed with exit code {exit_code}"
             executed_code = StatusCode.SUCCESS.code if exit_code == 0 else \
                 StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
+            executed_message = "Code executed successfully" if exit_code == 0 else \
+                StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.errmsg.format(
+                    execution="execute_code",
+                    error_msg=f"execution failed with exit code {exit_code}, stderr {stderr_text}")
             return ExecuteCodeResult(
                 code=executed_code,
                 message=executed_message,
@@ -111,28 +121,34 @@ class CodeOperation(BaseOperation):
                 )
             )
         except FileNotFoundError:
+            stderr_content = f"{language} file not found error"
             return ExecuteCodeResult(
                 code=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code,
-                message=f"{language} file not found error",
+                message=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.errmsg.format(
+                    execution="execute_code",
+                    error_msg=stderr_content),
                 data=ExecuteCodeData(
                     code_content=code,
                     language=language,
                     exit_code=-1,
                     stdout="",
-                    stderr=f"{language} file not found error"
+                    stderr=stderr_content
                 )
             )
 
         except Exception as e:
+            stderr_content = f"unexpected error: {str(e)}"
             return ExecuteCodeResult(
                 code=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code,
-                message=f"unexpected error {type(e).__name__}",
+                message=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.errmsg.format(
+                    execution="execute_code",
+                    error_msg=stderr_content),
                 data=ExecuteCodeData(
                     code_content=code,
                     language=language,
                     exit_code=-1,
                     stdout="",
-                    stderr=f"unexpected error {type(e).__name__}"
+                    stderr=stderr_content
                 )
             )
 

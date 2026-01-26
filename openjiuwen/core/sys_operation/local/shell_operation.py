@@ -8,15 +8,16 @@ from typing import Optional, Dict, Any, AsyncIterator
 from _pytest import pathlib
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.sys_operation.base import BaseOperation, OperationMode
+from openjiuwen.core.sys_operation.shell import BaseShellOperation
+from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.registry import operation
-from openjiuwen.core.sys_operation.result.shell_operation_result import (
+from openjiuwen.core.sys_operation.result import (
     ExecuteCmdResult, ExecuteCmdStreamResult, ExecuteCmdData
 )
 
 
 @operation(name="shell", mode=OperationMode.LOCAL, description="local shell operation")
-class ShellOperation(BaseOperation):
+class ShellOperation(BaseShellOperation):
     """Shell operation"""
 
     async def execute_cmd(
@@ -46,6 +47,7 @@ class ShellOperation(BaseOperation):
                 return ExecuteCmdResult(
                     code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
+                        execution="execute_cmd",
                         error_msg="Command not allowed by allowlist")
                 )
 
@@ -77,6 +79,7 @@ class ShellOperation(BaseOperation):
                     return ExecuteCmdResult(
                         code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
                         message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
+                            execution="execute_cmd",
                             error_msg=f"Read stream error {e}")
                     )
 
@@ -95,6 +98,7 @@ class ShellOperation(BaseOperation):
                     return ExecuteCmdResult(
                         code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
                         message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
+                            execution="execute_cmd",
                             error_msg=f"Stop process error {e}")
                     )
 
@@ -116,6 +120,7 @@ class ShellOperation(BaseOperation):
                 return ExecuteCmdResult(
                     code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
+                        execution="execute_cmd",
                         error_msg=f"Command timed out after {timeout} seconds"),
                     data=res_data
                 )
@@ -128,7 +133,9 @@ class ShellOperation(BaseOperation):
         except Exception as e:
             return ExecuteCmdResult(
                 code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
+                    execution="execute_cmd",
+                    error_msg=str(e))
             )
 
     async def execute_cmd_stream(

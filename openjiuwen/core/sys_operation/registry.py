@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+import importlib
 from typing import Dict, Any, Type
 
 from openjiuwen.core.sys_operation.base import BaseOperation, OperationMode
@@ -29,18 +30,46 @@ class OperationRegistry:
         }
 
     @classmethod
-    def get_operation_info(cls, name: str, mode: OperationMode) -> Dict[str, Any]:
+    def get_operation_info(cls, name: str, mode: OperationMode, auto_load: bool = True) -> Dict[str, Any]:
         """
         Get the operation cls info by the name and mode.
 
         Args:
             name: Unique identifier for the operation, e.g., "file", "code", "shell".
             mode: Running mode associated with the operation, e.g., "local" or "sandbox".
+            auto_load: Whether to automatically load unregistered modules (default: True)
 
         Returns:
             The operation cls info, including cls and description.
         """
-        return cls._repository.get(name, {}).get(mode, {})
+        # 1. Get from registered repository first
+        operation_info = cls._repository.get(name, {}).get(mode, {})
+
+        # 2. Lazy load module if not found and auto_load is enabled
+        if not operation_info and auto_load:
+            cls._lazy_load_operation(name, mode)
+            # Re-fetch after lazy loading
+            operation_info = cls._repository.get(name, {}).get(mode, {})
+
+        return operation_info
+
+    @classmethod
+    def _lazy_load_operation(cls, name: str, mode: OperationMode):
+        """
+        Private method: Lazy load operation module for specific name and mode.
+
+        The module path follows the convention:
+        openjiuwen.core.sys_operation.{mode.value}.{name}_operation
+
+        Args:
+            name: Operation name (e.g., "fs", "code", "shell")
+            mode: Running mode (OperationMode enum)
+        """
+        try:
+            module_path = f"openjiuwen.core.sys_operation.{mode.value}.{name}_operation"
+            importlib.import_module(module_path)
+        except (ImportError, AttributeError):
+            pass
 
 
 def operation(name: str, mode: OperationMode, description: str = ""):

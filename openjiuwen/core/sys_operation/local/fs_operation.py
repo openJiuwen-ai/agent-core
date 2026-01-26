@@ -12,9 +12,10 @@ from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator, Ite
 import aiofiles
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.sys_operation.base import BaseOperation, OperationMode
+from openjiuwen.core.sys_operation.fs import BaseFsOperation
+from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.registry import operation
-from openjiuwen.core.sys_operation.result.fs_operation_result import (
+from openjiuwen.core.sys_operation.result import (
     ReadFileResult, WriteFileResult, \
     UploadFileResult, DownloadFileResult, ListFilesResult, ListDirsResult, SearchFilesResult, \
     ReadFileStreamResult, DownloadFileStreamResult, UploadFileStreamResult,
@@ -42,7 +43,7 @@ class _ListItemsSpec:
 
 
 @operation(name="fs", mode=OperationMode.LOCAL, description="local fs operation")
-class FsOperation(BaseOperation):
+class FsOperation(BaseFsOperation):
     """File system operation"""
 
     async def read_file(
@@ -79,6 +80,7 @@ class FsOperation(BaseOperation):
                 return ReadFileResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="read_file",
                         error_msg=f"File not found: {file_path}")
                 )
 
@@ -109,7 +111,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             return ReadFileResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="read_file",
+                    error_msg=str(e))
             )
 
     async def read_file_stream(
@@ -146,6 +150,7 @@ class FsOperation(BaseOperation):
                 yield ReadFileStreamResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="read_file_stream",
                         error_msg=f"File not found: {file_path}")
                 )
                 return
@@ -209,7 +214,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             yield ReadFileStreamResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="read_file_stream",
+                    error_msg=str(e))
             )
 
     async def write_file(
@@ -248,12 +255,14 @@ class FsOperation(BaseOperation):
                 return WriteFileResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="write_file",
                         error_msg=f"Target path is a directory: {file_path}")
                 )
             if not create_if_not_exist and not file_path.exists():
                 return WriteFileResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="write_file",
                         error_msg=f"File does not exist: {file_path}")
                 )
 
@@ -280,7 +289,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             return WriteFileResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="write_file",
+                    error_msg=str(e))
             )
 
     async def upload_file(
@@ -316,12 +327,15 @@ class FsOperation(BaseOperation):
                 return UploadFileResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="upload_file",
                         error_msg=f"Source not found: {src}")
                 )
             if dst.exists() and not overwrite:
                 return UploadFileResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=f"Target exists: {dst}")
+                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="upload_file",
+                        error_msg=f"Target exists: {dst}")
                 )
 
             size = await self._transfer_file(src, dst, chunk_size)
@@ -335,7 +349,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             return UploadFileResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="upload_file",
+                    error_msg=str(e))
             )
 
     async def upload_file_stream(
@@ -371,13 +387,16 @@ class FsOperation(BaseOperation):
                 yield UploadFileStreamResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="upload_file_stream",
                         error_msg=f"Source not found: {src}")
                 )
                 return
             if dst.exists() and not overwrite:
                 yield UploadFileStreamResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=f"Target exists: {dst}")
+                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="upload_file_stream",
+                        error_msg=f"Target exists: {dst}")
                 )
                 return
 
@@ -404,7 +423,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             yield UploadFileStreamResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="upload_file_stream",
+                    error_msg=str(e))
             )
 
     async def download_file(
@@ -440,12 +461,14 @@ class FsOperation(BaseOperation):
                 return DownloadFileResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="download_file",
                         error_msg=f"Source not found: {src}")
                 )
             if dst.exists() and not overwrite:
                 return DownloadFileResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="download_file",
                         error_msg=f"Destination exists: {dst}")
                 )
             if create_parent_dirs:
@@ -462,7 +485,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             return DownloadFileResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="download_file",
+                    error_msg=str(e))
             )
 
     async def download_file_stream(
@@ -498,6 +523,7 @@ class FsOperation(BaseOperation):
                 yield DownloadFileStreamResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="download_file_stream",
                         error_msg=f"Source not found: {src}")
                 )
                 return
@@ -505,6 +531,7 @@ class FsOperation(BaseOperation):
                 yield DownloadFileStreamResult(
                     code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                     message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                        execution="download_file_stream",
                         error_msg=f"Destination exists: {dst}")
                 )
                 return
@@ -534,7 +561,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             yield DownloadFileStreamResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="download_file_stream",
+                    error_msg=str(e))
             )
 
     async def list_files(
@@ -591,7 +620,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             return ListFilesResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="list_files",
+                    error_msg=str(e))
             )
 
     async def list_directories(
@@ -654,6 +685,7 @@ class FsOperation(BaseOperation):
             return ListDirsResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
                 message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="list_directories",
                     error_msg=str(e)
                 ),
             )
@@ -697,7 +729,9 @@ class FsOperation(BaseOperation):
         except Exception as e:
             return SearchFilesResult(
                 code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(error_msg=str(e))
+                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+                    execution="search_files",
+                    error_msg=str(e))
             )
 
     def _search_files_internal_sync(
@@ -739,6 +773,7 @@ class FsOperation(BaseOperation):
                 rel_path = raw_resolved.relative_to(work_dir)
             except ValueError as e:
                 raise build_error(status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                                  execution="resolve_path",
                                   error_msg=f"Access denied: Path {path} traverses outside {work_dir}",
                                   cause=e) from e
 

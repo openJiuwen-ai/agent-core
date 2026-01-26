@@ -246,6 +246,10 @@ class SessionError(ExecutionError):
     pass
 
 
+class SysOperationError(ExecutionError):
+    pass
+
+
 STATUS_TO_EXCEPTION = build_status_exception_map()
 
 
