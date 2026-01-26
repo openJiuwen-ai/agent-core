@@ -498,7 +498,7 @@ class BaseAgent(ABC):
             tool_description = tool.description
 
         return PluginSchema(
-            id=tool.card.name,
+            id=tool.card.id,
             name=tool.card.name,
             description=tool_description,
             inputs=inputs
