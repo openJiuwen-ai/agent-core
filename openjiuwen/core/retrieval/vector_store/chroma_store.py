@@ -122,6 +122,10 @@ class ChromaVectorStore(VectorStore):
             database_name = DEFAULT_DATABASE
         return chromadb.PersistentClient(path=path_or_uri, database=database_name)
 
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
+        self._check_configs_matching(self._construct_config, self.collection.configuration.get("hnsw", {}))
+
     async def add(
         self,
         data: dict | List[dict],

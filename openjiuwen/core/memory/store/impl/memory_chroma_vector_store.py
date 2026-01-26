@@ -185,3 +185,7 @@ class MemoryChromaVectorStore(VectorStore):
         **kwargs: Any,
     ) -> List[SearchResult]:
         pass
+
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
+        logger.error("check_vector_field not implemented in MemoryChromaVectorStore")

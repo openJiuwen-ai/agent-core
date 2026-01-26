@@ -65,6 +65,16 @@ from openjiuwen.core.retrieval.indexing.processor.splitter.base import Splitter
 
 # Splitter implementations
 from openjiuwen.core.retrieval.indexing.processor.splitter.splitter import SentenceSplitter
+
+# Vector field related
+from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import (
+    MilvusAUTO,
+    MilvusFLAT,
+    MilvusHNSW,
+    MilvusIVF,
+    MilvusSCANN,
+)
 from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
 from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 
@@ -190,6 +200,15 @@ _UTILS = [
     "parse_base64_embedding",
 ]
 
+_VECTOR_FIELD_CLASSES = [
+    "ChromaVectorField",
+    "MilvusAUTO",
+    "MilvusFLAT",
+    "MilvusHNSW",
+    "MilvusIVF",
+    "MilvusSCANN",
+]
+
 __all__ = (
     _KNOWLEDGE_BASE_CLASSES
     + _KNOWLEDGE_BASE_FUNCTIONS
@@ -200,4 +219,5 @@ __all__ = (
     + _PROCESSOR_CLASSES
     + _RETRIEVER_CLASSES
     + _UTILS
+    + _VECTOR_FIELD_CLASSES
 )

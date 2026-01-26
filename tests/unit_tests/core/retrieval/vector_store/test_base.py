@@ -15,6 +15,9 @@ class ConcreteVectorStore(VectorStore):
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> None:
         pass
 
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
+
     async def add(self, data, batch_size=None, **kwargs):
         pass
 

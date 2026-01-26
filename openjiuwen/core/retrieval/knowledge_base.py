@@ -36,8 +36,10 @@ class KnowledgeBase(ABC):
         extractor: Optional[Extractor] = None,
         index_manager: Optional[Indexer] = None,
         llm_client: Optional[Any] = None,
+        strict_validation: bool = True,
         **kwargs: Any,
     ):
+        self.strict_validation = strict_validation
         self.config = config
         self.vector_store = vector_store
         self.embed_model = embed_model
@@ -67,6 +69,8 @@ class KnowledgeBase(ABC):
                     f'- Vector Store ({type(self.vector_store).__name__}) is using "{vector_store_val}"\n'
                     f'- Index manager ({type(self.index_manager).__name__}) is using "{index_manager_val}"',
                 )
+        if self.strict_validation and self.vector_store:
+            self.vector_store.check_vector_field()
 
     async def delete_collection(self, collection: str) -> None:
         """Delete a collection from current database"""

@@ -177,3 +177,7 @@ class MemoryMilvusVectorStore(VectorStore):
 
     async def table_exists(self, table_name: str) -> bool:
         return utility.has_collection(table_name, using="default")
+
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
+        logger.error("check_vector_field not implemented in MemoryMilvusVectorStore")

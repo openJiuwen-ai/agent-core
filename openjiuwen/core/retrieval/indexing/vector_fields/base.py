@@ -10,7 +10,7 @@ for construction and search operations.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.fields import FieldInfo
 
 DEFAULT = None
@@ -52,6 +52,9 @@ class VectorField(BaseModel):
     vector_field: str = Field(default="embedding", description="Vector field name")
     database_type: Literal["milvus", "chroma"] = Field(description="Database type")
     index_type: Literal["auto", "hnsw", "flat", "ivf", "scann"] = Field(description="ANN index type")
+
+    # Disallow extra arguments to stop typo, validate on assignment to prevent user error
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     @staticmethod
     def should_keep(finfo: FieldInfo, stage: Literal["search", "construct"]) -> bool:

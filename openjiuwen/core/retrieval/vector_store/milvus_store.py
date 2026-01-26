@@ -9,7 +9,7 @@ Supports vector search, sparse search (BM25), and hybrid search.
 import asyncio
 from typing import Any, List, Optional
 
-from pymilvus import AnnSearchRequest, MilvusClient, RRFRanker
+from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -102,6 +102,43 @@ class MilvusVectorStore(VectorStore):
             client.use_database(database_name)
         return client
 
+    def get_search_params(self, top_k: int) -> dict[str, Any]:
+        """Get correct parameters for searches"""
+        search_params = self._search_config
+        if "efSearchFactor" in self._search_config:
+            search_params = search_params.copy()
+            search_params["ef"] = round(top_k * search_params.pop("efSearchFactor"))
+        return search_params
+
+    def check_vector_field(self) -> None:
+        """Check if vector field configuration is consistent with actual database"""
+        if not self._client.has_collection(self.collection_name):
+            return
+        index_type = self.vector_field.index_type
+        variant = str(getattr(self.vector_field, "variant", "") or "")
+        field_name = self.vector_field.vector_field
+        actual = self._client.describe_index(self.collection_name, field_name) or {}
+        if not actual:
+            collection_fields = self._client.describe_collection(self.collection_name).get("fields", [])
+            v_fields = [v_field for v_field in collection_fields if v_field["type"] == DataType.FLOAT_VECTOR]
+            v_fields_list = "\n".join("- [{field_id}] {name}: {params}".format(**v_field) for v_field in v_fields)
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
+                error_msg=f"MilvusVectorStore has vector_field at {field_name} while actual database has "
+                f"vector field(s) at:\n{v_fields_list}\nYou may want to call delete_collection method on "
+                f'collection "{self.collection_name}"',
+            )
+
+        if index_type != "auto":
+            returned_type: str = actual.get("index_type", "unknown")
+            if not (returned_type.startswith(index_type.upper()) and returned_type.endswith(variant)):
+                raise build_error(
+                    StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
+                    error_msg=f"MilvusVectorStore has index_type of {index_type} while actual database has "
+                    f"index_type of {returned_type}, do not change index_type after Knowledge Base is constructed.",
+                )
+        self._check_configs_matching(self._construct_config, actual)
+
     async def add(
         self,
         data: dict | List[dict],
@@ -180,7 +217,7 @@ class MilvusVectorStore(VectorStore):
             anns_field=self.vector_field.vector_field,
             limit=top_k,
             output_fields=output_fields,
-            search_params={"metric_type": self._distance_metric, "params": self._search_config},
+            search_params={"metric_type": self._distance_metric, "params": self.get_search_params(top_k)},
             filter=filter_expr,
         )
 
@@ -263,7 +300,7 @@ class MilvusVectorStore(VectorStore):
                 dense_req = AnnSearchRequest(
                     data=[query_vector],
                     anns_field=self.vector_field.vector_field,
-                    param={"metric_type": self._distance_metric, "params": self._search_config},
+                    param={"metric_type": self._distance_metric, "params": self.get_search_params(top_k)},
                     limit=top_k,
                 )
                 search_requests.append(dense_req)
