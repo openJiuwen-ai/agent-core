@@ -781,7 +781,7 @@ class ResourceMgr:
                     self._id_to_card[card.id] = card
                     self._tag_mgr.tag_resource(card.id, tag if tag else GLOBAL)
                 self._tag_mgr.tag_resource(config.server_id, tag if tag else GLOBAL)
-                add_results.append(Ok(server_config.server_id))
+                add_results.append(Ok(config.server_id))
                 tool_names = [card.name for card in cards]
                 logger.info(
                     f"add mcp server succeed, id={config.server_id}, server_name={config.server_name},"
