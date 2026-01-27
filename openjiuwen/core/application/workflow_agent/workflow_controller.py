@@ -317,14 +317,14 @@ class WorkflowController(IntentDetectionController):
                     for chunk in chunks:
                         if isinstance(chunk, OutputSchema):
                             if isinstance(chunk.payload, dict):
-                                answer = chunk.payload.get("answer", "")
-                                if answer is not None:
-                                    content_parts.append(str(answer))
+                                response = chunk.payload.get("response", "")
+                                if response is not None:
+                                    content_parts.append(str(response))
                             elif isinstance(chunk.payload, InteractionOutput):
                                 # Keep interaction interrupt output content
                                 content_parts.append(str(chunk.payload.value) if chunk.payload.value else "")
                     workflow_content = "".join(content_parts)
-                    MessageUtils.add_ai_message(AssistantMessage(content=workflow_content),
+                    await MessageUtils.add_ai_message(AssistantMessage(content=workflow_content),
                                                 self._context_engine, session)
 
                 # Construct WorkflowOutput
