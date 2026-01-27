@@ -159,6 +159,6 @@ class SkillToolKit:
         rm = Runner.resource_mgr
         rm.add_tool([execute_python_code_tool, execute_command_tool, view_file_tool])
 
-        agent.ability_kit.add(execute_python_code_tool.card)
-        agent.ability_kit.add(execute_command_tool.card)
-        agent.ability_kit.add(view_file_tool.card)
+        agent.ability_manager.add(execute_python_code_tool.card)
+        agent.ability_manager.add(execute_command_tool.card)
+        agent.ability_manager.add(view_file_tool.card)
