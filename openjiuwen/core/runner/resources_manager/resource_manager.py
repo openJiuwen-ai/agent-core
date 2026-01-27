@@ -848,8 +848,8 @@ class ResourceMgr:
         results = []
         for mcp_server_id in server_ids_to_remove:
             try:
-                self._tag_mgr.remove_resource(server_id)
-                tool_ids = await self._resource_registry.tool().remove_tool_server(server_id)
+                self._tag_mgr.remove_resource(mcp_server_id)
+                tool_ids = await self._resource_registry.tool().remove_tool_server(mcp_server_id)
                 if tool_ids:
                     self.remove_tool(tool_id=tool_ids)
                 logger.info(f"remove mcp server succeed, id={mcp_server_id}")
