@@ -51,6 +51,12 @@ class OpenAIModelClient(BaseModelClient):
 
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
+        llm_logger.info(
+            "Before create openai client, model client config params ready.",
+            event_type=LogEventType.LLM_CALL_START,
+            timeout=final_timeout,
+            max_retries=self.model_client_config.max_retries
+        )
 
         return openai.AsyncOpenAI(
             api_key=self.model_client_config.api_key,

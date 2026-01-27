@@ -88,6 +88,12 @@ class SiliconFlowModelClient(BaseModelClient):
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
         timeout_obj = aiohttp.ClientTimeout(total=final_timeout)
 
+        llm_logger.info(
+            "Before create siliconflow client, model client config params ready.",
+            event_type=LogEventType.LLM_CALL_START,
+            timeout=final_timeout
+        )
+
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.post(
                     url=api_url,

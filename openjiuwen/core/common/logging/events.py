@@ -281,6 +281,9 @@ class LLMEvent(BaseLogEvent):
     is_stream: bool = False  # Whether it's a streaming call
     chunk_index: Optional[int] = None  # Chunk index (for streaming calls)
     extra_params: Dict[str, Any] = None # extra LLM parameters
+    timeout: Optional[float] = None # timeout parameter
+    stop: Optional[str] = None # stop parameter
+    max_retries: Optional[int] = None # max_retries parameter
 
     def __post_init__(self):
         super().__post_init__()

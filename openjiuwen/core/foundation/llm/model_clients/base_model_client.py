@@ -245,6 +245,7 @@ class BaseModelClient(ABC):
                 top_p=final_top_p,
                 max_tokens=final_max_tokens,
                 is_stream=stream,
+                stop=final_stop,
                 metadata={"client_name": client_name},
                 extra_params=extra_params
             )
