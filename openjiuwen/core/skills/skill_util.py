@@ -1,4 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import os
 from pathlib import Path
 
 from openjiuwen.core.foundation.prompt import PromptTemplate
@@ -84,6 +85,13 @@ class SkillUtil:
             str: A formatted prompt string with skill information that can be used
                 to inform agents about available skills.
         """
+        files_base_dir = os.getenv("FILES_BASE_DIR", str(Path(__file__).resolve().parent))
+        system_prompt = (
+            "You are an agent equipped with various skills to solve problems.\n"
+            "Before attempting any task, read the relevant skill document (SKILL.md) "
+            "using view_file and follow its workflow.\n"
+            f"All user-provided files are located at '{files_base_dir}'\n"
+        )
         skills = self._skill_manager.get_all()
         skills_info = []
         for index, skill in enumerate(skills):
@@ -92,4 +100,5 @@ class SkillUtil:
                 f"Skill description: {skill.description}; "
                 f"Skill file path: {skill.directory}"
             )
-        return skill_prompt.format({"skills": "\n".join(skills_info)}).content
+        skill_text = skill_prompt.format({"skills": "\n".join(skills_info)}).content
+        return system_prompt + "\n" + skill_text

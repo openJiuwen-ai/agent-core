@@ -45,7 +45,6 @@ async def main():
         "What is the store's average profit margin?"
     )
     skills_dir = Path(os.getenv("SKILLS_DIR")).expanduser().resolve()
-    files_base_dir = os.getenv("FILES_BASE_DIR")
 
     session_id = "skill_session"
     sys_operation_id = "default_sysop"
@@ -57,10 +56,7 @@ async def main():
     model_provider = (os.getenv("MODEL_PROVIDER", "OpenAI") or "OpenAI").strip()
 
     system_prompt = (
-        "You are an agent equipped with various skills to solve problems.\n"
-        "Before attempting any task, read the relevant skill document (SKILL.md) "
-        "using view_file and follow its workflow.\n"
-        f"All user-provided files are located at '{files_base_dir}'\n"
+        "You are an intelligent assistant."
     )
 
     from openjiuwen.core.runner.runner import Runner
