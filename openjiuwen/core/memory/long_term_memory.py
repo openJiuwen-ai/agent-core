@@ -15,6 +15,7 @@ from openjiuwen.core.memory.manage.mem_model.message_manager import MessageManag
 from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.index.write_manager import WriteManager
+from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, MemoryType
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.search.search_manager import SearchManager, SearchParams
@@ -76,6 +77,7 @@ class LongTermMemory(metaclass=Singleton):
         self.user_profile_manager = None
         self.variable_manager = None
         self.write_manager = None
+        self.summary_manager = None
         self.search_manager = None
         self.generator = None
         # llm
@@ -163,9 +165,13 @@ class LongTermMemory(metaclass=Singleton):
             self.kv_store,
             config.crypto_key
         )
+        self.summary_manager = SummaryManager(semantic_recall_instance=self.semantic_store,
+                                              user_mem_store=user_mem_store,
+                                              crypto_key=self._sys_mem_config.crypto_key)
         managers = {
             MemoryType.USER_PROFILE.value: self.user_profile_manager,
-            MemoryType.VARIABLE.value: self.variable_manager
+            MemoryType.VARIABLE.value: self.variable_manager,
+            MemoryType.SUMMARY.value: self.summary_manager
         }
         self.write_manager = WriteManager(managers, user_mem_store)
         self.search_manager = SearchManager(
@@ -173,7 +179,7 @@ class LongTermMemory(metaclass=Singleton):
             user_mem_store,
             config.crypto_key
         )
-        self.generator = Generator()
+        self.generator = Generator(data_id_generator=data_id_generator)
         # set init llm
         llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
                                                   model_client_config=config.default_model_client_cfg)
@@ -348,6 +354,7 @@ class LongTermMemory(metaclass=Singleton):
             # if timestamp is None, take the current time
             if not timestamp:
                 timestamp = datetime.now(timezone.utc)
+            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
             # when multi messages, use last msg_id
             for i, msg in enumerate(messages):
                 msg_timestamp = timestamp + timedelta(milliseconds=i)
@@ -377,7 +384,8 @@ class LongTermMemory(metaclass=Singleton):
                 session_id=session_id,
                 config=agent_config,
                 base_chat_model=llm,
-                message_mem_id=msg_id
+                message_mem_id=msg_id,
+                timestamp=timestamp_str
             )
             try:
                 await self.write_manager.add_mem(mem_units=all_memory, llm=llm)

@@ -24,7 +24,7 @@ class SearchParams(BaseModel):
 
 
 class SearchManager:
-    user_mem_manager_list = [MemoryType.USER_PROFILE.value]
+    user_mem_manager_list = [MemoryType.USER_PROFILE.value, MemoryType.SUMMARY.value]
     all_mem_manager_list = [item.value for item in MemoryType]
 
     def __init__(self,

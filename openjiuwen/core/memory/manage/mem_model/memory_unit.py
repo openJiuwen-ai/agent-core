@@ -17,6 +17,7 @@ class MemoryType(Enum):
     USER_PROFILE = "user_profile"
     VARIABLE = "variable"
     IMPLICIT_USER_PROFILE = "implicit_user_profile"
+    SUMMARY = "summary"
     UNKNOWN = "unknown"
 
 
@@ -39,6 +40,7 @@ class UserProfileUnit(BaseMemoryUnit):
     is_implicit: bool = False
     reasoning: str = ""
     context_summary: str = ""
+    timestamp: str = ""
 
 
 @dataclass
@@ -47,3 +49,12 @@ class VariableUnit(BaseMemoryUnit):
     variable_name: str
     variable_mem: str
     mem_id: str = ""
+
+
+@dataclass
+class SummaryUnit(BaseMemoryUnit):
+    mem_type: MemoryType = field(default=MemoryType.SUMMARY, init=False)
+    summary: str
+    mem_id: str = ""
+    message_mem_id: Optional[str] = None  # Corresponding Message ID
+    timestamp: str = ""
