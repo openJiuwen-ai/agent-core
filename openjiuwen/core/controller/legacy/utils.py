@@ -2,10 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import copy
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.constants.enums import TaskType
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.controller.legacy.event.event import Event
 from openjiuwen.core.controller.legacy.task.task import Task, TaskInput
@@ -25,6 +24,9 @@ from openjiuwen.core.foundation.llm import ModelConfig, BaseMessage, AssistantMe
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.workflow import WorkflowOutput
+
+if TYPE_CHECKING:
+    from openjiuwen.core.runner import Runner
 
 
 class MessageHandlerUtils:
@@ -277,6 +279,7 @@ class ReasonerUtils:
     @staticmethod
     async def get_model(model_config: ModelConfig):
         """Get model instance by config"""
+        from openjiuwen.core.runner import Runner
         model_id = generate_key(
             model_config.model_info.api_key,
             model_config.model_info.api_base,

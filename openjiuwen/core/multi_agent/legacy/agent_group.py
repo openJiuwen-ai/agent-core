@@ -196,7 +196,7 @@ class ControllerGroup(BaseGroup):
 
     def _convert_message(self, message):
         """Convert dict to Message if needed (backward compatibility)"""
-        from openjiuwen.core.controller import Event
+        from openjiuwen.core.controller.legacy import Event
         if isinstance(message, dict):
             return Event.create_user_event(
                 content=message.get("content") or message.get("query", ""),

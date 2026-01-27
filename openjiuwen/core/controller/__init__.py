@@ -5,31 +5,38 @@
 This module re-exports from legacy submodule for backward compatibility.
 """
 
-from openjiuwen.core.controller.legacy import (
-    BaseController,
-    IntentDetectionController,
+from openjiuwen.core.controller.schema import (
+    TextDataFrame,
+    FileDataFrame,
+    JsonDataFrame,
+    DataFrame,
+    EventType,
+    Event,
+    InputEvent,
+    TaskInteractionEvent,
+    TaskCompletionEvent,
+    TaskFailedEvent,
+    ControllerOutputPayload,
+    ControllerOutputChunk,
+    ControllerOutput,
     IntentType,
     Intent,
-    TaskQueue,
-    Task,
-    TaskInput,
     TaskStatus,
-    TaskResult,
-    IntentDetector,
-    Planner,
-    Event,
-    EventType,
-    EventPriority,
-    EventSource,
-    EventContent,
-    EventContext,
-    SourceType,
-    IntentDetectionConfig,
-    PlannerConfig,
-    ProactiveIdentifierConfig,
-    ReflectorConfig,
-    ReasonerConfig,
+    Task,
 )
+from openjiuwen.core.controller.modules import (
+    EventHandlerInput,
+    EventHandler,
+    EventQueue,
+    TaskManagerState,
+    TaskManager,
+    TaskFilter,
+    TaskExecutor,
+    TaskExecutorRegistry,
+    TaskScheduler,
+)
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.base import Controller
 
 _CONTROLLER_CLASSES = [
     "BaseController",
@@ -72,37 +79,6 @@ _CONFIG_CLASSES = [
     "ReasonerConfig",
 ]
 
-from openjiuwen.core.controller.schema import (
-    TextDataFrame,
-    FileDataFrame,
-    JsonDataFrame,
-    DataFrame,
-    EventType,
-    InputEvent,
-    TaskInteractionEvent,
-    TaskCompletionEvent,
-    TaskFailedEvent,
-    ControllerOutputPayload,
-    ControllerOutputChunk,
-    ControllerOutput,
-    IntentType,
-    Intent,
-    TaskStatus,
-    Task
-)
-from openjiuwen.core.controller.modules import (
-    EventHandlerInput,
-    EventHandler,
-    EventQueue,
-    TaskManagerState,
-    TaskManager,
-    TaskFilter,
-    TaskExecutor,
-    TaskExecutorRegistry,
-    TaskScheduler,
-)
-from openjiuwen.core.controller.config import ControllerConfig
-from openjiuwen.core.controller.base import Controller
 
 _NEW_CLASS = [
     # ========================= 数据模型定义 =============================

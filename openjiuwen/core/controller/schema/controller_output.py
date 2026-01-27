@@ -37,10 +37,8 @@ class ControllerOutputPayload(BaseModel):
         data: Output data list, contains the actual output content
         metadata: Metadata, can contain additional output information
     """
-    type: Literal[
-        EventType.TASK_COMPLETION, EventType.TASK_INTERACTION,
-        EventType.TASK_FAILED, TASK_PROCESSING, ALL_TASKS_PROCESSED
-    ]
+    type: Literal[EventType.TASK_COMPLETION, EventType.TASK_INTERACTION, EventType.TASK_FAILED,
+                    TASK_PROCESSING, ALL_TASKS_PROCESSED]
     data: List[DataFrame] = Field(default_factory=list)
     metadata: Optional[Dict[str, Any]] = None
 

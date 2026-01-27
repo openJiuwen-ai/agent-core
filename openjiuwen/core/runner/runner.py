@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Optional, Union, Any
+from typing import Optional, Union, Any, TYPE_CHECKING
 
 from openjiuwen.core.multi_agent import BaseGroup
 from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
@@ -21,8 +21,8 @@ from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMg
 from openjiuwen.core.session import Session
 from openjiuwen.core.workflow import Session as WorkflowSession
 from openjiuwen.core.workflow import create_workflow_session
-from openjiuwen.core.single_agent import Session as AgentSession, AgentCard
-from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.single_agent import Session as AgentSession, create_agent_session
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.workflow import generate_workflow_key
 from openjiuwen.core.workflow import Workflow
@@ -235,7 +235,7 @@ class Runner:
             await getattr(agent_session, "_inner").post_run()
 
     async def run_agent_group(self,
-                              agent_group: str | BaseGroup,
+                              agent_group: Union[str, 'BaseGroup'],
                               inputs: Any,
                               *,
                               session: Optional[str | Session] = None,
@@ -256,7 +256,7 @@ class Runner:
         return await agent_group_instance.invoke(inputs)
 
     async def run_agent_group_streaming(self,
-                                        agent_group: str | BaseGroup,
+                                        agent_group: Union[str, 'BaseGroup'],
                                         inputs: Any,
                                         *,
                                         session: Optional[str | Session] = None,

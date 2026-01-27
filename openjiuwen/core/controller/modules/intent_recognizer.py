@@ -27,6 +27,7 @@ Supported intent types (see ``IntentType`` for details):
 - UNKNOWN_TASK
 """
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.controller.base import ControllerConfig
@@ -35,7 +36,9 @@ from openjiuwen.core.controller.modules.task_manager import TaskManager
 from openjiuwen.core.controller.schema import Intent
 from openjiuwen.core.controller.schema.event import Event
 from openjiuwen.core.session import Session
-from openjiuwen.core.single_agent.agent import AbilityManager
+
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent.agent import AbilityManager
 
 
 class IntentRecognizer:
@@ -49,7 +52,7 @@ class IntentRecognizer:
             self,
             config: ControllerConfig,
             task_manager: TaskManager,
-            ability_manager: AbilityManager,
+            ability_manager: 'AbilityManager',
             context_engine: ContextEngine
     ):
         """Initialize the intent recognizer.

@@ -25,7 +25,7 @@ from openjiuwen.core.workflow import Start
 from openjiuwen.core.session import FORCE_DEL_WORKFLOW_STATE_ENV_KEY
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.foundation.llm import BaseModelInfo, Model
+from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata
 from openjiuwen.core.workflow import Workflow
 

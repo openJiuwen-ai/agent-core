@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from openjiuwen.core.multi_agent.legacy.group_controller import (
     BaseGroupController
 )
-from openjiuwen.core.controller import Event
+from openjiuwen.core.controller.legacy import Event
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode

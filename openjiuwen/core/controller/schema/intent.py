@@ -19,7 +19,7 @@ from pydantic import BaseModel, model_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.controller.schema.event.event import Event
+from openjiuwen.core.controller.schema.event import Event
 
 
 class IntentType(Enum):

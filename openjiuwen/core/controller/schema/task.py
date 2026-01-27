@@ -13,12 +13,16 @@ submitted -> working -> (completed | failed | paused | canceled)
                 -> input-required -> (continue execution or cancel)
 """
 
+from __future__ import annotations
+
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, TYPE_CHECKING
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from openjiuwen.core.controller.schema.event import Event
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk
+
+if TYPE_CHECKING:
+    from openjiuwen.core.controller.schema.event import Event
 
 
 class TaskStatus(str, Enum):

@@ -42,7 +42,7 @@ from examples.groups.hierarchical_group import (
 from examples.groups.hierarchical_group.agents.main_controller import (
     HierarchicalMainController
 )
-from openjiuwen.core.controller import Event
+from openjiuwen.core.controller.legacy import Event
 from openjiuwen.core.common.constants import constant as const
 from openjiuwen.core.workflow import WorkflowCard, Workflow, Start, End
 from openjiuwen.core.workflow import (
