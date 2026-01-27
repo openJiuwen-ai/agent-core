@@ -7,22 +7,28 @@ import pytest
 
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
-from openjiuwen.core.foundation.llm import UserMessage, SystemMessage
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.context_engine.schema.messages import OffloadUserMessage
+from openjiuwen.core.foundation.llm import UserMessage, SystemMessage, AssistantMessage, ToolMessage
+from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.single_agent import AgentCard
 
 
 class TestContextEngine:
     @pytest.fixture
     def session(self):
-        return Session("test_session")
+        return create_agent_session("test_session", card=AgentCard(id="test_agent"))
+
+    @pytest.fixture
+    def same_session(self):
+        return create_agent_session("test_session", card=AgentCard(id="test_agent"))
 
     @pytest.fixture
     def another_session(self):
-        return Session("another_session")
+        return create_agent_session("another_session", card=AgentCard(id="test_agent"))
 
     @pytest.fixture
     def engine(self):
-        return ContextEngine(ContextEngineConfig(default_window_message_num=5, memory_message_num=3))
+        return ContextEngine(ContextEngineConfig(default_window_message_num=5))
 
     @pytest.mark.asyncio
     async def test_create_context_with_history_and_session(self, engine, session):
@@ -48,32 +54,6 @@ class TestContextEngine:
 
         assert ctx1 is not ctx2
         assert ctx1.session_id() != ctx2.session_id()
-
-    @pytest.mark.asyncio
-    async def test_create_context_loads_from_memory_when_no_history(self, engine, session):
-        mem_messages = [UserMessage(content="from memory")]
-        with patch.object(ContextEngine, "_load_context_from_memory", new=AsyncMock(return_value=mem_messages)):
-            context = await engine.create_context(
-                context_id="ctx",
-                session=session,
-                mem_scope_id="scope-1",
-            )
-        assert context.get_messages() == mem_messages
-
-    @pytest.mark.asyncio
-    async def test_save_contexts_persists_and_calls_on_save(self, engine, session):
-        context = await engine.create_context(context_id="ctx", session=session)
-        await context.add_messages(UserMessage(content="new msg"))
-
-        with patch.object(ContextEngine, "_save_context_to_memory", new=AsyncMock()) as save_mock, \
-                patch.object(context, "on_save", wraps=context.on_save) as on_save_spy:
-            await engine.save_contexts(["ctx"], session=session, mem_scope_id="scope-1")
-
-        save_mock.assert_awaited_once()
-        # ensure we persisted only the newly added message (without history)
-        args, kwargs = save_mock.call_args
-        assert kwargs["messages"] == [UserMessage(content="new msg")]
-        on_save_spy.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_clear_context_all(self, engine, session):
@@ -105,3 +85,39 @@ class TestContextEngine:
 
         assert engine.get_context(context_id="ctx1", session_id=session.get_session_id()) is None
         assert engine.get_context(context_id="ctx2", session_id=another_session.get_session_id()) is None
+
+    @pytest.mark.asyncio
+    async def test_context_save_and_load(self, session, same_session):
+        from openjiuwen.core.session import get_default_inmemory_checkpointer
+        check_pointer = get_default_inmemory_checkpointer()
+        await check_pointer.pre_agent_execute(
+            session=getattr(session, "_inner").get_inner_session(), inputs=None
+        )
+        ce_1 = ContextEngine(ContextEngineConfig(default_window_message_num=5))
+        context_1 = await ce_1.create_context(
+            "test_context",
+            session,
+        )
+        messages = [
+            SystemMessage(content="1"),
+            UserMessage(content="2"),
+            AssistantMessage(content="3"),
+            ToolMessage(content="4", tool_call_id=""),
+            OffloadUserMessage(content="5", offload_type="in_memory", offload_handle="abc"),
+        ]
+
+        await context_1.add_messages(messages)
+        await ce_1.save_contexts(["test_context"], session)
+        await session.post_run()
+
+        await check_pointer.pre_agent_execute(
+            session=getattr(same_session, "_inner").get_inner_session(), inputs=None
+        )
+        ce_2 = ContextEngine(ContextEngineConfig(default_window_message_num=5))
+        context_2 = await ce_2.create_context(
+            "test_context",
+            same_session,
+        )
+
+        assert context_1.get_messages() == context_2.get_messages()
+

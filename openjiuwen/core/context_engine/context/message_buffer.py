@@ -1,12 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Dict
 
 from openjiuwen.core.foundation.llm import BaseMessage
 
 
 class ContextMessageBuffer:
-    def __init__(self, history_messages: List[BaseMessage]):
+    def __init__(self, history_messages: List[BaseMessage], max_buffer_size: Optional[int] = None):
+        self._max_buffer_size = max_buffer_size
         self._context_messages: List[BaseMessage] = history_messages[:]
         self._history_messages_size = len(history_messages)
 
@@ -16,9 +17,10 @@ class ContextMessageBuffer:
     def add_back(self, messages: Union[BaseMessage, List[BaseMessage]]):
         if isinstance(messages, BaseMessage):
             self._context_messages.append(messages)
-            return
-        for msg in messages:
-            self._context_messages.append(msg)
+        else:
+            for msg in messages:
+                self._context_messages.append(msg)
+        self._if_need_resize()
 
     def get_back(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
         context_messages = self._context_messages[:]
@@ -44,3 +46,54 @@ class ContextMessageBuffer:
             return
         history_messages = self._context_messages[:self._history_messages_size]
         self._context_messages = history_messages + messages
+
+    def _if_need_resize(self):
+        if self._max_buffer_size is None:
+            return
+        if len(self._context_messages) <= self._max_buffer_size * 2:
+            return
+        self._context_messages = self._context_messages[self._max_buffer_size:]
+        if self._history_messages_size == 0 or self._max_buffer_size > self._history_messages_size:
+            self._history_messages_size = 0
+            return
+        self._history_messages_size = self._history_messages_size - self._max_buffer_size
+
+
+class OffloadMessageBuffer:
+    def __init__(
+            self,
+            init_messages: Dict[str, List[BaseMessage]] = None,
+    ):
+        self._in_memory_offload_messages: Dict[str, List[BaseMessage]] = init_messages or dict()
+
+    def offload(
+            self,
+            offload_handle: str,
+            offload_type: str,
+            messages: List[BaseMessage],
+    ):
+        if offload_type == "in_memory":
+            self._in_memory_offload_messages[offload_handle] = messages
+
+    def reload(
+            self,
+            offload_handle: str,
+            offload_type: str
+    ) -> List[BaseMessage]:
+        if offload_type == "in_memory":
+            return self._in_memory_offload_messages.get(offload_handle, [])
+        return []
+
+    def clear(
+            self,
+            offload_handle: str,
+            offload_type: str
+    ):
+        if offload_type == "in_memory":
+            self._in_memory_offload_messages.pop(offload_handle, None)
+        return
+
+    def get_all(
+            self
+    ):
+        return self._in_memory_offload_messages
