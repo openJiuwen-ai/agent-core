@@ -4,12 +4,7 @@
 
 import pytest
 
-from openjiuwen.core.common.constants.enums import ControllerType
-from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.session.internal.agent import AgentSession
-from openjiuwen.core.session import Config
+from openjiuwen.core.session.workflow import create_workflow_session
 from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.foundation.tool import tool, ToolCard
 from openjiuwen.core.workflow import Workflow, WorkflowCard, WorkflowOutput, WorkflowExecutionState
@@ -90,7 +85,9 @@ class TestRunner:
         name = "test_workflow"
         version = "1"
         workflow = self._build_workflow(name, workflow_id, version)
-        result = await Runner.run_workflow(workflow, inputs={"query": "query workflow"}, session=session)
+        Runner.resource_mgr.add_workflow(workflow.card, lambda: workflow)
+        session = create_workflow_session()
+        result = await Runner.run_workflow(workflow_id, inputs={"query": "query workflow"}, session=session)
         assert result == WorkflowOutput(result={"result": "query workflow"}, state=WorkflowExecutionState.COMPLETED)
 
     async def test_run_tool(self, session):

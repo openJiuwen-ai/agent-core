@@ -88,7 +88,9 @@ class ToolMgr:
             if not connected:
                 raise build_error(StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR, server_config=server_config,
                                   reason="")
-            return await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
+            results = await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
+            self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
+            return results
         except Exception as e:
             raise build_error(StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=e, server_config=server_config,
                               reason=str(e))
@@ -128,6 +130,8 @@ class ToolMgr:
             ids = self._mcp_server_name_to_ids.get(mcp_server_resource.config.server_name)
             if ids and server_id in ids:
                 ids.remove(server_id)
+            if not ids:
+                self._mcp_server_name_to_ids.pop(mcp_server_resource.config.server_name)
         return mcp_server_resource.tool_ids
 
     async def refresh_tool_server(self, server_id: str, skip_not_exist: bool = False, force: bool = False) -> list[
@@ -140,7 +144,7 @@ class ToolMgr:
             return []
         need_refresh = force
         if not force:
-            if time.time() - mcp_resource.last_update_time >= mcp_resource.expiry_time:
+            if mcp_resource.expiry_time and time.time() - mcp_resource.last_update_time >= mcp_resource.expiry_time:
                 need_refresh = True
 
         if need_refresh:
