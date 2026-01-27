@@ -394,7 +394,7 @@ class ReActAgent(BaseAgent):
             last_msg = system_messages[-1]
             last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
 
-        # Get tool info from _ability_kit
+        # Get tool info from _ability_manager
         tools = await self.list_tool_info()
 
         # ReAct loop

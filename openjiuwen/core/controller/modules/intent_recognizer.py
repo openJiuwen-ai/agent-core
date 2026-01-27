@@ -27,6 +27,7 @@ Supported intent types (see ``IntentType`` for details):
 - UNKNOWN_TASK
 """
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.controller.base import ControllerConfig
@@ -35,7 +36,9 @@ from openjiuwen.core.controller.modules.task_manager import TaskManager
 from openjiuwen.core.controller.schema import Intent
 from openjiuwen.core.controller.schema.event import Event
 from openjiuwen.core.session import Session
-from openjiuwen.core.single_agent.base import AbilityManager
+
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent.agent import AbilityManager
 
 
 class IntentRecognizer:
@@ -49,7 +52,7 @@ class IntentRecognizer:
             self,
             config: ControllerConfig,
             task_manager: TaskManager,
-            ability_manager: AbilityManager,
+            ability_manager: 'AbilityManager',
             context_engine: ContextEngine
     ):
         """Initialize the intent recognizer.
@@ -78,7 +81,7 @@ class IntentRecognizer:
         ...
 
 
-class EventHandlerWithIntentRecognition(ABC, EventHandler):
+class EventHandlerWithIntentRecognition(EventHandler):
     """Event handler with intent recognition.
 
     Extends ``EventHandler`` by adding an intent recognition step and routing
@@ -149,7 +152,6 @@ class EventHandlerWithIntentRecognition(ABC, EventHandler):
         ...
 
     async def _process_pause_task_intent(self, inputs: EventHandlerInput):
-    async def _process_pause_task_intent(self, inputs: EventHandlerInput):
         """Process PAUSE_TASK intent.
 
         Typically calls ``task_scheduler.pause_task`` to interrupt a target
@@ -160,7 +162,6 @@ class EventHandlerWithIntentRecognition(ABC, EventHandler):
         """
         ...
 
-    async def _process_resume_task_intent(self, inputs: EventHandlerInput):
     async def _process_resume_task_intent(self, inputs: EventHandlerInput):
         """Process RESUME_TASK intent.
 
@@ -173,7 +174,6 @@ class EventHandlerWithIntentRecognition(ABC, EventHandler):
         ...
 
     async def _process_continue_task_intent(self, inputs: EventHandlerInput):
-    async def _process_continue_task_intent(self, inputs: EventHandlerInput):
         """Process CONTINUE_TASK intent.
 
         Typically uses context from a dependent task and delegates to
@@ -184,7 +184,6 @@ class EventHandlerWithIntentRecognition(ABC, EventHandler):
         """
         ...
 
-    async def _process_supplement_task_intent(self, inputs: EventHandlerInput):
     async def _process_supplement_task_intent(self, inputs: EventHandlerInput):
         """Process SUPPLEMENT_TASK intent.
 
@@ -197,7 +196,6 @@ class EventHandlerWithIntentRecognition(ABC, EventHandler):
         ...
 
     async def _process_cancel_task_intent(self, inputs: EventHandlerInput):
-    async def _process_cancel_task_intent(self, inputs: EventHandlerInput):
         """Process CANCEL_TASK intent.
 
         Typically calls ``task_scheduler.cancel_task`` to cancel the target
@@ -208,7 +206,6 @@ class EventHandlerWithIntentRecognition(ABC, EventHandler):
         """
         ...
 
-    async def _process_modify_task_intent(self, inputs: EventHandlerInput):
     async def _process_modify_task_intent(self, inputs: EventHandlerInput):
         """Process MODIFY_TASK intent.
 
@@ -221,7 +218,6 @@ class EventHandlerWithIntentRecognition(ABC, EventHandler):
         ...
 
     async def _process_switch_task_intent(self, inputs: EventHandlerInput):
-    async def _process_switch_task_intent(self, inputs: EventHandlerInput):
         """Process SWITCH_TASK intent.
 
         Typically interrupts all currently running tasks and then calls
@@ -232,7 +228,6 @@ class EventHandlerWithIntentRecognition(ABC, EventHandler):
         """
         ...
 
-    async def _process_unknown_task_intent(self, event: Event):
     async def _process_unknown_task_intent(self, event: Event):
         """Process UNKNOWN_TASK intent.
 

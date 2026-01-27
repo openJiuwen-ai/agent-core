@@ -1,41 +1,43 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-
-
-"""Task data model definitions.
-
-This module defines data models related to tasks:
-
-- TaskStatus: enumeration of task states.
-- Task: task data model.
-
-Task state transitions:
-    submitted -> working -> (completed | failed | paused | canceled)
-                    |
-                    -> input-required -> (continue execution or cancel)
 """
+Task Data Model Definitions
+
+This module defines task-related data models, including:
+- TaskStatus: Task status enumeration
+- Task: Task data model
+
+Task Status Flow:
+submitted -> working -> (completed | failed | paused | canceled)
+                |
+                -> input-required -> (continue execution or cancel)
+"""
+
+from __future__ import annotations
+
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, TYPE_CHECKING
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from pydantic import BaseModel, Field
-
-from openjiuwen.core.controller.schema import InputEvent
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk
+
+if TYPE_CHECKING:
+    from openjiuwen.core.controller.schema.event import Event
 
 
 class TaskStatus(str, Enum):
-    """Task status enumeration.
+    """Task Status Enumeration
 
-    Defines all possible task states:
-        - SUBMITTED: task has been submitted and is waiting to run.
-        - WORKING: task is currently running.
-        - PAUSED: task has been paused.
-        - INPUT_REQUIRED: task requires user input.
-        - COMPLETED: task finished successfully.
-        - CANCELED: task has been canceled.
-        - FAILED: task execution failed.
-        - WAITING: waiting (e.g. on dependent tasks).
-        - UNKNOWN: unknown state.
+    Defines all possible states of a task:
+    - SUBMITTED: Submitted, waiting for execution
+    - WORKING: Currently executing
+    - PAUSED: Paused
+    - INPUT_REQUIRED: Requires user input
+    - COMPLETED: Completed
+    - CANCELED: Canceled
+    - FAILED: Execution failed
+    - WAITING: Waiting (maybe waiting for dependent tasks to complete)
+    - UNKNOWN: Unknown status
     """
     SUBMITTED = "submitted"
     WORKING = "working"
@@ -49,40 +51,120 @@ class TaskStatus(str, Enum):
 
 
 class Task(BaseModel):
-    """Task model.
+    """Task Model
 
-    Defines the structure of a task, including basic information, status,
-    inputs/outputs, and hierarchical relationships.
+    Defines the structure of a task, including task basic information, status,
+    input/output, and hierarchical relationships.
 
     Attributes:
-        session_id: Session ID to which this task belongs.
-        task_id: Unique identifier of the task.
-        task_type: Logical task type, used to find the corresponding
-            ``TaskExecutor``.
-        description: Human-readable description of the task.
-        priority: Task priority. Smaller values indicate higher priority.
-            Default is 1.
-        inputs: All input events related to this task.
-        outputs: Output frames produced during task execution.
-        Status: Current task status.
-        parent_task_id: Parent task ID, used for building task hierarchies.
-        context_id: Context ID, used to associate contextual information.
-        input_required_fields: Schema for fields that require user input when
-            status is ``INPUT_REQUIRED``.
-        error_message: Error message when status is ``FAILED``.
-        metadata: Arbitrary metadata associated with the task.
+        session_id: Session ID, identifies the session to which the task belongs
+        task_id: Task ID, uniquely identifies a task
+        task_type: Task type, used to find the corresponding TaskExecutor
+        description: Task description
+        priority: Task priority, smaller numbers indicate higher priority, default is 1
+        inputs: List of all input events related to this task
+        outputs: List of output chunks during task execution
+        status: Task status
+        parent_task_id: Parent task ID, used to build task hierarchical relationships
+        context_id: Context ID, used to associate context information with the task
+        input_required_fields: Field definitions for required user input (used when status is INPUT_REQUIRED)
+        error_message: Error message (used when status is FAILED)
+        metadata: Task metadata, can store additional task information
     """
     session_id: str
     task_id: str
     task_type: str
-    description: Optional[str]
+    description: Optional[str] = None
     priority: int = 1
-    inputs: List[InputEvent] = None
+    inputs: Optional[List[Event]] = None
     outputs: List[ControllerOutputChunk] = Field(default_factory=list)
-    Status: TaskStatus = TaskStatus.UNKNOWN
-    parent_task_id: str = None
-    context_id: str = None
-    input_required_fields: Optional[Union[dict[str, Any], BaseModel]] = Field(default=None)
+    status: TaskStatus = TaskStatus.UNKNOWN
+    parent_task_id: Optional[str] = None
+    context_id: Optional[str] = None
+    input_required_fields: Optional[Union[Dict[str, Any], BaseModel]] = Field(default=None)
     error_message: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
 
+    @field_validator('task_id', 'session_id', 'task_type')
+    @classmethod
+    def validate_required_strings(cls, v: str) -> str:
+        """Validate that required string fields are not empty
+
+        Args:
+            v: The field value to validate
+
+        Returns:
+            str: The validated value
+
+        Raises:
+            ValueError: If the value is empty or None
+        """
+        if not v or not v.strip():
+            raise ValueError(f"{cls.__name__} field cannot be empty")
+        return v.strip()
+
+    @field_validator('priority')
+    @classmethod
+    def validate_priority(cls, v: int) -> int:
+        """Validate task priority
+
+        Args:
+            v: Priority value
+
+        Returns:
+            int: The validated priority value
+
+        Raises:
+            ValueError: If priority is negative
+        """
+        if v < 0:
+            raise ValueError("Priority must be a non-negative integer")
+        return v
+
+    @field_validator('parent_task_id')
+    @classmethod
+    def validate_parent_task_id(cls, v: Optional[str]) -> Optional[str]:
+        """Validate parent task ID
+
+        Args:
+            v: Parent task ID value
+
+        Returns:
+            Optional[str]: The validated parent task ID
+
+        Raises:
+            ValueError: If parent_task_id is an empty string
+        """
+        if v is not None and (not v or not v.strip()):
+            raise ValueError("parent_task_id cannot be an empty string if provided")
+        return v.strip() if v else None
+
+    @model_validator(mode='after')
+    def validate_task_consistency(self):
+        """Validate task consistency and status-specific requirements
+
+        Validates:
+        - task_id should not equal parent_task_id (no self-reference)
+        - FAILED status requires error_message
+        - INPUT_REQUIRED status requires input_required_fields
+
+        Returns:
+            Task: The validated task instance
+
+        Raises:
+            ValueError: If validation fails
+        """
+        # Check for circular reference
+        if self.parent_task_id and self.task_id == self.parent_task_id:
+            raise ValueError("task_id cannot be the same as parent_task_id (circular reference)")
+
+        # Validate status-specific fields
+        if self.status == TaskStatus.FAILED:
+            if not self.error_message or not self.error_message.strip():
+                raise ValueError("error_message is required when status is FAILED")
+
+        if self.status == TaskStatus.INPUT_REQUIRED:
+            if self.input_required_fields is None:
+                raise ValueError("input_required_fields is required when status is INPUT_REQUIRED")
+
+        return self

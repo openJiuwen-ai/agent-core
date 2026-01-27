@@ -134,6 +134,11 @@ class StatusCode(Enum):
     AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR = (
         123005,
         "agent controller_tool_execution process error, reason: {error_msg}")
+    AGENT_CONTROLLER_TASK_PARAM_ERROR = (123006, "controller task parameter error, reason: {error_msg}")
+    AGENT_CONTROLLER_INTENT_PARAM_ERROR = (123007, "controller intention parameter error, reason: {error_msg}")
+    AGENT_CONTROLLER_TASK_EXECUTION_ERROR = (123008, "controller task execution error, reason: {error_msg}")
+    AGENT_CONTROLLER_EVENT_HANDLER_ERROR = (123009, "controller event handler error, reason: {error_msg}")
+    AGENT_CONTROLLER_EVENT_QUEUE_ERROR = (123010, "agent controller event queue execution error, reason: {error_msg}")
 
     # =========================
     # Runner / Distributed 134000–134999

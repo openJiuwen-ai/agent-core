@@ -67,7 +67,7 @@ class BaseGroup(ABC):
 
     def add_agent(
         self,
-        agent: BaseAgent,
+        agent: 'BaseAgent',
         agent_id: Optional[str] = None
     ) -> 'BaseGroup':
         """Register agent to group
@@ -134,7 +134,7 @@ class BaseGroup(ABC):
 
     def remove_agent(
         self,
-        agent_id: Union[str, BaseAgent]
+        agent_id: Union[str, 'BaseAgent']
     ) -> 'BaseGroup':
         """Remove agent from group
 
@@ -162,7 +162,7 @@ class BaseGroup(ABC):
 
         return self
 
-    def get_agent(self, agent_id: str) -> Optional[BaseAgent]:
+    def get_agent(self, agent_id: str) -> Optional['BaseAgent']:
         """Get agent by ID
 
         Args:

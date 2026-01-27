@@ -16,7 +16,7 @@ from openjiuwen.core.application.llm_agent import (
 from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
-from openjiuwen.core.controller import Task, TaskInput
+from openjiuwen.core.controller.legacy import Task, TaskInput
 from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.foundation.llm import ModelConfig, ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.workflow import End, WorkflowCard
@@ -25,7 +25,7 @@ from openjiuwen.core.workflow import Start
 from openjiuwen.core.session import FORCE_DEL_WORKFLOW_STATE_ENV_KEY
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.foundation.llm import BaseModelInfo, Model
+from openjiuwen.core.foundation.llm import BaseModelInfo
 from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata
 from openjiuwen.core.workflow import Workflow
 

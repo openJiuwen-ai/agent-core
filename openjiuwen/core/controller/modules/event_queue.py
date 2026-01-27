@@ -1,98 +1,132 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""Event Queue Module
 
-
-"""Event queue module.
-
-This module implements the event queue responsible for publishing and
-subscribing events:
-
-- EventQueue: event queue that publishes and subscribes controller events.
+This module implements the event queue, responsible for event publishing and subscription:
+EventQueue: Event queue that handles event publishing and subscription
 
 Workflow:
-    1. Event subscription: subscribe to specific event types via ``subscribe``.
-    2. Event publishing: publish events into the message queue via
-       ``publish_event``.
-    3. Event handling: subscribed events are handled by the appropriate
-       ``EventHandler`` methods.
-    4. Event unsubscription: cancel subscriptions via ``unsubscribe``.
+- Event Subscription: Subscribe to specific types of events via the subscribe method
+- Event Publishing: Publish events to the message queue via the publish_event method
+- Event Processing: Subscribed events will be handled by the corresponding methods of EventHandler
+- Event Unsubscription: Unsubscribe from events via the unsubscribe method
 
-Supported event types:
-- INPUT: user input events.
-- TASK_INTERACTION: task interaction events (when execution requires user
-  interaction).
-- TASK_COMPLETION: task completion events.
-- TASK_FAILED: task failure events.
+Supported Event Types:
+- INPUT: User input event
+- TASK_INTERACTION: Task interaction event (user interaction required during task execution)
+- TASK_COMPLETION: Task completion event
+- TASK_FAILED: Task failure event
 """
-from typing import Optional, Callable, Awaitable
 
-from openjiuwen.core.controller.base import ControllerConfig
+from typing import Callable, Awaitable, Optional
+
+from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.schema.event import Event, EventType
-from openjiuwen.core.controller.modules.event_handler import EventHandlerInput, EventHandler
-from openjiuwen.core.runner import Runner
-from openjiuwen.core.runner.message_queue.message_queue import MessageQueueBase
+from openjiuwen.core.controller.modules.event_handler import EventHandler, EventHandlerInput
+from openjiuwen.core.session import Session
+from openjiuwen.core.common.exception.errors import build_error, BaseError
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.logging import logger
 
 
 class EventQueue:
-    """Event queue for the controller.
+    """Event Queue
 
-    Responsible for publishing and subscribing events, and dispatching them
-    to the appropriate event handler methods.
+    Responsible for publishing and subscribing to events, and
+    dispatching them to the appropriate methods of event handlers.
 
-    Implemented on top of a message queue abstraction and supports:
-        - Publishing events (``publish_event``).
-        - Subscribing to events (``subscribe``).
-        - Unsubscribing from events (``unsubscribe`` / ``unsubscribe_all``).
-        - Handling multiple event types.
+    Built on top of a message queue, it supports:
+    - Publishing events (publish_event)
+    - Subscribing to events (subscribe)
+    - Unsubscribing from events (unsubscribe)
+    - Handling multiple event types
 
-    Event topic format: ``{agent_id}_{session_id}_{event_type}``.
+    Event topic format: {agent_id}_{session_id}_{event_type}
+
+    Workflow:
+    - MessageQueue starts a background consumer task
+    - When publish_event is called, the message is placed into the queue
+    - MessageQueue automatically invokes the registered callback function
+    - The callback converts the message into an EventHandlerInput and calls the corresponding EventHandler method
     """
-    
+
     def __init__(
             self,
             config: ControllerConfig,
     ):
-        """Initialize the event queue.
+        """Initialize the event queue
 
         Args:
-            config: Controller configuration.
+            config: Controller configuration
         """
+        # Lazy import
+        from openjiuwen.core.runner.message_queue_inmemory import MessageQueueInMemory
+
         self._config = config
-        self._queue: MessageQueueBase = Runner().pubsub()
+        self._queue: MessageQueueInMemory = MessageQueueInMemory(
+            queue_max_size=self._config.event_queue_size, timeout=self._config.event_timeout
+        )
         self._event_handler: Optional[EventHandler] = None
 
+    @property
+    def config(self) -> ControllerConfig:
+        """Get configuration"""
+        return self._config
+
+    @config.setter
+    def config(self, config: ControllerConfig):
+        """Update configuration"""
+        self._config = config
+
     def set_event_handler(self, event_handler: EventHandler):
-        """Attach an event handler.
+        """Set the event handler
 
         Args:
-            event_handler: Event handler instance.
+            event_handler: Event handler instance
         """
         self._event_handler = event_handler
+
+    def start(self):
+        """Start event queue message processing
+
+        Start the MessageQueue background consumer task
+        """
+        self._queue.start()
+
+    async def stop(self):
+        """Stop event queue message processing
+
+        Stop the MessageQueue background consumer task
+        """
+        await self._queue.stop()
 
     def _subscribe_event(
             self,
             topic: str,
             event_handle_func: Callable[[EventHandlerInput], Awaitable[...]]
     ):
-        """Subscribe to a single event topic.
+        """Subscribe to a single event topic
 
         Args:
-            topic: Event topic string.
-            event_handle_func: Event handler coroutine for the topic.
+            topic: Event topic
+            event_handle_func: Event handling function
 
         Returns:
-            str: The topic string.
+            str: Event topic
         """
         # Create subscription
         subscription = self._queue.subscribe(topic)
 
-        # Set message handler (passing topic to access cached sessions if needed)
-        subscription.set_message_handler(event_handle_func)
+        async def event_handle_wrapper(payload: dict):
+            """Wrapper: extract Event and Session, build EventHandlerInput"""
+            event = payload["event"]
+            session = payload["session"]
+            handler_input = EventHandlerInput(event=event, session=session)
+            return await event_handle_func(handler_input)
 
-        # Activate subscription
+        subscription.set_message_handler(event_handle_wrapper)
         subscription.activate()
 
-        # Return topic for bookkeeping
         return topic
 
     async def subscribe(
@@ -100,58 +134,65 @@ class EventQueue:
             agent_id: str,
             session_id: str
     ) -> (dict[str, str], dict[str, str]):
-        """Subscribe to all event types for a given agent/session.
+        """Subscribe to all event types
 
         Args:
-            agent_id: Agent identifier.
-            session_id: Session identifier.
+            agent_id: Agent ID
+            session_id: Session ID
 
         Returns:
-            Tuple[dict, dict]: (subscriptions, topics) where:
-                - subscriptions maps ``EventType`` to subscription handles.
-                - topics maps ``EventType`` to topic strings.
+            Tuple[dict, dict]: (subscription dict, topic dict)
         """
-        topics = {}
-        subscriptions = {}
-        # Subscribe to input events
-        topic = self._build_topic(agent_id, session_id, EventType.INPUT)
-        sub = self._subscribe_event(topic, self._event_handler.handle_input)
-        subscriptions[EventType.INPUT] = sub
-        topics[EventType.INPUT] = topic
+        try:
+            topics = {}
+            subscriptions = {}
 
-        # Subscribe to task interaction events
-        topic = self._build_topic(agent_id, session_id, EventType.TASK_INTERACTION)
-        sub = self._subscribe_event(topic, self._event_handler.handle_task_interaction)
-        subscriptions[EventType.TASK_INTERACTION] = sub
-        topics[EventType.TASK_INTERACTION] = topic
+            # Subscribe to input event
+            topic = self._build_topic(agent_id, session_id, EventType.INPUT)
+            sub = self._subscribe_event(topic, self._event_handler.handle_input)
+            subscriptions[EventType.INPUT] = sub
+            topics[EventType.INPUT] = topic
 
-        # Subscribe to task completion events
-        topic = self._build_topic(agent_id, session_id, EventType.TASK_COMPLETION)
-        sub = self._subscribe_event(topic, self._event_handler.handle_task_completion)
-        subscriptions[EventType.TASK_COMPLETION] = sub
-        topics[EventType.TASK_COMPLETION] = topic
+            # Subscribe to task interaction event
+            topic = self._build_topic(agent_id, session_id, EventType.TASK_INTERACTION)
+            sub = self._subscribe_event(topic, self._event_handler.handle_task_interaction)
+            subscriptions[EventType.TASK_INTERACTION] = sub
+            topics[EventType.TASK_INTERACTION] = topic
 
-        # Subscribe to task failure events
-        topic = self._build_topic(agent_id, session_id, EventType.TASK_FAILED)
-        sub = self._subscribe_event(topic, self._event_handler.handle_task_failed)
-        subscriptions[EventType.TASK_FAILED] = sub
-        topics[EventType.TASK_FAILED] = topic
+            # Subscribe to task completion event
+            topic = self._build_topic(agent_id, session_id, EventType.TASK_COMPLETION)
+            sub = self._subscribe_event(topic, self._event_handler.handle_task_completion)
+            subscriptions[EventType.TASK_COMPLETION] = sub
+            topics[EventType.TASK_COMPLETION] = topic
 
-        return subscriptions, topics
+            # Subscribe to task failed event
+            topic = self._build_topic(agent_id, session_id, EventType.TASK_FAILED)
+            sub = self._subscribe_event(topic, self._event_handler.handle_task_failed)
+            subscriptions[EventType.TASK_FAILED] = sub
+            topics[EventType.TASK_FAILED] = topic
+
+            return subscriptions, topics
+
+        except Exception as e:
+            logger.error(f"Event queue execution failed: {e}", exc_info=True)
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_EVENT_QUEUE_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def _unsubscribe_event(
             self,
             topic: str
     ):
-        """Unsubscribe from a single event topic.
+        """Unsubscribe from a single event topic
 
         Args:
-            topic: Event topic string.
+            topic: Event topic
 
         Returns:
-            bool: Whether the operation succeeded.
+            bool: Whether unsubscribe succeeded
         """
-        # Cancel subscription
         await self._queue.unsubscribe(topic)
         return True
 
@@ -160,67 +201,93 @@ class EventQueue:
             agent_id: str,
             session_id: str,
     ):
-        """Unsubscribe from all event types for a given agent/session.
+        """Unsubscribe from all event types
 
         Args:
-            agent_id: Agent identifier.
-            session_id: Session identifier.
+            agent_id: Agent ID
+            session_id: Session ID
 
         Returns:
-            dict: Topic dictionary (for compatibility; currently empty).
+            dict: Topic dictionary
         """
         topics = {}
-        # Unsubscribe from input events
+
+        # Unsubscribe from input event
         topic = self._build_topic(agent_id, session_id, EventType.INPUT)
         await self._unsubscribe_event(topic)
 
-        # Unsubscribe from task interaction events
+        # Unsubscribe from task interaction event
         topic = self._build_topic(agent_id, session_id, EventType.TASK_INTERACTION)
         await self._unsubscribe_event(topic)
 
-        # Unsubscribe from task completion events
+        # Unsubscribe from task completion event
         topic = self._build_topic(agent_id, session_id, EventType.TASK_COMPLETION)
         await self._unsubscribe_event(topic)
 
-        # Unsubscribe from task failure events
+        # Unsubscribe from task failed event
         topic = self._build_topic(agent_id, session_id, EventType.TASK_FAILED)
         await self._unsubscribe_event(topic)
 
         return topics
-    
+
     async def publish_event(
-        self,
-        agent_id: str,
-        session_id: str,
-        event: Event
+            self,
+            agent_id: str,
+            session: 'Session',
+            event: Event
     ) -> None:
-        """Publish an event into the queue.
+        """Publish an event to the event queue and wait until it is handled
 
         Args:
-            agent_id: Agent identifier.
-            session_id: Session identifier.
-            event: Event to be published.
+            agent_id: Agent ID
+            session: Session object
+            event: Event to be published
+
+        Note:
+            - This method waits until the EventHandler finishes processing before
+              it returns, ensuring event processing order.
         """
+        session_id = session.session_id()
         topic = self._build_topic(agent_id, session_id, event.event_type)
-        # 发布消息
-        await self._queue.produce_message(topic, event.model_dump())
+
+        # Lazy import to avoid circular imports
+        from openjiuwen.core.runner.message_queue_base import InvokeQueueMessage
+
+        queue_message = InvokeQueueMessage()
+        queue_message.payload = {"event": event, "session": session}
+
+        # Publish message
+        await self._queue.produce_message(topic, queue_message)
+
+        # Wait until EventHandler finishes processing
+        try:
+            await queue_message.response
+
+        except BaseError:
+            raise
+
+        except Exception as e:
+            logger.error(f"Event handler failed for {event.event_type}: {e}", exc_info=True)
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_EVENT_HANDLER_ERROR,
+                error_msg=str(e),
+                cause=e
+            ) from e
 
     async def unsubscribe_all(self) -> None:
-        """Unsubscribe from all topics (if supported by the underlying queue)."""
-        ...
+        """Unsubscribe from all topics"""
+        await self._queue.stop()
 
     @staticmethod
     def _build_topic(agent_id: str, session_id: str, event_type: str) -> str:
-        """Build an event topic string.
+        """Build event topic
 
         Args:
-            agent_id: Agent identifier.
-            session_id: Session identifier.
-            event_type: Event type string.
+            agent_id: Agent ID
+            session_id: Session ID
+            event_type: Event type
 
         Returns:
-            str: Fully qualified topic string.
+            str: Event topic string
         """
         return f"{agent_id}_{session_id}_{event_type}"
-
-
