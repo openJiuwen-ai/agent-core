@@ -12,14 +12,14 @@ from openjiuwen.core.session.state.base import State, CommitStateLike, DEFAULT_N
 class StateCollection(State):
 
     def __init__(
-        self,
-        io_state: CommitStateLike,
-        global_state: CommitStateLike,
-        comp_state: CommitStateLike,
-        workflow_state: CommitStateLike,
-        trace_state: dict = None,
-        parent_id: str = "",
-        node_id: str = DEFAULT_NODE_ID,
+            self,
+            io_state: CommitStateLike,
+            global_state: CommitStateLike,
+            comp_state: CommitStateLike,
+            workflow_state: CommitStateLike,
+            trace_state: dict = None,
+            parent_id: str = "",
+            node_id: str = DEFAULT_NODE_ID,
     ):
         self._io_state = io_state
         self._global_state = global_state
@@ -69,15 +69,15 @@ class StateCollection(State):
 class CommitState(StateCollection):
 
     def __init__(
-        self,
-        io_state: CommitStateLike,
-        global_state: CommitStateLike,
-        comp_state: CommitStateLike,
-        workflow_state: CommitStateLike,
-        trace_state: dict = None,
-        parent_id: str = "",
-        node_id: str = DEFAULT_NODE_ID,
-        workflow_only=True,
+            self,
+            io_state: CommitStateLike,
+            global_state: CommitStateLike,
+            comp_state: CommitStateLike,
+            workflow_state: CommitStateLike,
+            trace_state: dict = None,
+            parent_id: str = "",
+            node_id: str = DEFAULT_NODE_ID,
+            workflow_only=True,
     ):
         trace_state = trace_state or {}
         super().__init__(io_state=io_state, global_state=global_state, comp_state=comp_state, trace_state=trace_state,
@@ -106,10 +106,10 @@ class CommitState(StateCollection):
         result = self._io_state.get_by_prefix(schema, self._parent_id)
         return result
 
-    def get_outputs(self, node_id) -> Optional[Any]:
+    def get_outputs(self, node_id=None) -> Optional[Any]:
         if self._io_state is None:
             return None
-        return self._io_state.get_by_prefix(node_id, self._parent_id)
+        return self._io_state.get_by_prefix(node_id if node_id else self._node_id, self._parent_id)
 
     def get_inputs_by_transformer(self, transformer: Callable) -> dict:
         if self._io_state is None:

@@ -1221,7 +1221,7 @@ class ResourceMgr:
         for remove_id in ids_to_remove:
             error = None
             try:
-                self._tag_mgr.remove_resource(resource_id)
+                self._tag_mgr.remove_resource(remove_id)
                 # add resource
                 if resource_type == "workflow":
                     self._resource_registry.workflow().remove_workflow(remove_id)
@@ -1255,10 +1255,10 @@ class ResourceMgr:
                     results.append(Ok(removed_card))
             if not error:
                 if removed_card:
-                    logger.info(f"remove resource succeed, id={resource_id}, type={resource_type},"
+                    logger.info(f"remove resource succeed, id={remove_id}, type={resource_type},"
                                 f" card={removed_card}")
                 else:
-                    logger.info(f"remove resource succeed, id={resource_id}, type={resource_type}")
+                    logger.info(f"remove resource succeed, id={remove_id}, type={resource_type}")
         return results if not isinstance(resource_id, str) else results[0]
 
     def _inner_find_resource_ids(self, *, resource_id: Optional[str | list[str]], tag: Tag | list[Tag],
@@ -1307,7 +1307,7 @@ class ResourceMgr:
         for get_id in ids_to_get:
             resource = None
             try:
-                if self._tag_mgr.has_resource(resource_id):
+                if self._tag_mgr.has_resource(get_id):
                     if resource_type == "tool":
                         resource = self._resource_registry.tool().get_tool(get_id, session=session)
                     elif resource_type == "prompt":
@@ -1349,7 +1349,7 @@ class ResourceMgr:
         for get_id in ids_to_get:
             resource = None
             try:
-                if self._tag_mgr.has_resource(resource_id):
+                if self._tag_mgr.has_resource(get_id):
                     # add resource
                     if resource_type == "workflow":
                         resource = await self._resource_registry.workflow().get_workflow(get_id, session=session)
