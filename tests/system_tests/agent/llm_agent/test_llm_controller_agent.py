@@ -5,6 +5,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from openjiuwen.core.common import Param
 from openjiuwen.core.memory import MemoryChromaVectorStore
 from openjiuwen.core.foundation.store import DbBasedKVStore
 from openjiuwen.core.retrieval import EmbeddingConfig
@@ -123,6 +124,15 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         system_prompt = "你是一个AI助手，在适当的时候调用合适的工具，帮助我完成任务！今天的日期为：{}\n注意：1. 如果用户请求中未指定具体时间，则默认为今天。"
         return [
             dict(role="system", content=system_prompt.format(build_current_date()))
+        ]
+
+    @staticmethod
+    def _create_prompt_template_with_memory():
+        system_prompt = "你是一个AI助手，在适当的时候调用合适的工具，帮助我完成任务！今天的日期为：{}\n注意：1. 如果用户请求中未指定具体时间，则默认为今天。"
+        system_prompt = system_prompt.format(build_current_date())
+        system_prompt += "\n以下列出的是用户历史保存的记忆变量\n{{sys_memory_variables}}\n以下列出的是用户的长期记忆信息\n{{sys_long_term_memory}}"
+        return [
+            dict(role="system", content=system_prompt)
         ]
 
     @staticmethod
@@ -474,7 +484,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         user_id = "default_user_id"
         scope_id = "react_agent_123"
         model_config = self._create_model_config()
-        prompt_template = self._create_prompt_template()
+        prompt_template = self._create_prompt_template_with_memory()
         memory_engine = await self._create_memory_engine()
         llm_agent_config = create_llm_agent_config(
             agent_id="react_agent_123",
@@ -488,7 +498,10 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         )
         llm_agent_config.memory_config = self._create_memory_scope_config()
         llm_agent_config.agent_memory_config = AgentMemoryConfig(
-            mem_variables=[],
+            mem_variables=[
+                Param.string(name="name", description="用户的姓名", required=False),
+                Param.string(name="career", description="用户的职业", required=False),
+            ],
             enable_long_term_mem=True
         )
         llm_agent: LLMAgent = create_llm_agent(
@@ -502,11 +515,14 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
                                          "user_id": user_id,
                                          "scope_id": scope_id})
         print(f"LLMAgent 输出结果：{result}")
+        await asyncio.sleep(30)
         result = await llm_agent.invoke({"query": "我叫什么名字",
                                          "user_id": user_id,
                                          "scope_id": scope_id})
         print(f"LLMAgent 输出结果：{result}")
-        await asyncio.sleep(20)
+        result = await memory_engine.get_variables(user_id=user_id, scope_id=scope_id)
+        print(f"memory variables: {result}")
+        self.assertEqual(len(result), 2)
         result = await memory_engine.search_user_mem(user_id=user_id, scope_id=scope_id, query="我叫什么名字", num=1)
         self.assertEqual(len(result), 1)  # may be [] is llm_agent.invoke return too fast
         print("memory result:", result[0])

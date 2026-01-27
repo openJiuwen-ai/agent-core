@@ -119,7 +119,7 @@ class LLMAgent(ControllerAgent):
         super().__init__(agent_config, controller=None)
 
         self._long_term_memory_instance = LongTermMemory()
-        self._enable_memory = agent_config.agent_memory_config.enable_long_term_mem,
+        self._enable_memory = agent_config.agent_memory_config.enable_long_term_mem
         self._memory_agent_config = agent_config.agent_memory_config
 
         self.controller = LLMController(

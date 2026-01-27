@@ -1317,8 +1317,8 @@ class LLMController(BaseController):
                 scope_id=scope_id
             )
             if memory_variables:
-                filter_memory_variables = {k: v for k, v in memory_variables.items()
-                                           if k in self.config.memory_config.mem_variables}
+                cur_variables_config = [config.name for config in self.config.agent_memory_config.mem_variables]
+                filter_memory_variables = {k: v for k, v in memory_variables.items() if k in cur_variables_config}
                 result.update({"sys_memory_variables":
                                    JsonUtils.safe_json_dumps(filter_memory_variables, ensure_ascii=False)})
             logger.info(f"memory_variables: {memory_variables}")
