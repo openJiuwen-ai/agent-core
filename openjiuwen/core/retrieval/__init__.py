@@ -11,7 +11,7 @@ from openjiuwen.core.retrieval.common.config import (
     RetrievalConfig,
     VectorStoreConfig,
 )
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval.common.document import Document, TextChunk, MultimodalDocument
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.common.triple import Triple
 from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
@@ -21,6 +21,7 @@ from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.embedding.ollama_embedding import OllamaEmbedding
 from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
+from openjiuwen.core.retrieval.embedding.vllm_embedding import VLLMEmbedding
 from openjiuwen.core.retrieval.embedding.utils import parse_base64_embedding
 from openjiuwen.core.retrieval.graph_knowledge_base import GraphKnowledgeBase
 
@@ -125,6 +126,7 @@ _COMMON_CLASSES = [
     "VectorStoreConfig",
     "EmbeddingConfig",
     "Document",
+    "MultimodalDocument",
     "TextChunk",
     "RetrievalResult",
     "SearchResult",
@@ -139,6 +141,7 @@ _EMBEDDING_CLASSES = [
     "APIEmbedding",
     "OllamaEmbedding",
     "OpenAIEmbedding",
+    "VLLMEmbedding",
 ]
 
 _VECTOR_STORE_CLASSES = [
