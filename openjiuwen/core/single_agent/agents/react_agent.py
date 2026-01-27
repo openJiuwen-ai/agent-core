@@ -253,9 +253,11 @@ class ReActAgent(BaseAgent):
     def _init_memory_scope(self) -> None:
         """Initialize memory scope (subclass can override configuration)"""
         if self.config.mem_scope_id:
-            LongTermMemory().set_scope_config(
-                self.config.mem_scope_id,
-                MemoryScopeConfig()
+            asyncio.run(
+                LongTermMemory().set_scope_config(
+                    self.config.mem_scope_id,
+                    MemoryScopeConfig()
+                )
             )
 
     def _create_default_config(self) -> ReActAgentConfig:
