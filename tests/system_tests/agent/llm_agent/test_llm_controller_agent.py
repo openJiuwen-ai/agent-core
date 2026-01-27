@@ -542,8 +542,8 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         )
 
         # 调用
-        querys = ["我叫张明", "我喜欢运动", "我今年20岁", "我的工作是软件工程师", "我来自杭州"]
-        for query in querys:
+        queries = ["我叫张明", "我喜欢运动", "我今年20岁", "我的工作是软件工程师", "我来自杭州"]
+        for query in queries:
             result = await llm_agent.invoke({"query": query,
                                              "user_id": user_id,
                                              "scope_id": scope_id})
