@@ -34,6 +34,8 @@ from openjiuwen.core.controller.modules import (
     TaskExecutor,
     TaskExecutorRegistry,
     TaskScheduler,
+    IntentRecognizer,
+    EventHandlerWithIntentRecognition
 )
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.base import Controller
@@ -81,45 +83,47 @@ _CONFIG_CLASSES = [
 
 
 _NEW_CLASS = [
-    # ========================= 数据模型定义 =============================
-    # 数据单元
+    # ========================= DataStructure Definition =============================
+    # Units
     "TextDataFrame",
     "FileDataFrame",
     "JsonDataFrame",
     "DataFrame",
-    # 事件（控制器输入）
+    # Event (Controller Inputs)
     "EventType",
     "Event",
     "InputEvent",
     "TaskInteractionEvent",
     "TaskCompletionEvent",
     "TaskFailedEvent",
-    # 控制器输出
+    # Controller outputs
     "ControllerOutputPayload",
     "ControllerOutputChunk",
     "ControllerOutput",
-    # 意图
+    # Intent
     "IntentType",
     "Intent",
-    # 任务
+    # Task
     "TaskStatus",
     "Task",
-    # ========================= 控制器内部模块 =============================
-    # 事件队列和事件处理
+    # ========================= Controller Inner Modules =============================
+    # Event Queue
     "EventHandlerInput",
     "EventHandler",
     "EventQueue",
-    # 任务管理
+    # Task Manager
     "TaskManagerState",
     "TaskManager",
     "TaskFilter",
-    # 任务执行调度
+    # Task Execution
     "TaskExecutor",
     "TaskExecutorRegistry",
     "TaskScheduler",
-    # =========================     控制器   =============================
+    # =========================    Controller   =============================
     "ControllerConfig",
-    "Controller"
+    "Controller",
+    "IntentRecognizer",
+    "EventHandlerWithIntentRecognition"
 ]
 
 

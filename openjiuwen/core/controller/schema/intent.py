@@ -14,7 +14,7 @@ used by the controller to identify and process user requests.
 
 
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, model_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -91,9 +91,9 @@ class Intent(BaseModel):
     event: "Event"
     target_task_id: Optional[str]
     target_task_description: Optional[str] = None
-    depend_task_id: str = None
-    supplementary_info: Optional[Dict[str, Any]] = None
-    modification_details: Optional[Dict[str, Any]] = None
+    depend_task_id: List[str] = None
+    supplementary_info: Optional[str] = None
+    modification_details: Optional[str] = None
     confidence: float = 1.0
     metadata: Optional[Dict[str, Any]] = None
     clarification_prompt: Optional[str] = None
@@ -122,7 +122,7 @@ class Intent(BaseModel):
         # Validate confidence range
         if not 0.0 <= self.confidence <= 1.0:
             raise build_error(
-                StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                 error_msg=f"Confidence must be between 0.0 and 1.0, got {self.confidence}"
             )
 
@@ -130,60 +130,60 @@ class Intent(BaseModel):
         if self.intent_type == IntentType.CREATE_TASK:
             if not self.target_task_description:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="CREATE_TASK intent requires target_task_description"
                 )
 
         elif self.intent_type == IntentType.CONTINUE_TASK:
             if not self.depend_task_id:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="CONTINUE_TASK intent requires depend_task_id"
                 )
 
         elif self.intent_type == IntentType.SUPPLEMENT_TASK:
             if not self.target_task_id:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="SUPPLEMENT_TASK intent requires target_task_id"
                 )
 
             if not self.supplementary_info:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="SUPPLEMENT_TASK intent requires supplementary_info"
                 )
 
         elif self.intent_type == IntentType.MODIFY_TASK:
             if not self.target_task_id:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="MODIFY_TASK intent requires target_task_id"
                 )
 
             if not self.modification_details:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="MODIFY_TASK intent requires modification_details"
                 )
 
         elif self.intent_type in (IntentType.PAUSE_TASK, IntentType.RESUME_TASK, IntentType.CANCEL_TASK):
             if not self.target_task_id:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg=f"{self.intent_type.value} intent requires target_task_id"
                 )
 
         elif self.intent_type == IntentType.SWITCH_TASK:
             if not self.target_task_description:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="SWITCH_TASK intent requires target_task_description"
                 )
 
         elif self.intent_type == IntentType.UNKNOWN_TASK:
             if not self.clarification_prompt:
                 raise build_error(
-                    StatusCode.CONTROLLER_INTENT_PARAM_ERROR,
+                    StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="UNKNOWN_TASK intent requires clarification_prompt"
                 )
