@@ -114,10 +114,17 @@ class UserProfileManager(BaseMemoryManager):
                     source_id=memory.message_mem_id
                 )
                 mem_id = await self._add_user_profile_memory(user_profile_search_param)
-                await self._add_vector_user_profile_memory(user_id=memory.user_id,
-                                                           scope_id=memory.scope_id,
-                                                           memory_id=mem_id,
-                                                           mem=conf_mem)
+                vector_success = await self._add_vector_user_profile_memory(user_id=memory.user_id,
+                                                                           scope_id=memory.scope_id,
+                                                                           memory_id=mem_id,
+                                                                           mem=conf_mem)
+                if not vector_success:
+                    await self.delete(user_id=memory.user_id, scope_id=memory.scope_id, mem_id=mem_id)
+                    raise build_error(
+                        StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                        memory_type="user profile",
+                        error_msg=f"user_profile_manager add vector store failed",
+                    )
             elif conf_event == ConflictType.NONE.value:
                 logger.debug(f"none conflict info: {conflict}, new_profile: {memory.profile_mem}")
             elif conf_event == ConflictType.UPDATE.value:
@@ -283,10 +290,10 @@ class UserProfileManager(BaseMemoryManager):
 
     async def _add_vector_user_profile_memory(
             self, user_id: str, scope_id: str, memory_id: str,
-            mem: str, mem_type: str = MemoryType.USER_PROFILE.value):
+            mem: str, mem_type: str = MemoryType.USER_PROFILE.value) -> bool:
         if self.semantic_recall:
             table_name = generate_idx_name(user_id, scope_id, mem_type)
-            await self.semantic_recall.add_docs([(memory_id, mem)], table_name, scope_id=scope_id)
+            return await self.semantic_recall.add_docs([(memory_id, mem)], table_name, scope_id=scope_id)
         else:
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,

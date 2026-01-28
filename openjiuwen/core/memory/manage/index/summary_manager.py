@@ -33,7 +33,13 @@ class SummaryManager(BaseMemoryManager):
                 error_msg="summary add Must pass SummaryUnit class",
             )
 
-        await self._add_summary_memory_to_vector(summary_unit=memory, scope_id=memory.scope_id)
+        vector_success = await self._add_summary_memory_to_vector(summary_unit=memory, scope_id=memory.scope_id)
+        if not vector_success:
+            raise build_error(
+                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                memory_type="summary",
+                error_msg="summary add to vector store failed",
+            )
         await self._add_summary_memory_to_mem_store(memory)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
@@ -111,7 +117,7 @@ class SummaryManager(BaseMemoryManager):
                                    mem_id=summary_unit.mem_id,
                                    data=data)
 
-    async def _add_summary_memory_to_vector(self, summary_unit: SummaryUnit, scope_id: str):
+    async def _add_summary_memory_to_vector(self, summary_unit: SummaryUnit, scope_id: str) -> bool:
         """Add plaintext summary to vector store for semantic recall."""
         if not self.semantic_recall:
             raise build_error(
@@ -122,7 +128,7 @@ class SummaryManager(BaseMemoryManager):
         table_name = generate_idx_name(usr_id=summary_unit.user_id,
                                        scope_id=summary_unit.scope_id,
                                        mem_type=MemoryType.SUMMARY.value)
-        await self.semantic_recall.add_docs(
+        return await self.semantic_recall.add_docs(
             docs=[(summary_unit.mem_id, summary_unit.summary)],
             table_name=table_name,
             scope_id=scope_id
