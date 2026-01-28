@@ -4,6 +4,7 @@ import asyncio
 import uuid
 import json
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.memory.common.constant import EXCLUSIVE_VALUE_KEY
 
 
 class DistributedLock:
@@ -31,7 +32,7 @@ class DistributedLock:
             if not existing:
                 return
             data = json.loads(existing)
-            if data.get("value") == self.lock_value:
+            if data.get(EXCLUSIVE_VALUE_KEY) == self.lock_value:
                 await self.store.delete(self.lock_key)
         except Exception as e:
             logger.error(f"Error releasing lock: {e}")

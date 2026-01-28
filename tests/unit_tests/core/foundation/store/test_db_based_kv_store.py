@@ -1,5 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
+import json
 import os
 import shutil
 
@@ -7,6 +9,7 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from openjiuwen.core.foundation.store.db_based_kv_store import DbBasedKVStore
+from openjiuwen.core.memory.common.constant import EXCLUSIVE_VALUE_KEY
 
 
 @pytest.fixture(name="kv_store")
@@ -50,3 +53,14 @@ class TestDefaultKVStore:
         await kv_store.delete_by_prefix("key3")
         assert await kv_store.get_by_prefix("key3") == {}
         assert await kv_store.mget(["key4", "key53245", "key1"]) == ['value4', None, 'update_value1']
+
+        assert await kv_store.exclusive_set("exclusive_key", "exclusive_value", 3)
+        value = await kv_store.get("exclusive_key")
+        value_dict = json.loads(value)
+        assert value_dict.get(EXCLUSIVE_VALUE_KEY) == "exclusive_value"
+        assert not await kv_store.exclusive_set("exclusive_key", "update_exclusive_value", 3)
+        await asyncio.sleep(3)
+        assert await kv_store.exclusive_set("exclusive_key", "update_exclusive_value", 3)
+        value = await kv_store.get("exclusive_key")
+        value_dict = json.loads(value)
+        assert value_dict.get(EXCLUSIVE_VALUE_KEY) == "update_exclusive_value"

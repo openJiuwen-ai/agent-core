@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase
 
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
+from openjiuwen.core.memory.common.constant import EXCLUSIVE_EXPIRY_KEY, EXCLUSIVE_VALUE_KEY
 
 
 class Base(DeclarativeBase):
@@ -66,13 +67,13 @@ class DbBasedKVStore(BaseKVStore):
                 if row is not None:
                     try:
                         data = json.loads(row.value)
-                        old_expire = data.get("expire")
+                        old_expire = data.get(EXCLUSIVE_EXPIRY_KEY)
                         if old_expire is None or old_expire > now:
                             return False
                     except json.JSONDecodeError:
                         return False
                 expire_at = now + expiry if expiry else None
-                val = json.dumps({"value": value, "expiry": expire_at})
+                val = json.dumps({EXCLUSIVE_VALUE_KEY: value, EXCLUSIVE_EXPIRY_KEY: expire_at})
                 stmt = (
                     insert(KVStoreTable)
                     .values(key=key, value=val)
