@@ -40,6 +40,7 @@ from openjiuwen.core.single_agent.agents.react_agent import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.foundation.tool.base import ToolCard
+from openjiuwen.core.context_engine import ContextEngineConfig
 
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
@@ -61,7 +62,9 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.api_base, "")
         self.assertEqual(config.prompt_template_name, "")
         self.assertEqual(config.prompt_template, [])
-        self.assertEqual(config.context_window_limit, 20)
+        self.assertEqual(config.context_engine_config, ContextEngineConfig(
+            max_context_message_num=200, default_window_round_num=10
+        ))
         self.assertEqual(config.max_iterations, 5)
 
     def test_config_chained_configuration(self):
@@ -77,7 +80,11 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
             .configure_prompt_template([
                 {"role": "system", "content": "你是一个助手"}
             ])
-            .configure_context_limit(30)
+            .configure_context_engine(
+                max_context_message_num=100,
+                default_window_round_num=20,
+                enable_reload=True
+            )
             .configure_max_iterations(10)
         )
 
@@ -86,7 +93,11 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.api_key, "test_key")
         self.assertEqual(config.api_base, "https://api.test.com")
         self.assertEqual(len(config.prompt_template), 1)
-        self.assertEqual(config.context_window_limit, 30)
+        self.assertEqual(config.context_engine_config, ContextEngineConfig(
+            max_context_message_num=100,
+            default_window_round_num=20,
+            enable_reload=True
+        ))
         self.assertEqual(config.max_iterations, 10)
 
     def test_configure_mem_scope(self):
@@ -796,7 +807,7 @@ class TestNewReActAgentConfigUpdate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.config.api_base, "base2")
 
     def test_configure_updates_context_engine_on_limit_change(self):
-        """测试更改 context_window_limit 时更新 context_engine"""
+        """测试更改 上下文窗口对话轮次 时更新 context_engine"""
         with patch.object(
             ReActAgent,
             '_init_memory_scope',
@@ -805,8 +816,8 @@ class TestNewReActAgentConfigUpdate(unittest.IsolatedAsyncioTestCase):
             agent = ReActAgent(card=self.card)
             old_context_engine = agent.context_engine
 
-            # 更改 context_window_limit
-            new_config = ReActAgentConfig().configure_context_limit(50)
+            # 更改 上下文窗口对话轮次
+            new_config = ReActAgentConfig().configure_context_engine(default_window_round_num=20)
             agent.configure(new_config)
 
         # context_engine 应该被更新

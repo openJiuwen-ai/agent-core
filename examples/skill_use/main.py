@@ -90,7 +90,10 @@ async def main():
         )
         .configure_prompt_template([{"role": "system", "content": system_prompt}])
         .configure_max_iterations(max_iterations)
-        .configure_context_limit(None)
+        .configure_context_engine(
+            max_context_message_num=None,
+            default_window_round_num=None
+        )
     )
     agent.configure(cfg)
 

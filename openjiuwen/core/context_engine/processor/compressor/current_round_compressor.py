@@ -32,11 +32,12 @@ Your sole task: compress the conversation history below into **≤ 500 tokens** 
 ---
 
 📌 Strict output format:
-- Valid JSON wrapped in ```json:
+- Valid JSON wrapped in ```json```:
 ```json
 {
     "summary": "<refined_text>"
 }
+```
 """
 
 

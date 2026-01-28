@@ -31,6 +31,7 @@ Output valid JSON:
 {
     "summary": "<compressed_text>"
 }
+```
 """
 
 

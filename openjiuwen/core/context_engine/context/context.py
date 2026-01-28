@@ -10,7 +10,7 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, SystemMessage
-from openjiuwen.core.foundation.tool import ToolInfo, Tool
+from openjiuwen.core.foundation.tool import ToolInfo, Tool, ToolCard, tool
 from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, ContextStats
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManager
@@ -19,8 +19,9 @@ from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManag
 _RELOADER_SYSTEM_PROMPT = """
 You may see offloaded content markers in your context: [[OFFLOAD: handle=<id>, type=<type>]].
 
-When you need the full content of an offloaded message:
-- Call reload_original_context_messages(handle="<id>", type="<type>") with the exact values from the marker
+When you see an offloaded-content marker and believe retrieving it will help your answer, 
+feel free to call reload_original_context_messages:
+- Call reload_original_context_messages(offload_handle="<id>", offload_type="<type>") with the exact values from the marker
 - Do not guess or make up the missing content
 
 Storage types: "in_memory" (session cache).
@@ -28,15 +29,16 @@ Storage types: "in_memory" (session cache).
 
 
 class SessionModelContext(ModelContext):
-    def __init__(self,
-                 context_id: str,
-                 session_id: str,
-                 config: ContextEngineConfig,
-                 *,
-                 history_messages: List[BaseMessage] = None,
-                 processors: List[ContextProcessor] = None,
-                 token_counter: TokenCounter = None,
-                 ):
+    def __init__(
+            self,
+            context_id: str,
+            session_id: str,
+            config: ContextEngineConfig,
+            *,
+            history_messages: List[BaseMessage] = None,
+            processors: List[ContextProcessor] = None,
+            token_counter: TokenCounter = None
+    ):
         self._message_id = 0
         self._validate_and_init_messages(history_messages)
         self._context_id = context_id
@@ -49,6 +51,32 @@ class SessionModelContext(ModelContext):
         self._processors = processors
         self._kv_cache_manager = KVCacheManager(session_id) if config.enable_kv_cache_release else None
         self._offload_message_buffer = OffloadMessageBuffer()
+        self._reloader_tool_card = ToolCard(
+            id=f"reload_{session_id}_{context_id}",
+            name="reload_original_context_messages",
+            description="Retrieve messages that were previously offloaded from the context window."
+                        "Provide the exact handle and storage type returned when the content was offloaded;"
+                        "the tool will fetch the complete original message list and inject "
+                        "it back into the conversation, allowing the model to see the full text "
+                        "as if it had never been removed.",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "offload_handle": {
+                        "description": "A unique identifier or file path pointing to the offloaded content. "
+                                       "Accepts either a UUID string (e.g., 'abc123-def456') for memory-based storage.",
+                        "type": "string",
+                    },
+                    "offload_type": {
+                        "description": "The storage backend used when the content was offloaded. Must be one of: "
+                                       "'in_memory': Content was stored in in-memory cache. "
+                                       "Requires offload_handle to be a UUID or key string.",
+                        "type": "string",
+                    },
+                },
+                "required": ["offload_handle", "offload_type"],
+            },
+        )
 
     def __len__(self):
         return self._message_buffer.size()
@@ -59,10 +87,11 @@ class SessionModelContext(ModelContext):
     def context_id(self) -> str:
         return self._context_id
 
-    async def add_messages(self,
-                           messages: BaseMessage | List[BaseMessage],
-                           **kwargs
-                           ) -> List[BaseMessage]:
+    async def add_messages(
+            self,
+            messages: BaseMessage | List[BaseMessage],
+            **kwargs
+    ) -> List[BaseMessage]:
         self._validate_and_init_messages(messages)
         messages_to_add = messages if isinstance(messages, list) else [messages]
         for processor in self._processors:
@@ -106,13 +135,14 @@ class SessionModelContext(ModelContext):
         self.pop_messages(len(self), with_history=with_history)
         return
 
-    async def get_context_window(self,
-                                 system_messages: List[BaseMessage] = None,
-                                 tools: List[ToolInfo] = None,
-                                 window_size: Optional[int] = None,
-                                 dialogue_round: Optional[int] = None,
-                                 **kwargs
-                                 ) -> ContextWindow:
+    async def get_context_window(
+            self,
+            system_messages: List[BaseMessage] = None,
+            tools: List[ToolInfo] = None,
+            window_size: Optional[int] = None,
+            dialogue_round: Optional[int] = None,
+            **kwargs
+    ) -> ContextWindow:
         if window_size is not None and window_size <= 0:
             raise build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
@@ -290,31 +320,7 @@ class SessionModelContext(ModelContext):
         return self._token_counter
 
     def reloader_tool(self) -> Tool:
-        from openjiuwen.core.foundation.tool import ToolCard, tool
-
-        card = ToolCard(
-            name="reload_original_context_messages",
-            description="",
-            input_params={
-                "type": "object",
-                "properties": {
-                    "offload_handle": {
-                        "description": "A unique identifier or file path pointing to the offloaded content. "
-                                       "Accepts either a UUID string (e.g., 'abc123-def456') for memory-based storage.",
-                        "type": "string",
-                    },
-                    "offload_type": {
-                        "description": "The storage backend used when the content was offloaded. Must be one of: "
-                                       "'in_memory': Content was stored in in-memory cache. "
-                                       "Requires offload_handle to be a UUID or key string.",
-                        "type": "string",
-                    },
-                },
-                "required": ["offload_handle", "offload_type"],
-            },
-        )
-
-        @tool(card=card)
+        @tool(card=self._reloader_tool_card)
         def reload_original_context_messages(offload_handle: str, offload_type: str) -> str:
             reloaded_messages = self._offload_message_buffer.reload(offload_handle, offload_type)
             if not reloaded_messages:

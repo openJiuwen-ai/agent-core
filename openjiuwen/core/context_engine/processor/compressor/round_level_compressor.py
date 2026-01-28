@@ -45,6 +45,7 @@ Your task: compress and summarize the following consecutive conversation rounds 
 {
     "summary": "<refined content>"
 }
+```
 """
 
 
