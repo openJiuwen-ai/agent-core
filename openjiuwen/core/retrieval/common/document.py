@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
 Document Data Models
 
@@ -7,6 +7,7 @@ Contains Document and TextChunk data models.
 """
 
 import base64
+import mimetypes
 import re
 import uuid
 from pathlib import Path
@@ -76,7 +77,7 @@ class MultimodalDocument(Document):
         Add base64-encoded data directly::
 
             doc = MultimodalDocument()
-            doc.add_field("audio", data="data:audio/mp3;base64,...")
+            doc.add_field("audio", data="data:audio/wav;base64,...")
 
         Access structured content for embedding::
 
@@ -106,7 +107,7 @@ class MultimodalDocument(Document):
                         }
                     )
                 case "audio":
-                    file_format = re.match(r"data:audio/([a-z0-9_]+);base64,", data).group(1)
+                    file_format = re.match(r"data:audio/(.+?);base64,", data).group(1)
                     content.append(
                         {
                             "type": "input_audio",
@@ -200,7 +201,7 @@ def _load_multimodal_data(
             dict(data=data, file_path=file_path),
         )
     if isinstance(data, str):
-        if kind == "text" or re.match(f"data:{kind}/([a-z0-9_]+);base64,", data):
+        if kind == "text" or re.match(f"data:{kind}/(.+?);base64,", data):
             return kind, data
         _raise_validation_error_with_info(
             f"invalid_{kind}_data_provided",
@@ -219,8 +220,18 @@ def _load_multimodal_data(
             f"Unable to open {kind} file at {file_path}",
             dict(kind=kind, file_path=file_path),
         )
-    file_ext = file_path.suffix.casefold().replace(".jpg", ".jpeg").removeprefix(".")
-    b64_prefix = f"data:{kind}/{file_ext};base64,"
+    # mimetypes.guess_file_type was introduced in python 3.13 to make mimetypes.guess_type url-only
+    guess_mime_type = getattr(mimetypes, "guess_file_type", mimetypes.guess_type)
+    mime_type = guess_mime_type(str(file_path), strict=False)[0]
+    if not (isinstance(mime_type, str) and "/" in mime_type):
+        _raise_validation_error_with_info(
+            "cannot_determine_mimetype",
+            f"Unable to determine mimetype for {kind} file: {file_path}",
+            dict(kind=kind, file_path=file_path),
+        )
+    if not mime_type.startswith(kind):
+        mime_type = "/".join([kind] + mime_type.split("/")[1:])
+    b64_prefix = f"data:{mime_type};base64,"
     try:
         if kind == "text":
             return kind, file_path.read_text(encoding="utf-8")

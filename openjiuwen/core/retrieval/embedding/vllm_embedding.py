@@ -37,7 +37,7 @@ class VLLMEmbedding(OpenAIEmbedding):
                 error_msg="input provided for multimodal embedding is not a MultimodalDocument",
             )
         kwargs = self.parse_multimodal_input(doc, kwargs)
-        return await self._get_embeddings(None, **kwargs)[0]
+        return (await self._get_embeddings(None, **kwargs))[0]
 
     def embed_multimodal_sync(self, doc: MultimodalDocument, **kwargs) -> List[float]:
         """Embed multimodal document"""
