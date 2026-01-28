@@ -119,7 +119,7 @@ class LoopGroup(BaseWorkflow, Executable):
                 StatusCode.COMPONENT_LOOP_CONFIG_ERROR,
                 error_msg="end_nodes haven't been configured"
             )
-        self._auto_complete_abilities()
+        self.auto_complete_abilities()
         actor_manager = ActorManager(self._workflow_spec, self._stream_actor, sub_graph=True, session=session)
         loop_session = SubWorkflowSession(session.parent(), self._workflow_config.card.id, actor_manager)
         self.compiled_graph = self.compile(loop_session, context=kwargs.get("context"))

@@ -499,8 +499,8 @@ class Workflow:
                     pass
 
     def _validate_and_init_session(self, session: WorkflowSession, stream_modes: list[StreamMode]):
-        self._internal._auto_complete_abilities()
-        mq_manager = ActorManager(self._internal._workflow_config.spec, self._internal._stream_actor, sub_graph=False,
+        self._internal.auto_complete_abilities()
+        mq_manager = ActorManager(self._internal.config().spec, self._internal.stream_actor(), sub_graph=False,
                                   session=session)
         session.set_actor_manager(mq_manager)
         session.set_stream_writer_manager(StreamWriterManager(stream_emitter=StreamEmitter(), modes=stream_modes))
@@ -519,8 +519,8 @@ class Workflow:
         Returns:
             tuple: (actor_manager, sub_workflow_session)
         """
-        self._internal._auto_complete_abilities()
-        actor_manager = ActorManager(self._internal._workflow_config.spec, self._internal._stream_actor, sub_graph=True,
+        self._internal.auto_complete_abilities()
+        actor_manager = ActorManager(self._internal.config().spec, self._internal.stream_actor(), sub_graph=True,
                                      session=session)
         sub_workflow_session = SubWorkflowSession(
             session,

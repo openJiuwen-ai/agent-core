@@ -28,7 +28,7 @@ class MessageQueueFactory:
                 logger.exception(f"[MessageQueueFactory] Failed to import Pulsar MQ: {e}")
                 raise JiuWenBaseException(StatusCode.MESSAGE_QUEUE_INIT_ERROR.code,
                                           StatusCode.MESSAGE_QUEUE_INIT_ERROR.errmsg.format(f"{mq_type} import error"))
-            except Exception as e:
+            except Exception:
                 raise JiuWenBaseException(StatusCode.MESSAGE_QUEUE_INIT_ERROR.code,
                                           StatusCode.MESSAGE_QUEUE_INIT_ERROR.errmsg.format(f"{mq_type} import error"))
         else:

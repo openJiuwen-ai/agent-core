@@ -154,7 +154,7 @@ class ComponentExecutable(Executable):
                                   StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.errmsg.format(ability='Collect'))
 
     async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
-        """Execute component with streaming input and streaming output.
+        """ Execute component with streaming input and streaming output.
 
          Args:
              inputs: Streaming input data (async iterator)
@@ -165,8 +165,7 @@ class ComponentExecutable(Executable):
              AsyncIterator[Output]: Async iterator that yields transformed output chunks
 
          Note:
-             This is the most general pattern for real-time data processing pipelines.
-         """
+             This is the most general pattern for real-time data processing pipelines. """
         raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.code,
                                   StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.errmsg.format(ability='Transform'))
 

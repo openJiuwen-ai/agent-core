@@ -26,16 +26,17 @@ class RemoteAgent:
         self.config = RemoteClientConfig(id=agent_id, protocol=protocol, topic=self.topic, **(config or {}))
         self.client = self._create_client()
 
-    def _create_client(self) -> RemoteClient:
+    def _create_client(self) -> RemoteClient | None:
         if self.protocol == ProtocolEnum.MQ:
             client = MqRemoteClient(config=self.config)
             return client
+        return None
 
     async def invoke(self, inputs: dict, timeout: float = None):
         try:
             await self.client.start()
             return await self.client.invoke(inputs, timeout=timeout)
-        except asyncio.CancelledError as e:
+        except asyncio.CancelledError:
             # Timeout cancellation call set externally
             raise JiuWenBaseException(StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.code,
                                       StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.errmsg.format(
@@ -50,12 +51,12 @@ class RemoteAgent:
             await self.client.start()
             async for chunk in self.client.stream(inputs, timeout=timeout):
                 yield chunk
-        except asyncio.CancelledError as e:
+        except asyncio.CancelledError:
             # Runner stop causes client cancellation
             raise JiuWenBaseException(StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.code,
                                       StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.errmsg.format(
                                           f"agent_id:{self.agent_id}"))
-        except TimeoutError as e:
+        except TimeoutError:
             raise JiuWenBaseException(StatusCode.REMOTE_AGENT_REQUEST_TIMEOUT.code,
                                       StatusCode.REMOTE_AGENT_REQUEST_TIMEOUT.errmsg.format(
                                           self.agent_id))

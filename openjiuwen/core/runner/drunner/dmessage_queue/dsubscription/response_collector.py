@@ -110,7 +110,7 @@ class ResponseCollector:
         try:
             while True:
                 msg = await asyncio.wait_for(self.queue.get(), timeout=timeout)
-                logger.debug(f"[Collector:{self.message_id}] stream get message {msg}")
+                logger.debug("[Collector:%s] stream get message %s", self.message_id, msg)
                 await self.check_message(msg)
                 if msg.last_chunk:
                     # Last message is MQ empty marker, do not return

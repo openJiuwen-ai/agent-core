@@ -20,21 +20,23 @@ from openjiuwen.core.single_agent import AgentCard
 
 @pytest.mark.asyncio
 class TestRunnerIntegration:
-    def setup_method(self):
+    def __init__(self):
         # Save original methods
-        self.original_handle_invoke = AgentAdapter._handle_invoke
-        self.original_handle_stream = AgentAdapter._handle_stream
+        self.mock_invoke = None
+        self.mock_stream = None
 
-        # Replace with custom methods
-        async def mock_handle_invoke(self, inputs):
+    def setup_method(self):
+        # Define mock handlers that respect encapsulation by using public API
+        async def mock_handle_invoke(inputs):
             return {"MOCK_INVOKE": "CUSTOM_RESPONSE"}
 
-        async def mock_handle_stream(self, inputs):
+        async def mock_handle_stream(inputs):
             for i in range(3):
                 yield {"MOCK_STREAM": f"chunk_{i}"}
 
-        AgentAdapter._handle_invoke = mock_handle_invoke
-        AgentAdapter._handle_stream = mock_handle_stream
+        # Store mock handlers for use in tests
+        self.mock_invoke = mock_handle_invoke
+        self.mock_stream = mock_handle_stream
 
         fake_mq = RunnerConfig(
             distributed_mode=True,
@@ -47,10 +49,8 @@ class TestRunnerIntegration:
         )
         Runner.set_config(fake_mq)
 
-    def teardown_method(self):
-        # Restore original methods
-        AgentAdapter._handle_invoke = self.original_handle_invoke
-        AgentAdapter._handle_stream = self.original_handle_stream
+    @staticmethod
+    def teardown_method():
         Runner.set_config(DEFAULT_RUNNER_CONFIG)
 
     async def test_agent_normal_lifecycle(self):
@@ -59,6 +59,9 @@ class TestRunnerIntegration:
         logger.info("=== Test 0: Agent lifecycle ===")
         await Runner.start()
         weather_adapter = AgentAdapter(agent_id="weather-single_agent")
+        # Access handlers through public server attribute to respect encapsulation
+        weather_adapter.server.invoke_handler = self.mock_invoke
+        weather_adapter.server.stream_handler = self.mock_stream
         weather_adapter.start()
 
         try:
@@ -181,16 +184,16 @@ class TestRunnerIntegration:
         """
         logger.info("=== Test 4: Adapter error propagation ===")
         await Runner.start()
-        original_handler = AgentAdapter._handle_invoke
 
         # Simulate adapter throwing exception
-        async def error_handler(self, inputs):
+        async def error_handler(inputs):
             raise JiuWenBaseException(
                 error_code=111,
                 message="ADAPTER_ERROR")
 
-        AgentAdapter._handle_invoke = error_handler
         weather_adapter = AgentAdapter(agent_id="weather-single_agent")
+        # Access handler through public server attribute to respect encapsulation
+        weather_adapter.server.invoke_handler = error_handler
         weather_adapter.start()
 
         try:
@@ -204,8 +207,6 @@ class TestRunnerIntegration:
             assert e.value.error_code == StatusCode.REMOTE_AGENT_PROCESS_ERROR.code
             assert "code: 111, message: ADAPTER_ERROR" in e.value.message
         finally:
-            # Restore original handler
-            AgentAdapter._handle_invoke = original_handler
             await weather_adapter.stop()
             await Runner.stop()
 
@@ -287,17 +288,14 @@ class TestRunnerIntegration:
         logger.info("=== Test 9: Concurrent Streaming vs Regular Calls ===")
         await Runner.start()
 
-        # Save original method
-        original_handle_stream = AgentAdapter._handle_stream
-
         # Simulate streaming response
-        async def mock_handle_stream(self, inputs):
+        async def mock_handle_stream(inputs):
             for i in range(5):
                 yield {"stream_chunk": i, "data": f"chunk_{i}_for_{inputs.get('city', 'unknown')}"}
 
-        AgentAdapter._handle_stream = mock_handle_stream
-
         streaming_adapter = AgentAdapter(agent_id="streaming-single_agent")
+        # Access handler through public server attribute to respect encapsulation
+        streaming_adapter.server.stream_handler = mock_handle_stream
         streaming_adapter.start()
 
         try:
@@ -363,7 +361,5 @@ class TestRunnerIntegration:
                 for chunk in result:
                     assert "stream_chunk" in chunk and "data" in chunk
         finally:
-            # Restore original method
-            AgentAdapter._handle_stream = original_handle_stream
             await streaming_adapter.stop()
             await Runner.stop()

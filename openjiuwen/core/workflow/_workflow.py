@@ -71,6 +71,9 @@ class BaseWorkflow:
     def config(self):
         return self._workflow_config
 
+    def stream_actor(self):
+        return self._stream_actor
+
     @classmethod
     def _validate_comp_id(cls, comp_id: str) -> None:
         """validate compnent id"""
@@ -84,7 +87,7 @@ class BaseWorkflow:
                                       connection_type: ConnectionType = ConnectionType.CONNECTION) -> None:
         """Validate that component IDs exist in comp_configs before adding connection.
 
-        This prevents KeyError in _auto_complete_abilities when edges reference non-existent components.
+        This prevents KeyError in auto_complete_abilities when edges reference non-existent components.
         """
         registered_comps = set(self._workflow_spec.comp_configs.keys())
 
@@ -250,7 +253,7 @@ class BaseWorkflow:
     async def reset(self):
         await self._graph.reset()
 
-    def _auto_complete_abilities(self):
+    def auto_complete_abilities(self):
         """Auto-complete component abilities based on edge topology."""
         edge_topology = self._build_edge_topology()
         self._validate_edge_nodes(edge_topology)

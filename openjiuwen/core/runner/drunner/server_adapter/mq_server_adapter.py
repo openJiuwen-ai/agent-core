@@ -171,7 +171,8 @@ class MqServerAdapter:
         self._running_tasks.pop(msg_id, None)
         if task.cancelled():
             logger.info(f"[{self.adapter_id}] Task {msg_id} cancelled (cleanup)")
-        elif exc := task.exception():
+        exc = task.exception()
+        if exc:
             logger.error(f"[{self.adapter_id}] Task {msg_id} failed: {exc}")
 
     async def stop(self):

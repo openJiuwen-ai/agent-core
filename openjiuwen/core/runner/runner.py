@@ -72,7 +72,8 @@ class Runner:
         """Get the distributed message queue for cross-process communication."""
         return self._distribute_message_queue
 
-    def set_config(self, config: RunnerConfig):
+    @staticmethod
+    def set_config(config: RunnerConfig):
         """Set the runner configuration with provided config object.
 
         Args:
@@ -80,7 +81,8 @@ class Runner:
         """
         set_runner_config(config)
 
-    def get_config(self):
+    @staticmethod
+    def get_config():
         """Retrieve the current runner configuration.
 
         Returns:

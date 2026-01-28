@@ -2,12 +2,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved
 
+from typing import Annotated, List
+
 import pytest
-from typing import Annotated, Any, List, Dict
 from pydantic import Field, BaseModel
 
-from openjiuwen.core.foundation.tool.tool import tool, ToolCard
 from openjiuwen.core.foundation.tool.schema import ToolInfo
+from openjiuwen.core.foundation.tool.tool import tool, ToolCard
 
 
 @tool(

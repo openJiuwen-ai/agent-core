@@ -954,20 +954,21 @@ async def test_five_transform_workflow():
 
 
 async def test_auto_complete_abilities_detects_unregistered_edge_nodes():
-    """Test that _auto_complete_abilities raises exception when edges reference unregistered components."""
+    """Test that auto_complete_abilities raises exception when edges reference unregistered components."""
     flow = Workflow()
     flow.set_start_comp("start", MockStartNode("start"))
     flow.add_workflow_comp("a", Node1("a"))
     flow.set_end_comp("end", MockEndNode("end"))
 
     # Use mock to inject an edge with an unregistered target node to simulate configuration error
-    # This bypasses add_connection validation to test _auto_complete_abilities defensive check
-    workflow_spec = flow._internal._workflow_config.spec
+    # This bypasses add_connection validation to test auto_complete_abilities defensive check
+    workflow_internal = getattr(flow, "_internal", None)
+    workflow_spec = workflow_internal.config().spec
     original_edges = workflow_spec.edges.copy()
     workflow_spec.edges["a"] = ["unregistered_node"]
 
     try:
-        # _auto_complete_abilities is called during invoke/stream, which should detect the issue
+        # auto_complete_abilities is called during invoke/stream, which should detect the issue
         with pytest.raises(JiuWenBaseException) as context:
             await flow.invoke({"a": 1}, create_workflow_session())
 
