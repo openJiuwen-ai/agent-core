@@ -6,7 +6,7 @@ import json
 from ast import literal_eval
 from typing import Optional, List, Dict, Any
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import agent_logger, LogEventType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.prompt import PromptTemplate
@@ -53,14 +53,22 @@ class TuneUtils:
         pattern = r"```json(.*?)```"
         match = re.search(pattern, json_like_string, re.DOTALL)
         if not match:
-            logger.warning("Failed to extract json string from response")
+            agent_logger.warning(
+                "Failed to extract json string from response",
+                event_type=LogEventType.AGENT_ERROR,
+                input_data=json_like_string
+            )
             return None
 
         matched_json_string = match.group(1).strip()
         try:
             json_data = json.loads(matched_json_string)
         except json.decoder.JSONDecodeError:
-            logger.warning("Failed to decode json string")
+            agent_logger.warning(
+                "Failed to decode json string",
+                event_type=LogEventType.AGENT_ERROR,
+                input_data=json_like_string
+            )
             return None
         return json_data
 
@@ -69,17 +77,29 @@ class TuneUtils:
         pattern = r"```list(.*?)```"
         match = re.search(pattern, list_like_string, re.DOTALL)
         if not match:
-            logger.warning("Failed to extract list string from response")
+            agent_logger.warning(
+                "Failed to extract list string from response",
+                event_type=LogEventType.AGENT_ERROR,
+                input_data=list_like_string
+            )
             return None
 
         matched_list_string = match.group(1).strip()
         try:
             list_data = literal_eval(matched_list_string)
         except Exception:
-            logger.warning("Failed to convert list string to python list")
+            agent_logger.warning(
+                "Failed to convert list string to python list",
+                event_type=LogEventType.AGENT_ERROR,
+                input_data=list_like_string
+            )
             return None
         if not isinstance(list_data, list):
-            logger.warning("Parsed data is not a list-type")
+            agent_logger.warning(
+                "Parsed data is not a list-type",
+                event_type=LogEventType.AGENT_ERROR,
+                input_data=list_like_string
+            )
 
         return list_data
 
