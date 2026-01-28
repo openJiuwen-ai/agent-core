@@ -46,7 +46,6 @@ from openjiuwen.core.controller.schema.event import Event, InputEvent, TaskFaile
 from openjiuwen.core.foundation.llm import SystemMessage, UserMessage, ToolMessage
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
-from openjiuwen.core.runner import Runner
 
 
 class IntentRecognizer:
@@ -153,6 +152,7 @@ class IntentRecognizer:
                 error_msg="Multiple inputs are not supported for intent recognition."
             )
 
+        from openjiuwen.core.runner import Runner
         model = await Runner.resource_mgr.get_model(model_id=self._config.intent_llm_id)
         user_message = await self._prepare_user_message(query=texts[0].text)
         await context.add_messages(user_message)
