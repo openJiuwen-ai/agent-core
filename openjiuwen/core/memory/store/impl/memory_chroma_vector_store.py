@@ -8,9 +8,10 @@ from chromadb.errors import NotFoundError
 
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class MemoryChromaVectorStore(VectorStore):
@@ -24,7 +25,10 @@ class MemoryChromaVectorStore(VectorStore):
 
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> Any:
-        logger.error("create_client not implemented in MemoryChromaVectorStore")
+        memory_logger.error(
+            "Create_client not implemented in MemoryChromaVectorStore.",
+            event_type=LogEventType.MEMORY_STORE,
+        )
         pass
 
     async def get_collection(self, table_name: str):
@@ -142,10 +146,18 @@ class MemoryChromaVectorStore(VectorStore):
         self.check_table_name(table_name, "delete")
         collection_is_exists = await self.table_exists(table_name)
         if not collection_is_exists:
-            logger.debug(f"Chroma Collection {table_name} does not exist, skip delete vector")
+            memory_logger.debug(
+                "Chroma collection does not exist, skip delete vector",
+                metadata={"collection_name": table_name},
+                event_type=LogEventType.MEMORY_DELETE,
+            )
             return True
         if not ids:
-            logger.debug(f"ids is {ids}, skip delete vector")
+            memory_logger.debug(
+                "Ids is None, skip delete vector",
+                memory_id=ids,
+                event_type=LogEventType.MEMORY_DELETE,
+            )
             return True
         collection = await self.get_collection(table_name)
         await asyncio.to_thread(
@@ -157,7 +169,11 @@ class MemoryChromaVectorStore(VectorStore):
     async def delete_table(self, table_name: str) -> bool:
         collection_is_exists = await self.table_exists(table_name)
         if not collection_is_exists:
-            logger.debug(f"Chroma Collection {table_name} does not exist, skip delete collection")
+            memory_logger.debug(
+                "Chroma collection does not exist, skip delete collection.",
+                metadata={"collection_name": table_name},
+                event_type=LogEventType.MEMORY_DELETE,
+            )
             return True
         await asyncio.to_thread(
             self.client.delete_collection,

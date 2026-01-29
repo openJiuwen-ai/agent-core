@@ -4,13 +4,14 @@ import json
 from typing import List, Tuple
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model, JsonOutputParser
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
 from openjiuwen.core.memory.config.config import AgentMemoryConfig
 from openjiuwen.core.memory.prompt.memory_analyzer import (MEMORY_ANALYZER_PROMPT,
                                                            VARIABLES_DESCRIPTION_TEMPLATE_PROMPT,
                                                            SUMMARY_TEMPLATE_PROMPT, USER_PROFILE_CATEGORY)
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 MEMORY_CATEGORIES_SCOPE = [
     "user_profile"
@@ -60,7 +61,11 @@ class MemoryAnalyzer:
             retries: int = 3
     ) -> MemoryAnalyzerResult | None:
         if len(messages) == 0:
-            logger.warning("No messages to analyze")
+            memory_logger.warning(
+                "No messages to analyze",
+                event_type=LogEventType.MEMORY_PROCESS,
+                metadata={"messages_len": len(messages)}
+            )
             return None
         need_summary, raw_summary = MemoryAnalyzer._check_summary(
             messages=messages,
@@ -90,7 +95,11 @@ class MemoryAnalyzer:
             except json.JSONDecodeError as e:
                 if attempt < retries - 1:
                     continue
-                logger.error(f"categories model output format error: {e.msg}")
+                memory_logger.error(
+                    "Categories model output format error",
+                    event_type=LogEventType.MEMORY_PROCESS,
+                    exception=str(e)
+                )
 
         return MemoryAnalyzerResult()
 
@@ -106,9 +115,13 @@ class MemoryAnalyzer:
         if need_summary:
             summary_max_token = max(int(raw_summary_len * memory_config.summary_config.fraction),
                                     memory_config.summary_config.max_token)
-            logger.debug(f"summary_max_token: {summary_max_token}, raw_summary_len: {raw_summary_len},"
-                         f"fraction: {memory_config.summary_config.fraction},"
-                         f"config max_token: {memory_config.summary_config.max_token}")
+            memory_logger.debug(
+                "Building model input to analyze the memories contained in the messages",
+                event_type=LogEventType.MEMORY_PROCESS,
+                metadata={"summary_max_token": summary_max_token, "raw_summary_len": raw_summary_len,
+                          "fraction": memory_config.summary_config.fraction,
+                          "config_max_token": memory_config.summary_config.max_token}
+            )
             summary_description, summary_output_format = \
                 MemoryAnalyzer._build_summary_prompt(
                     max_message_token=summary_max_token,

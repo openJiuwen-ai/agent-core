@@ -4,11 +4,12 @@ from typing import Tuple
 
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class WriteManager:
@@ -24,34 +25,61 @@ class WriteManager:
                 try:
                     await self.managers[mem_type].add(mem_unit, llm)
                 except ValueError as e:
-                    logger.error(f"Failed to add {mem_type}, error: {str(e)}")
+                    memory_logger.error(
+                        "Failed to add mem",
+                        exception=str(e),
+                        memory_type=mem_type,
+                        event_type=LogEventType.MEMORY_STORE
+                    )
                     has_inner_exception = True
                 except Exception as e:
-                    logger.error(f"Failed to add {mem_type}, error: {str(e)}")
+                    memory_logger.error(
+                        "Failed to add mem",
+                        exception=str(e),
+                        memory_type=mem_type,
+                        event_type=LogEventType.MEMORY_STORE
+                    )
                     has_inner_exception = True
             else:
-                logger.warning(f"Unsupported memory type: {mem_type}")
+                memory_logger.warning(
+                    "Unsupported memory type",
+                    memory_type=mem_type,
+                    event_type=LogEventType.MEMORY_STORE
+                )
 
         if has_inner_exception:
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
                 memory_type="user profile",
                 error_msg=f"memory engine add mem has exception",
+                operation="add mem"
             )
 
     async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str):
         mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)
         if mem_type is None:
-            logger.warning(f"Skipping this update due to failure in getting memory type, mem_id:{mem_id}, "
-                           f"user_id:{user_id}, scope_id:{scope_id}")
+            memory_logger.warning(
+                "Skipping this update due to failure in getting memory type",
+                memory_type=mem_type,
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id,
+            )
             return
         await self.managers[mem_type].update(user_id, scope_id, mem_id, memory)
 
     async def delete_mem_by_id(self, user_id: str, scope_id: str, mem_id: str):
         mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)
         if mem_type is None:
-            logger.warning(f"Skipping this deletion due to failure in getting memory type, mem_id:{mem_id}, "
-                           f"user_id:{user_id}, scope_id:{scope_id}")
+            memory_logger.warning(
+                "Skipping this deletion due to failure in getting memory type",
+                memory_type=mem_type,
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return
         await self.managers[mem_type].delete(user_id, scope_id, mem_id)
 
@@ -64,16 +92,42 @@ class WriteManager:
         try:
             data = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
         except Exception as e:
-            logger.error(f"Failed to get memory: {e}")
+            memory_logger.error(
+                "Failed to get memory",
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id,
+                exception=str(e)
+            )
             return None
         if data is None:
-            logger.warning(f"Nonexistent memory, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
+            memory_logger.warning(
+                "Nonexistent memory",
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id,
+            )
             return None
         if "mem_type" not in data:
-            logger.warning(f"The mem_type field doesn't exist, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
+            memory_logger.warning(
+                "The mem_type field doesn't exist",
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id,
+            )
             return None
         mem_type = data['mem_type']
         if mem_type not in self.managers:
-            logger.warning(f"Unsupported mem_type:{mem_type}, mem_id:{mem_id}, user_id:{user_id}, scope_id:{scope_id}")
+            memory_logger.warning(
+                "Unsupported mem_type",
+                memory_id=[mem_id],
+                memory_type=mem_type,
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return None
         return mem_type

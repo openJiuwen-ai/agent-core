@@ -4,12 +4,13 @@ import json
 from typing import Dict, Any
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 from openjiuwen.core.foundation.llm import JsonOutputParser
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.process.extract.common import build_model_input
 from openjiuwen.core.memory.process.extract.common import ExtractMemoryParams
 from openjiuwen.core.memory.prompt.user_profile_extractor import (USER_PROFILE_JSON_FORMAT,
                                                                   USER_PROFILE_MULTI_USER_PROMPT)
 from openjiuwen.core.memory.prompt.long_term_memory_extractor import LONG_TERM_MEMORY_EXTRACTOR_PROMPT
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 def handle_user_profile_prompt(sys_prompt: str, index: int, last_one: bool, user_define: Dict[str, str] = None) -> str:
@@ -65,7 +66,11 @@ class LongTermMemoryExtractor:
             try:
                 MemoryType(category)
             except ValueError:
-                logger.warning(f"invalid category, remove {category}")
+                memory_logger.warning(
+                    "Invalid category, remove category",
+                    event_type=LogEventType.MEMORY_PROCESS,
+                    metadata={"category": category}
+                )
                 categories.remove(category)
         if len(categories) == 0:
             return {}
@@ -90,5 +95,9 @@ class LongTermMemoryExtractor:
             except json.JSONDecodeError as e:
                 if attempt < retries - 1:
                     continue
-                logger.error(f"long term memory extractor model output format error: {e.msg}")
+                memory_logger.error(
+                    "Long term memory extractor model output format error",
+                    event_type=LogEventType.MEMORY_PROCESS,
+                    exception=str(e)
+                )
         return {}

@@ -2,11 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import List, Tuple
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class SemanticStore:
@@ -54,7 +55,12 @@ class SemanticStore:
             bool: True if the operation succeeded, False otherwise.
         """
         if not self.embedding_model:
-            logger.error("Embedding model not initialized, please call initialize_embedding_model first.")
+            memory_logger.error(
+                "Embedding model not initialized, please call initialize_embedding_model first.",
+                event_type=LogEventType.MEMORY_STORE,
+                scope_id=scope_id,
+                metadata={"collection_name": table_name}
+            )
             return False
             
         try:
@@ -84,7 +90,13 @@ class SemanticStore:
             await self.vector_store.add(data=data, table_name=table_name)
             return True
         except Exception as e:
-            logger.error(f"Failed to add documents to semantic store: {e}")
+            memory_logger.error(
+                "Failed to add documents to semantic store.",
+                event_type=LogEventType.MEMORY_STORE,
+                exception=str(e),
+                scope_id=scope_id,
+                metadata={"collection_name": table_name}
+            )
             return False
     
     async def delete_docs(self, ids: List[str], table_name: str) -> bool:
@@ -101,7 +113,13 @@ class SemanticStore:
         try:
             return await self.vector_store.delete(ids=ids, table_name=table_name)
         except Exception as e:
-            logger.error(f"Failed to delete documents from semantic store: {e}")
+            memory_logger.error(
+                "Failed to delete documents from semantic store.",
+                event_type=LogEventType.MEMORY_DELETE,
+                exception=str(e),
+                meta_data={"collection_name": table_name},
+                memory_id=ids
+            )
             return False
     
     async def search(self, query: str, table_name: str,
@@ -125,14 +143,24 @@ class SemanticStore:
                 is the similarity score, with higher values indicating greater similarity.
         """
         if not self.embedding_model:
-            logger.error("Embedding model not initialized, please call initialize_embedding_model first.")
+            memory_logger.error(
+                "Embedding model not initialized, please call initialize_embedding_model first.",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                query=query,
+                meta_data={"collection_name": table_name}
+            )
             return []
             
         try:
             # Generate embedding for the query
             query_embeddings = await self.embedding_model.embed_documents(texts=[query])
             if len(query_embeddings) == 0:
-                logger.error(f"Failed to embed query: {query}")
+                memory_logger.error(
+                    "Failed to embed query.",
+                    event_type=LogEventType.MEMORY_RETRIEVE,
+                    query=query,
+                    meta_data={"collection_name": table_name}
+                )
                 return []
             query_embedding = query_embeddings[0]
 
@@ -146,7 +174,13 @@ class SemanticStore:
             # Convert to required format
             return [(result.id, result.score) for result in results]
         except Exception as e:
-            logger.error(f"Failed to search semantic store: {e}")
+            memory_logger.error(
+                "Failed to embed query.",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                query=query,
+                exception=str(e),
+                meta_data={"collection_name": table_name}
+            )
             return []
     
     async def delete_table(self, table_name: str) -> bool:
@@ -162,5 +196,11 @@ class SemanticStore:
         try:
             return await self.vector_store.delete_table(table_name=table_name)
         except Exception as e:
-            logger.error(f"Failed to delete table from semantic store: {e}")
+            memory_logger.error(
+                "Failed to delete table from semantic store.",
+                event_type=LogEventType.MEMORY_DELETE,
+                message="delete table",
+                exception=str(e),
+                meta_data={"collection_name": table_name}
+            )
             return False

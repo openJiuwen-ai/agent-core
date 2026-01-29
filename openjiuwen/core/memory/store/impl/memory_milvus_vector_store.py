@@ -3,11 +3,12 @@
 import asyncio
 from typing import List, Any, Optional
 from pymilvus import FieldSchema, CollectionSchema, DataType, Collection, connections, utility
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 MEMORY_ID_LENGTH = 36
 
@@ -41,7 +42,11 @@ class MemoryMilvusVectorStore(VectorStore):
 
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> Any:
-        logger.error("create_client not implemented in MemoryMilvusVectorStore")
+        memory_logger.error(
+            "Create_client not implemented in MemoryMilvusVectorStore.",
+            message="create vector store client",
+            event_type=LogEventType.MEMORY_STORE,
+        )
         pass
 
     async def _ensure_connection(self):
@@ -67,7 +72,11 @@ class MemoryMilvusVectorStore(VectorStore):
         if collection_name in self.collections:
             return self.collections[collection_name]
         if not utility.has_collection(collection_name):
-            logger.info(f"Collection {collection_name} not found, creating...")
+            memory_logger.info(
+                "Collection not found, creating...",
+                event_type=LogEventType.MEMORY_STORE,
+                metadata={"collection_name": collection_name},
+            )
             fields = [
                 FieldSchema(name="id", dtype=DataType.VARCHAR,
                             is_primary=True, max_length=MEMORY_ID_LENGTH),
@@ -78,9 +87,17 @@ class MemoryMilvusVectorStore(VectorStore):
             collection = Collection(name=collection_name, schema=schema, using="default")
             index_params = {"index_type": "IVF_FLAT", "metric_type": "IP", "params": {"nlist": 128}}
             collection.create_index("embedding", index_params)
-            logger.info(f"Index created for collection {collection_name}")
+            memory_logger.info(
+                "Index created for collection.",
+                event_type=LogEventType.MEMORY_STORE,
+                metadata={"collection_name": collection_name},
+            )
         else:
-            logger.info(f"milvus collection already exists: {collection_name}")
+            memory_logger.info(
+                "Milvus collection already exists.",
+                event_type=LogEventType.MEMORY_STORE,
+                metadata={"collection_name": collection_name},
+            )
             collection = Collection(name=collection_name, using="default")
         collection.load()
         self.collections[collection_name] = collection
@@ -150,7 +167,12 @@ class MemoryMilvusVectorStore(VectorStore):
             )
         await self._ensure_connection()
         if not utility.has_collection(table_name, using="default"):
-            logger.debug(f"Milvus Collection {table_name} does not exist, skip delete vector")
+            memory_logger.debug(
+                f"Milvus collection does not exist, skip delete vector.",
+                event_type=LogEventType.MEMORY_DELETE,
+                memory_id=ids,
+                metadata={"collection_name": table_name}
+            )
             return True
         collection = await self._get_collection(table_name)
         ids_str = ", ".join(f'"{i}"' for i in ids)
@@ -165,7 +187,11 @@ class MemoryMilvusVectorStore(VectorStore):
     async def delete_table(self, table_name: str) -> bool:
         await self._ensure_connection()
         if not await self.table_exists(table_name):
-            logger.debug(f"Milvus Collection {table_name} does not exist, skip delete collection")
+            memory_logger.debug(
+                f"Milvus collection does not exist, skip delete collection.",
+                event_type=LogEventType.MEMORY_DELETE,
+                metadata={"collection_name": table_name}
+            )
             return True
         await asyncio.to_thread(
             utility.drop_collection,
@@ -180,4 +206,6 @@ class MemoryMilvusVectorStore(VectorStore):
 
     def check_vector_field(self) -> None:
         """Check if vector field configuration is consistent with actual database"""
-        logger.error("check_vector_field not implemented in MemoryMilvusVectorStore")
+        memory_logger.error(
+            "check_vector_field not implemented in MemoryMilvusVectorStore",
+            event_type=LogEventType.MEMORY_STORE)

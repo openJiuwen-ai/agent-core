@@ -4,11 +4,12 @@
 from abc import abstractmethod, ABC
 from typing import Any, Tuple
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.common.crypto import encrypt, decrypt, NONCE_LENGTH, TAG_LENGTH
 
 from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class BaseMemoryManager(ABC):
@@ -59,10 +60,18 @@ class BaseMemoryManager(ABC):
             encrypt_memory, nonce, tag = encrypt(key=key, plaintext=plaintext)
             return f"{nonce}{tag}{encrypt_memory}"
         except ValueError as e:
-            logger.warning(f"Encrypt exception occurred:{str(e)}")
+            memory_logger.warning(
+                "Encrypt exception occurred",
+                exception=str(e),
+                event_type=LogEventType.MEMORY_PROCESS,
+            )
             return ""
         except Exception as e:
-            logger.warning(f"Encrypt error occurred:{str(e)}")
+            memory_logger.warning(
+                "Encrypt error occurred",
+                exception=str(e),
+                event_type=LogEventType.MEMORY_PROCESS,
+            )
             return ""
 
     @staticmethod
@@ -72,7 +81,11 @@ class BaseMemoryManager(ABC):
 
         nonce_and_tag_len = BaseMemoryManager.NONCE_HEX_LENGTH + BaseMemoryManager.TAG_HEX_LENGTH
         if len(ciphertext) < nonce_and_tag_len:
-            logger.warning(f"Decryption error occurred: invalid ciphertext len{len(ciphertext)}")
+            memory_logger.warning(
+                "Decryption error occurred: invalid ciphertext",
+                event_type=LogEventType.MEMORY_PROCESS,
+                metadata={"ciphertext_len": len(ciphertext)}
+            )
             return ""
 
         nonce = ciphertext[0:BaseMemoryManager.NONCE_HEX_LENGTH]
@@ -81,8 +94,16 @@ class BaseMemoryManager(ABC):
         try:
             return decrypt(key=key, ciphertext=encrypt_memory, nonce=nonce, tag=tag)
         except ValueError as e:
-            logger.warning(f"Decrypt exception occurred:{str(e)}")
+            memory_logger.warning(
+                "Decrypt exception occurred",
+                event_type=LogEventType.MEMORY_PROCESS,
+                exception=str(e)
+            )
             return ""
         except Exception as e:
-            logger.warning(f"Decrypt error occurred:{str(e)}")
+            memory_logger.warning(
+                "Decrypt error occurred",
+                event_type=LogEventType.MEMORY_PROCESS,
+                exception=str(e)
+            )
             return ""

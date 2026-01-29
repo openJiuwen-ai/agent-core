@@ -1,12 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.process.extract.common import ExtractMemoryParams
 from openjiuwen.core.memory.process.extract.long_term_memory_extractor import LongTermMemoryExtractor
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit, \
     UserProfileUnit, SummaryUnit
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
 from openjiuwen.core.memory.process.extract.memory_analyzer import MemoryAnalyzer, VariableResult
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 category_to_class = {
     "user_profile": MemoryType.USER_PROFILE
@@ -28,7 +29,12 @@ class Generator:
         message_mem_id = kwargs.get("message_mem_id")
         timestamp = kwargs.get("timestamp")
         if not all([messages, config, user_id, scope_id, model]):
-            logger.error("messages, config, user_id, scope_id, model are required parameters")
+            memory_logger.error(
+                "Messages, config, user_id, scope_id, model are required parameters",
+                event_type=LogEventType.MEMORY_PROCESS,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return []
 
         extract_memory_params = ExtractMemoryParams(
@@ -60,7 +66,12 @@ class Generator:
                                                         timestamp=timestamp)
         all_memory_results.append(summary_unit)
         if not config.enable_long_term_mem:
-            logger.info("Not enable long term memory")
+            memory_logger.info(
+                "Not enable long term memory",
+                event_type=LogEventType.MEMORY_PROCESS,
+                user_id=user_id,
+                scope_id=scope_id,
+            )
             return all_memory_results
         try:
             merged_units = await self._categories_to_memory_unit(
@@ -70,16 +81,40 @@ class Generator:
                 timestamp=timestamp
             )
         except AttributeError as e:
-            logger.debug(f"Get conflict info has attribute exception: {str(e)}")
+            memory_logger.debug(
+                "Get conflict info has attribute exception",
+                event_type=LogEventType.MEMORY_PROCESS,
+                user_id=user_id,
+                scope_id=scope_id,
+                exception=str(e)
+            )
             return all_memory_results
         except ValueError as e:
-            logger.warning(f"Get conflict info has value exception: {str(e)}")
+            memory_logger.warning(
+                "Get conflict info has value exception",
+                event_type=LogEventType.MEMORY_PROCESS,
+                user_id=user_id,
+                scope_id=scope_id,
+                exception=str(e)
+            )
             return all_memory_results
         except BaseException as e:
-            logger.warning(f"Get conflict info has exception: {str(e)}")
+            memory_logger.warning(
+                "Get conflict info has exception",
+                event_type=LogEventType.MEMORY_PROCESS,
+                user_id=user_id,
+                scope_id=scope_id,
+                exception=str(e)
+            )
             return all_memory_results
         all_memory_results += merged_units
-        logger.info(f"Memory units generated {all_memory_results}")
+        memory_logger.info(
+            "Memory units generated successfully",
+            event_type=LogEventType.MEMORY_PROCESS,
+            user_id=user_id,
+            scope_id=scope_id,
+            metadata={"all_memory_result": all_memory_results}
+        )
         return all_memory_results
 
     async def _categories_to_memory_unit(self,
@@ -152,7 +187,13 @@ class Generator:
         user_profile_dict = memory_dict.get("user_profile", {})
         for profile_type, profile_list in user_profile_dict.items():
             if not isinstance(profile_list, list):
-                logger.warning(f"User profile extractor output format error: {profile_list} is not a list")
+                memory_logger.warning(
+                    "User profile extractor output format error: profile_list is not a list",
+                    event_type=LogEventType.MEMORY_PROCESS,
+                    user_id=user_id,
+                    scope_id=scope_id,
+                    metadata={"profile_list": profile_list}
+                )
                 continue
             for profile in profile_list:
                 mem_id = str(await self.data_id_generator.generate_next_id(user_id=user_id))

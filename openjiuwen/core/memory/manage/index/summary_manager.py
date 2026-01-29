@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 from typing import Any, List, Tuple
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.common.base import generate_idx_name, parse_memory_hit_infos
@@ -12,6 +11,8 @@ from openjiuwen.core.memory.manage.mem_model.memory_unit import SummaryUnit, Bas
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class SummaryManager(BaseMemoryManager):
@@ -58,7 +59,13 @@ class SummaryManager(BaseMemoryManager):
         """delete memory by its id."""
         data = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
         if data is None:
-            logger.error(f"Delete summary in store failed, the mem of mem_id({mem_id}) is not exist.")
+            memory_logger.error(
+                "Delete summary in store failed, the mem of mem_id is not exist.",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_id=mem_id,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return False
         await self.mem_store.delete(mem_id=mem_id, user_id=user_id, scope_id=scope_id)
         await self._delete_vector_summary_memory(memory_id=[mem_id],
@@ -70,7 +77,12 @@ class SummaryManager(BaseMemoryManager):
         """delete memory by user id and app id."""
         data = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id, mem_type=MemoryType.SUMMARY.value)
         if data is None:
-            logger.error(f"Delete summary in store failed, the mem of user_id({user_id}) is not exist.")
+            memory_logger.error(
+                "Delete summary in store failed, the mem of user_id is not exist.",
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return False
         mem_ids = [item['id'] for item in data]
         await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)

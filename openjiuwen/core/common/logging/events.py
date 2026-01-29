@@ -69,6 +69,7 @@ class LogEventType(Enum):
     MEMORY_RETRIEVE = "memory_retrieve"  # Memory retrieved
     MEMORY_DELETE = "memory_delete"  # Memory deleted
     MEMORY_UPDATE = "memory_update"  # Memory updated
+    MEMORY_PROCESS = "memory_process"  # Memory process
 
     # Session related events
     SESSION_CREATE = "session_create"  # Session created
@@ -313,11 +314,13 @@ class MemoryEvent(BaseLogEvent):
 
     memory_type: Optional[str] = None  # Memory type, e.g., short_term, long_term
     operation: Optional[str] = None  # Operation type, e.g., store, retrieve, delete, update
-    memory_id: Optional[str] = None  # Memory ID
+    memory_id: Optional[List[str]] = None  # Memory ID
     query: Optional[str] = None  # Query content (for retrieval)
     memory_count: Optional[int] = None  # Memory count
     retrieved_memories: Optional[List[Dict[str, Any]]] = None  # Retrieved memories
     storage_size_bytes: Optional[int] = None  # Storage size (bytes)
+    user_id: Optional[str] = None
+    scope_id: Optional[str] = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -439,6 +442,7 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.TOOL_CALL_END: ToolEvent,
     LogEventType.TOOL_CALL_ERROR: ToolEvent,
     # Memory events
+    LogEventType.MEMORY_PROCESS: MemoryEvent,
     LogEventType.MEMORY_STORE: MemoryEvent,
     LogEventType.MEMORY_RETRIEVE: MemoryEvent,
     LogEventType.MEMORY_DELETE: MemoryEvent,

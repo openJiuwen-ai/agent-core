@@ -3,11 +3,12 @@
 
 from typing import Any, Optional, Tuple
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import VariableUnit
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class VariableManager(BaseMemoryManager):
@@ -22,7 +23,13 @@ class VariableManager(BaseMemoryManager):
     async def add(self, memory: VariableUnit, llm: Tuple[str, Model] | None = None):
         """add Variable memory"""
         if self.kv_store is None:
-            logger.error("kv_store cannot be None")
+            memory_logger.error(
+                "kv_store cannot be None",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_type="variable",
+                user_id=memory.user_id,
+                scope_id=memory.scope_id
+            )
             return
         key, value = self._make_variable_pairs(
             memory.user_id,
@@ -36,12 +43,25 @@ class VariableManager(BaseMemoryManager):
         await self.kv_store.set(key, value)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
-        logger.warning("not implemented method update")
+        memory_logger.warning(
+            "Not implemented method update",
+            event_type=LogEventType.MEMORY_STORE,
+            memory_type="variable",
+            memory_id=[mem_id],
+            user_id=user_id,
+            scope_id=scope_id
+        )
         pass
 
     async def update_user_variable(self, user_id: str, scope_id: str, var_name: str, var_mem: str):
         if self.kv_store is None:
-            logger.error("kv_store cannot be None")
+            memory_logger.error(
+                "KV_store cannot be None",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_type="variable",
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return
         existing_variable = await self.query_variable(user_id=user_id, scope_id=scope_id, name=var_name)
         if not VariableManager._check_exist(existing_variable, var_name):
@@ -51,12 +71,25 @@ class VariableManager(BaseMemoryManager):
         await self.kv_store.set(key, value)
 
     async def delete(self, user_id: str, scope_id: str, mem_id: str, **kwargs):
-        logger.warning("not implemented method delete")
+        memory_logger.error(
+            "Not implemented method delete",
+            event_type=LogEventType.MEMORY_STORE,
+            memory_id=[mem_id],
+            memory_type="variable",
+            user_id=user_id,
+            scope_id=scope_id
+        )
         pass
 
     async def delete_by_user_id(self, user_id: str, scope_id: str):
         if self.kv_store is None:
-            logger.error("kv_store cannot be None")
+            memory_logger.error(
+                "kv_store cannot be None",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_type="variable",
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return
         user_prefix = f"user_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}"
         session_prefix = f"session_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}"
@@ -65,17 +98,37 @@ class VariableManager(BaseMemoryManager):
 
     async def delete_user_variable(self, user_id: str, scope_id: str, var_name: str):
         if self.kv_store is None:
-            logger.error("kv_store cannot be None")
+            memory_logger.error(
+                "kv_store cannot be None",
+                event_type=LogEventType.MEMORY_STORE,
+                memory_type="variable",
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return
         key, _ = self._make_variable_pairs(usr_id=user_id, for_deletion=False, scope_id=scope_id, var_name=var_name)
         await self.kv_store.delete(key)
 
     async def get(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
-        logger.warning("not implemented method get")
+        memory_logger.warning(
+            "Not implemented method get",
+            memory_id=[mem_id],
+            event_type=LogEventType.MEMORY_STORE,
+            memory_type="variable",
+            user_id=user_id,
+            scope_id=scope_id
+        )
         pass
 
     async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
-        logger.warning("not implemented method search")
+        memory_logger.warning(
+            "Not implemented method search",
+            event_type=LogEventType.MEMORY_STORE,
+            memory_type="variable",
+            query=query,
+            user_id=user_id,
+            scope_id=scope_id
+        )
         pass
 
     async def query_variable(self, user_id: str, scope_id: str, name: Optional[str] = None,
@@ -137,9 +190,23 @@ class VariableManager(BaseMemoryManager):
     @staticmethod
     def _check_user_and_scope_id(user_id, scope_id, context="Operation"):
         if not user_id or not user_id.strip():
-            logger.error(f"{context} failed, user ID is empty")
+            memory_logger.error(
+                "Check user and scope id operation failed, user ID is empty",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                memory_type="variable",
+                user_id=user_id,
+                scope_id=scope_id,
+                metadata={"context": context}
+            )
         if not scope_id or not scope_id.strip():
-            logger.error(f"{context} failed, scope ID is empty")
+            memory_logger.error(
+                "Check user and scope id operation failed, scope ID is empty",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                memory_type="variable",
+                user_id=user_id,
+                scope_id=scope_id,
+                metadata={"context": context},
+            )
 
     @staticmethod
     def _check_exist(variable_dict: dict[str, Any], variable_name: str) -> bool:

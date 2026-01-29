@@ -3,8 +3,9 @@
 import asyncio
 import uuid
 import json
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.common.constant import EXCLUSIVE_VALUE_KEY
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class DistributedLock:
@@ -35,7 +36,11 @@ class DistributedLock:
             if data.get(EXCLUSIVE_VALUE_KEY) == self.lock_value:
                 await self.store.delete(self.lock_key)
         except Exception as e:
-            logger.error(f"Error releasing lock: {e}")
+            memory_logger.error(
+                "Error releasing lock",
+                exception=str(e),
+                event_type=LogEventType.MEMORY_STORE,
+            )
 
     async def __aenter__(self):
         await self.acquire()
