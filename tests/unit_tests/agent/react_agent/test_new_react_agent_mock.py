@@ -741,18 +741,19 @@ class TestNewReActAgentGetToolInfo(unittest.IsolatedAsyncioTestCase):
 
     def test_get_tool_info_returns_agent_as_tool(self):
         """测试将 Agent 转换为 ToolInfo（作为子 Agent 使用）"""
-        from openjiuwen.core.common.schema import Param, ParamType
-
         card = AgentCard(
             name="sub_agent",
             description="子 Agent 描述",
-            input_params=[
-                Param.string(
-                    name="query",
-                    description="查询内容",
-                    required=True
-                )
-            ]
+            input_params={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "用户输入信息",
+                    }
+                },
+                "required": ["query"]
+            }
         )
 
         with patch.object(
@@ -762,7 +763,7 @@ class TestNewReActAgentGetToolInfo(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=card)
 
-        tool_info = agent.get_tool_info()
+        tool_info = agent.card.tool_info()
 
         self.assertEqual(tool_info.name, "sub_agent")
         self.assertEqual(tool_info.description, "子 Agent 描述")
