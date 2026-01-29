@@ -34,8 +34,9 @@ class SysOperationCard(BaseCard):
                 return OperationMode(v.lower())
             except ValueError as ex:
                 raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
-                    error_msg=f"mode must be one of {[e.value for e in OperationMode]}, current value: {v}",
-                    cause=ex) from ex
+                                  error_msg=f"mode must be one of {[e.value for e in OperationMode]}, "
+                                            f"current value: {v}",
+                                  cause=ex) from ex
         return v
 
 

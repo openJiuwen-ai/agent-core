@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import typing
 from typing import Any, Optional, Type, Union, Dict, List, get_type_hints
 from copy import deepcopy
 from jsonschema import validate as jsonschema_validate, ValidationError as JsonSchemaValidationError
@@ -226,6 +227,9 @@ class SchemaUtils:
 
         for field_name, field_schema in properties.items():
             field_type = SchemaUtils._convert_schema_to_type(field_schema)
+            # For optional fields and don't have default values
+            if field_name not in required:
+                field_type = typing.Optional[field_type]
             field_config = SchemaUtils._convert_schema_to_field(field_schema, field_name in required)
             field_definitions[field_name] = (field_type, field_config)
 
@@ -290,7 +294,6 @@ class SchemaUtils:
 
         # Handle union types (multiple allowed types)
         if isinstance(schema_type, list):
-            import typing
             types = []
             has_null = False
 
