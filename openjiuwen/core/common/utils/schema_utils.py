@@ -59,7 +59,7 @@ class SchemaUtils:
             raise e
         except Exception as e:
             # Wrap the exception in a custom business exception
-            raise build_error(StatusCode.SCHEMA_FORMAT_INVALID, cause=e, reason=str(e), data={data})
+            raise build_error(StatusCode.SCHEMA_FORMAT_INVALID, cause=e, reason=str(e), data=data) from e
 
     @staticmethod
     def remove_none_values(data: Any) -> Any:
