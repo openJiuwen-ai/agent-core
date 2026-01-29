@@ -56,24 +56,33 @@ class AbilityManager:
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
 
-    def add(self, ability: Ability) -> None:
+    def add(self, ability: Union[Ability, List[Ability]]) -> None:
         """Add an ability
 
         Args:
             ability: Ability Card to add
         """
-        if isinstance(ability, ToolCard):
-            self._tools[ability.name] = ability
-        elif isinstance(ability, WorkflowCard):
-            self._workflows[ability.name] = ability
-        elif isinstance(ability, AgentCard):
-            self._agents[ability.name] = ability
-        elif isinstance(ability, McpServerConfig):
-            self._mcp_servers[ability.server_name] = ability
+        def add_single_ability(_ability: Ability):
+            if isinstance(_ability, ToolCard):
+                self._tools[_ability.name] = _ability
+            elif isinstance(_ability, WorkflowCard):
+                self._workflows[_ability.name] = _ability
+            elif isinstance(_ability, AgentCard):
+                self._agents[_ability.name] = _ability
+            elif isinstance(_ability, McpServerConfig):
+                self._mcp_servers[_ability.server_name] = _ability
+            else:
+                logger.warning(f"Unknown ability type: {type(_ability)}")
+
+        if isinstance(ability, Ability):
+            add_single_ability(ability)
+        elif isinstance(ability, List):
+            for item in ability:
+                add_single_ability(item)
         else:
             logger.warning(f"Unknown ability type: {type(ability)}")
 
-    def remove(self, name: str) -> Optional[Ability]:
+    def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name
 
         Args:
@@ -82,15 +91,30 @@ class AbilityManager:
         Returns:
             Removed ability Card, or None if not found
         """
-        if name in self._tools:
-            return self._tools.pop(name)
-        if name in self._workflows:
-            return self._workflows.pop(name)
-        if name in self._agents:
-            return self._agents.pop(name)
-        if name in self._mcp_servers:
-            return self._mcp_servers.pop(name)
-        return None
+        if isinstance(name, str):
+            if name in self._tools:
+                return self._tools.pop(name, None)
+            if name in self._workflows:
+                return self._workflows.pop(name, None)
+            if name in self._agents:
+                return self._agents.pop(name, None)
+            if name in self._mcp_servers:
+                return self._mcp_servers.pop(name, None)
+            return None
+        elif isinstance(name, list):
+            result = []
+            for item in name:
+                if name in self._tools:
+                    result.append(self._tools.pop(item, None))
+                if name in self._workflows:
+                    result.append(self._workflows.pop(item, None))
+                if name in self._agents:
+                    result.append(self._agents.pop(item, None))
+                if name in self._mcp_servers:
+                    result.append(self._mcp_servers.pop(item, None))
+                return result
+        else:
+            return None
 
     def get(self, name: str) -> Optional[Ability]:
         """Get an ability Card by name

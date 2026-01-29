@@ -215,12 +215,9 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             agent = ReActAgent(card=self.card)
             tool_card = self._create_add_tool_card()
 
-            result = agent.add_ability(tool_card)
+            agent.ability_manager.add(tool_card)
 
-        # 验证返回 self（支持链式调用）
-        self.assertIs(result, agent)
-        # 验证能力已添加
-        abilities = agent.list_abilities()
+        abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 1)
         self.assertEqual(abilities[0].name, "add")
 
@@ -235,9 +232,9 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             add_card = self._create_add_tool_card()
             multiply_card = self._create_multiply_tool_card()
 
-            agent.add_ability([add_card, multiply_card])
+            agent.ability_manager.add([add_card, multiply_card])
 
-        abilities = agent.list_abilities()
+        abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 2)
         names = [a.name for a in abilities]
         self.assertIn("add", names)
@@ -251,14 +248,12 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             return_value=None
         ):
             agent = ReActAgent(card=self.card)
-            agent.add_ability(self._create_add_tool_card())
-            agent.add_ability(self._create_multiply_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_multiply_tool_card())
 
-            result = agent.remove_ability("add")
+            result = agent.ability_manager.remove("add")
 
-        # 验证返回 self（支持链式调用）
-        self.assertIs(result, agent)
-        abilities = agent.list_abilities()
+        abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 1)
         self.assertEqual(abilities[0].name, "multiply")
 
@@ -270,14 +265,13 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             return_value=None
         ):
             agent = ReActAgent(card=self.card)
-            agent.add_ability(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
 
-        ability = agent.get_ability("add")
+        ability = agent.ability_manager.get("add")
         self.assertIsNotNone(ability)
         self.assertEqual(ability.name, "add")
 
-        # 获取不存在的能力
-        not_exist = agent.get_ability("not_exist")
+        not_exist = agent.ability_manager.get("not_exist")
         self.assertIsNone(not_exist)
 
     async def test_list_tool_info(self):
@@ -288,10 +282,10 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             return_value=None
         ):
             agent = ReActAgent(card=self.card)
-            agent.add_ability(self._create_add_tool_card())
-            agent.add_ability(self._create_multiply_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_multiply_tool_card())
 
-        tool_infos = await agent.list_tool_info()
+        tool_infos = await agent.ability_manager.list_tool_info()
         self.assertEqual(len(tool_infos), 2)
 
         names = [t.name for t in tool_infos]
@@ -389,7 +383,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=self.card)
             agent.configure(self.config)
-            agent.add_ability(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
             agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
@@ -437,7 +431,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=self.card)
             agent.configure(self.config)
-            agent.add_ability(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
             agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
@@ -495,8 +489,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=self.card)
             agent.configure(self.config)
-            agent.add_ability(self._create_add_tool_card())
-            agent.add_ability(self._create_multiply_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_multiply_tool_card())
             agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
@@ -555,7 +549,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=self.card)
             agent.configure(config)
-            agent.add_ability(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
             agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):

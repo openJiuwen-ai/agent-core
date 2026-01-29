@@ -69,95 +69,9 @@ class BaseAgent(ABC):
         """Set configuration"""
         pass
 
-    # ========== Ability Management Interface ==========
     @property
     def ability_manager(self) -> AbilityManager:
         return self._ability_manager
-
-    def add_ability(self, ability: Union[Ability, List[Ability]]) -> 'BaseAgent':
-        """Add an ability
-
-        Args:
-            ability: Ability Card or list (ToolCard/WorkflowCard/AgentCard/McpServerConfig)
-
-        Returns:
-            self (supports chaining)
-        """
-        abilities = [ability] if not isinstance(ability, list) else ability
-        for ab in abilities:
-            self._ability_manager.add(ab)
-        return self
-
-    def remove_ability(self, name: Union[str, List[str]]) -> 'BaseAgent':
-        """Remove an ability
-
-        Args:
-            name: Ability name or list
-
-        Returns:
-            self (supports chaining)
-        """
-        names = [name] if isinstance(name, str) else name
-        for n in names:
-            self._ability_manager.remove(n)
-        return self
-
-    def get_ability(self, name: str) -> Optional[Ability]:
-        """Get an ability Card
-
-        Args:
-            name: Ability name
-
-        Returns:
-            Ability Card, or None if not found
-        """
-        return self._ability_manager.get(name)
-
-    def list_abilities(self) -> List[Ability]:
-        """List all ability Cards
-
-        Returns:
-            List of ability Cards
-        """
-        return self._ability_manager.list()
-
-    async def list_tool_info(
-            self,
-            names: Optional[List[str]] = None
-    ) -> List[ToolInfo]:
-        """Get ToolInfo list for LLM usage
-
-        Args:
-            names: Filter by ability names (optional)
-
-        Returns:
-            List of ToolInfo objects
-        """
-        return await self._ability_manager.list_tool_info(names=names)
-
-    # ========== Query Interface ==========
-    def get_tool_info(self) -> ToolInfo:
-        """Convert current Agent to ToolInfo (for use as sub-agent)
-
-        Returns:
-            ToolInfo representing this agent
-        """
-        # Build parameters from agent card's input_params
-        params = {"type": "object", "properties": {}, "required": []}
-        if hasattr(self.card, 'input_params'):
-            for param in self.card.input_params:
-                params["properties"][param.name] = {
-                    "type": param.type,
-                    "description": getattr(param, 'description', "") or ""
-                }
-                if getattr(param, 'required', False):
-                    params["required"].append(param.name)
-
-        return ToolInfo(
-            name=self.card.name,
-            description=self.card.description or "",
-            parameters=params
-        )
 
     # ========== Execution Interface ==========
 

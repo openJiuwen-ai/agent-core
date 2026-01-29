@@ -403,12 +403,12 @@ class ReActAgent(BaseAgent):
             )
         context_reloader = context.reloader_tool()
         if self.config.context_engine_config.enable_reload:
-            self.add_ability(context_reloader.card)
+            self.ability_manager.add(context_reloader.card)
             from openjiuwen.core.runner import Runner
             if not Runner.resource_mgr.get_tool(context_reloader.card.id):
                 Runner.resource_mgr.add_tool(context_reloader)
         else:
-            self.remove_ability(context_reloader.card.name)
+            self.ability_manager.remove(context_reloader.card.name)
         return context
 
     async def invoke(
@@ -457,7 +457,7 @@ class ReActAgent(BaseAgent):
             last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
 
         # Get tool info from _ability_manager
-        tools = await self.list_tool_info()
+        tools = await self.ability_manager.list_tool_info()
 
         # ReAct loop
         for iteration in range(self.config.max_iterations):
