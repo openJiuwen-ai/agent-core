@@ -17,12 +17,10 @@ from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
-from openjiuwen.core.retrieval.indexing.indexer.chroma_indexer import ChromaIndexer
 from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
 
 
 class KnowledgeBase(ABC):
@@ -57,7 +55,7 @@ class KnowledgeBase(ABC):
         special_attrs = {"vector_store", "index_manager"}
         if name in special_attrs and all(getattr(self, attr, None) for attr in special_attrs):
             self.validate_index()
-            if isinstance(self.vector_store, ChromaVectorStore) or isinstance(self.index_manager, ChromaIndexer):
+            if any(type(getattr(self, attr)).__name__.casefold().startswith("chroma") for attr in special_attrs):
                 if self.strict_validation and self.config.index_type != "vector":
                     raise build_error(
                         StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
