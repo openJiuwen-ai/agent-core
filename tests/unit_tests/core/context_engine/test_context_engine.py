@@ -107,7 +107,7 @@ class TestContextEngine:
         ]
 
         await context_1.add_messages(messages)
-        await ce_1.save_contexts(["test_context"], session)
+        await ce_1.save_contexts(session, ["test_context"])
         await session.post_run()
 
         await check_pointer.pre_agent_execute(

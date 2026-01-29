@@ -147,7 +147,7 @@ class ContextEngine:
 
         if context_id is None:
             delete_context_list = [
-                context_id for context_id, context in self._context_pool.items()
+                context.context_id() for _, context in self._context_pool.items()
                 if context.session_id() == session_id
             ]
 
@@ -160,7 +160,8 @@ class ContextEngine:
                 return
 
             for context_id in delete_context_list:
-                del self._context_pool[context_id]
+                full_context_id = f"{session_id}_{context_id}"
+                del self._context_pool[full_context_id]
             return
 
         full_context_id = f"{session_id}_{context_id}"
@@ -174,8 +175,8 @@ class ContextEngine:
         del self._context_pool[full_context_id]
 
     async def save_contexts(self,
-                            context_ids: List[str],
                             session: Session,
+                            context_ids: List[str] = None
                             ):
         """
         Batch-persist multiple contexts and their runtime states.
@@ -189,6 +190,12 @@ class ContextEngine:
         """
         session_id = session.get_session_id()
         states = dict()
+        if context_ids is None:
+            context_ids = [
+                context.context_id() for context_id, context in self._context_pool.items()
+                if context.session_id() == session_id
+            ]
+
         for context_id in context_ids:
             full_context_id = f"{session_id}_{context_id}"
             context = self._context_pool.get(full_context_id)
@@ -263,7 +270,7 @@ class ContextEngine:
     ):
         states = None
         if hasattr(session, "get_state"):
-            states = session.get_state()
+            states = session.get_state("context")
         elif hasattr(session, "_inner"):
             states = getattr(session, "_inner").get_state("context") if session else None
 

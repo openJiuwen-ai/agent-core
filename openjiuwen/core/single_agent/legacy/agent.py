@@ -588,6 +588,7 @@ class ControllerAgent(BaseAgent):
             # Fully delegate to controller
             result = await self.controller.invoke(inputs, agent_session)
             if session is None:
+                await self.context_engine.save_contexts(agent_session)
                 await agent_session.post_run()
 
             return result
@@ -662,6 +663,7 @@ class ControllerAgent(BaseAgent):
                             await agent_session.write_stream(item)
             finally:
                 if need_cleanup:
+                    await self.context_engine.save_contexts(agent_session)
                     await agent_session.post_run()
 
         task = asyncio.create_task(stream_process())

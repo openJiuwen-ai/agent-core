@@ -376,6 +376,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -421,6 +422,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -470,6 +472,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -529,6 +532,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -582,6 +586,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -694,6 +699,7 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session

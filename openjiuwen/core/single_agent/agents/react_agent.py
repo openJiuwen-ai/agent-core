@@ -504,12 +504,14 @@ class ReActAgent(BaseAgent):
                     await context.add_messages(tool_msg)
             else:
                 # No tool calls, return AI response
+                await self.context_engine.save_contexts(session)
                 return {
                     "output": ai_message.content,
                     "result_type": "answer"
                 }
 
         # Max iterations reached
+        await self.context_engine.save_contexts(session)
         return {
             "output": "Max iterations reached without completion",
             "result_type": "error"
@@ -556,6 +558,7 @@ class ReActAgent(BaseAgent):
             finally:
                 # Close stream
                 if session is not None and hasattr(session, 'post_run'):
+                    await self.context_engine.save_contexts(session)
                     await session.post_run()
 
         task = asyncio.create_task(stream_process())
