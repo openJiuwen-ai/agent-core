@@ -1077,9 +1077,6 @@ class WorkflowController(IntentDetectionController):
                         f"Skipping additional interrupt: component_id="
                         f"{chunk.payload.id if hasattr(chunk.payload, 'id') else 'unknown'}"
                     )
-            else:
-                if not isinstance(chunk, CustomSchema):  # filter custom stream data, avoid repeat output
-                    result.append(chunk)
         
         return result
 
