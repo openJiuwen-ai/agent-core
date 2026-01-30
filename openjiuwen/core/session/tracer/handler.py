@@ -10,8 +10,8 @@ from typing import Any
 
 from dateutil.tz import tzlocal
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.callback.base import BaseHandler, trigger_event
 from openjiuwen.core.session.stream.manager import StreamWriterManager
@@ -123,11 +123,11 @@ class TraceAgentHandler(TraceBaseHandler):
 
     def _update_error_trace_data(self, span: TraceAgentSpan, error, **kwargs):
         end_time = datetime.now(tz=tzlocal()).replace(tzinfo=None)
-        if isinstance(error, JiuWenBaseException):
-            error_info = {"error_code": error.error_code, "message": error.message}
+        if isinstance(error, BaseError):
+            error_info = {"error_code": error.status.code, "message": error.message}
         else:
-            error_info = {"error_code": StatusCode.SESSION_TRACE_AGENT_UNDEFINED_FAILED.code,
-                          "message": str(error)}
+            error_info = {"error_code": StatusCode.WORKFLOW_EXECUTION_ERROR.code,
+                          "message": StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(str(error))}
         elapsed_time = self._get_elapsed_time(span.start_time, end_time) if span.start_time else None
         update_data = {
             "end_time": end_time,
@@ -328,14 +328,13 @@ class TraceWorkflowHandler(TraceBaseHandler):
         update_data = {}
         end_time = datetime.now(tz=tzlocal()).replace(tzinfo=None)
         if exception is not None:
-            if isinstance(exception, JiuWenBaseException):
-                span.error = {"error_code": exception.error_code, "message": exception.message}
+            if isinstance(exception, BaseError):
+                span.error = {"error_code": exception.code, "message": exception.message}
             elif isinstance(exception, GraphInterrupt):
                 return
             else:
-                span.error = {"error_code": StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.code,
-                              "message": StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                                  error_msg=str(exception))}
+                span.error = {"error_code": StatusCode.WORKFLOW_EXECUTION_ERROR.code,
+                              "message": StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(reason=str(exception))}
             if on_invoke_data:
                 span.on_invoke_data.append(on_invoke_data)
             update_data = {

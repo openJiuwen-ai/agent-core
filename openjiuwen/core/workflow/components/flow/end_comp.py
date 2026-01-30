@@ -42,11 +42,7 @@ class End(WorkflowComponent):
                 self._conf = EndConfig.model_validate(conf)
                 self._template = TemplateProcessor(self._conf.response_template)
             except Exception as e:
-                raise build_error(
-                    StatusCode.COMPONENT_END_INIT_FAILED,
-                    error_msg="`response_template` type error, is not str",
-                    cause=e
-                ) from e
+                raise build_error(StatusCode.COMPONENT_END_PARAM_INVALID, reason=f"conf is invalid, {str(e)}", cause=e)
         else:
             self._conf = None
             self._template = None

@@ -3,8 +3,8 @@
 import asyncio
 from typing import Dict, Optional, List, AsyncIterator, Any
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.stream.base import StreamMode, BaseStreamMode
 from openjiuwen.core.session.stream.emitter import StreamEmitter
@@ -45,17 +45,16 @@ class StreamWriterManager:
                 try:
                     data = await self._stream_emitter.stream_queue.receive(timeout=first_frame_timeout)
                     is_first_frame = False
-                except asyncio.TimeoutError:
-                    raise JiuWenBaseException(StatusCode.STREAM_FIRST_FRAME_TIMEOUT_FAILED.code,
-                                              StatusCode.STREAM_FIRST_FRAME_TIMEOUT_FAILED.errmsg.format(
-                                                  timeout=first_frame_timeout)) from asyncio.TimeoutError
+                except asyncio.TimeoutError as e:
+                    raise build_error(StatusCode.STREAM_OUTPUT_FIRST_CHUNK_INTERVAL_TIMEOUT, cause=e,
+                                      timeout=first_frame_timeout, reason=e)
             else:
                 try:
                     data = await self._stream_emitter.stream_queue.receive(timeout=timeout)
-                except asyncio.TimeoutError:
-                    raise JiuWenBaseException(StatusCode.STREAM_FRAME_TIMEOUT_FAILED.code,
-                                              StatusCode.STREAM_FRAME_TIMEOUT_FAILED.errmsg.format(
-                                                  timeout=timeout)) from asyncio.TimeoutError
+                except asyncio.TimeoutError as e:
+                    raise build_error(StatusCode.STREAM_OUTPUT_CHUNK_INTERVAL_TIMEOUT, cause=e, timeout=timeout,
+                                      reason=e)
+
             if data is not None:
                 if data == StreamEmitter.END_FRAME:
                     logger.info("Received END_FRAME, stopping stream output.")
@@ -88,7 +87,8 @@ class StreamWriterManager:
 
     def remove_writer(self, key: StreamMode) -> Optional[StreamWriter]:
         if key in self._default_modes:
-            raise ValueError(f"Can not remove default writer for mode {key}")
+            raise build_error(StatusCode.STREAM_WRITER_MANAGER_REMOVE_WRITER_ERROR,
+                              reason=f"Can not remove default writer for mode {key}")
 
         return self._writers.pop(key, None)
 
@@ -101,6 +101,5 @@ class StreamWriterManager:
             elif mode == BaseStreamMode.CUSTOM:
                 self.add_writer(mode, CustomStreamWriter(self._stream_emitter))
             else:
-                raise ValueError(
-                    f"default modes must be OUTPUT, TRACE, CUSTOM, {mode} is not supported."
-                )
+                raise build_error(StatusCode.STREAM_WRITER_MANAGER_ADD_WRITER_ERROR, mode=mode,
+                                  reason=f"default modes must be OUTPUT, TRACE, CUSTOM, {mode} is not supported.")

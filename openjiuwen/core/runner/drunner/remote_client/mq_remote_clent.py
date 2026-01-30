@@ -6,8 +6,8 @@ import time
 import uuid
 from typing import Optional, Dict, AsyncGenerator
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.dmessage_queue.dsubscription.reply_topic_subscription import ReplyTopicSubscription
 from openjiuwen.core.runner.drunner.dmessage_queue.message import DmqRequestMessage, DMessageType
@@ -38,9 +38,7 @@ class MqRemoteClient(RemoteClient):
         self.mq = Runner.dist_pubsub
         self.system_reply_sub = Runner.system_reply_sub
         if self.system_reply_sub is None:
-            raise JiuWenBaseException(StatusCode.RUNNER_DISTRIBUTED_MODE_REQUIRED.code,
-                                      StatusCode.RUNNER_DISTRIBUTED_MODE_REQUIRED.errmsg.format(
-                                          "reply topic not initialized"))
+            raise build_error(StatusCode.DIST_MESSAGE_QUEUE_CLIENT_START_ERROR, reason="reply topic not initialized")
         self.reply_topic = self.system_reply_sub.topic
         self._started = True
         logger.debug(f"[MqRemoteClient] init success topic: {self.topic}, reply_topic: {self.reply_topic}")
@@ -88,6 +86,12 @@ class MqRemoteClient(RemoteClient):
             logger.info(f"[MQRemoteClient] Stream {message_id} cancelled, sending STOP")
             await self._send_stop_message(message_id)
             raise
+        except TimeoutError:
+            raise
+        except BaseError:
+            raise
+        except Exception as e:
+            raise
         finally:
             await self.system_reply_sub.unregister_collector(message_id, self.remote_id)
 
@@ -121,6 +125,12 @@ class MqRemoteClient(RemoteClient):
         except asyncio.CancelledError:
             logger.info(f"[MQRemoteClient] Stream {message_id} cancelled, sending STOP")
             await self._send_stop_message(message_id)
+            raise
+        except TimeoutError:
+            raise
+        except BaseError:
+            raise
+        except Exception as e:
             raise
         finally:
             await self.system_reply_sub.unregister_collector(message_id, self.remote_id)

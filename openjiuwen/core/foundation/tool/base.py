@@ -36,9 +36,9 @@ class Tool:
             metadata purposes throughout the tool's lifecycle.
         """
         if card is None:
-            raise build_error(StatusCode.TOOL_CARD_NOT_SUPPORTED)
+            raise build_error(StatusCode.TOOP_CARD_INVALID, card=card, reason="card is None")
         if not card.id:
-            raise build_error(StatusCode.TOOL_CARD_ID_NOT_SUPPORTED, card=card)
+            raise build_error(StatusCode.TOOP_CARD_INVALID, card=card, reason="card is is None or empty")
         self._card = card
 
     @property

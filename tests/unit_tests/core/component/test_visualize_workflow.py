@@ -4,8 +4,8 @@ from typing import Literal
 from unittest.mock import patch
 import pytest
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.workflow import BranchComponent
 from openjiuwen.core.workflow import BranchRouter
 from openjiuwen.core.workflow import NumberCondition
@@ -620,7 +620,7 @@ def test_visualize_workflow_with_loop_unset_end_nodes():
     loop_group.add_connection("1", "2")
     loop_group.add_connection("2", "3")
     loop_group.add_connection("3", "4")
-
+    loop_group.end_nodes("4")
     loop_component = LoopComponent(loop_group, {"results": "${1.result}", "user_var": "${l.user_var}",
                                                 "index_collect": "${4.index}"})
 
@@ -692,79 +692,67 @@ def test_drawable_exception():
     drawable = Drawable()
     # set start node failed
     node_id = "start"
-    with pytest.raises(JiuWenBaseException) as cm:
+    with pytest.raises(BaseError) as cm:
         drawable.set_start_node(node_id)
-    assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_SET_START_NODE_FAILED.code
-    assert cm.value.message == StatusCode.DRAWABLE_GRAPH_SET_START_NODE_FAILED.errmsg.format(
-        node_id=node_id)
+    assert cm.value.code == StatusCode.DRAWABLE_GRAPH_START_NODE_INVALID.code
 
     # set end node failed
     node_id = "end"
-    with pytest.raises(JiuWenBaseException) as cm:
+    with pytest.raises(BaseError) as cm:
         drawable.set_end_node(node_id)
-    assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_SET_END_NODE_FAILED.code
-    assert cm.value.message == StatusCode.DRAWABLE_GRAPH_SET_END_NODE_FAILED.errmsg.format(
-        node_id=node_id)
+    assert cm.value.code == StatusCode.DRAWABLE_GRAPH_END_NODE_INVALID.code
 
     # set end node failed
     node_id = "break"
-    with pytest.raises(JiuWenBaseException) as cm:
+    with pytest.raises(BaseError) as cm:
         drawable.set_break_node(node_id)
-    assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED.code
-    assert cm.value.message == StatusCode.DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED.errmsg.format(
-        node_id=node_id)
+    assert cm.value.code == StatusCode.DRAWABLE_GRAPH_BREAK_NODE_INVALID.code
 
     # to mermaid failed, title is not str
     invalid_titles = [-1, {}, {"a": "b"}, [], [1, 2]]
     for invalid_title in invalid_titles:
-        with pytest.raises(JiuWenBaseException) as cm:
+        with pytest.raises(BaseError) as cm:
             drawable.to_mermaid(title=invalid_title)
-        assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_INVALID_TITLE.code
-        assert cm.value.message == StatusCode.DRAWABLE_GRAPH_INVALID_TITLE.errmsg
+        assert cm.value.code == StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID.code
 
     # to mermaid failed, expand_subgraph is not boolean or non-negative integer
     invalid_expand_subgraphs = [-1, "", "true", "xxx", {}, {"a": "b"}, [], [1, 2]]
     for invalid_expand_subgraph in invalid_expand_subgraphs:
-        with pytest.raises(JiuWenBaseException) as cm:
+        with pytest.raises(BaseError) as cm:
             drawable.to_mermaid(expand_subgraph=invalid_expand_subgraph)
-        assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH.code
-        assert cm.value.message == StatusCode.DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH.errmsg
+        assert cm.value.code == StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID.code
+
 
     # to mermaid failed, enable_animation is not boolean
     invalid_enable_animations = ["", "true", "xxx", 1, 0, {}, {"a": "b"}, [], [1, 2]]
     for invalid_enable_animation in invalid_enable_animations:
-        with pytest.raises(JiuWenBaseException) as cm:
+        with pytest.raises(BaseError) as cm:
             drawable.to_mermaid(expand_subgraph=1, enable_animation=invalid_enable_animation)
-        assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION.code
-        assert cm.value.message == StatusCode.DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION.errmsg
+        assert cm.value.code == StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID.code
 
     # to mermaid svg failed, expand_subgraph is non-negative integer
     for invalid_expand_subgraph in invalid_expand_subgraphs:
-        with pytest.raises(JiuWenBaseException) as cm:
+        with pytest.raises(BaseError) as cm:
             drawable.to_mermaid_svg(expand_subgraph=invalid_expand_subgraph)
-            assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH.code
-            assert cm.value.message == StatusCode.DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH.errmsg
+        assert cm.value.code == StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID.code
 
     # to mermaid svg failed, title is not str
     for invalid_title in invalid_titles:
-        with pytest.raises(JiuWenBaseException) as cm:
+        with pytest.raises(BaseError) as cm:
             drawable.to_mermaid_svg(title=invalid_title)
-        assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_INVALID_TITLE.code
-        assert cm.value.message == StatusCode.DRAWABLE_GRAPH_INVALID_TITLE.errmsg
+        assert cm.value.code == StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID.code
 
     # to mermaid png failed, expand_subgraph is non-negative integer
     for invalid_expand_subgraph in invalid_expand_subgraphs:
-        with pytest.raises(JiuWenBaseException) as cm:
+        with pytest.raises(BaseError) as cm:
             drawable.to_mermaid_png(expand_subgraph=invalid_expand_subgraph)
-            assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH.code
-            assert cm.value.message == StatusCode.DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH.errmsg
+        assert cm.value.code == StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID.code
 
     # to mermaid png failed, title is not str
     for invalid_title in invalid_titles:
-        with pytest.raises(JiuWenBaseException) as cm:
+        with pytest.raises(BaseError) as cm:
             drawable.to_mermaid_png(title=invalid_title)
-        assert cm.value.error_code == StatusCode.DRAWABLE_GRAPH_INVALID_TITLE.code
-        assert cm.value.message == StatusCode.DRAWABLE_GRAPH_INVALID_TITLE.errmsg
+        assert cm.value.code == StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID.code
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})

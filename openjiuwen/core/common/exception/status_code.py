@@ -6,29 +6,10 @@ from enum import Enum
 class StatusCode(Enum):
     """Status code enum"""
 
-    TAG_REMOVE_ERROR = None
     SUCCESS = (0, "success")
     ERROR = (-1, "error")
 
-    # Util Error
-    COMMON_SCHEMA_INVALID = (90000, "common schema is invalid, reason: {error_msg}")
-    COMMON_SCHEMA_CONFIG_ERROR = (90001, "common schema config error, reason: {error_msg}")
-
-    # Workflow Component  100000 - 109999
-
-    # Workflow: Interactive And Recovery 100000 - 100029
-    WORKFLOW_INPUT_INVALID = (100000, "workflow input is invalid, reason: {error_msg}")
-    WORKFLOW_STATE_RUNTIME_ERROR = (100001, "workflow state runtime error, reason: {error_msg}")
-    WORKFLOW_EXECUTION_NOT_SUPPORT = (100002, "workflow execution is not supported, reason: {error_msg}")
-    WORKFLOW_INTERRUPT_EXECUTION_ERROR = (100003, "workflow interrupt execution error, reason: {error_msg}")
-    WORKFLOW_STREAM_NOT_SUPPORT = (100004, "workflow stream is not supported, reason: {error_msg}")
-    WORKFLOW_COMPONENT_RUNTIME_ERROR = (100005, "workflow component runtime error, reason: {error_msg}")
-    WORKFLOW_STATE_INVALID = (100006, "workflow state is invalid, reason: {error_msg}")
-
     # Workflow: Execution 100100 - 100199
-    WORKFLOW_EXECUTION_RUNTIME_ERROR = (100100, "workflow execution runtime error, reason: {error_msg}")
-    WORKFLOW_INVOKE_TIMEOUT = (100101, "workflow invoke timeout ({timeout}s), reason: {error_msg}")
-    WORKFLOW_STREAM_EXECUTION_TIMEOUT = (100102, "workflow stream_execution timeout ({timeout}s), reason: {error_msg}")
 
     # Workflow Component - Builtin-workflow Component 101000 - 109999
 
@@ -62,71 +43,16 @@ class StatusCode(Enum):
     COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR = (101076,
         "component questioner_execution process error, reason: {error_msg}")
 
-    ## BranchComponent  101100 - 101119
-    COMPONENT_BRANCH_PARAM_ERROR = (101100, "component branch parameter error, reason: {error_msg}")
-    COMPONENT_BRANCH_EXECUTION_ERROR = (101101, "component branch execution error, reason: {error_msg}")
 
-    ## SetVariableComponent  101120 - 101139
-    COMPONENT_SET_VAR_INPUT_PARAM_ERROR = (101120, "component set_var_input parameter error, reason: {error_msg}")
-    COMPONENT_SET_VAR_INIT_FAILED = (101121, "component set_var initialization failed, reason: {error_msg}")
-
-    ## SubWorkflowComponent  101140 - 101149
-    COMPONENT_SUB_WORKFLOW_INIT_FAILED = (101140, "component sub_workflow initialization failed, reason: {error_msg}")
-    COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR = (101141, "component sub_workflow runtime error, reason: {error_msg}")
-
-    ## LoopComponent  101150 - 101159
-    COMPONENT_LOOP_NOT_SUPPORT = (101150, "component loop is not supported, reason: {error_msg}")
-    COMPONENT_LOOP_EXECUTION_ERROR = (101151, "component loop execution error, reason: {error_msg}")
-    COMPONENT_LOOP_INPUT_INVALID = (101152, "component loop_input is invalid, reason: {error_msg}")
-    COMPONENT_LOOP_CONFIG_ERROR = (101153, "component loop config error, reason: {error_msg}")
-
-    ## BreakComponent  101180 - 101189
-    COMPONENT_BREAK_EXECUTION_ERROR = (101180, "component break execution error, reason: {error_msg}")
 
     ## ToolComponent  102000 - 102019
     COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
     COMPONENT_TOOL_INIT_FAILED = (102002, "component tool initialization failed, reason: {error_msg}")
 
-    ## StartComponent  102100 - 102119
-    COMPONENT_START_INPUT_INVALID = (102100, "component start_input is invalid, reason: {error_msg}")
-    COMPONENT_START_CONFIG_ERROR = (102101, "component start config error, reason: {error_msg}")
-
-    ## EndComponent  102120 - 102149
-    COMPONENT_END_INIT_FAILED = (102120, "component end initialization failed, reason: {error_msg}")
 
     # Workflow 110000 - 119999
     # Workflow - Orchestration And Execution 110000 - 110999
-    GRAPH_SET_START_NODE_FAILED = (110001, "Graph create error, caused by start node set failed, detail: {detail}")
-    GRAPH_SET_END_NODE_FAILED = (110002, "Graph create error, caused by end node set failed, detail: {detail}")
-    GRAPH_ADD_NODE_FAILED = (110003, "Graph create error, caused by add node failed, detail: {detail}")
-    GRAPH_ADD_EDGE_FAILED = (110004, "Graph create error, caused by add edge failed, detail: {detail}")
-    GRAPH_ADD_CONDITION_EDGE_FAILED = (
-        110005,
-        "Graph create error, caused by add conditional edge failed, detail: {detail}",
-    )
-    WORKFLOW_COMPONENT_CONFIG_ERROR = (110006, "Workflow component config error: {error_msg}")
-    DRAWABLE_GRAPH_SET_START_NODE_FAILED = (
-        110021,
-        "Drawable Graph create error, caused by start node set failed, node id: {node_id}",
-    )
-    DRAWABLE_GRAPH_SET_END_NODE_FAILED = (
-        110022,
-        "Drawable Graph create error, caused by end node set failed, node id: {node_id}",
-    )
-    DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED = (
-        110023,
-        "Drawable Graph create error, caused by break node set failed, node id: {node_id}",
-    )
-    DRAWABLE_GRAPH_INVALID_TITLE = (110024, "Invalid value of argument 'title', expected a str")
-    DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH = (
-        110025,
-        "Invalid value of argument 'expand_subgraph', expected a boolean or a non-negative integer",
-    )
-    DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION = (
-        110026,
-        "Invalid value of argument 'enable_animation', expected a boolean",
-    )
 
     # Workflow - Exception Handling 111000 - 111999
     # Agent Orchestration 120000 - 129999
@@ -165,29 +91,11 @@ class StatusCode(Enum):
     # Multi-Agent Orchestration - Multi-Agent Runner 131000-131030
 
     # Runner 134000 - 134999
-    REMOTE_AGENT_REQUEST_TIMEOUT = (134001, "RemoteAgent {} request timeout")
-    AGENT_NOT_FOUND = (134002, "Agent {} is not found")
-    WORKFLOW_NOT_BOUND_TO_AGENT = (134003, "workflow not bound to single_agent")
-    TOOL_NOT_BOUND_TO_AGENT = (134004, "tool not bound to single_agent")
-    TOOL_NOT_FOUND = (134005, "Tool not found")
-    RUNNER_DISTRIBUTED_MODE_REQUIRED = (134006, "Runner must be initialized with distributed_mode enabled. message: {}")
-    RUNNER_STOPPED = (134007, "Runner not running: {}")
-    REMOTE_AGENT_REQUEST_CANCELLED = (134008, "Remote single_agent request cancelled: {}")
-    REMOTE_AGENT_PROCESS_ERROR = (134009, "Remote single_agent process error. code: {error_code}, message: {error_msg}")
     # Runner Dmq 134100 - 134199
-    MESSAGE_QUEUE_NOT_RUNNING = (134101, "Message queue is not running: {}")
-    MESSAGE_QUEUE_INIT_ERROR = (134102, "Message queue init error: {}")
 
     # GraphEngine 140000 - 149999
     # GraphEngine - Graph Orchestration and Execution 140000 - 140999
     # GraphEngine - Conditional Evaluation 140000 - 140019
-    EXPRESSION_CONDITION_SYNTAX_ERROR = (
-        140000,
-        "Expression condition has syntax error, expression as {expression}, error as {error_msg}.",
-    )
-    EXPRESSION_CONDITION_EVAL_ERROR = (140001, "Expression condition eval error, as {error_msg}.")
-    ARRAY_CONDITION_ERROR = (140002, "Array condition error")
-    NUMBER_CONDITION_ERROR = (140003, "Number condition error")
 
     # ContextEngine 150000 - 154999
     # ContextEngine - Context Structured Storage and Retrieval 150000 - 150999
@@ -357,16 +265,6 @@ class StatusCode(Enum):
     MODEL_CLIENT_CONFIG_INVALID = (181005, "model client_config is invalid, reason: {error_msg}")
 
     # Foundation - Tool Definition and Execution 182000 - 182999
-    PLUGIN_EXECUTION_RUNTIME_ERROR = (182000, "plugin execution runtime error, reason: {error_msg}")
-    PLUGIN_REQUEST_TIMEOUT = (182001, "plugin request timeout ({timeout}s), reason: {error_msg}")
-    PLUGIN_RESPONSE_PROCESS_ERROR = (182002, "plugin response process error, reason: {error_msg}")
-    PLUGIN_RESPONSE_INVALID = (182003,
-                               "plugin response is invalid, reason: {error_msg}")
-    PLUGIN_RESPONSE_CALL_FAILED = (182004, "plugin response call failed, reason: {error_msg}")
-    PLUGIN_INPUT_PARAM_ERROR = (182005, "plugin input parameter error, reason: {error_msg}")
-    PLUGIN_RESTFUL_API_NOT_SUPPORT = (182006,
-                                      "plugin restful_api is not supported, reason: {error_msg}")
-
     # Common Capabilities - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
     COMMON_LOG_PATH_INIT_FAILED = (183001, "common log_path initialization failed, reason: {error_msg}")

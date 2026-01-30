@@ -5,8 +5,6 @@ import os
 from abc import ABC
 from typing import TypedDict, Any, Optional
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.constants import COMP_STREAM_CALL_TIMEOUT_KEY, STREAM_INPUT_GEN_TIMEOUT_KEY, \
     END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY, END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY, \
@@ -144,9 +142,7 @@ class Config(ABC):
 
     def get_workflow_config(self, workflow_id):
         if workflow_id is None:
-            raise JiuWenBaseException(StatusCode.SESSION_WORKFLOW_CONFIG_GET_FAILED.code,
-                                      message=StatusCode.SESSION_WORKFLOW_CONFIG_GET_FAILED.errmsg.format(
-                                          reason="workflow_id is invalid, cannot be None"))
+            raise ValueError("workflow_id is invalid, cannot be None")
         return self._workflow_configs.get(workflow_id)
 
     def get_agent_config(self):
@@ -157,11 +153,7 @@ class Config(ABC):
 
     def add_workflow_config(self, workflow_id, workflow_config):
         if workflow_id is None:
-            raise JiuWenBaseException(StatusCode.SESSION_WORKFLOW_CONFIG_ADD_FAILED.code,
-                                      message=StatusCode.SESSION_WORKFLOW_CONFIG_ADD_FAILED.errmsg.format(
-                                          reason="workflow_id is invalid, cannot be None"))
+            raise ValueError("workflow_id is invalid, cannot be None")
         if workflow_config is None:
-            raise JiuWenBaseException(StatusCode.SESSION_WORKFLOW_CONFIG_ADD_FAILED.code,
-                                      message=StatusCode.SESSION_WORKFLOW_CONFIG_ADD_FAILED.errmsg.format(
-                                          reason="workflow config is invalid, cannot be None"))
+            raise ValueError("workflow config is invalid, cannot be None")
         self._workflow_configs[workflow_id] = workflow_config

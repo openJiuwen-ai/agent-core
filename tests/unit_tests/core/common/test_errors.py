@@ -40,7 +40,7 @@ def test_build_error_maps_to_manual_override():
 
 def test_format_template_missing_key_safe():
     # Use the current enum member name
-    tmpl = StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg
+    tmpl = StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg
     rendered = _format_template(tmpl, params=None)
     assert isinstance(rendered, str)
     assert "<missing:" in rendered

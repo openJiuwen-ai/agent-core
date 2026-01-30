@@ -7,8 +7,8 @@ from typing import Optional, Dict, OrderedDict
 
 import pulsar
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.dmessage_queue.message_serializer import serialize_message, deserialize_message
 from openjiuwen.core.runner.message_queue_base import (
@@ -124,18 +124,19 @@ class MessageQueuePulsar(MessageQueueBase):
         logger.info(f"[MessageQueuePulsar] stopped")
 
     def subscribe(self, topic: str) -> PulsarSubscription:
-        if not self._is_running:
-            raise JiuWenBaseException(StatusCode.MESSAGE_QUEUE_NOT_RUNNING.code,
-                                      StatusCode.MESSAGE_QUEUE_NOT_RUNNING.errmsg.format(f"subscribe {topic} failed"))
-        if topic in self._subs:
-            return self._subs[topic]
-        consumer = self._client.subscribe(topic, subscription_name=self.DEFAULT_SUBSCRIPTION_NAME,
-                                          consumer_type=pulsar.ConsumerType.KeyShared)
-        # All Pulsar operations reuse the same thread pool
-        sub = PulsarSubscription(topic, consumer, self._executor)
-        self._subs[topic] = sub
-        logger.info(f"[MessageQueuePulsar] Create new subscription, topic={topic}")
-        return sub
+        try:
+            self._validate_running()
+            if topic in self._subs:
+                return self._subs[topic]
+            consumer = self._client.subscribe(topic, subscription_name=self.DEFAULT_SUBSCRIPTION_NAME,
+                                              consumer_type=pulsar.ConsumerType.KeyShared)
+            # All Pulsar operations reuse the same thread pool
+            sub = PulsarSubscription(topic, consumer, self._executor)
+            self._subs[topic] = sub
+            logger.info(f"[MessageQueuePulsar] Create new subscription, topic={topic}")
+            return sub
+        except Exception as e:
+            raise build_error(StatusCode.MESSAGE_QUEUE_TOPIC_SUBSCRIPTION_ERROR, cause=e, topic=topic, reason=e)
 
     async def unsubscribe(self, topic: str):
         sub = self._subs.pop(topic, None)
@@ -143,32 +144,37 @@ class MessageQueuePulsar(MessageQueueBase):
             await sub.deactivate()
             logger.info(f"[MessageQueuePulsar] unsubscribed {topic}")
 
-    async def produce_message(self, topic: str, message: QueueMessage):
+    def _validate_running(self):
         if not self._is_running:
-            raise JiuWenBaseException(StatusCode.MESSAGE_QUEUE_NOT_RUNNING.code,
-                                      StatusCode.MESSAGE_QUEUE_NOT_RUNNING.errmsg.format(
-                                          f"produce message to {topic} failed"))
-        # Get or create producer
-        producer = await self._get_or_create_producer(topic)
-        # Serialize and send
-        content = serialize_message(message)
+            raise RuntimeError("pulsar message queue is not running")
 
-        loop = asyncio.get_running_loop()
+    async def produce_message(self, topic: str, message: QueueMessage):
+        try:
+            self._validate_running()
+            # Get or create producer
+            producer = await self._get_or_create_producer(topic)
+            # Serialize and send
+            content = serialize_message(message)
 
-        logger.info(
-            f"[MessageQueuePulsar] Sending message to topic={topic}, message_id={message.message_id}")
+            loop = asyncio.get_running_loop()
 
-        await loop.run_in_executor(
-            self._executor,
-            lambda: producer.send(
-                content,
-                partition_key=message.message_id
+            logger.info(
+                f"[MessageQueuePulsar] Sending message to topic={topic}, message_id={message.message_id}")
+
+            await loop.run_in_executor(
+                self._executor,
+                lambda: producer.send(
+                    content,
+                    partition_key=message.message_id
+                )
             )
-        )
 
-        logger.info(
-            f"[MessageQueuePulsar] Message sent successfully: topic={topic}, message_id={message.message_id}"
-        )
+            logger.info(
+                f"[MessageQueuePulsar] Message sent successfully: topic={topic}, message_id={message.message_id}"
+            )
+        except Exception as e:
+            raise build_error(StatusCode.MESSAGE_QUEUE_TOPIC_MESSAGE_PRODUCTION_ERROR, cause=e, topic=topic,
+                              message=message, reason=e)
 
     async def _get_or_create_producer(self, topic: str) -> pulsar.Producer:
         producer = self._producers.get(topic)

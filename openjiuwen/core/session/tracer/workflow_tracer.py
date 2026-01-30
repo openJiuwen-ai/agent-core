@@ -4,8 +4,8 @@
 from typing import Optional
 
 from openjiuwen.core.common.constants.constant import LOOP_ID, INDEX
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.session.utils import NESTED_PATH_SPLIT
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
 
@@ -170,8 +170,7 @@ class TracerWorkflowUtils:
         if tracer is None:
             return
         if error is None:
-            raise JiuWenBaseException(StatusCode.SESSION_TRACE_ERROR_FAILED.code,
-                                      StatusCode.SESSION_TRACE_ERROR_FAILED.errmsg.format(reason="error is None"))
+            raise build_error(StatusCode.TRACER_WORKFLOW_TRACE_ERROR, reason="'trace_error''s error is None")
         invoke_id = session.executable_id()
         parent_id = session.parent_id()
         await session.tracer().trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_invoke",

@@ -21,10 +21,15 @@ class BranchComponent(WorkflowComponent):
 
     def add_branch(self, condition: Union[str, Callable[[], bool], Condition], target: Union[str, list[str]],
                    branch_id: str = None):
-        self._validate_branch_param(condition)
-        self._validate_branch_param(target)
-        for item in target:
-            self._validate_branch_param(item)
+        if not condition:
+            raise build_error(StatusCode.COMPONENT_BRANCH_PARAM_INVALID, reason=f"condition is None or empty")
+        if not target:
+            raise build_error(StatusCode.COMPONENT_BRANCH_PARAM_INVALID, reason=f"target is None or empty")
+        if isinstance(target, list):
+            for idx, item in enumerate(target):
+                if not item:
+                    raise build_error(StatusCode.COMPONENT_BRANCH_PARAM_INVALID,
+                                      reason=f'empty item at index {idx} in target list')
         self._router.add_branch(condition, target, branch_id=branch_id)
 
     def router(self) -> Callable[..., Union[Hashable, list[Hashable]]]:
@@ -40,10 +45,3 @@ class BranchComponent(WorkflowComponent):
 
     def skip_trace(self) -> bool:
         return True
-
-    def _validate_branch_param(self, param_value: Any):
-        if not param_value:
-            raise build_error(
-                StatusCode.COMPONENT_BRANCH_PARAM_ERROR,
-                error_msg=f"{param_value} is invalid , can not be None or empty"
-            )

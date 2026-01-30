@@ -6,10 +6,9 @@ from asyncio import CancelledError
 from typing import Any, Optional, AsyncIterator, Literal
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT, END_NODE_STREAM, INPUTS_KEY, CONFIG_KEY
-from openjiuwen.core.common.utils.schema_utils import SchemaUtils
+from openjiuwen.core.common.exception.errors import BaseError, ExecutionError, build_error
 from openjiuwen.core.workflow.components.base import ComponentAbility
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.graph.atomic_node import AsyncAtomicNode
 from openjiuwen.core.graph.executable import Executable, Output
@@ -112,22 +111,13 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             return True
         except GraphInterrupt:
             raise
-        except JiuWenBaseException as e:
-            if e.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code:
-                raise e
-            raise JiuWenBaseException(
-                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
-                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-                    error_msg=f"node_id: {self._node_id}, ability: {ability.name}, error: {e}"
-                ),
-            ) from e
+        except BaseError:
+            raise
         except Exception as e:
-            raise JiuWenBaseException(
-                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
-                StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-                    error_msg=f"node_id: {self._node_id}, ability: {ability.name}, error: {e}"
-                ),
-            ) from e
+            raise build_error(
+                StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR, cause=e, ability=ability.name,
+                comp=self._node_id,
+                reason=e, workflow=self._session.workflow_id())
         finally:
             if event and not event.is_set():
                 event.set()
@@ -261,43 +251,46 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             self._session.state().update({INTERACTIVE_INPUT: None})
 
     async def call(self, config: Any = None):
+        # 1. check whether init node or not
         if self._session is None or self._executable is None:
-            raise JiuWenBaseException(1, "vertex is not initialized, node is is " + self._node_id)
-
+            raise build_error(StatusCode.GRAPH_VERTEX_EXECUTION_ERROR, reason="node is not initialized",
+                              node_id=self._node_id)
+        # 2. begin to execute node 'batch-in' abilities
         is_subgraph = self._executable.graph_invoker()
+        current_ability = None
         try:
             call_ability = [ability for ability in self._component_ability if
                             ability in [ComponentAbility.INVOKE, ComponentAbility.STREAM]]
-            logger.debug(f"call ability: {call_ability}, node: {self._node_id}")
             for ability in call_ability:
+                current_ability = ability
+                logger.debug(f"begin call ability: {call_ability}, node: {self._node_id}")
                 await self._run_executable(ability, is_subgraph, config)
-
-        except JiuWenBaseException as e:
+                logger.debug(f"succeed call ability: {call_ability}, node: {self._node_id}")
+        except ExecutionError as e:
+            logger.error(f"failed call ability: {current_ability.name}, node: {self._node_id}, error: {e}")
             raise e
 
-        # wait only when stream_call called
-        logger.debug(f"node [{self._node_id}] stream called: {self._stream_called()}")
         if self._stream_called():
+            # 3. wait for node's 'stream-in' abilities execution finished
+            logger.debug(f"node [{self._node_id}] stream called: {self._stream_called()}")
+            stream_timeout = self._stream_called_timeout if (
+                    self._stream_called_timeout and self._stream_called_timeout > 0) else None
             try:
                 result = await asyncio.wait_for(
                     self._stream_done,
-                    timeout=(
-                        self._stream_called_timeout
-                        if self._stream_called_timeout and self._stream_called_timeout > 0
-                        else None
-                    )
+                    timeout=stream_timeout
                 )
                 if isinstance(result, Exception):
                     raise result
             except asyncio.TimeoutError:
-                raise JiuWenBaseException(StatusCode.STREAM_FRAME_TIMEOUT_FAILED.code,
-                                          StatusCode.STREAM_FRAME_TIMEOUT_FAILED.errmsg.format(
-                                              timeout=self._stream_called_timeout))
+                raise build_error(StatusCode.GRAPH_VERTEX_STREAM_CALL_TIMEOUT, timeout=stream_timeout,
+                                  node_id=self._node_id)
         elif self._has_stream_call and not self.is_end_node:
-            raise JiuWenBaseException(StatusCode.STREAM_NO_INPUT_FAILED.code,
-                                      StatusCode.STREAM_NO_INPUT_FAILED.errmsg.format(
-                                          abilities=self._stream_abilities()))
-        # when the component output is in streaming mode, send an end tracer frame with empty outputs.
+            # raise error when has stream call but no stream data in
+            raise build_error(StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR, reason="no stream data in",
+                              node_id=self._node_id)
+
+        # 4. when the component output is in streaming mode, send an end tracer frame with empty outputs.
         await self.__trace_component_done__()
         logger.debug("node [%s] call finished", self._node_id)
 
@@ -315,7 +308,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         logger.debug(f"node [{self._node_id}] stream entrypoint has been called")
 
         if self._session is None or self._session.actor_manager() is None:
-            error = JiuWenBaseException(1, "queue manager is not initialized")
+            error = build_error(StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR, reason="queue manager is not initialized",
+                                node_id=self._node_id)
             self._stream_done.set_result(error)
             error_callback(error)
             return

@@ -10,25 +10,103 @@ class StatusCode(Enum):
     SUCCESS = (0, "success")
     ERROR = (-1, "error")
 
-    # =========================
-    # Workflow Component 100000–109999
-    # =========================
+    # =============================================================================================================
+    # 100. Workflow 100000–100999
+    # =============================================================================================================
 
-    # Workflow: Interactive And Recovery 100000 - 100029
-    WORKFLOW_INPUT_INVALID = (100000, "workflow input is invalid, reason: {error_msg}")
-    WORKFLOW_STATE_RUNTIME_ERROR = (100001, "workflow state runtime error, reason: {error_msg}")
-    WORKFLOW_EXECUTION_NOT_SUPPORT = (100002, "workflow execution is not supported, reason: {error_msg}")
-    WORKFLOW_INTERRUPT_EXECUTION_ERROR = (100003, "workflow interrupt execution error, reason: {error_msg}")
-    WORKFLOW_STREAM_NOT_SUPPORT = (100004, "workflow stream is not supported, reason: {error_msg}")
-    WORKFLOW_COMPONENT_RUNTIME_ERROR = (100005, "workflow component runtime error, reason: {error_msg}")
-    WORKFLOW_STATE_INVALID = (100006, "workflow state is invalid, reason: {error_msg}")
+    # ===============================================
+    # 0. Workflow Validation Error Codes (100000 - 100099)
+    # All errors in this section raise ValidateError when triggered.
+    # These errors occur during workflow configuration/creation phase.
+    # ===============================================
+    WORKFLOW_COMPONENT_ID_INVALID = (
+        100010, "the component id is invalid for component '{comp_id}', reason='{reason}', workflow='{workflow}'")
+    WORKFLOW_COMPONENT_ABILITY_INVALID = (
+        100011, "the ability is invalid for component '{comp_id}', ability={ability}, reason='{reason}', "
+                "workflow='{workflow}'")
+    WORKFLOW_EDGE_INVALID = (
+        100012, "edge is invalid, reason='{reason}', source='{src_cmp_id}', target='{target_cmp_id}', "
+                "workflow='{workflow}'")
+    WORKFLOW_CONDITION_EDGE_INVALID = (
+        100013, "condition edge is invalid, reason='{reason}'. source='{src_cmp_id}', workflow='{workflow}'")
+    WORKFLOW_COMPONENT_SCHEMA_INVALID = (
+        100014, "component input/output schema is invalid for component '{comp_id}', reason='{reason}', "
+                "workflow='{workflow}'")
 
-    # Workflow: Execution 100100 - 100199
-    WORKFLOW_EXECUTION_RUNTIME_ERROR = (100100, "workflow execution runtime error, reason: {error_msg}")
-    WORKFLOW_INVOKE_TIMEOUT = (100101, "workflow invoke timeout ({timeout}s), reason: {error_msg}")
-    WORKFLOW_STREAM_EXECUTION_TIMEOUT = (100102, "workflow stream_execution timeout ({timeout}s), reason: {error_msg}")
+    WORKFLOW_STREAM_EDGE_INVALID = (
+        100015, "stream edge is invalid, reason='{reason}', source='{src_cmp_id}', target='{target_cmp_id}', "
+                "workflow='{workflow}'")
+    WORKFLOW_EXECUTE_INPUT_INVALID = (
+        100016, "workflow execute input is invalid, inputs='{inputs}', reason='{reason}', workflow='{workflow}'")
+    WORKFLOW_EXECUTE_SESSION_INVALID = (100017, "execute session is invalid, reason='{reason}', workflow='{workflow}'")
 
-    # Workflow Component - Builtin-workflow Component 101000 - 109999
+    # ===============================================================
+    # 1. Workflow Execution Error Codes (100100 - 100199)a
+    # All errors in this section raise ExecutionError when triggered.
+    # These errors occur during workflow runtime/execution phase.
+    # ===============================================================
+    WORKFLOW_COMPILE_ERROR = (
+        100100,
+        "workflow compilation has error, error='{reason}', workflow={workflow}")
+    WORKFLOW_EXECUTION_TIMEOUT = (
+        100101,
+        "workflow execution exceeded time limit of {timeout} seconds, workflow='{workflow}'")
+    WORKFLOW_EXECUTION_ERROR = (
+        100102,
+        "workflow execution has error, error='{reason}', workflow='{workflow}'")
+
+    # ===============================================================
+    # 2. Workflow Component orchestration Error Codes (100200 - 100299)
+    # All errors in this section raise ExecutionError when triggered.
+    # These errors occur during workflow runtime/execution phase.
+    # ===============================================================
+    WORKFLOW_INNER_ORCHESTRATION_ERROR = (
+        100053, "workflow inner orchestration error, error='{reason}'")
+    WORKFLOW_COMPONENT_EXECUTION_ERROR = (
+        100054, "component '{comp}' execute '{ability}' error, reason='{reason}', workflow='{workflow}'")
+
+    # =============================================================================================================
+    # 101. Built-in Workflow Component 101000–101999
+    # =============================================================================================================
+
+    # ======================================
+    # 00. Start Component  101000 - 101009
+    # ======================================
+
+    # ======================================
+    # 01. End Component    101010 - 101019
+    # ======================================
+    COMPONENT_END_PARAM_INVALID = (100010, "component end params is invalid, error='{reason}'")
+
+    # ======================================
+    # 02. BranchComponent  101020 - 101029
+    # ======================================
+    COMPONENT_BRANCH_PARAM_INVALID = (101020, "component branch params is invalid, error='{reason}'")
+    COMPONENT_BRANCH_EXECUTION_ERROR = (101021, "component branch execution error, error='{reason}'")
+
+    # expression
+    EXPRESSION_SYNTAX_ERROR = (101024, "expression syntax error")
+    EXPRESSION_EVAL_ERROR = (101025, "expression evaluation error, reason: {error_msg}")
+    ARRAY_CONDITION_ERROR = (101026, "array condition error")
+    NUMBER_CONDITION_ERROR = (101027, "number condition error, reason: {error_msg}")
+
+    # ======================================
+    # 03. LoopComponent  101030 - 101049
+    # ======================================
+    COMPONENT_LOOP_GROUP_PARAM_INVALID = (101030, "loop group params is invalid, error='{reason}'")
+    COMPONENT_LOOP_SET_VAR_PARAM_INVALID = (101031, "loop set_var params invalid, error='{reason}'")
+
+    COMPONENT_LOOP_EXECUTION_ERROR = (101040, "loop execution error, error='{reason}', comp='{comp}'")
+    COMPONENT_LOOP_CONDITION_EXECUTION_ERROR = (
+        101041, "loop condition execution error, error='{reason}', comp='{comp}'")
+    COMPONENT_LOOP_BREAK_EXECUTION_ERROR = (101042, "loop break execution error, error='{reason}', comp='{comp}'")
+    COMPONENT_LOOP_SET_VAR_EXECUTION_ERROR = (101043, "loop set_var execution error, error='{reason}', comp='{comp}'")
+
+    # =========================================
+    # 05. SubWorkflowComponent  101150 - 101159
+    # =========================================
+    COMPONENT_SUB_WORKFLOW_PARAM_INVALID = (101150, "component sub_workflow param is invalid, error='{reason}'")
+
     ## LLMComponent  101000 - 101049
     COMPONENT_LLM_TEMPLATE_CONFIG_ERROR = (101000, "component llm_template config error, reason: {error_msg}")
     COMPONENT_LLM_RESPONSE_CONFIG_INVALID = (101001, "component llm_response_config is invalid, reason: {error_msg}")
@@ -40,11 +118,14 @@ class StatusCode(Enum):
     COMPONENT_LLM_CONFIG_INVALID = (101007, "component llm_config is invalid, reason: {error_msg}")
 
     ## IntentDetectionComponent 101050 - 101069
-    COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR = (101050,
+    COMPONENT_INTENT_DETECTION_INPUT_PARAM_ERROR = (
+        101050,
         "component intent_detection_input parameter error, reason: {error_msg}")
-    COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED = (101051,
+    COMPONENT_INTENT_DETECTION_LLM_INIT_FAILED = (
+        101051,
         "component intent_detection_llm initialization failed, reason: {error_msg}")
-    COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED = (101052,
+    COMPONENT_INTENT_DETECTION_INVOKE_CALL_FAILED = (
+        101052,
         "component intent_detection_invoke call failed, reason: {error_msg}")
 
     ## QuestionComponent 101070 - 101099
@@ -59,53 +140,10 @@ class StatusCode(Enum):
     COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR = (101076,
                                                     "component questioner_execution process error, reason: {error_msg}")
 
-    ## BranchComponent  101100 - 101119
-    COMPONENT_BRANCH_PARAM_ERROR = (101100, "component branch parameter error, reason: {error_msg}")
-    COMPONENT_BRANCH_EXECUTION_ERROR = (101101, "component branch execution error, reason: {error_msg}")
-
-    ## SetVariableComponent  101120 - 101139
-    COMPONENT_SET_VAR_INPUT_PARAM_ERROR = (101120, "component set_var_input parameter error, reason: {error_msg}")
-    COMPONENT_SET_VAR_INIT_FAILED = (101121, "component set_var initialization failed, reason: {error_msg}")
-
-    ## SubWorkflowComponent  101140 - 101149
-    COMPONENT_SUB_WORKFLOW_INIT_FAILED = (101140, "component sub_workflow initialization failed, reason: {error_msg}")
-    COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR = (101141, "component sub_workflow runtime error, reason: {error_msg}")
-
-    ## LoopComponent  101150 - 101159
-    COMPONENT_LOOP_NOT_SUPPORT = (101150, "component loop is not supported, reason: {error_msg}")
-    COMPONENT_LOOP_EXECUTION_ERROR = (101151, "component loop execution error, reason: {error_msg}")
-    COMPONENT_LOOP_INPUT_INVALID = (101152, "component loop_input is invalid, reason: {error_msg}")
-    COMPONENT_LOOP_CONFIG_ERROR = (101153, "component loop config error, reason: {error_msg}")
-
-    ## BreakComponent  101180 - 101189
-    COMPONENT_BREAK_EXECUTION_ERROR = (101180, "component break execution error, reason: {error_msg}")
-
     ## ToolComponent  102000 - 102019
     COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
     COMPONENT_TOOL_INIT_FAILED = (102002, "component tool initialization failed, reason: {error_msg}")
-
-    ## StartComponent  102100 - 102119
-    COMPONENT_START_INPUT_INVALID = (102100, "component start_input is invalid, reason: {error_msg}")
-    COMPONENT_START_CONFIG_ERROR = (102101, "component start config error, reason: {error_msg}")
-
-    ## EndComponent  102120 - 102149
-    COMPONENT_END_INIT_FAILED = (102120, "component end initialization failed, reason: {error_msg}")
-
-    # =========================
-    # Workflow Graph & Orchestration 110000–119999
-    # =========================
-
-    GRAPH_START_NODE_SET_FAILED = (110001, "graph start node set failed, reason: {error_msg}")
-    GRAPH_END_NODE_SET_FAILED = (110002, "graph end node set failed, reason: {error_msg}")
-    GRAPH_NODE_ADD_FAILED = (110003, "graph node add failed, reason: {error_msg}")
-    GRAPH_EDGE_ADD_FAILED = (110004, "graph edge add failed, reason: {error_msg}")
-    GRAPH_CONDITION_EDGE_ADD_FAILED = (110005, "graph condition edge add failed, reason: {error_msg}")
-    WORKFLOW_COMPONENT_CONFIG_ERROR = (110006, "workflow component config error, reason: {error_msg}")
-
-    DRAWABLE_GRAPH_TITLE_INVALID = (110024, "drawable graph title is invalid")
-    DRAWABLE_GRAPH_EXPAND_CONFIG_INVALID = (110025, "drawable graph expand_subgraph config is invalid")
-    DRAWABLE_GRAPH_ANIMATION_CONFIG_INVALID = (110026, "drawable graph animation config is invalid")
 
     # =========================
     # Agent Orchestration 120000–129999
@@ -140,56 +178,176 @@ class StatusCode(Enum):
     AGENT_CONTROLLER_EVENT_HANDLER_ERROR = (123009, "controller event handler error, reason: {error_msg}")
     AGENT_CONTROLLER_EVENT_QUEUE_ERROR = (123010, "agent controller event queue execution error, reason: {error_msg}")
 
-    # =========================
-    # Runner / Distributed 134000–134999
-    # =========================
+    # =============================================================================================================
+    # 110 Runner / Distributed 110000–110999
+    # =============================================================================================================
 
-    REMOTE_AGENT_REQUEST_TIMEOUT = (134001, "remote agent request timeout ({timeout}s)")
-    AGENT_NOT_FOUND = (134002, "agent not found")
-    WORKFLOW_NOT_BOUND_TO_AGENT = (134003, "workflow not bound to agent")
-    TOOL_NOT_BOUND_TO_AGENT = (134004, "tool not bound to agent")
-    RUNNER_DISTRIBUTED_MODE_REQUIRED = (134006, "runner distributed mode is required")
-    RUNNER_STOPPED = (134007, "runner is stopped")
-    REMOTE_AGENT_REQUEST_CANCELLED = (134008, "remote agent request cancelled")
-    REMOTE_AGENT_PROCESS_ERROR = (134009, "remote agent process error, reason: {error_msg}")
+    # =======================================
+    # 0. Runner execution 110000 - 110099
+    # =======================================
+    RUNNER_TERMINATION_ERROR = (110002, "runner is already terminate")
+    RUNNER_RUN_AGENT_ERROR = (110022, "runner run agent '{agent}' failed, error='{reason}'")
+    # =======================================
+    # 1. distribute execution 110100 - 110199
+    # =======================================
+    REMOTE_AGENT_EXECUTION_TIMEOUT = (110100, "remote agent '{agent_id}' execute exceed {timeout} seconds")
+    REMOTE_AGENT_EXECUTION_ERROR = (110101, "remote agent '{agent_id}' execute error, error='{reason}'")
+    REMOTE_AGENT_RESPONSE_PROCESS_ERROR = (
+        110102,
+        "remote agent request process error, message_id='{message_id}', process_id='{process_id}', "
+        "response='{code={error_code}', msg='{error_msg}'")
 
+    # =======================================
+    # 2. message queue 110200 - 110299
+    # =======================================
+    MESSAGE_QUEUE_INITIATION_ERROR = (110200, "init type '{type}' message queue error, error='{reason}'")
+    MESSAGE_QUEUE_TOPIC_SUBSCRIPTION_ERROR = (110210, "subscribe topic error, topic='{topic}', error='{reason}'")
+    MESSAGE_QUEUE_TOPIC_MESSAGE_PRODUCTION_ERROR = (
+        110211,
+        "produce message error, topic='{topic}', message='{message}', error='{reason}'")
+    MESSAGE_QUEUE_MESSAGE_CONSUME_ERROR = (110212, "consume message error, error='{reason}'")
+    MESSAGE_QUEUE_MESSAGE_PROCESS_EXECUTION_ERROR = (110213, "process message error, error='{reason}'")
+
+    # =======================================
+    # 3. dist message queue 110300 - 110399
+    # =======================================
+    DIST_MESSAGE_QUEUE_CLIENT_START_ERROR = (110300, "distribute message queue client start error, error='{reason}'")
+
+    # =======================================
+    # 4. resource_manager 110400 - 110599
+    # =======================================
     # ResourceMgr 134200-134300
     # param validate
-    RESOURCE_ID_VALUE_INVALID = (134201, "{resource_type} id is invalid, reason='{reason}'")
-    RESOURCE_TAG_VALUE_INVALID = (134202, "tag is invalid, tag={tag}, reason='{reason}'")
-    RESOURCE_CARD_VALUE_INVALID = (134203, "{resource_type} card is invalid, reason='{reason}'")
-    RESOURCE_PROVIDER_INVALID = (134204, "{resource_type} provider is invalid, reason='{reason}'")
-    RESOURCE_VALUE_INVALID = (134205, "{resource_type} value is invalid, reason='{reason}'")
+    RESOURCE_ID_VALUE_INVALID = (110400, "{resource_type} id is invalid, reason='{reason}'")
+    RESOURCE_TAG_VALUE_INVALID = (110401, "tag is invalid, tag={tag}, reason='{reason}'")
+    RESOURCE_CARD_VALUE_INVALID = (110402, "{resource_type} card is invalid, reason='{reason}'")
+    RESOURCE_PROVIDER_INVALID = (110403, "{resource_type} provider is invalid, reason='{reason}'")
+    RESOURCE_VALUE_INVALID = (110404, "{resource_type} value is invalid, reason='{reason}'")
 
-    RESOURCE_ADD_ERROR = (134250, "resource add failed, card={card}, reason='{reason}'")
+    RESOURCE_ADD_ERROR = (110430, "resource add failed, card='{card}', error='{reason}'")
 
-    RESOURCE_MCP_SERVER_PARAM_INVALID = (134301, "server param is invalid, param='{param}', reason={reason}")
-    RESOURCE_MCP_SERVER_CONNECTION_ERROR = (134302,
-                                            "mcp server connect failed, server_config={server_config}, reason={reason}")
-    RESOURCE_MCP_SERVER_ADD_ERROR = (134303, "mcp server add failed, server_config={server_config}, reason={reason}")
-    RESOURCE_MCP_SERVER_REFRESH_ERROR = (134304, "mcp server refresh failed, server_id={server_id}, reason={reason}")
-    RESOURCE_MCP_SERVER_REMOVE_ERROR = (134305, "mcp server remove failed, server_id={server_id}, reason={reason}")
-    RESOURCE_MCP_TOOL_GET_ERROR = (134306, "mcp server tool get failed, server_id={server_id}, reason={reason}")
+    # tag manager error 110480 - 110499
+    RESOURCE_TAG_REMOVE_TAG_ERROR = (110480, "tag is invalid, tag='{tag}', error='{reason}'")
+    RESOURCE_TAG_ADD_RESOURCE_TAG_ERROR = (
+        110481,
+        "add tag failed, resource_id='{resource_id}', tag='{tag}', error='{reason}'")
+    RESOURCE_TAG_REMOVE_RESOURCE_TAG_ERROR = (
+        110482,
+        "remove resource tag failed, resource_id='{resource_id}', tags='{tags}', error='{reason}'")
+    RESOURCE_TAG_REPLACE_RESOURCE_TAG_ERROR = (
+        110483,
+        "replace resource tag failed, resource_id='{resource_id}', tags='{tags}', error='{reason}'")
+    RESOURCE_TAG_FIND_RESOURCE_ERROR = (
+        110484,
+        "replace resource tag failed, resource_id='{resource_id}', tags='{tags}', error='{reason}'")
 
-    # tag manager
-    RESOURCE_TAG_REMOVE_TAG_ERROR = (134401, "tag is invalid, tag={tag}, reason={reason}")
-    RESOURCE_TAG_ADD_RESOURCE_TAG_ERROR = (134402,
-        "add tag failed, resource_id={resource_id}, tag={tag}, reason='{reason}'")
-    RESOURCE_TAG_REMOVE_RESOURCE_TAG_ERROR = (134403,
-        "remove resource tag failed, resource_id={resource_id}, tags={tags}, reason='{reason}'")
-    RESOURCE_TAG_REPLACE_RESOURCE_TAG_ERROR = (134404,
-        "replace resource tag failed, resource_id={resource_id}, tags={tags}, reason='{reason}'")
-    RESOURCE_TAG_FIND_RESOURCE_ERROR = (134405,
-        "replace resource tag failed, resource_id={resource_id}, tags={tags}, reason='{reason}'")
+    # specific_resource error 110500 - 110599
+    # mcp resource error 110510 - 110519
+    RESOURCE_MCP_SERVER_PARAM_INVALID = (110510, "server param is invalid, param='{param}', error='{reason}'")
 
-    # =========================
-    # Graph Engine 140000–149999
-    # =========================
+    RESOURCE_MCP_SERVER_CONNECTION_ERROR = (
+        110511,
+        "mcp server connect failed, server_config={server_config}, error='{reason}'")
+    RESOURCE_MCP_SERVER_ADD_ERROR = (
+        110512, "mcp server add failed, server_config={server_config}, error='{reason}'")
+    RESOURCE_MCP_SERVER_REFRESH_ERROR = (
+        110513, "mcp server refresh failed, server_id={server_id}, error='{reason}'")
+    RESOURCE_MCP_SERVER_REMOVE_ERROR = (
+        110514, "mcp server remove failed, server_id={server_id}, error='{reason}'")
+    RESOURCE_MCP_TOOL_GET_ERROR = (
+        110515, "mcp server tool get failed, server_id={server_id}, error='{reason}'")
 
-    EXPRESSION_SYNTAX_ERROR = (140000, "expression syntax error")
-    EXPRESSION_EVAL_ERROR = (140001, "expression evaluation error, reason: {error_msg}")
-    ARRAY_CONDITION_ERROR = (140002, "array condition error")
-    NUMBER_CONDITION_ERROR = (140003, "number condition error, reason: {error_msg}")
+    # =============================================================================================================
+    # 111. Session 111000 – 111999
+    # =============================================================================================================
+
+    # =======================================
+    # 01. component session 111000 - 111009
+    # =======================================
+    COMP_SESSION_INTERACT_ERROR = (
+        111005,
+        "interact is not support, error='{reason}', comp_id={comp_id}, workflow={workflow}")
+
+    # =======================================
+    # 11. interaction     111110 - 111119
+    # =======================================
+    INTERACTION_INPUT_INVALID = (111110, "interaction input is invalid, reason={reason}")
+
+    # =======================================
+    # 12 checkpointer     111120 - 111129
+    # =======================================
+    CHECKPOINTER_POST_WORKFLOW_EXECUTION_ERROR = (
+        111120,
+        "post workflow execute error, session_id={session_id}, workflow={workflow}, error='{reason}'")
+    CHECKPOINTER_PRE_WORKFLOW_EXECUTION_ERROR = (
+        111121,
+        "pre workflow execute error, session_id={session_id}, workflow={workflow}, error='{reason}'")
+    CHECKPOINTER_INTERRUPT_AGENT_ERROR = (
+        111122,
+        "interrupt agent execute error, session_id={session_id}, agent={agent}, error='{reason}'")
+    CHECKPOINTER_POST_AGENT_EXECUTION_ERROR = (
+        111123,
+        "post agent execute error, session_id={session_id}, agent={agent}, error='{reason}'")
+
+    # =======================================
+    # 13 stream writer     111130 - 111139
+    # =======================================
+    STREAM_WRITER_MANAGER_ADD_WRITER_ERROR = (111130, "add new stream writer error, mode={mode}, error='{reason}'")
+    STREAM_WRITER_MANAGER_REMOVE_WRITER_ERROR = (111131, "remove stream writer error, mode={mode}, error='{reason}'")
+    STREAM_WRITER_WRITE_STREAM_VALIDATION_ERROR = (
+        111132,
+        "writer stream data validate error, stream_type={schema_type}, "
+        "stream_data={stream_data}, error='{reason}'")
+    STREAM_WRITER_WRITE_STREAM_ERROR = (
+        111133, "writer stream data error, stream_data={stream_data}, error='{reason}'")
+
+    STREAM_OUTPUT_FIRST_CHUNK_INTERVAL_TIMEOUT = (
+        111134,
+        "stream output first stream chunk timeout, timeout={timeout}s, error='{reason}'")
+    STREAM_OUTPUT_CHUNK_INTERVAL_TIMEOUT = (
+        111135,
+        "stream output next stream chunk timeout, interval_timeout={timeout}s, error='{reason}'")
+
+    # =======================================
+    # 14 tracer     111140 - 111149
+    # =======================================
+    TRACER_WORKFLOW_TRACE_ERROR = (111140, "trace workflow error, error='{reason}'")
+    TRACER_AGENT_TRACE_ERROR = (111141, "trace agent error, error='{reason}'")
+
+    # =============================================================================================================
+    # 112. Graph Engine 112000–112999
+    # =============================================================================================================
+    # 01. graph state commit 112030 - 112039
+    GRAPH_STATE_COMMIT_ERROR = (112030, "graph commit state error, error='{reason}'")
+
+    # 02. drawable graph 112020 - 112029
+    DRAWABLE_GRAPH_START_NODE_INVALID = (
+        112020,
+        "drawable_graph start node is invalid, node={node_id}, reason={reason}",
+    )
+    DRAWABLE_GRAPH_END_NODE_INVALID = (
+        112021,
+        "drawable_graph end node is invalid, node={node_id}, reason={reason}",
+    )
+    DRAWABLE_GRAPH_BREAK_NODE_INVALID = (
+        112022,
+        "drawable_graph break node is invalid, node={node_id}, reason={reason}",
+    )
+    DRAWABLE_GRAPH_TO_MERMAID_INVALID = (112043, "drawable_graph to_mermaid error, reason={reason}")
+
+    # 03. stream graph execution 112030 - 112049
+    GRAPH_STREAM_ACTOR_EXECUTION_ERROR = (112030, "actor manager execute error, error='{reason}'")
+    # 05. graph vertex execution 112050 - 112069
+    GRAPH_VERTEX_EXECUTION_ERROR = (112050, "vertex execute error, error='{reason}', node_id={node_id}")
+    GRAPH_VERTEX_STREAM_CALL_TIMEOUT = (112051, "vertex stream timeout, timeout={timeout}, node_id={node_id}")
+    GRAPH_VERTEX_STREAM_CALL_ERROR = (112052, "vertex stream call error, error='{reason}', node_id={node_id}")
+
+    # 10. pregel graph 112100 - 112199
+    PREGEL_GRAPH_NODE_ID_INVALID = (112100, "node id is invalid, node_id={node_id}, error='{reason}'")
+    PREGEL_GRAPH_NODE_INVALID = (112101, "node is invalid, node_id={node_id}, error='{reason}'")
+    PREGEL_GRAPH_EDGE_INVALID = (112102,
+                                 "edge is invalid, source_id={source_id}, target_id={target_id}, error='{reason}'")
+    PREGEL_GRAPH_CONDITION_EDGE_INVALID = (112103, "condition edge is invalid, source_id={source_id}, error='{reason}'")
 
     # =========================
     # ContextEngine 150000 - 154999
@@ -317,38 +475,6 @@ class StatusCode(Enum):
     # =========================
     # Foundation Tool 160000–169999
     # =========================
-    TOOL_STREAM_NOT_SUPPORTED = (160001, "stream is not support, card={card}")
-    TOOL_INVOKE_NOT_SUPPORTED = (160002, "invoke is not support, card={card}")
-    TOOL_CARD_NOT_SUPPORTED = (160003, "card is not support")
-    TOOL_CARD_ID_NOT_SUPPORTED = (160004, "card's id is not support, card={card}")
-
-    # RestfulApi 160100-160199
-    # RestfulApiCard validate 160100-160120
-    TOOL_RESTFUL_API_CARD_CONFIG_INVALID = (160100, "config failed, {reason}")
-    # RestfulApiCard Execution 160121 - 160199
-    TOOL_RESTFUL_API_TIMEOUT = (160121,
-                                "execute {interface} failed, request is timeout, timeout={timeout}s, card=[{card}]")
-    TOOL_RESTFUL_API_RESPONSE_SIZE_EXCEED_LIMIT = (160122,
-                                                   "execute {interface} failed, response is too big,"
-                                                   " max_size={max_length}b, actual={actual_length}b, card=[{card}]")
-    TOOL_RESTFUL_API_RESPONSE_ERROR = (160123,
-                                       "execute {interface} failed, response error, code={code}, reason={reason}")
-    TOOL_RESTFUL_API_EXECUTION_ERROR = (160124, "RestfulApi execute {interface} failed,"
-                                                " reason={reason}, card=[{card}]")
-
-    # LocalFunction 160200-160299
-    # LocalFunction validate 160200-160220
-    TOOL_LOCAL_FUNCTION_FUNC_NOT_SUPPORTED = (160201, "func is not supported, card={card}")
-
-    # LocalFunction execution 160221-160299
-    TOOL_LOCAL_FUNCTION_EXECUTION_ERROR = (160221, "execute {interface} failed, reason={reason}, card={card}")
-
-    # MCPTool 160300-160399
-    # MCPTool validate 160300-160320
-    TOOL_MCP_CLIENT_NOT_SUPPORTED = (160301, "mcp client is not supported, card={card}")
-
-    # MCPTool execution 160321-160399
-    TOOL_MCP_EXECUTION_ERROR = (160321, "execute {interface} failed, reason={reason}, card={card}")
 
     # =========================
     # Optimization Toolchain 170000 - 179999
@@ -403,16 +529,36 @@ class StatusCode(Enum):
     MODEL_INVOKE_PARAM_ERROR = (181004, "model invoke parameter error, reason: {error_msg}")
     MODEL_CLIENT_CONFIG_INVALID = (181005, "model client_config is invalid, reason: {error_msg}")
 
-    # Foundation - Tool Definition and Execution 182000 - 182999
-    PLUGIN_EXECUTION_RUNTIME_ERROR = (182000, "plugin execution runtime error, reason: {error_msg}")
-    PLUGIN_REQUEST_TIMEOUT = (182001, "plugin request timeout ({timeout}s), reason: {error_msg}")
-    PLUGIN_RESPONSE_PROCESS_ERROR = (182002, "plugin response process error, reason: {error_msg}")
-    PLUGIN_RESPONSE_INVALID = (182003,
-                               "plugin response is invalid, reason: {error_msg}")
-    PLUGIN_RESPONSE_CALL_FAILED = (182004, "plugin response call failed, reason: {error_msg}")
-    PLUGIN_INPUT_PARAM_ERROR = (182005, "plugin input parameter error, reason: {error_msg}")
-    PLUGIN_RESTFUL_API_NOT_SUPPORT = (182006,
-                                      "plugin restful_api is not supported, reason: {error_msg}")
+    # 2. Foundation - Tool Definition and Execution 182000 - 182999
+    # 0. basic tool
+    TOOP_CARD_INVALID = (182000, "card is invalid, card={card}, error='{reason}'")
+    TOOL_STREAM_NOT_SUPPORTED = (182010, "stream is not support, card={card}")
+    TOOL_INVOKE_NOT_SUPPORTED = (182011, "invoke is not support, card={card}")
+
+    # 1. restuful api 182100 - 182199
+    TOOL_RESTFUL_API_CARD_CONFIG_INVALID = (182100, "config failed, {reason}")
+    TOOL_RESTFUL_API_EXECUTION_TIMEOUT = (
+        182101,
+        "execute {method} failed, request is timeout, timeout={timeout}s, card=[{card}]")
+    TOOL_RESTFUL_API_RESPONSE_SIZE_EXCEED_LIMIT = (
+        182102,
+        "execute {method} failed, response is too big, max_size={max_length}b, actual={actual_length}b, card=[{card}]")
+    TOOL_RESTFUL_API_RESPONSE_ERROR = (
+        182103, "execute {method} failed, response error, code={code}, error='{reason}'")
+    TOOL_RESTFUL_API_EXECUTION_ERROR = (
+        182104, "RestfulApi execute {method} failed, error='{reason}', card=[{card}]")
+    # 2. local function 182200 - 182299
+    TOOL_LOCAL_FUNCTION_FUNC_NOT_SUPPORTED = (
+        182200, "func is not supported, card={card}")
+    TOOL_LOCAL_FUNCTION_EXECUTION_ERROR = (
+        182205, "execute {method} failed, error='{reason}', card={card}")
+
+    # 3. mcp tool 182300 - 182399
+    TOOL_MCP_CLIENT_NOT_SUPPORTED = (182300, "mcp client is not supported, card={card}")
+    TOOL_MCP_EXECUTION_ERROR = (182301, "execute {method} failed, error='{reason}', card={card}")
+
+    # 4. openapi tool 182400 - 182499
+    TOOL_OPENAPI_CLIENT_EXECUTION_ERROR = (182400, "openapi client execute error, error='{reason}'")
 
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
@@ -433,24 +579,28 @@ class StatusCode(Enum):
     COMMON_SSL_CERT_INVALID = (188005, "common ssl_cert is invalid, reason: {error_msg}")
 
     # Foundation - Schema 189000 - 189999
-    SCHEMA_VALIDATE_INVALID = (189001, "validate data with schema failed, reason={reason}, data={data}")
-    SCHEMA_FORMAT_INVALID = (189002, "format data with schema failed, reason={reason}, data={data}")
+    SCHEMA_VALIDATE_INVALID = (189001, "validate data with schema failed, error='{reason}', data={data}")
+    SCHEMA_FORMAT_INVALID = (189002, "format data with schema failed, error='{reason}', data={data}")
 
     # =========================
     # SysOperation 199000–199999
     # =========================
 
-    SYS_OPERATION_MANAGER_PROCESS_ERROR = (199001,
-       "sys operation manager process error, process: {process}, reason: {error_msg}")
-    SYS_OPERATION_CARD_PARAM_ERROR = (199002,
+    SYS_OPERATION_MANAGER_PROCESS_ERROR = (
+        199001,
+        "sys operation manager process error, process: {process}, reason: {error_msg}")
+    SYS_OPERATION_CARD_PARAM_ERROR = (
+        199002,
         "sys operation card param error, reason: {error_msg}")
-    SYS_OPERATION_FS_EXECUTION_ERROR = (199003,
+    SYS_OPERATION_FS_EXECUTION_ERROR = (
+        199003,
         "file system operation execution error, execution: {execution}, reason: {error_msg}")
-    SYS_OPERATION_SHELL_EXECUTION_ERROR = (199004,
+    SYS_OPERATION_SHELL_EXECUTION_ERROR = (
+        199004,
         "shell operation execution error, execution: {execution}, reason: {error_msg}")
-    SYS_OPERATION_CODE_EXECUTION_ERROR = (199005,
+    SYS_OPERATION_CODE_EXECUTION_ERROR = (
+        199005,
         "code operation execution error, execution: {execution}, reason: {error_msg}")
-
 
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.

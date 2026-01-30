@@ -7,8 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 from openjiuwen.core.common.constants.constant import INTERACTION
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.workflow import BranchComponent, WorkflowCard
 from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
@@ -43,7 +43,7 @@ fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
 
 fake_exception_module = types.ModuleType("base")
-fake_exception_module.JiuWenBaseException = Mock()
+fake_exception_module.BaseError = Mock()
 
 sys.modules["openjiuwen.core.common.logging.base"] = fake_base
 sys.modules["openjiuwen.core.common.exception.base"] = fake_exception_module
@@ -56,21 +56,17 @@ async def test_simple_workflow():
     """
     flow, mock_node, mock_start = create_simple_workflow()
     session_id = uuid.uuid4().hex
-    with pytest.raises(JiuWenBaseException) as e:
+    with pytest.raises(BaseError) as e:
         await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: a, ability: invoke, error: value < 20",
-    )
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component 'a' execute 'invoke' error, reason='value < 20', workflow='simple_workflow'" in str(e.value)
     assert mock_start.runtime == 1
     assert mock_node.runtime == 1
     flow2, mock_node2, mock_start2 = create_simple_workflow()
-    with pytest.raises(JiuWenBaseException) as e:
+    with pytest.raises(BaseError) as e:
         await flow2.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: a, ability: invoke, error: value < 20",
-    )
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component 'a' execute 'invoke' error, reason='value < 20', workflow='simple_workflow' " in str(e.value)
     assert mock_start2.runtime == 0
     assert mock_node2.runtime == 1
 
@@ -137,23 +133,19 @@ async def test_workflow_comp():
     flow.add_connection("start", "a")
     flow.add_connection("a", "end")
     session_id = uuid.uuid4().hex
-    with pytest.raises(JiuWenBaseException) as e:
+    with pytest.raises(BaseError) as e:
         await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: a2, ability: invoke, error: value < 20",
-    )
-
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component 'a2' execute 'invoke' error, reason='value < 20', workflow='test_workflow_comp'" in str(e.value)
     assert mock_start.runtime == 1
     assert mock_node.runtime == 1
 
     await asyncio.sleep(0.1)
-    with pytest.raises(JiuWenBaseException) as e:
+    with pytest.raises(BaseError) as e:
         await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: a2, ability: invoke, error: value < 20",
-    )
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component 'a2' execute 'invoke' error, reason='value < 20', workflow='test_workflow_comp'" in str(e.value)
+
     assert mock_start.runtime == 1
     assert mock_node.runtime == 2
 
@@ -195,51 +187,47 @@ async def test_workflow_with_loop():
     flow.add_connection("b", "e")
 
     session_id = uuid.uuid4().hex
-    with pytest.raises(JiuWenBaseException) as e:
+    with pytest.raises(BaseError) as e:
         await flow.invoke({"input_array": [1, 2, 3], "input_number": 1},
-                                   create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: 2, ability: invoke, error: inner error: 1"
-    )
-    with pytest.raises(JiuWenBaseException) as e:
+                          create_workflow_session(session_id=session_id))
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component '2' execute 'invoke' error, reason='inner error: 1', workflow='" in str(
+        e.value)
+
+    with pytest.raises(BaseError) as e:
         result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
 
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: 2, ability: invoke, error: inner error: 11"
-    )
-    with pytest.raises(JiuWenBaseException) as e:
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component '2' execute 'invoke' error, reason='inner error: 11', workflow='" in str(
+        e.value)
+
+    with pytest.raises(BaseError) as e:
         result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: 2, ability: invoke, error: inner error: 21"
-    )
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component '2' execute 'invoke' error, reason='inner error: 21', workflow='" in str(
+        e.value)
 
     result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
     assert result == WorkflowOutput(result={"array_result": [11, 12, 13], "user_var": 31},
-                                        state=WorkflowExecutionState.COMPLETED)
+                                    state=WorkflowExecutionState.COMPLETED)
 
-
-    with pytest.raises(JiuWenBaseException) as e:
+    with pytest.raises(BaseError) as e:
         expect_e = Exception()
         result = await flow.invoke({"input_array": [4, 5], "input_number": 2},
                                    create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: 2, ability: invoke, error: inner error: 2"
-    )
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component '2' execute 'invoke' error, reason='inner error: 2', workflow=" in str(
+        e.value)
 
-    with pytest.raises(JiuWenBaseException) as e:
+    with pytest.raises(BaseError) as e:
         result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-        error_msg="node_id: 2, ability: invoke, error: inner error: 12"
-    )
+    assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+    assert "component '2' execute 'invoke' error, reason='inner error: 12', workflow=" in str(
+        e.value)
 
     result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
     assert result == WorkflowOutput(result={"array_result": [14, 15], "user_var": 22},
-                                        state=WorkflowExecutionState.COMPLETED)
+                                    state=WorkflowExecutionState.COMPLETED)
 
 
 async def test_workflow_with_loop_interactive():
@@ -389,6 +377,7 @@ async def test_workflow_with_loop_interactive():
     res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(result={"array_result": [14, 15], "user_var": None},
                                  state=WorkflowExecutionState.COMPLETED)
+
 
 async def test_workflow_with_loop_comp_interactive():
     flow = Workflow(card=WorkflowCard(id="test_workflow_with_loop_interactive"))
@@ -655,9 +644,9 @@ async def test_collect_node_interactive_workflow():
     flow.add_stream_connection("a", "b")
     flow.add_connection("b", "end")
     session_id = uuid.uuid4().hex
-    with pytest.raises(JiuWenBaseException) as e:
+    with pytest.raises(BaseError) as e:
         res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
-    assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
+    assert e.value.code == StatusCode.COMP_SESSION_INTERACT_ERROR.code
 
 
 async def test_simple_concurrent_interactive_workflow():
@@ -827,9 +816,9 @@ async def test_simple_interactive_workflow_both_raw_input_update():
         state=WorkflowExecutionState.INPUT_REQUIRED)
 
     user_input = InteractiveInput({"aa": "any key"})
-    with pytest.raises(JiuWenBaseException) as exc_info:
+    with pytest.raises(BaseError) as exc_info:
         user_input.update("a", {"aa": "abc"})
-    assert exc_info.value.error_code == StatusCode.WORKFLOW_STATE_RUNTIME_ERROR.code
+    assert exc_info.value.code == StatusCode.INTERACTION_INPUT_INVALID.code
 
     res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
@@ -867,7 +856,6 @@ async def test_simple_interactive_workflow_raw_inputs_empty_str_list():
     flow.add_connection("a", "end")
 
     for raw_inputs in [[], ""]:
-
         session_id = uuid.uuid4().hex
         start_node.runtime = 0
 
@@ -892,6 +880,7 @@ async def test_simple_interactive_workflow_raw_inputs_empty_str_list():
             result={'result': raw_inputs},
             state=WorkflowExecutionState.COMPLETED)
 
+
 async def test_simple_interactive_workflow_update_empty_str_list():
     """
     graph : start->a->end
@@ -915,7 +904,6 @@ async def test_simple_interactive_workflow_update_empty_str_list():
     flow.add_connection("a", "end")
 
     for raw_inputs in [[], ""]:
-
         session_id = uuid.uuid4().hex
         start_node.runtime = 0
 
@@ -940,6 +928,7 @@ async def test_simple_interactive_workflow_update_empty_str_list():
         assert res == WorkflowOutput(
             result={'result': raw_inputs},
             state=WorkflowExecutionState.COMPLETED)
+
 
 async def test_simple_interactive_workflow_none():
     """
@@ -987,6 +976,7 @@ async def test_simple_interactive_workflow_none():
             {'index': 0, 'payload': InteractionOutput.model_validate({'id': 'a', 'value': 'Please enter any key'}),
              'type': INTERACTION})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
+
 
 async def test_simple_interactive_workflow_checkpointer():
     """

@@ -539,7 +539,7 @@ class TestRestfulApiExceptions:
             with pytest.raises(Exception) as exc_info:
                 await restful_api.invoke({})
 
-            assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_TIMEOUT.code
+            assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_EXECUTION_TIMEOUT.code
 
 
     @pytest.mark.asyncio

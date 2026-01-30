@@ -4,8 +4,8 @@
 from typing import Type, Generic, TypeVar
 from pydantic import BaseModel, ValidationError
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.stream.base import OutputSchema, TraceSchema, CustomSchema
 from openjiuwen.core.session.stream.emitter import StreamEmitter
@@ -25,21 +25,20 @@ class StreamWriter(Generic[T, S]):
 
     async def write(self, stream_data: T) -> None:
         if stream_data is None:
-            raise JiuWenBaseException(StatusCode.STREAM_WRITER_WRITE_FAILED.code,
-                                      StatusCode.STREAM_WRITER_WRITE_FAILED.errmsg.format(reason="can not write None"))
+            raise build_error(StatusCode.STREAM_WRITER_WRITE_STREAM_VALIDATION_ERROR,
+                              stream_type=self._schema_type.__name__,
+                              stream_data=stream_data, reason="stream data is None")
         try:
             validated_data = self._schema_type.model_validate(stream_data)
         except ValidationError as e:
-            raise JiuWenBaseException(
-                StatusCode.STREAM_WRITER_WRITE_SCHEMA_FAILED.code,
-                StatusCode.STREAM_WRITER_WRITE_SCHEMA_FAILED.errmsg.format(
-                    detail=f"Data validation failed for schema {self._schema_type.__name__}")
-            ) from e
+            raise build_error(StatusCode.STREAM_WRITER_WRITE_STREAM_VALIDATION_ERROR, cause=e,
+                              stream_type=self._schema_type.__name__,
+                              stream_data=stream_data, reason=e)
         try:
             await self._do_write(validated_data)
         except Exception as error:
-            raise JiuWenBaseException(StatusCode.STREAM_WRITER_WRITE_FAILED.code,
-                                      StatusCode.STREAM_WRITER_WRITE_FAILED.errmsg.format(reason=error)) from error
+            raise build_error(StatusCode.STREAM_WRITER_WRITE_STREAM_ERROR, cause=error, stream_data=stream_data,
+                              reason=error)
 
     async def _do_write(self, validated_data: S) -> None:
         if self._stream_emitter and not self._stream_emitter.is_closed():

@@ -8,19 +8,19 @@ import asyncio
 
 from openjiuwen.core.runner.message_queue_base import StreamQueueMessage, InvokeQueueMessage, QueueMessage, MessageQueueBase
 from openjiuwen.core.runner.message_queue_inmemory import MessageQueueInMemory
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 
 
-class MockMessagehandler_stream:
+class MockMessageHandlerStream:
     async def handle_event(self, request: Any) -> AsyncIterator[str]:
         for i in range(1, 10):
-            response = f"MockMessagehandler_stream response for msg : {request}, i is {i}"
+            response = f"MockMessageHandlerStream response for msg : {request}, i is {i}"
             yield response
 
 
-class MockMessagehandler_invoke:
+class MockMessageHandlerInvoke:
     async def handle_event(self, request: Any) -> str:
-        return "MockMessagehandler_invoke response for msg : " + request
+        return "MockMessageHandlerInvoke response for msg : " + request
 
 
 async def get_response(response):
@@ -36,16 +36,16 @@ async def get_response(response):
 @pytest.mark.asyncio
 class TestMessageQueue:
 
-    async def messagequeue_common(self, mq: MessageQueueBase):
+    async def message_queue_common(self, mq: MessageQueueBase):
         mq.start()
 
         # stream handler
         subscription1 = mq.subscribe("topic_stream")
-        subscription1.set_message_handler(MockMessagehandler_stream().handle_event)
+        subscription1.set_message_handler(MockMessageHandlerStream().handle_event)
         subscription1.activate()
         # invoke handler
         subscription2 = mq.subscribe("topic_invoke")
-        subscription2.set_message_handler(MockMessagehandler_invoke().handle_event)
+        subscription2.set_message_handler(MockMessageHandlerInvoke().handle_event)
         subscription2.activate()
 
         # <1.1> send stream request to stream handler
@@ -59,7 +59,7 @@ class TestMessageQueue:
         assert message.error_msg == ""
         i = 1
         async for ret in response:
-            assert ret == f"MockMessagehandler_stream response for msg : 上海温度多少, i is {i}"
+            assert ret == f"MockMessageHandlerStream response for msg : 上海温度多少, i is {i}"
             i += 1
 
         # # <1.2> send invoke request to stream handler
@@ -68,7 +68,7 @@ class TestMessageQueue:
         await mq.produce_message("topic_stream", message1)
         response = await get_response(message1.response)
         assert response is None
-        assert message1.error_code == StatusCode.ERROR.code
+        assert message1.error_code == StatusCode.MESSAGE_QUEUE_MESSAGE_CONSUME_ERROR.code
 
         # <1.3> send publish request to stream handler
         message2 = QueueMessage()
@@ -84,7 +84,7 @@ class TestMessageQueue:
         await mq.produce_message("topic_invoke", message3)
         response = await get_response(message3.response)
         assert response is not None
-        assert response == "MockMessagehandler_invoke response for msg : 北京温度多少"
+        assert response == "MockMessageHandlerInvoke response for msg : 北京温度多少"
         assert message3.error_code == StatusCode.SUCCESS.code
         assert message3.error_msg == ""
 
@@ -94,7 +94,7 @@ class TestMessageQueue:
         await mq.produce_message("topic_invoke", message4)
         response = await get_response(message4.response)
         assert response is None
-        assert message4.error_code == StatusCode.ERROR.code
+        assert message4.error_code == StatusCode.MESSAGE_QUEUE_MESSAGE_CONSUME_ERROR.code
 
         # <2.3> send publish request to invkoke handler
         message5 = QueueMessage()
@@ -109,7 +109,7 @@ class TestMessageQueue:
 
         await mq.stop()
 
-    async def test_messagequeue_inmemory(self):
+    async def test_message_queue_inmemory(self):
         mq = MessageQueueInMemory()
-        await self.messagequeue_common(mq)
-
+        await self.message_queue_common(mq)
+

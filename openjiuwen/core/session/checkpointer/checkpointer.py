@@ -3,8 +3,8 @@
 
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.graph.store import Store
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
@@ -36,9 +36,9 @@ class InMemoryCheckpointer(Checkpointer):
                 await self._graph_store.delete(session.session_id(), session.workflow_id())
                 workflow_store.clear(session.workflow_id())
             else:
-                raise JiuWenBaseException(StatusCode.WORKFLOW_STATE_INVALID.code,
-                    StatusCode.WORKFLOW_STATE_INVALID.errmsg.format
-                        (error_msg="workflow state exists but non-interactive input and cleanup is disabled"))
+                raise build_error(StatusCode.CHECKPOINTER_PRE_WORKFLOW_EXECUTION_ERROR, session_id=session.session_id(),
+                                  workflow=session.workflow_id(),
+                                  reason=f"workflow state exists but non-interactive input and cleanup is disabled")
 
     async def post_workflow_execute(self, session: BaseSession, result, exception):
         workflow_store = self._workflow_stores.get(session.session_id())
@@ -47,8 +47,7 @@ class InMemoryCheckpointer(Checkpointer):
             logger.info(f"exception in workflow, save checkpoint for "
                         f"workflow: {session.workflow_id()} in session: {session.session_id()}")
             if workflow_store is None:
-                raise JiuWenBaseException(StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code,
-                                          StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg)
+                raise build_error()
             workflow_store.save(session)
             workflow_ids.add(session.workflow_id())
             raise exception
@@ -61,7 +60,7 @@ class InMemoryCheckpointer(Checkpointer):
                 workflow_ids.discard(session.workflow_id())
             else:
                 logger.warning(f"workflow_store of workflow: {session.workflow_id()} dose not exist in "
-                            f"session: {session.session_id()}")
+                               f"session: {session.session_id()}")
 
             from openjiuwen.core.session.internal.agent import AgentSession
             if not isinstance(session.parent(), AgentSession):
@@ -72,13 +71,14 @@ class InMemoryCheckpointer(Checkpointer):
             logger.info(f"interaction required, save checkpoint for "
                         f"workflow: {session.workflow_id()} in session: {session.session_id()}")
             if workflow_store is None:
-                raise JiuWenBaseException(StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code,
-                                          StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg)
+                raise build_error(StatusCode.CHECKPOINTER_POST_WORKFLOW_EXECUTION_ERROR, workflow=session.workflow_id(),
+                                  session_id=session.session_id(), reason="workflow_store is not found")
             workflow_store.save(session)
             workflow_ids.add(session.workflow_id())
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
-        logger.info(f"agent: {session.agent_id()} create or restore checkpoint from session: {session.session_id()}")
+        logger.info(
+            f"agent: {session.agent_id()} create or restore checkpoint from session: {session.session_id()}")
         from openjiuwen.core.session.checkpointer.agent_storage import AgentStorage
         agent_store = self._agent_stores.setdefault(session.session_id(), AgentStorage())
         agent_store.recover(session)
@@ -90,8 +90,8 @@ class InMemoryCheckpointer(Checkpointer):
                     f"agent: {session.agent_id()} in session: {session.session_id()}")
         agent_store = self._agent_stores.get(session.session_id())
         if agent_store is None:
-            raise JiuWenBaseException(StatusCode.SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR.code,
-                                      StatusCode.SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR.errmsg)
+            raise build_error(StatusCode.CHECKPOINTER_INTERRUPT_AGENT_ERROR, session_id=session.session_id(),
+                              agent=session.agent_id(), reason="agent store is not found")
         agent_store.save(session)
 
     async def post_agent_execute(self, session: BaseSession):
@@ -99,8 +99,9 @@ class InMemoryCheckpointer(Checkpointer):
                     f"agent: {session.agent_id()} in session: {session.session_id()}")
         agent_store = self._agent_stores.get(session.session_id())
         if agent_store is None:
-            raise JiuWenBaseException(StatusCode.SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR.code,
-                                      StatusCode.SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR.errmsg)
+            raise build_error(StatusCode.CHECKPOINTER_POST_AGENT_EXECUTION_ERROR, session_id=session.session_id(),
+                              agent=session.agent_id(), reason="agent store is not found")
+
         agent_store.save(session)
 
     async def release(self, session_id: str, agent_id: str = None):
@@ -123,6 +124,3 @@ class InMemoryCheckpointer(Checkpointer):
 
     def graph_store(self) -> Store:
         return self._graph_store
-
-
-

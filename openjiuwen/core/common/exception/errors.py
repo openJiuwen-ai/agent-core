@@ -31,13 +31,13 @@ class BaseError(Exception):
     fatal: bool = False
 
     def __init__(
-        self,
-        status: StatusCode,
-        *,
-        msg: Optional[str] = None,
-        details: Optional[Any] = None,
-        cause: Optional[BaseException] = None,
-        **kwargs: dict[str, Any],
+            self,
+            status: StatusCode,
+            *,
+            msg: Optional[str] = None,
+            details: Optional[Any] = None,
+            cause: Optional[BaseException] = None,
+            **kwargs: dict[str, Any],
     ):
         self.status = status
         self.code = self.status.code
@@ -186,6 +186,12 @@ class Termination(BaseError):
 # Module domain exception definitions
 # =========================
 
+class RunnerTermination(Termination):
+    def __init__(self, reason, status, **kwargs):
+        super().__init__(status, **kwargs)
+        self.reason = reason
+
+
 class WorkflowError(ExecutionError):
     pass
 
@@ -254,12 +260,12 @@ STATUS_TO_EXCEPTION = build_status_exception_map()
 
 
 def build_error(
-    status: StatusCode,
-    *,
-    msg: Optional[str] = None,
-    details: Optional[Any] = None,
-    cause: Optional[BaseException] = None,
-    **kwargs,
+        status: StatusCode,
+        *,
+        msg: Optional[str] = None,
+        details: Optional[Any] = None,
+        cause: Optional[BaseException] = None,
+        **kwargs,
 ) -> BaseError:
     """
     Build exception instance without raising.
@@ -270,12 +276,12 @@ def build_error(
 
 
 def raise_error(
-    status: StatusCode,
-    *,
-    msg: Optional[str] = None,
-    details: Optional[Any] = None,
-    cause: Optional[BaseException] = None,
-    **kwargs,
+        status: StatusCode,
+        *,
+        msg: Optional[str] = None,
+        details: Optional[Any] = None,
+        cause: Optional[BaseException] = None,
+        **kwargs,
 ) -> None:
     """
     Unified error raising entry.
@@ -284,25 +290,25 @@ def raise_error(
 
 
 def system_error(
-    status: StatusCode,
-    *,
-    cause: Optional[Exception] = None,
-    **kwargs,
+        status: StatusCode,
+        *,
+        cause: Optional[Exception] = None,
+        **kwargs,
 ) -> None:
     raise FrameworkError(status, cause=cause, **kwargs)
 
 
 def validate_error(
-    status: StatusCode,
-    *,
-    cause: Optional[Exception] = None,
-    **kwargs,
+        status: StatusCode,
+        *,
+        cause: Optional[Exception] = None,
+        **kwargs,
 ) -> None:
     raise ValidationError(status, cause=cause, **kwargs)
 
 
 def terminate(
-    status: StatusCode,
-    **kwargs,
+        status: StatusCode,
+        **kwargs,
 ) -> None:
     raise Termination(status, **kwargs)

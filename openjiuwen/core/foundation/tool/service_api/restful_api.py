@@ -9,7 +9,7 @@ from oauthlib.common import urlencode
 from pydantic import Field, field_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
@@ -111,15 +111,17 @@ class RestfulApi(Tool):
                                              final_timeout,
                                              kwargs.get("max_response_byte_size", self._max_response_byte_size))
         except (aiohttp.ConnectionTimeoutError, asyncio.TimeoutError) as e:
-            raise build_error(StatusCode.TOOL_RESTFUL_API_TIMEOUT, cause=e,
-                              interface="invoke", timeout=final_timeout, card=self.card)
+            raise build_error(StatusCode.TOOL_RESTFUL_API_EXECUTION_TIMEOUT, cause=e,
+                              method="invoke", timeout=final_timeout, card=self.card)
         except aiohttp.ClientResponseError as e:
             raise build_error(StatusCode.TOOL_RESTFUL_API_RESPONSE_ERROR, cause=e,
-                              interface="invoke", code=e.status, reason=e.message,
+                              method="invoke", code=e.status, reason=e.message,
                               card=self.card)
+        except BaseError as e:
+            raise e
         except Exception as e:
             raise build_error(StatusCode.TOOL_RESTFUL_API_EXECUTION_ERROR, cause=e,
-                              interface="invoke", reason=str(e),
+                              method="invoke", reason=str(e),
                               card=self.card)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
@@ -131,7 +133,7 @@ class RestfulApi(Tool):
             content += chunk
             if len(content) > response_bytes_size_limit:
                 raise build_error(StatusCode.TOOL_RESTFUL_API_RESPONSE_SIZE_EXCEED_LIMIT,
-                                  interface="invoke", max_length=response_bytes_size_limit, actual_length=len(content),
+                                  method="invoke", max_length=response_bytes_size_limit, actual_length=len(content),
                                   card=self._card)
         res = json.loads(content.decode("utf-8"))
         return res

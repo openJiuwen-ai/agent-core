@@ -19,10 +19,7 @@ class SubWorkflowComponent(WorkflowComponent):
     def __init__(self, sub_workflow: Workflow):
         super().__init__()
         if sub_workflow is None:
-            raise build_error(
-                StatusCode.COMPONENT_SUB_WORKFLOW_INIT_FAILED,
-                error_msg="sub_workflow is None"
-            )
+            raise build_error(StatusCode.COMPONENT_SUB_WORKFLOW_PARAM_INVALID, error_msg="sub_workflow is None")
         self._sub_workflow = sub_workflow
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:

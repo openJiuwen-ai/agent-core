@@ -3,10 +3,9 @@
 import ast
 import operator
 import re
-from typing import Any, Optional
+from typing import Any
 
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.session import BaseSession
@@ -116,8 +115,8 @@ class ExpressionCondition(Condition):
                 error_msg=str(e),
                 cause=e
             ) from e
-        except JiuWenBaseException as e:
-            # Re-raise existing JiuWenBaseException
+        except BaseError as e:
+            # Re-raise existing BaseError
             raise e
         except Exception as e:
             raise build_error(
@@ -198,7 +197,7 @@ def _check_ast_depth(node: ast.AST, current_depth: int = 0) -> int:
             StatusCode.EXPRESSION_EVAL_ERROR,
             error_msg=f"expression nesting depth exceeds maximum allowed depth of {MAX_AST_DEPTH}"
         )
-    
+
     # Base case: if node is a leaf node
     if isinstance(node, (ast.Constant, ast.Name)):
         return current_depth
@@ -280,7 +279,7 @@ def _evaluate_ast(node: Any, runtime: dict) -> Any:
                 error_msg=f"unsupported AST node type: {type(node).__name__}"
             )
         return result
-    except JiuWenBaseException:
+    except BaseError:
         raise
     except Exception as e:
         raise build_error(
@@ -459,7 +458,7 @@ def _evaluate_subscript(node: ast.Subscript, runtime: dict) -> Any:
         lower = _evaluate_ast(node.slice.lower, runtime) if node.slice.lower else None
         upper = _evaluate_ast(node.slice.upper, runtime) if node.slice.upper else None
         step = _evaluate_ast(node.slice.step, runtime) if node.slice.step else None
-        
+
         # Check for potential large slice operations
         if isinstance(lower, int) and isinstance(upper, int) and (upper - lower) > MAX_COLLECTION_SIZE:
             raise build_error(
@@ -467,7 +466,7 @@ def _evaluate_subscript(node: ast.Subscript, runtime: dict) -> Any:
                 error_msg=f"slice operation would create collection exceeding "
                           f"maximum size of {MAX_COLLECTION_SIZE}"
             )
-            
+
         slice_obj = slice(lower, upper, step)
         return value[slice_obj]
     else:

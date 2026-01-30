@@ -62,5 +62,5 @@ class MCPTool(Tool):
             return {"result": result}
 
         except Exception as e:
-            raise build_error(StatusCode.TOOL_MCP_EXECUTION_ERROR, cause=e, reason=str(e), interface="invoke",
+            raise build_error(StatusCode.TOOL_MCP_EXECUTION_ERROR, cause=e, reason=str(e), method="invoke",
                               card=self._card)

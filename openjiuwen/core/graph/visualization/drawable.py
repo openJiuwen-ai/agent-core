@@ -6,16 +6,18 @@ from dataclasses import dataclass
 from inspect import ismethod, isfunction, isclass
 from typing import Any, get_args, get_type_hints, get_origin, Literal, List, Optional, Union
 
+from openjiuwen.core.common.exception.errors import build_error
+
 with contextlib.redirect_stdout(io.StringIO()):
     try:
         from mermaid import Direction, Mermaid
         from mermaid.flowchart import FlowChart, Link, LinkShape, Node, LinkHead
+
         _MERMAID_AVAILABLE = True
     except ModuleNotFoundError:
         _MERMAID_AVAILABLE = False
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow import ComponentComposable
 from openjiuwen.core.workflow import BranchRouter
 from openjiuwen.core.graph.visualization.drawable_edge import DrawableEdge
@@ -54,7 +56,7 @@ class Drawable:
         from openjiuwen.core.workflow import BranchComponent
         from openjiuwen.core.workflow import IntentDetectionComponent
         if isinstance(component, LoopComponent) or isinstance(component, AdvancedLoopComponent):
-            subgraph = component.loop_group.drawable.get_graph()\
+            subgraph = component.loop_group.drawable.get_graph() \
                 if isinstance(component, LoopComponent) else component.body.drawable.get_graph()
             # If end nodes are unset, the graph is traversed to discover all end nodes.
             if len(subgraph.end_nodes) == 0:
@@ -81,25 +83,22 @@ class Drawable:
     def set_start_node(self, node_id: str):
         """save node whose id is node_id to self._graph.start_nodes"""
         if node_id not in self._graph.nodes:
-            raise JiuWenBaseException(error_code=StatusCode.DRAWABLE_GRAPH_SET_START_NODE_FAILED.code,
-                                      message=StatusCode.DRAWABLE_GRAPH_SET_START_NODE_FAILED.errmsg.format(
-                                          node_id=node_id))
+            raise build_error(StatusCode.DRAWABLE_GRAPH_START_NODE_INVALID, node_id=node_id,
+                              reason=f"node '{node_id}' does not exist in the graph")
         self._graph.start_nodes.append(self._graph.nodes[node_id])
 
     def set_end_node(self, node_id: str):
         """save node whose id is node_id to self._graph.end_nodes"""
         if node_id not in self._graph.nodes:
-            raise JiuWenBaseException(error_code=StatusCode.DRAWABLE_GRAPH_SET_END_NODE_FAILED.code,
-                                      message=StatusCode.DRAWABLE_GRAPH_SET_END_NODE_FAILED.errmsg.format(
-                                          node_id=node_id))
+            raise build_error(StatusCode.DRAWABLE_GRAPH_END_NODE_INVALID, node_id=node_id,
+                              reason=f"node '{node_id}' does not exist in the graph")
         self._graph.end_nodes.append(self._graph.nodes[node_id])
 
     def set_break_node(self, node_id: str):
         """save node whose id is node_id to self._graph.break_nodes"""
         if node_id not in self._graph.nodes:
-            raise JiuWenBaseException(error_code=StatusCode.DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED.code,
-                                      message=StatusCode.DRAWABLE_GRAPH_SET_BREAK_NODE_FAILED.errmsg.format(
-                                          node_id=node_id))
+            raise build_error(StatusCode.DRAWABLE_GRAPH_BREAK_NODE_INVALID, node_id=node_id,
+                              reason=f"node '{node_id}' does not exist in the graph")
         self._graph.break_nodes.append(self._graph.nodes[node_id])
 
     def add_edge(self, source: str, target: str = None, conditional: bool = False, streaming: bool = False,
@@ -139,6 +138,7 @@ class Drawable:
     def get_graph(self) -> DrawableGraph:
         """get drawable graph"""
         return self._graph
+
 
 if not _MERMAID_AVAILABLE:
     class _MermaidDiagram:
@@ -233,14 +233,13 @@ else:
                        enable_animation: bool = False) -> str:
             """convert graph to Mermaid syntax"""
             if not isinstance(title, str):
-                raise JiuWenBaseException(error_code=StatusCode.DRAWABLE_GRAPH_INVALID_TITLE.code,
-                                          message=StatusCode.DRAWABLE_GRAPH_INVALID_TITLE.errmsg)
+                raise build_error(StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID, reason="'title' type is not str")
             if not (isinstance(expand_subgraph, bool) or (type(expand_subgraph) is int and expand_subgraph >= 0)):
-                raise JiuWenBaseException(error_code=StatusCode.DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH.code,
-                                          message=StatusCode.DRAWABLE_GRAPH_INVALID_EXPAND_SUBGRAPH.errmsg)
+                raise build_error(StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID,
+                                  reason="'expand_subgraph' type is not bool")
             if not isinstance(enable_animation, bool):
-                raise JiuWenBaseException(error_code=StatusCode.DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION.code,
-                                          message=StatusCode.DRAWABLE_GRAPH_INVALID_ENABLE_ANIMATION.errmsg)
+                raise build_error(StatusCode.DRAWABLE_GRAPH_TO_MERMAID_INVALID,
+                                  reason="'enable_animation' type is not bool")
 
             mermaid_nodes = {}
             subgraph_mermaid_nodes = {}
@@ -306,11 +305,11 @@ else:
             sub_nodes = ([sub_node for sub_node in mermaid_nodes.values()] +
                          [sub_node.node for sub_node in subgraph_mermaid_nodes.values()])
             subgraph_node = self._SubGraphNode(node=Node(id_=self._node_id_generator.next(), content=node.id,
-                                                            sub_nodes=sub_nodes, direction=Direction.TOP_TO_BOTTOM),
-                                                  subgraph_links=links,
-                                                  subgraph_start_nodes=subgraph_start_nodes,
-                                                  subgraph_end_nodes=subgraph_end_nodes,
-                                                  subgraph_break_nodes=subgraph_break_nodes)
+                                                         sub_nodes=sub_nodes, direction=Direction.TOP_TO_BOTTOM),
+                                               subgraph_links=links,
+                                               subgraph_start_nodes=subgraph_start_nodes,
+                                               subgraph_end_nodes=subgraph_end_nodes,
+                                               subgraph_break_nodes=subgraph_break_nodes)
             return subgraph_node
 
         def _gen_mermaid_links(self, graph: DrawableGraph, mermaid_nodes: dict, subgraph_mermaid_nodes: dict,

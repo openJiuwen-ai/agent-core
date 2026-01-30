@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import RunnerTermination, build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.dmessage_queue.message import DmqResponseMessage, ResultType
 
@@ -135,14 +135,13 @@ class ResponseCollector:
                 # Message queue full but not retrieved, client probably doesn't need it
                 raise asyncio.CancelledError(f"Collector({self.message_id}) queue full")
             else:
-                raise JiuWenBaseException(StatusCode.RUNNER_STOPPED.code,
-                                          StatusCode.RUNNER_STOPPED.errmsg.format(
-                                              "Collector({self.message_id}) was cancelled"))
+                raise RunnerTermination(reason=f"Collector({self.message_id}) was cancelled",
+                                        status=StatusCode.RUNNER_TERMINATION_ERROR)
         if msg.result_type == ResultType.ERROR:
             # Remote error codes encapsulated in error message
-            raise JiuWenBaseException(StatusCode.REMOTE_AGENT_PROCESS_ERROR.code,
-                                      StatusCode.REMOTE_AGENT_PROCESS_ERROR.errmsg.format(
-                                          error_code=msg.error_code, error_msg=msg.error_msg))
+            raise build_error(StatusCode.REMOTE_AGENT_RESPONSE_PROCESS_ERROR, message_id=self.message_id,
+                              process_id=self.receiver_id,
+                              error_code=msg.error_code, error_msg=msg.error_msg)
 
     async def close(self, reason: CancelReason = CancelReason.RUNNER_STOPPED):
         """Active cancellation (including queue full, system shutdown)"""

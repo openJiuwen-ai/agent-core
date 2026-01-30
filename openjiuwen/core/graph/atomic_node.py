@@ -4,27 +4,22 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import CommitState
 
 
 def _validate_session_and_state(session: Optional[BaseSession]) -> None:
     if session is None:
-        raise JiuWenBaseException(StatusCode.SESSION_STATE_SESSION_NONE.code, 
-                                 StatusCode.SESSION_STATE_SESSION_NONE.errmsg)
+        raise build_error(StatusCode.GRAPH_STATE_COMMIT_ERROR, reason="session is None")
     
     if not isinstance(session, BaseSession):
-        raise JiuWenBaseException(StatusCode.SESSION_STATE_INVALID_SESSION_TYPE.code, 
-                                 StatusCode.SESSION_STATE_INVALID_SESSION_TYPE.errmsg.format(
-                                     session_type=type(session).__name__))
+        raise build_error(StatusCode.GRAPH_STATE_COMMIT_ERROR, reason="session is not base session")
     
     state = session.state()
     if not isinstance(state, CommitState):
-        raise JiuWenBaseException(StatusCode.SESSION_STATE_INVALID_STATE_TYPE.code, 
-                                 StatusCode.SESSION_STATE_INVALID_STATE_TYPE.errmsg.format(
-                                     state_type=type(state).__name__))
+        raise build_error(StatusCode.GRAPH_STATE_COMMIT_ERROR, reason="session is not support commit state")
 
 
 class AtomicNode(ABC):

@@ -3,9 +3,9 @@
 from abc import ABC
 from typing import AsyncIterator, TypeVar
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.graph.base import Graph
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable
 from openjiuwen.core.session.session import BaseSession
@@ -32,69 +32,29 @@ class ComponentExecutable(Executable):
 
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if not isinstance(session, NodeSession):
-            raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.code,
-                                      StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.errmsg)
-
-        current_class = type(self)
-        # Check if the attribute exists, is callable, and is not the base implementation
-        if (hasattr(current_class, 'invoke') and
-                callable(getattr(current_class, 'invoke')) and
-                current_class.invoke is ComponentExecutable.invoke):
-            raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.code,
-                                      StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.errmsg.format(
-                                          ability='INVOKE', method='invoke', class_name=type(self).__name__))
-
+            raise build_error(StatusCode.WORKFLOW_INNER_ORCHESTRATION_ERROR,
+                              reason="session type must be NodeSession when on_invoke")
         return await self.invoke(inputs, Session(session, False), kwargs.get("context"))
 
     async def on_stream(self, inputs: Input, session: BaseSession, **kwargs) -> AsyncIterator[Output]:
         if not isinstance(session, NodeSession):
-            raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.code,
-                                      StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.errmsg)
-
-        current_class = type(self)
-
-        # Check if the attribute exists, is callable, and is not the base implementation
-        if (hasattr(current_class, 'stream') and
-                callable(getattr(current_class, 'stream')) and
-                current_class.stream is ComponentExecutable.stream):
-            raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.code,
-                                      StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.errmsg.format(
-                                          ability='STREAM', method='stream', class_name=type(self).__name__))
+            raise build_error(StatusCode.WORKFLOW_INNER_ORCHESTRATION_ERROR,
+                              reason="session type must be NodeSession when on_stream")
 
         async for value in self.stream(inputs, Session(session, False), kwargs.get("context")):
             yield value
 
     async def on_collect(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         if not isinstance(session, NodeSession):
-            raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.code,
-                                      StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.errmsg)
-
-        current_class = type(self)
-
-        # Check if the attribute exists, is callable, and is not the base implementation
-        if (hasattr(current_class, 'collect') and
-                callable(getattr(current_class, 'collect')) and
-                current_class.collect is ComponentExecutable.collect):
-            raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.code,
-                                      StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.errmsg.format(
-                                          ability='COLLECT', method='collect', class_name=type(self).__name__))
+            raise build_error(StatusCode.WORKFLOW_INNER_ORCHESTRATION_ERROR,
+                              reason="session type must be NodeSession when on_collect")
 
         return await self.collect(inputs, Session(session, True), kwargs.get("context"))
 
     async def on_transform(self, inputs: Input, session: BaseSession, **kwargs) -> AsyncIterator[Output]:
         if not isinstance(session, NodeSession):
-            raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.code,
-                                      StatusCode.SESSION_COMPONENT_INVALID_SESSION_TYPE.errmsg)
-
-        current_class = type(self)
-
-        # Check if the attribute exists, is callable, and is not the base implementation
-        if (hasattr(current_class, 'transform') and
-                callable(getattr(current_class, 'transform')) and
-                current_class.transform is ComponentExecutable.transform):
-            raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.code,
-                                      StatusCode.SESSION_COMPONENT_ABILITY_NOT_IMPLEMENTED.errmsg.format(
-                                          ability='TRANSFORM', method='transform', class_name=type(self).__name__))
+            raise build_error(StatusCode.WORKFLOW_INNER_ORCHESTRATION_ERROR,
+                              reason="session is not NodeSession when on_transform")
 
         async for value in self.transform(inputs, Session(session, True), kwargs.get("context")):
             yield value
@@ -114,8 +74,14 @@ class ComponentExecutable(Executable):
         Note:
             This is the most common execution pattern for simple operations.
         """
-        raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.code,
-                                  StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.errmsg.format(ability='Invoke'))
+        class_name = type(self).__name__
+        method_name = "stream"
+
+        raise NotImplementedError(
+            f"Component '{class_name}' is missing required method: {method_name}()\n"
+            f"  → Expected signature: async def {method_name}(self, inputs: Input, session: Session, "
+            f"context: ModelContext) -> AsyncIterator[Output]"
+        )
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         """
@@ -132,8 +98,14 @@ class ComponentExecutable(Executable):
         Note:
             Useful for long-running operations or real-time data generation.
         """
-        raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.code,
-                                  StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.errmsg.format(ability='Stream'))
+        class_name = type(self).__name__
+        method_name = "stream"
+
+        raise NotImplementedError(
+            f"Component '{class_name}' is missing required method: {method_name}()\n"
+            f"  → Expected signature: async def {method_name}(self, inputs: Input, session: Session, "
+            f"context: ModelContext) -> AsyncIterator[Output]"
+        )
 
     async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         """
@@ -150,8 +122,14 @@ class ComponentExecutable(Executable):
         Note:
             Useful for aggregating streaming data into a single result.
         """
-        raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.code,
-                                  StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.errmsg.format(ability='Collect'))
+        class_name = type(self).__name__
+        method_name = "collect"
+
+        raise NotImplementedError(
+            f"Component '{class_name}' is missing required method: {method_name}()\n"
+            f"  → Expected signature: async def {method_name}(self, inputs: Input, session: Session, "
+            f"context: ModelContext) -> Output"
+        )
 
     async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         """ Execute component with streaming input and streaming output.
@@ -165,9 +143,16 @@ class ComponentExecutable(Executable):
              AsyncIterator[Output]: Async iterator that yields transformed output chunks
 
          Note:
-             This is the most general pattern for real-time data processing pipelines. """
-        raise JiuWenBaseException(StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.code,
-                                  StatusCode.SESSION_COMPONENT_ABILITY_NOT_SUPPORTED.errmsg.format(ability='Transform'))
+             This is the most general pattern for real-time data processing pipelines.
+         """
+        class_name = type(self).__name__
+        method_name = "transform"
+
+        raise NotImplementedError(
+            f"Component '{class_name}' is missing required method: {method_name}()\n"
+            f"  → Expected signature: async def {method_name}(self, inputs: Input, session: Session, "
+            f"context: ModelContext) -> AsyncIterator[Output]"
+        )
 
 
 class ComponentComposable(ABC):
@@ -210,8 +195,12 @@ class ComponentComposable(ABC):
         """
         if isinstance(self, Executable):
             return self
-        raise JiuWenBaseException(
-            StatusCode.WORKFLOW_EXECUTION_NOT_SUPPORT.code, "workflow component should implement executable"
+        class_name = type(self).__name__
+        method_name = "to_executable"
+
+        raise NotImplementedError(
+            f"Component '{class_name}' is missing required method: {method_name}()\n"
+            f"  → Expected signature: def {method_name}(self) -> Executable"
         )
 
 

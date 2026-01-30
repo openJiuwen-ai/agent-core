@@ -8,11 +8,9 @@ from collections import OrderedDict
 from typing import Self, Union, AsyncIterator, List, Tuple
 
 from openjiuwen.core.common.constants.constant import INTERACTION
-from openjiuwen.core.common.exception.errors import build_error, BaseError
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.utils.dict_utils import flatten_dict
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.workflow.base import WorkflowCard, WorkflowChunk, WorkflowExecutionState, \
     WorkflowOutput
@@ -23,7 +21,7 @@ from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Router, INPUTS_KEY, CONFIG_KEY
 from openjiuwen.core.graph.executable import Executable, Input, Output
 from openjiuwen.core.session import WORKFLOW_EXECUTE_TIMEOUT, \
-    WORKFLOW_STREAM_FRAME_TIMEOUT, WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT, BaseSession, WorkflowSession
+    WORKFLOW_STREAM_FRAME_TIMEOUT, WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT, WorkflowSession
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session import Transformer
 from openjiuwen.core.session import SubWorkflowSession, NodeSession
@@ -122,7 +120,6 @@ class Workflow:
         Returns:
             Self for method chaining
         """
-        self._validate_schemas(inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
         self._internal.add_workflow_comp(comp_id,
                                          workflow_comp,
                                          wait_for_all=wait_for_all,
@@ -160,7 +157,6 @@ class Workflow:
         Returns:
             Self for method chaining
         """
-        self._validate_schemas(inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
         comp_ability = []
         if response_mode is not None and "streaming" == response_mode:
             self._is_streaming = True
@@ -268,28 +264,15 @@ class Workflow:
         """
         if kwargs.get("is_sub"):
             return await self._sub_invoke(inputs, session, context, **kwargs)
-
+        self._validate_session(session)
+        self._validate_inputs(inputs, **kwargs)
         self._install_asyncio_exception_handler()
-
-        session.set_workflow_card(self._card)
-        if self._card.input_params is not None and not isinstance(inputs, InteractiveInput):
-            inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
-                                                    skip_validate=kwargs.get("skip_inputs_validate"))
-
-        parent = session.get_parent()
-        if parent is not None and not hasattr(parent, "base"):
-            parent = getattr(parent, "_inner")
-        workflow_session = WorkflowSession(workflow_id=self._card.id,
-                                           parent=parent.base() if parent is not None else None,
-                                           session_id=session.get_session_id(),
-                                           callback_manager=session.get_callback_manager())
-        workflow_session.config().set_envs(session.get_envs())
+        workflow_session = self._create_workflow_session(session, stream_modes=[BaseStreamMode.OUTPUT], is_sub=False)
 
         async def _invoke_task():
             logger.info(f"begin to invoke, input: {inputs}")
             chunks = []
-            async for chunk in self._stream(inputs, workflow_session, context=context,
-                                            stream_modes=[BaseStreamMode.OUTPUT], skip_inputs_validate=True):
+            async for chunk in self._stream(inputs, workflow_session, context=context):
                 chunks.append(chunk)
 
             is_interaction = False
@@ -310,7 +293,7 @@ class Workflow:
             return output
 
         invoke_timeout = workflow_session.config().get_env(WORKFLOW_EXECUTE_TIMEOUT)
-        return await self._execute_with_timeout(_invoke_task, invoke_timeout, StatusCode.WORKFLOW_INVOKE_TIMEOUT)
+        return await self._execute_with_timeout(_invoke_task, invoke_timeout)
 
     async def stream(
             self,
@@ -341,22 +324,11 @@ class Workflow:
             async for chunk in self._sub_stream(inputs, session, context, **kwargs):
                 yield chunk
             return
-
+        self._validate_session(session)
+        self._validate_inputs(inputs, **kwargs)
         self._install_asyncio_exception_handler()
-
-        session.set_workflow_card(self._card)
-        if self._card.input_params is not None and not isinstance(inputs, InteractiveInput):
-            inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
-                                                    skip_validate=kwargs.get("skip_inputs_validate"))
-        parent = session.get_parent()
-        if parent is not None and not hasattr(parent, "base"):
-            parent = getattr(parent, "_inner")
-        workflow_session = WorkflowSession(workflow_id=self._card.id,
-                                           parent=parent.base() if parent is not None else None,
-                                           session_id=session.get_session_id(),
-                                           callback_manager=session.get_callback_manager())
-        workflow_session.config().set_envs(session.get_envs())
-        async for chunk in self._stream(inputs, workflow_session, context, stream_modes, **kwargs):
+        workflow_session = self._create_workflow_session(session, stream_modes=stream_modes, is_sub=False)
+        async for chunk in self._stream(inputs, workflow_session, context):
             yield chunk
 
     def draw(
@@ -389,10 +361,68 @@ class Workflow:
             return self._internal.to_mermaid_svg(title, expand_subgraph)
         return self._internal.to_mermaid(title, expand_subgraph, enable_animation)
 
+    async def _stream(self, inputs: Input,
+                      session: WorkflowSession,
+                      context: ModelContext = None,
+                      ) -> AsyncIterator[WorkflowChunk]:
+
+        # workflow start tracer info
+        await TracerWorkflowUtils.trace_workflow_start(session, inputs)
+        # calculate timeout and frame_timeout
+        timeout = session.config().get_env(WORKFLOW_EXECUTE_TIMEOUT)
+        frame_timeout = session.config().get_env(WORKFLOW_STREAM_FRAME_TIMEOUT)
+        if timeout is not None and 0 < timeout <= frame_timeout:
+            frame_timeout = timeout
+        session.config().set_envs({WORKFLOW_STREAM_FRAME_TIMEOUT: frame_timeout})
+        first_frame_timeout = session.config().get_env(WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT)
+        if timeout is not None and 0 < timeout <= first_frame_timeout:
+            first_frame_timeout = timeout
+        session.config().set_envs({WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT: first_frame_timeout})
+
+        async def stream_process():
+            compiled_graph = self._internal.compile(session, context)
+            try:
+                await compiled_graph.invoke({INPUTS_KEY: inputs, CONFIG_KEY: None}, session)
+            finally:
+                # workflow end tracer info
+                outputs = session.state().get_outputs(self._end_comp_id)
+                await TracerWorkflowUtils.trace_workflow_done(session, outputs)
+                await session.stream_writer_manager().stream_emitter().close()
+
+        task = asyncio.create_task(self._execute_with_timeout(stream_process, timeout))
+
+        interaction_chuck_list = []
+        chunks = []
+        async for chunk in session.stream_writer_manager().stream_output(first_frame_timeout=first_frame_timeout,
+                                                                         timeout=frame_timeout,
+                                                                         need_close=True):
+            yield chunk
+            if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
+                interaction_chuck_list.append(chunk)
+            chunks.append(chunk)
+        try:
+            await task
+            results = session.state().get_outputs(self._end_comp_id)
+            if results:
+                self._add_messages_to_context(inputs, results, context)
+                yield OutputSchema(type="workflow_final", index=0, payload=results)
+            elif interaction_chuck_list:
+                self._add_messages_to_context(inputs, interaction_chuck_list, context)
+            else:
+                self._add_messages_to_context(inputs, chunks, context)
+        except BaseError:
+            raise
+        except Exception as e:
+            raise build_error(
+                StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=str(e) if e else e, card=self._card)
+        finally:
+            await session.close()
+            await self._internal.reset()
+
     async def _sub_invoke(self, inputs: Input, session: Session,
                           context: ModelContext = None, **kwargs) -> Output:
         logger.info(f"begin to sub_invoke, inputs: {inputs}")
-        actor_manager, sub_workflow_session = self._prepare_sub_workflow_session(getattr(session, "_inner"))
+        sub_workflow_session = self._create_workflow_session(session, is_sub=True)
 
         try:
             compiled_graph = self._internal.compile(sub_workflow_session, context)
@@ -404,7 +434,7 @@ class Workflow:
                 required_abilities = [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]
                 stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
                 while stream_ability_count > 0:
-                    frame = await actor_manager.sub_workflow_stream().receive(
+                    frame = await sub_workflow_session.actor_manager().sub_workflow_stream().receive(
                         session.get_env(WORKFLOW_EXECUTE_TIMEOUT))
                     if frame is None:
                         logger.warning("no frame received")
@@ -431,8 +461,7 @@ class Workflow:
     async def _sub_stream(self, inputs: Input, session: Session, context: ModelContext = None, **kwargs) -> \
             AsyncIterator[Output]:
         logger.info(f"begin to sub_stream, input: {inputs}")
-        actor_manager, sub_workflow_session = self._prepare_sub_workflow_session(getattr(session, "_inner"))
-
+        sub_workflow_session = self._create_workflow_session(session, is_sub=True)
         try:
             compiled_graph = self._internal.compile(sub_workflow_session, context=context)
             await compiled_graph.invoke({INPUTS_KEY: inputs, CONFIG_KEY: kwargs.get(CONFIG_KEY)}, sub_workflow_session)
@@ -444,7 +473,7 @@ class Workflow:
             stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
             while stream_ability_count > 0:
                 logger.debug(f"waiting for frame {frame_count} with timeout {stream_timeout}")
-                frame = await actor_manager.sub_workflow_stream().receive(stream_timeout)
+                frame = await sub_workflow_session.actor_manager().sub_workflow_stream().receive(stream_timeout)
                 if frame is None:
                     logger.warning("no frame received")
                     continue
@@ -459,37 +488,18 @@ class Workflow:
             await sub_workflow_session.close()
             await self._internal.reset()
 
-    async def _execute_with_timeout(self, func, timeout, status_code):
+    async def _execute_with_timeout(self, func, timeout):
         task = asyncio.create_task(func())
         try:
             return await asyncio.wait_for(task, timeout=timeout if (timeout and timeout > 0) else None)
         except asyncio.TimeoutError as e:
-            raise build_error(
-                status_code,
-                error_msg="timeout",
-                timeout=timeout,
-                cause=e
-            ) from e
-        except JiuWenBaseException as e:
+            raise build_error(StatusCode.WORKFLOW_EXECUTION_TIMEOUT, cause=e, timeout=timeout, card=self._card)
+        except BaseError as e:
             raise e
         except Exception as e:
-            if task.done() and not task.cancelled():
-                if isinstance(task.exception(), JiuWenBaseException):
-                    raise task.exception()
-                else:
-                    raise build_error(
-                        StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR,
-                        error_msg=task.exception(),
-                        timeout=timeout,
-                        cause=e
-                    ) from e
-            else:
-                raise build_error(
-                    StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR,
-                    error_msg=str(e),
-                    timeout=timeout,
-                    cause=e
-                ) from e
+            error = task.exception() if task.done() and not task.cancelled() else e
+            raise build_error(StatusCode.WORKFLOW_EXECUTION_ERROR, cause=error, reason=str(error) if error else error,
+                              card=self._card)
         finally:
             if not task.done():
                 task.cancel()
@@ -498,102 +508,55 @@ class Workflow:
                 except Exception:
                     pass
 
-    def _validate_and_init_session(self, session: WorkflowSession, stream_modes: list[StreamMode]):
-        self._internal.auto_complete_abilities()
-        mq_manager = ActorManager(self._internal.config().spec, self._internal.stream_actor(), sub_graph=False,
-                                  session=session)
-        session.set_actor_manager(mq_manager)
-        session.set_stream_writer_manager(StreamWriterManager(stream_emitter=StreamEmitter(), modes=stream_modes))
-        if session.tracer() is None and (stream_modes is None or BaseStreamMode.TRACE in stream_modes):
-            tracer = Tracer()
-            tracer.init(session.stream_writer_manager(), session.callback_manager())
-            session.set_tracer(tracer)
+    def _create_workflow_session(self, session, stream_modes=None, is_sub: bool = False):
+        if not is_sub:
+            session.set_workflow_card(self._card)
+            parent = session.get_parent()
+            if parent is not None and not hasattr(parent, "base"):
+                parent = getattr(parent, "_inner")
+            workflow_session = WorkflowSession(workflow_id=self._card.id,
+                                               parent=parent.base() if parent is not None else None,
+                                               session_id=session.get_session_id(),
+                                               callback_manager=session.get_callback_manager())
+            workflow_session.config().set_envs(session.get_envs())
+            self._internal.auto_complete_abilities()
+            mq_manager = ActorManager(self._internal.config().spec, self._internal.stream_actor(), sub_graph=False,
+                                      session=workflow_session)
+            workflow_session.set_actor_manager(mq_manager)
+            workflow_session.set_stream_writer_manager(
+                StreamWriterManager(stream_emitter=StreamEmitter(), modes=stream_modes))
+            if workflow_session.tracer() is None and (stream_modes is None or BaseStreamMode.TRACE in stream_modes):
+                tracer = Tracer()
+                tracer.init(workflow_session.stream_writer_manager(), workflow_session.callback_manager())
+                workflow_session.set_tracer(tracer)
+            return workflow_session
+        else:
+            inner_session = getattr(session, "_inner")
+            self._internal.auto_complete_abilities()
+            actor_manager = ActorManager(self._internal.config().spec, self._internal.stream_actor(), sub_graph=True,
+                                         session=inner_session)
+            sub_workflow_session = SubWorkflowSession(
+                inner_session,
+                workflow_id=self._card.id,
+                actor_manager=actor_manager
+            )
+            return sub_workflow_session
 
-    def _prepare_sub_workflow_session(self, session: BaseSession) -> Tuple[ActorManager, BaseSession]:
-        """
-        Prepare common components for sub workflow execution.
-
-        Args:
-            session: The base session
-
-        Returns:
-            tuple: (actor_manager, sub_workflow_session)
-        """
-        self._internal.auto_complete_abilities()
-        actor_manager = ActorManager(self._internal.config().spec, self._internal.stream_actor(), sub_graph=True,
-                                     session=session)
-        sub_workflow_session = SubWorkflowSession(
-            session,
-            workflow_id=self._card.id,
-            actor_manager=actor_manager
-        )
-        return actor_manager, sub_workflow_session
-
-    async def _stream(self, inputs: Input,
-                      session: WorkflowSession,
-                      context: ModelContext = None,
-                      stream_modes: list[StreamMode] = None,
-                      **kwargs
-                      ) -> AsyncIterator[WorkflowChunk]:
-        self._validate_and_init_session(session, stream_modes)
-        # workflow start tracer info
-        await TracerWorkflowUtils.trace_workflow_start(session, inputs)
-        # calculate timeout and frame_timeout
-        timeout = session.config().get_env(WORKFLOW_EXECUTE_TIMEOUT)
-        frame_timeout = session.config().get_env(WORKFLOW_STREAM_FRAME_TIMEOUT)
-        if timeout is not None and 0 < timeout <= frame_timeout:
-            frame_timeout = timeout
-        session.config().set_envs({WORKFLOW_STREAM_FRAME_TIMEOUT: frame_timeout})
-        first_frame_timeout = session.config().get_env(WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT)
-        if timeout is not None and 0 < timeout <= first_frame_timeout:
-            first_frame_timeout = timeout
-        session.config().set_envs({WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT: first_frame_timeout})
-
-        async def stream_process():
-            compiled_graph = self._internal.compile(session, context)
+    def _validate_inputs(self, inputs, **kwargs):
+        if self._card.input_params is not None and not isinstance(inputs, InteractiveInput):
             try:
-                await compiled_graph.invoke({INPUTS_KEY: inputs, CONFIG_KEY: None}, session)
-            finally:
-                # workflow end tracer info
-                outputs = session.state().get_outputs(self._end_comp_id)
-                await TracerWorkflowUtils.trace_workflow_done(session, outputs)
-                await session.stream_writer_manager().stream_emitter().close()
+                inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
+                                                        skip_validate=kwargs.get("skip_inputs_validate"))
+            except Exception as e:
+                raise build_error(StatusCode.WORKFLOW_EXECUTE_INPUT_INVALID, cause=e, inputs=inputs,
+                                  reason=f"input validation failed against schema: {str(e) if e else 'Unknown error'}",
+                                  workflow=self._card.str())
 
-        task = asyncio.create_task(
-            self._execute_with_timeout(stream_process, timeout, StatusCode.WORKFLOW_STREAM_EXECUTION_TIMEOUT))
-
-        interaction_chuck_list = []
-        chunks = []
-        async for chunk in session.stream_writer_manager().stream_output(first_frame_timeout=first_frame_timeout,
-                                                                         timeout=frame_timeout,
-                                                                         need_close=True):
-            yield chunk
-            if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
-                interaction_chuck_list.append(chunk)
-            chunks.append(chunk)
-        try:
-            await task
-            results = session.state().get_outputs(self._end_comp_id)
-            if results:
-                self._add_messages_to_context(inputs, results, context)
-                yield OutputSchema(type="workflow_final", index=0, payload=results)
-            elif interaction_chuck_list:
-                self._add_messages_to_context(inputs, interaction_chuck_list, context)
-            else:
-                self._add_messages_to_context(inputs, chunks, context)
-        except JiuWenBaseException as e:
-            raise e
-        except Exception as e:
-            raise build_error(
-                StatusCode.WORKFLOW_EXECUTION_RUNTIME_ERROR,
-                error_msg=str(e),
-                timeout=timeout,
-                cause=e
-            ) from e
-
-        finally:
-            await session.close()
-            await self._internal.reset()
+    def _validate_session(self, session):
+        if not session:
+            raise build_error(StatusCode.WORKFLOW_EXECUTE_SESSION_INVALID,
+                              reason="session is required for workflow execution",
+                              workflow=self._card.str())
 
     @staticmethod
     def _add_messages_to_context(inputs: Input, results: Union[dict, List[OutputSchema]], context):
@@ -640,31 +603,6 @@ class Workflow:
         context.add_messages(user_messages + assistant_messages)
 
     @staticmethod
-    def _validate_schemas(inputs_schema: dict | Transformer = None, outputs_schema: dict | Transformer = None,
-                          stream_inputs_schema: dict | Transformer = None,
-                          stream_outputs_schema: dict | Transformer = None):
-        if isinstance(inputs_schema, dict) and isinstance(stream_inputs_schema, dict):
-            flatten_inputs_schema = flatten_dict(inputs_schema)
-            flatten_stream_inputs_schema = flatten_dict(stream_inputs_schema)
-            for key in flatten_inputs_schema.keys():
-                if key in flatten_stream_inputs_schema.keys():
-                    raise build_error(
-                        StatusCode.WORKFLOW_INPUT_INVALID,
-                        error_msg=f"duplicate key both exist in inputs_schema with stream_inputs_schema, "
-                                  f"key={key}"
-                    )
-        if isinstance(outputs_schema, dict) and isinstance(stream_outputs_schema, dict):
-            flatten_outputs_schema = flatten_dict(outputs_schema)
-            flatten_stream_outputs_schema = flatten_dict(stream_outputs_schema)
-            for key in flatten_outputs_schema.keys():
-                if key in flatten_stream_outputs_schema.keys():
-                    raise build_error(
-                        StatusCode.WORKFLOW_INPUT_INVALID,
-                        error_msg=f"duplicate key both exist in outputs_schema with stream_outputs_schema, "
-                                  f"key={key}"
-                    )
-
-    @staticmethod
     def _install_asyncio_exception_handler():
         """Install a global exception handler for asyncio tasks to handle unhandled exception."""
 
@@ -679,4 +617,3 @@ class Workflow:
 
         loop = asyncio.get_event_loop()
         loop.set_exception_handler(loop_exception_handler)
-

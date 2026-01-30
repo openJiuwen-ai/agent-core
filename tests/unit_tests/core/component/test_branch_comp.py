@@ -2,7 +2,6 @@ import pytest
 
 from openjiuwen.core.common.constants.constant import CONFIG_KEY
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import BranchComponent

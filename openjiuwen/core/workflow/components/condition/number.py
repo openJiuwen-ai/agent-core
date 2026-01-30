@@ -6,8 +6,6 @@ from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.session import BaseSession
 from openjiuwen.core.graph.executable import Input, Output
 from openjiuwen.core.common.constants.constant import INDEX
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
 
 
 class NumberCondition(Condition):
@@ -30,9 +28,6 @@ class NumberConditionInSession(Condition):
         current_idx = session.state().get(INDEX)
         limit_num = self._limit
         if limit_num is None:
-            raise JiuWenBaseException(
-                StatusCode.NUMBER_CONDITION_ERROR.code,
-                "loop_number variable not found or is None"
-            )
+            raise ValueError("loop_number variable not found or is None")
             
         return current_idx < limit_num
