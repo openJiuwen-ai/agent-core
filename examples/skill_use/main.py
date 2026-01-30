@@ -15,9 +15,8 @@ from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
 
 
 async def main():
+    # 获取配置项
     load_dotenv()
-
-    query = "处理用户提供的所有的pdf发票，并生成一份详细的xlsx报表"
 
     skills_dir = Path(os.getenv("SKILLS_DIR", "")).expanduser().resolve()
     files_base_dir = os.getenv("FILES_BASE_DIR", str(Path(__file__).resolve().parent))
@@ -30,6 +29,10 @@ async def main():
     model_provider = os.getenv("MODEL_PROVIDER", "")
     verify_ssl = os.getenv("LLM_SSL_VERIFY", "False")
 
+    # 构建agent对象
+    agent = ReActAgent(card=AgentCard(name="skill_agent", description="Skill Agent"))
+
+    # 创建并设置agent配置项
     system_prompt = (
         "You are an intelligent assistant.\n"
         f"All user-provided files are located at '{files_base_dir}'\n"
@@ -41,8 +44,6 @@ async def main():
         work_config=LocalWorkConfig(work_dir=None),
     )
     Runner.resource_mgr.add_sys_operation(sysop_card)
-
-    agent = ReActAgent(card=AgentCard(name="skill_agent", description="Skill Agent"))
 
     cfg = (ReActAgentConfig()
            .configure_model_client(
@@ -62,13 +63,12 @@ async def main():
     cfg.sys_operation_id = sysop_card.id
     agent.configure(cfg)
 
-    toolkit = SkillToolKit(sysop_card.id)
-    if hasattr(toolkit, "set_runner"):
-        toolkit.set_runner(Runner)
-    toolkit.add_skill_tools(agent)
-
+    # 为agent添加skills
     if skills_dir.exists():
         await agent.register_skill(str(skills_dir))
+
+    # 运行agent
+    query = "处理用户提供的所有的pdf发票，并生成一份详细的xlsx报表"
 
     res = await Runner.run_agent(
         agent=agent,
