@@ -25,7 +25,7 @@ from openjiuwen.core.session import Session
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.task_manager import TaskManager
     from openjiuwen.core.controller.modules.task_scheduler import TaskScheduler
-    from openjiuwen.core.single_agent.agent import AbilityManager
+    from openjiuwen.core.single_agent.base import AbilityManager
 
 
 class EventHandlerInput(BaseModel):

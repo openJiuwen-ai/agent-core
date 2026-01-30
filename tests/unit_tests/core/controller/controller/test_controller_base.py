@@ -29,7 +29,7 @@ from openjiuwen.core.controller.schema import (
     TaskStatus,
     InputEvent,
 )
-from openjiuwen.core.single_agent.agent import AbilityManager, ControllerAgent
+from openjiuwen.core.single_agent.base import AbilityManager, ControllerAgent
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.logging import logger
 

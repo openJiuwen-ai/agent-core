@@ -27,7 +27,7 @@ from openjiuwen.core.controller.modules.event_queue import EventQueue
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk
 from openjiuwen.core.controller.modules.task_manager import TaskManager
 from openjiuwen.core.session import Session
-from openjiuwen.core.single_agent.agent import AbilityManager
+from openjiuwen.core.single_agent.base import AbilityManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.base import ControllerConfig

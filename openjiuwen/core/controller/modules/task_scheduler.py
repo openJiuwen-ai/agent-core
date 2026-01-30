@@ -35,7 +35,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 
 if TYPE_CHECKING:
-    from openjiuwen.core.single_agent.agent import AbilityManager
+    from openjiuwen.core.single_agent.base import AbilityManager
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 

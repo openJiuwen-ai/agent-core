@@ -44,7 +44,7 @@ from openjiuwen.core.controller.schema import TextDataFrame
 from openjiuwen.core.session import Session
 from openjiuwen.core.session.internal.wrapper import TaskSession
 from openjiuwen.core.single_agent import AgentCard
-from openjiuwen.core.single_agent.agent import AbilityManager, ControllerAgent
+from openjiuwen.core.single_agent.base import AbilityManager, ControllerAgent
 from openjiuwen.core.common.logging import logger
 
 
