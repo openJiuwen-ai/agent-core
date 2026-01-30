@@ -222,22 +222,55 @@ class AbilityManager:
 
     async def execute(
             self,
-            tool_call: ToolCall,
+            tool_call: Union[ToolCall, List[ToolCall]],
             session: Session
-    ) -> Tuple[Any, ToolMessage]:
+    ) -> List[Tuple[Any, ToolMessage]]:
         """Execute an ability call
 
         Get instance from Runner.resource_mgr by card info, execute and return
 
         Args:
-            tool_call: Tool call from LLM
+            tool_call: Single tool call or list of tool calls
             session: Session instance
 
         Returns:
-            (result, ToolMessage) tuple
+            List of (result, ToolMessage) tuples
         """
-        from openjiuwen.core.runner import Runner
 
+        tool_calls = []
+        if isinstance(tool_call, list):
+            tool_calls.extend(tool_call)
+        elif isinstance(tool_call, ToolCall):
+            tool_calls.append(tool_call)
+        else:
+            logger.warning(f"execute ability input tool call is invalid, {type(tool_call)}!")
+
+        # Execute all tool calls in parallel
+        tasks = [
+            self._execute_single_tool_call(tool_call, session)
+            for tool_call in tool_calls
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results
+        final_results: List[Tuple[Any, ToolMessage]] = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                # Handle exception
+                error_msg = f"Ability execution error: {str(result)}"
+                logger.error(error_msg)
+                tool_message = ToolMessage(
+                    content=error_msg,
+                    tool_call_id=tool_calls[i].id
+                )
+                final_results.append((None, tool_message))
+            else:
+                final_results.append(result)
+
+        return final_results
+
+    async def _execute_single_tool_call(self, tool_call: ToolCall, session: Session) -> Tuple[Any, ToolMessage]:
+        result, error_msg = None, None
         tool_name = tool_call.name
 
         # Parse arguments
@@ -250,14 +283,12 @@ class AbilityManager:
         except (json.JSONDecodeError, AttributeError):
             tool_args = {}
 
-        result = None
-        error_msg = None
-
         # Check ability type and execute accordingly
         if tool_name in self._tools:
             # Execute Tool - get instance from Runner.resource_mgr
             tool_card = self._tools[tool_name]
             tool_id = tool_card.id or tool_card.name
+            from openjiuwen.core.runner import Runner
             tool = Runner.resource_mgr.get_tool(tool_id=tool_id)
             if tool:
                 try:
@@ -267,11 +298,11 @@ class AbilityManager:
                     logger.error(error_msg)
             else:
                 error_msg = f"Tool instance not found in resource_mgr: {tool_id}"
-
         elif tool_name in self._workflows:
             # Execute Workflow - get instance from Runner.resource_mgr
             workflow_card = self._workflows[tool_name]
             workflow_id = workflow_card.id or workflow_card.name
+            from openjiuwen.core.runner import Runner
             workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id)
             if workflow:
                 try:
@@ -283,11 +314,11 @@ class AbilityManager:
                 error_msg = (
                     f"Workflow instance not found in resource_mgr: {workflow_id}"
                 )
-
         elif tool_name in self._agents:
             # Execute sub-Agent - get instance from Runner.resource_mgr
             agent_card = self._agents[tool_name]
             agent_id = agent_card.id or agent_card.name
+            from openjiuwen.core.runner import Runner
             agent = await Runner.resource_mgr.get_agent(agent_id=agent_id)
             if agent:
                 try:
@@ -299,13 +330,12 @@ class AbilityManager:
                 error_msg = (
                     f"Agent instance not found in resource_mgr: {agent_id}"
                 )
-
         elif tool_name in self._mcp_servers:
             # Execute MCP tool
             error_msg = f"MCP tool execution not yet implemented: {tool_name}"
-
         else:
             # Fallback: try to get tool from Runner.resource_mgr by name
+            from openjiuwen.core.runner import Runner
             tool = Runner.resource_mgr.get_tool(tool_id=tool_name)
             if tool:
                 try:

@@ -73,50 +73,6 @@ class BaseAgent(ABC):
     def ability_manager(self) -> AbilityManager:
         return self._ability_manager
 
-    # ========== Execution Interface ==========
-
-    async def _execute_ability(
-            self,
-            tool_calls: Union[ToolCall, List[ToolCall]],
-            session: Session
-    ) -> List[Tuple[Any, ToolMessage]]:
-        """Execute ability calls (supports parallel execution)
-
-        Args:
-            tool_calls: Single tool call or list of tool calls
-            session: Session instance
-
-        Returns:
-            List of (result, ToolMessage) tuples
-        """
-        # Convert single tool_call to list
-        if not isinstance(tool_calls, list):
-            tool_calls = [tool_calls]
-
-        # Execute all tool calls in parallel
-        tasks = [
-            self._ability_manager.execute(tool_call, session)
-            for tool_call in tool_calls
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Process results
-        final_results: List[Tuple[Any, ToolMessage]] = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                # Handle exception
-                error_msg = f"Ability execution error: {str(result)}"
-                logger.error(error_msg)
-                tool_message = ToolMessage(
-                    content=error_msg,
-                    tool_call_id=tool_calls[i].id
-                )
-                final_results.append((None, tool_message))
-            else:
-                final_results.append(result)
-
-        return final_results
-
     @abstractmethod
     async def invoke(
             self,
