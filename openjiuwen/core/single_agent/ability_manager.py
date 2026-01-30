@@ -272,7 +272,7 @@ class AbilityManager:
             # Execute Workflow - get instance from Runner.resource_mgr
             workflow_card = self._workflows[tool_name]
             workflow_id = workflow_card.id or workflow_card.name
-            workflow = await Runner.resource_mgr.get_workflow(id=workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id)
             if workflow:
                 try:
                     result = await workflow.invoke(tool_args, session)
@@ -288,7 +288,7 @@ class AbilityManager:
             # Execute sub-Agent - get instance from Runner.resource_mgr
             agent_card = self._agents[tool_name]
             agent_id = agent_card.id or agent_card.name
-            agent = await Runner.resource_mgr.get_agent(id=agent_id)
+            agent = await Runner.resource_mgr.get_agent(agent_id=agent_id)
             if agent:
                 try:
                     result = await agent.invoke(tool_args)
@@ -306,7 +306,7 @@ class AbilityManager:
 
         else:
             # Fallback: try to get tool from Runner.resource_mgr by name
-            tool = Runner.resource_mgr.get_tool(id=tool_name)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_name)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)
