@@ -121,3 +121,37 @@ class TestContextEngine:
 
         assert context_1.get_messages() == context_2.get_messages()
 
+    @pytest.mark.asyncio
+    async def test_context_save_and_load_with_invalid_context_id(self, session, same_session):
+        from openjiuwen.core.session import get_default_inmemory_checkpointer
+        check_pointer = get_default_inmemory_checkpointer()
+        await check_pointer.pre_agent_execute(
+            session=getattr(session, "_inner").get_inner_session(), inputs=None
+        )
+        ce_1 = ContextEngine(ContextEngineConfig(default_window_message_num=5))
+        context_1 = await ce_1.create_context(
+            "test_context.0.0.1",
+            session,
+        )
+        messages = [
+            SystemMessage(content="1"),
+            UserMessage(content="2"),
+            AssistantMessage(content="3"),
+            ToolMessage(content="4", tool_call_id=""),
+            OffloadUserMessage(content="5", offload_type="in_memory", offload_handle="abc"),
+        ]
+
+        await context_1.add_messages(messages)
+        await ce_1.save_contexts(session)
+        await session.post_run()
+
+        await check_pointer.pre_agent_execute(
+            session=getattr(same_session, "_inner").get_inner_session(), inputs=None
+        )
+        ce_2 = ContextEngine(ContextEngineConfig(default_window_message_num=5))
+        context_2 = await ce_2.create_context(
+            "test_context.0.0.1",
+            same_session,
+        )
+
+        assert context_1.get_messages() == context_2.get_messages()

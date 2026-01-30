@@ -23,7 +23,11 @@ class ContextMessageBuffer:
         self._if_need_resize()
 
     def get_back(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
-        context_messages = self._context_messages[:]
+        context_messages = (
+            self._context_messages[:]
+            if self._max_buffer_size is None
+            else self._context_messages[max(0, len(self._context_messages) - self._max_buffer_size):]
+        )
         if size is None:
             return context_messages \
                 if with_history \

@@ -80,6 +80,7 @@ class LogEventType(Enum):
     CONTEXT_ADD_MESSAGE = "context_add_message"  # Context message added
     CONTEXT_CLEAR = "context_clear"  # Context cleared
     CONTEXT_RETRIEVE = "context_retrieve"  # Context retrieved
+    CONTEXT_SAVE = "context_save"  # Context saved
 
     # Retrieval related events
     RETRIEVAL_START = "retrieval_start"  # Retrieval started
