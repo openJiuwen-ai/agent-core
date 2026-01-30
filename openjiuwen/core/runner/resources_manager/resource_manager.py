@@ -1185,7 +1185,7 @@ class ResourceMgr:
         """
         ids_to_remove = []
         if resource_id is not None:
-            self._inner_validate_resource_id(resource_id)
+            self._inner_validate_resource_ids(resource_id, resource_type)
             ids_to_remove = resource_id if isinstance(resource_id, list) else [resource_id]
         remove_by_tag = False
         results: list[Result] = []
@@ -1547,7 +1547,7 @@ class ResourceMgr:
             )
 
     @staticmethod
-    def _inner_validate_resource_ids(resource_id: list[str], resource_type):
+    def _inner_validate_resource_ids(resource_id: list[str] | str, resource_type="resource"):
         """
         Validate resource ID(s).
 
@@ -1563,6 +1563,8 @@ class ResourceMgr:
                 resource_id=resource_id,
                 reason=f"{resource_type} id list cannot be empty or None"
             )
+        if isinstance(resource_id, str):
+            ResourceMgr._inner_validate_resource_id(resource_id, resource_type)
 
         if isinstance(resource_id, list):
             tmp_ids = []

@@ -198,6 +198,8 @@ class LoopComponent(WorkflowComponent):
                                                   getattr(session, "_inner"))
         except GraphInterrupt:
             raise
+        except BaseError:
+            raise
         except Exception as e:
             raise build_error(
                 StatusCode.COMPONENT_LOOP_EXECUTION_ERROR,

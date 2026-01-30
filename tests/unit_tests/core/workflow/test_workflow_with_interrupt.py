@@ -58,15 +58,16 @@ async def test_simple_workflow():
     session_id = uuid.uuid4().hex
     with pytest.raises(BaseError) as e:
         await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
+    print(str(e.value))
     assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
-    assert "component 'a' execute 'invoke' error, reason='value < 20', workflow='simple_workflow'" in str(e.value)
+    assert "component 'a' execute 'invoke' error, reason='value < 20', workflow='simple_workflow'" in e.value.message
     assert mock_start.runtime == 1
     assert mock_node.runtime == 1
     flow2, mock_node2, mock_start2 = create_simple_workflow()
     with pytest.raises(BaseError) as e:
         await flow2.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
     assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
-    assert "component 'a' execute 'invoke' error, reason='value < 20', workflow='simple_workflow' " in str(e.value)
+    assert "component 'a' execute 'invoke' error, reason='value < 20', workflow='simple_workflow'" in e.value.message
     assert mock_start2.runtime == 0
     assert mock_node2.runtime == 1
 

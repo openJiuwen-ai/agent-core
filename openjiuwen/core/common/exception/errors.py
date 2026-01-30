@@ -78,7 +78,7 @@ class BaseError(Exception):
         return json.dumps(self.to_dict(), ensure_ascii=False)
 
     def __str__(self) -> str:
-        return f"[{self.code}] {self._template_message} {self.message}"
+        return f"[{self.code}] {self.message if self.message else self._template_message}"
 
     @classmethod
     def _reconstruct(cls, status, msg, details, cause, params):
