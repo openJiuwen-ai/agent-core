@@ -155,13 +155,13 @@ class StatusCode(Enum):
 
     # ResourceMgr 134200-134300
     # param validate
-    RESOURCE_ID_VALUE_INVALID = (134201, "resource_id is invalid, resource_id={resource_id}, reason={reason}")
-    RESOURCE_TAG_VALUE_INVALID = (134202, "tag is invalid, tag={tag}, reason={reason}")
-    RESOURCE_CARD_VALUE_INVALID = (134203, "card is invalid, card={card}, reason={reason}")
-    RESOURCE_PROVIDER_INVALID = (134204, "resource provider is invalid, card={card}, reason={reason}")
-    RESOURCE_VALUE_INVALID = (134205, "resource value is invalid, reason={reason}")
+    RESOURCE_ID_VALUE_INVALID = (134201, "{resource_type} id is invalid, reason='{reason}'")
+    RESOURCE_TAG_VALUE_INVALID = (134202, "tag is invalid, tag={tag}, reason='{reason}'")
+    RESOURCE_CARD_VALUE_INVALID = (134203, "{resource_type} card is invalid, reason='{reason}'")
+    RESOURCE_PROVIDER_INVALID = (134204, "{resource_type} provider is invalid, reason='{reason}'")
+    RESOURCE_VALUE_INVALID = (134205, "{resource_type} value is invalid, reason='{reason}'")
 
-    RESOURCE_ADD_ERROR = (134250, "resource add failed, card={card}, reason={reason}")
+    RESOURCE_ADD_ERROR = (134250, "resource add failed, card={card}, reason='{reason}'")
 
     RESOURCE_MCP_SERVER_PARAM_INVALID = (134301, "server param is invalid, param='{param}', reason={reason}")
     RESOURCE_MCP_SERVER_CONNECTION_ERROR = (134302,

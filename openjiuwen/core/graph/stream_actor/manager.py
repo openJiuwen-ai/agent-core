@@ -7,7 +7,7 @@ from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.workflow.components.base import ComponentAbility
-from openjiuwen.core.common.schema.workflow_spec import WorkflowSpec
+from openjiuwen.core.workflow.workflow_config import WorkflowSpec
 from openjiuwen.core.session import Transformer, get_by_schema, STREAM_INPUT_GEN_TIMEOUT_KEY
 from openjiuwen.core.session.stream import AsyncStreamQueue
 from openjiuwen.core.graph.stream_actor.base import StreamActor, StreamGraph

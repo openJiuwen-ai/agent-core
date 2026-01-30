@@ -24,8 +24,7 @@ from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import WorkflowSession
 
 from openjiuwen.core.graph.stream_actor.base import StreamGraph
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig
-from openjiuwen.core.common.schema.workflow_spec import CompIOConfig, NodeSpec
+from openjiuwen.core.workflow.workflow_config import WorkflowConfig, CompIOConfig, NodeSpec
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.graph.graph import PregelGraph
 

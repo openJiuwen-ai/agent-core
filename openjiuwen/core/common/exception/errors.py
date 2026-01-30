@@ -47,7 +47,7 @@ class BaseError(Exception):
         self.__cause__ = cause
 
         self._template_message = self._render_message()
-        self.message = "" if msg is None else msg
+        self.message = msg if msg else self._template_message
         super().__init__(self._template_message)
 
     def _render_message(self) -> str:

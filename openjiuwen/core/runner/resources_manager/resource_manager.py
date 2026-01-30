@@ -1,11 +1,11 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Any, Callable, Optional, Tuple, List, Union
+from typing import Any, Callable, Optional, Tuple, List, Type, Union
 from pydantic import BaseModel
 
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import ValidationError, build_error
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig
@@ -64,8 +64,9 @@ class ResourceMgr:
         Returns:
             Result[GroupCard, Exception]: Result object containing the added group card or an exception.
         """
-        self._inner_validate_resource_card(card)
-        self._inner_validate_provider(card, agent_group)
+        self._inner_validate_resource_card(card, "group", GroupCard)
+        self._inner_validate_resource_id(card.id, "group")
+        self._inner_validate_provider(agent_group, "group")
         if tag is not None:
             self._inner_validate_tag(tag)
         return self._inner_add_resource(resource_id=card.id,
@@ -151,9 +152,10 @@ class ResourceMgr:
         Returns:
             Result[AgentCard, Exception]: Result object containing the added agent card or an exception.
         """
-        self._inner_validate_resource_card(card)
-        if not isinstance(agent, RemoteAgent):
-            self._inner_validate_provider(card, agent)
+        self._inner_validate_resource_card(card, "agent", AgentCard)
+        self._inner_validate_resource_id(card.id, "agent")
+        self._inner_validate_provider(agent, "agent")
+
         if tag is not None:
             self._inner_validate_tag(tag)
         return self._inner_add_resource(resource_id=card.id if card else None,
@@ -179,12 +181,7 @@ class ResourceMgr:
             Result[AgentCard, Exception] or list[Result[AgentCard, Exception]]:
                 Result object(s) containing the added agent card(s) or exception(s).
         """
-        if not agents:
-            raise build_error(StatusCode.RESOURCE_PROVIDER_INVALID, reason="resource list is None or empty")
-        for card, agent in agents:
-            self._inner_validate_resource_card(card)
-            if not isinstance(agent, RemoteAgent):
-                self._inner_validate_provider(card, agent)
+        self._inner_validate_providers(agents, "agent", AgentCard)
         if tag is not None:
             self._inner_validate_tag(tag)
         results = []
@@ -259,8 +256,9 @@ class ResourceMgr:
         Returns:
             Result[WorkflowCard, Exception]: Result object containing the added workflow card or an exception.
         """
-        self._inner_validate_resource_card(card)
-        self._inner_validate_provider(card, workflow)
+        self._inner_validate_resource_card(card, "workflow", WorkflowCard)
+        self._inner_validate_resource_id(card.id, "workflow")
+        self._inner_validate_provider(workflow, "workflow")
         if tag is not None:
             self._inner_validate_tag(tag)
         return self._inner_add_resource(resource_id=card.id if card else None,
@@ -285,11 +283,7 @@ class ResourceMgr:
             Result[WorkflowCard, Exception] or list[Result[WorkflowCard, Exception]]:
                 Result object(s) containing the added workflow card(s) or exception(s).
         """
-        if not workflows:
-            raise build_error(StatusCode.RESOURCE_PROVIDER_INVALID, reason="resource list is None or empty")
-        for card, workflow in workflows:
-            self._inner_validate_resource_card(card)
-            self._inner_validate_provider(card, workflow)
+        self._inner_validate_providers(workflows, "workflow", WorkflowCard)
         if tag is not None:
             self._inner_validate_tag(tag)
         results = []
@@ -364,12 +358,7 @@ class ResourceMgr:
             Result[ToolCard, Exception] or list[Result[ToolCard, Exception]]:
                 Result object(s) containing the added tool card(s) or exception(s).
         """
-        if not tool:
-            raise build_error(StatusCode.RESOURCE_VALUE_INVALID, reason="resource(s) is None or empty")
-        if isinstance(tool, list):
-            for item in tool:
-                if not item:
-                    raise build_error(StatusCode.RESOURCE_VALUE_INVALID, reason="tool item is None or empty")
+        self._inner_validate_resource(tool, "tool", Tool)
         if tag is not None:
             self._inner_validate_tag(tag)
         if isinstance(tool, Tool):
@@ -449,8 +438,8 @@ class ResourceMgr:
         Returns:
             Result[str, Exception]: Result object containing the model ID or an exception.
         """
-        self._inner_validate_resource_id(model_id)
-        self._inner_validate_provider(model_id, model)
+        self._inner_validate_resource_id(model_id, "model")
+        self._inner_validate_provider(model, "model")
         if tag is not None:
             self._inner_validate_tag(tag)
         return self._inner_add_resource(resource_id=model_id,
@@ -474,12 +463,7 @@ class ResourceMgr:
             Result[str, Exception] or list[Result[str, Exception]]:
                 Result object(s) containing the model ID(s) or exception(s).
         """
-        if not models:
-            raise build_error(StatusCode.RESOURCE_PROVIDER_INVALID, reason="resource(s) is None or empty")
-
-        for model_id, model in models:
-            self._inner_validate_resource_id(model_id)
-            self._inner_validate_provider(model_id, model)
+        self._inner_validate_providers(models, "model")
         if tag is not None:
             self._inner_validate_tag(tag)
         results = []
@@ -553,9 +537,8 @@ class ResourceMgr:
         Returns:
             Result[str, Exception]: Result object containing the prompt ID or an exception.
         """
-        self._inner_validate_resource_id(prompt_id)
-        if not template:
-            raise build_error(StatusCode.RESOURCE_VALUE_INVALID, card=prompt_id, reason="resource is None")
+        self._inner_validate_resource_id(prompt_id, "prompt")
+        self._inner_validate_resource(template, "prompt", PromptTemplate)
         if tag is not None:
             self._inner_validate_tag(tag)
         return self._inner_add_resource(resource_id=prompt_id, resource=template, tag=tag, resource_type="prompt")
@@ -576,12 +559,7 @@ class ResourceMgr:
             Result[str, Exception] or list[Result[str, Exception]]:
                 Result object(s) containing the prompt ID(s) or exception(s).
         """
-        if not prompts:
-            raise build_error(StatusCode.RESOURCE_VALUE_INVALID, reason="resource(s) is None or empty")
-        for prompt_id, prompt in prompts:
-            self._inner_validate_resource_id(prompt_id)
-            if not prompt:
-                raise build_error(StatusCode.RESOURCE_VALUE_INVALID, reason="resource is None")
+        self._inner_validate_resource(prompts, "prompt", PromptTemplate)
         if tag is not None:
             self._inner_validate_tag(tag)
         result = []
@@ -648,7 +626,7 @@ class ResourceMgr:
         Returns:
             Result[SysOperationCard, Exception]: Success card or error
         """
-        self._inner_validate_resource_card(card)
+        self._inner_validate_resource_card(card, "sys_operation", SysOperationCard)
         if tag is not None:
             self._inner_validate_tag(tag)
         return self._inner_add_resource(resource_id=card.id,
@@ -1396,7 +1374,7 @@ class ResourceMgr:
                 tmp_tags.append(single_tag)
 
     @staticmethod
-    def _inner_validate_resource_card(card: BaseCard):
+    def _inner_validate_resource_card(card: BaseCard, resource_type: str, card_class_type: Type):
         """
         Validate resource card.
 
@@ -1406,10 +1384,15 @@ class ResourceMgr:
         Raises:
             Error if card is invalid.
         """
-        if card is None:
-            raise build_error(StatusCode.RESOURCE_CARD_VALUE_INVALID, card=card, reason="card is None")
-        if not card.id:
-            raise build_error(StatusCode.RESOURCE_CARD_VALUE_INVALID, card=card, reason="card id value is empty value")
+        if not isinstance(card, card_class_type):
+            expected_type = card_class_type.__name__
+            raise build_error(
+                StatusCode.RESOURCE_CARD_VALUE_INVALID,
+                resource_type=resource_type,
+                reason=(
+                    f"cannot be None, must be an instance of {expected_type}"
+                )
+            )
 
     @staticmethod
     def _inner_validate_server_config(server_config):
@@ -1423,26 +1406,148 @@ class ResourceMgr:
             Error if configuration is invalid.
         """
         if not server_config:
-            raise build_error(StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID, server_config=server_config,
-                              reason="server_config(s) is None or empty")
-        if isinstance(server_config, McpServerConfig) and not server_config.server_id:
-            raise build_error(StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID, server_config=server_config,
-                              reason="server_config's server_id is None or empty")
-        ids = []
+            raise build_error(
+                StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                server_config=server_config,
+                reason="MCP server configuration cannot be empty or None"
+            )
+
+        if isinstance(server_config, McpServerConfig):
+            if not server_config.server_id:
+                raise build_error(
+                    StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                    server_config=server_config,
+                    reason="MCP server configuration is missing server_id"
+                )
+            if not isinstance(server_config.server_id, str):
+                raise build_error(
+                    StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                    server_config=server_config,
+                    reason=(
+                        f"invalid MCP server_id type: "
+                        f"expected string, got {type(server_config.server_id).__name__}"
+                    )
+                )
+            if not server_config.server_id.strip():
+                raise build_error(
+                    StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                    server_config=server_config,
+                    reason="MCP server_id cannot be empty or whitespace only"
+                )
+
         if isinstance(server_config, list):
-            for config in server_config:
+            if not server_config:
+                raise build_error(
+                    StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                    server_config=server_config,
+                    reason="MCP server configuration list is empty"
+                )
+
+            seen_ids = []
+            for idx, config in enumerate(server_config):
                 if not config:
-                    raise build_error(StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID, server_config=server_config,
-                                      reason="server config list has invalid item")
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                        server_config=server_config,
+                        reason=(
+                            f"invalid MCP server configuration at idx {idx}: "
+                            f"configuration cannot be None"
+                        )
+                    )
+
+                if not isinstance(config, McpServerConfig):
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                        server_config=server_config,
+                        reason=(
+                            f"invalid MCP server configuration type at idx {idx}: "
+                            f"expected McpServerConfig, got {type(config).__name__}"
+                        )
+                    )
+
                 if not config.server_id:
-                    raise build_error(StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID, server_config=server_config)
-                if config.server_id in ids:
-                    raise build_error(StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID, server_config=server_config,
-                                      reason="server config list has duplicate server_id")
-                ids.append(config.server_id)
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                        server_config=server_config,
+                        reason=(
+                            f"invalid MCP server configuration at idx {idx}: "
+                            f"server_id is missing"
+                        )
+                    )
+
+                if not isinstance(config.server_id, str):
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                        server_config=server_config,
+                        reason=(
+                            f"invalid MCP server_id type at idx {idx}: "
+                            f"expected string, got {type(config.server_id).__name__}"
+                        )
+                    )
+
+                if not config.server_id.strip():
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                        server_config=server_config,
+                        reason=(
+                            f"invalid MCP server_id at idx {idx}: "
+                            f"server_id cannot be empty or whitespace only"
+                        )
+                    )
+
+                if config.server_id in seen_ids:
+                    duplicate_idx = seen_ids.index(config.server_id)
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                        server_config=server_config,
+                        reason=(
+                            f"duplicate MCP server_id found: "
+                            f"'{config.server_id}' appears at idx {duplicate_idx} and {idx}"
+                        )
+                    )
+
+                seen_ids.append(config.server_id)
+
+        # 检查既不是McpServerConfig也不是list的情况
+        elif not isinstance(server_config, McpServerConfig):
+            raise build_error(
+                StatusCode.RESOURCE_MCP_SERVER_PARAM_INVALID,
+                server_config=server_config,
+                reason=(
+                    f"Invalid MCP server configuration type: "
+                    f"expected McpServerConfig or list[McpServerConfig], "
+                    f"got {type(server_config).__name__}"
+                )
+            )
 
     @staticmethod
-    def _inner_validate_resource_id(resource_id: str | list[str]):
+    def _inner_validate_resource_id(resource_id: str, resource_type="resource"):
+        if not resource_id:
+            raise build_error(
+                StatusCode.RESOURCE_ID_VALUE_INVALID,
+                resource_type=resource_type,
+                reason=f"cannot be empty or None"
+            )
+
+        if not isinstance(resource_id, str):
+            raise build_error(
+                StatusCode.RESOURCE_ID_VALUE_INVALID,
+                resource_type=resource_type,
+                reason=(
+                    f"invalid id type: "
+                    f"expected string, got {type(resource_id).__name__}"
+                )
+            )
+
+        if not resource_id.strip():
+            raise build_error(
+                StatusCode.RESOURCE_ID_VALUE_INVALID,
+                resource_type=resource_type,
+                reason=f"string id cannot be empty or whitespace only"
+            )
+
+    @staticmethod
+    def _inner_validate_resource_ids(resource_id: list[str], resource_type):
         """
         Validate resource ID(s).
 
@@ -1453,19 +1558,208 @@ class ResourceMgr:
             Error if ID(s) are invalid.
         """
         if not resource_id:
-            raise build_error(StatusCode.RESOURCE_ID_VALUE_INVALID, resource_id=resource_id, reason="is None or empty")
+            raise build_error(
+                StatusCode.RESOURCE_ID_VALUE_INVALID,
+                resource_id=resource_id,
+                reason=f"{resource_type} id list cannot be empty or None"
+            )
+
         if isinstance(resource_id, list):
             tmp_ids = []
-            for rid in resource_id:
-                if not resource_id:
-                    raise build_error(StatusCode.RESOURCE_ID_VALUE_INVALID, resource_id=resource_id,
-                                      reason="has None or empty resource_id item")
+            for idx, rid in enumerate(resource_id):
+                try:
+                    ResourceMgr._inner_validate_resource_id(rid, resource_type)
+                except ValidationError as e:
+                    raise build_error(
+                        StatusCode.RESOURCE_ID_VALUE_INVALID,
+                        resource_id=resource_id,
+                        reason=(
+                            f"invalid {resource_type} id at idx {idx}: {e.message}"
+                        )
+                    )
+
                 if rid in tmp_ids:
-                    raise build_error(StatusCode.RESOURCE_ID_VALUE_INVALID, resource_id=resource_id,
-                                      reason=f"has duplicate resource_id '{rid}'")
+                    raise build_error(
+                        StatusCode.RESOURCE_ID_VALUE_INVALID,
+                        resource_id=resource_id,
+                        reason=(
+                            f"duplicate {resource_type} id found: "
+                            f"'{rid}' appears multiple times in the list"
+                        )
+                    )
+                tmp_ids.append(rid)
 
     @staticmethod
-    def _inner_validate_provider(card, provider):
+    def _inner_validate_providers(
+            providers: list,
+            resource_type: str,
+            card_class_type: Type = None
+    ):
+        if not providers:
+            raise build_error(
+                StatusCode.RESOURCE_PROVIDER_INVALID,
+                resource_type=resource_type,
+                reason=f" cannot be empty: expected a non-empty list of (card, callable) pairs"
+            )
+
+        for idx, item in enumerate(providers):
+            if not isinstance(item, tuple) or len(item) != 2:
+                expected_type = f"tuple[{card_class_type.__name__ if card_class_type else 'str'}, Callable]"
+                raise build_error(
+                    StatusCode.RESOURCE_PROVIDER_INVALID,
+                    resource_type=resource_type,
+                    reason=(
+                        f"invalid provider format at idx {idx}: "
+                        f"expected {expected_type}, got {type(item).__name__} "
+                        f"(length={len(item) if isinstance(item, (tuple, list)) else 'N/A'})"
+                    )
+                )
+
+            resource_item, provider = item
+
+            if resource_item is None:
+                expected_type = card_class_type.__name__ if card_class_type else "str"
+                raise build_error(
+                    StatusCode.RESOURCE_PROVIDER_INVALID,
+                    resource_type=resource_type,
+                    reason=(
+                        f"invalid {'card' if card_class_type else 'id'} at idx {idx}: "
+                        f"{'card' if card_class_type else 'id'} cannot be None, must be an instance of {expected_type}"
+                    )
+                )
+            try:
+                ResourceMgr._inner_validate_resource_id(
+                    resource_item if isinstance(resource_item, str) else resource_item.id, resource_type)
+            except ValidationError as e:
+                raise build_error(StatusCode.RESOURCE_PROVIDER_INVALID,
+                                  resource_type=resource_type,
+                                  reason=(
+                                      f"invalid {resource_type} id at idx {idx}: "
+                                      f"{str(e)}"
+                                  ))
+
+            if provider is None:
+                raise build_error(
+                    StatusCode.RESOURCE_PROVIDER_INVALID,
+                    resource_type=resource_type,
+                    reason=(
+                        f"invalid provider at idx {idx}: "
+                        f"provider cannot be None, must be a callable function"
+                    )
+                )
+
+            if card_class_type:
+                if not isinstance(resource_item, card_class_type):
+                    raise build_error(
+                        StatusCode.RESOURCE_PROVIDER_INVALID,
+                        resource_type=resource_type,
+                        reason=(
+                            f"invalid {resource_type} card type at idx {idx}: "
+                            f"expected {card_class_type.__name__}, got {type(resource_item).__name__}"
+                        )
+                    )
+            else:
+                if not isinstance(resource_item, str):
+                    raise build_error(
+                        StatusCode.RESOURCE_PROVIDER_INVALID,
+                        resource_type=resource_type,
+                        reason=(
+                            f"invalid {resource_type} card type at idx {idx}: "
+                            f"expected str, got {type(resource_item).__name__}"
+                        )
+                    )
+
+            if not (resource_type == "agent" and isinstance(provider, RemoteAgent)):
+                if not isinstance(provider, Callable):
+                    raise build_error(
+                        StatusCode.RESOURCE_PROVIDER_INVALID,
+                        resource_type=resource_type,
+                        reason=(
+                            f"invalid {resource_type} provider type at idx {idx}: "
+                            f"expected callable, got {type(provider).__name__}"
+                        )
+                    )
+
+    @staticmethod
+    def _inner_validate_resource(instance: Any | list, resource_type, resource_class_type: Type):
+        if instance is None:
+            raise build_error(
+                StatusCode.RESOURCE_VALUE_INVALID,
+                resource_type=resource_type,
+                reason=(
+                    f"{resource_type} cannot be None: "
+                    f"expected an instance or list of {resource_class_type.__name__}"
+                )
+            )
+
+        if isinstance(instance, list):
+            if not instance:
+                raise build_error(
+                    StatusCode.RESOURCE_VALUE_INVALID,
+                    resource_type=resource_type,
+                    reason=(
+                        f"{resource_type} list cannot be empty: "
+                        f"expected a non-empty list of {resource_class_type.__name__}"
+                    )
+                )
+
+            for idx, item in enumerate(instance):
+                if item is None:
+                    raise build_error(
+                        StatusCode.RESOURCE_VALUE_INVALID,
+                        resource_type=resource_type,
+                        reason=(
+                            f"{resource_type} at index {idx} cannot be None: "
+                            f"expected an instance of {resource_class_type.__name__}"
+                        )
+                    )
+
+                if not isinstance(item, resource_class_type):
+                    raise build_error(
+                        StatusCode.RESOURCE_VALUE_INVALID,
+                        resource_type=resource_type,
+                        reason=(
+                            f"invalid {resource_type} type at index {idx}: "
+                            f"expected {resource_class_type.__name__}, "
+                            f"got {type(item).__name__}"
+                        )
+                    )
+
+                try:
+                    if resource_type == "tool":
+                        ResourceMgr._inner_validate_resource_card(item.card, resource_type, ToolCard)
+                        ResourceMgr._inner_validate_resource_id(item.card.id, resource_type)
+                except ValidationError as e:
+                    raise build_error(
+                        StatusCode.RESOURCE_VALUE_INVALID,
+                        resource_type=resource_type,
+                        reason=f"{resource_type} at index {idx} has invalid card: {e.message}"
+                    )
+        else:
+            if not isinstance(instance, resource_class_type):
+                raise build_error(
+                    StatusCode.RESOURCE_VALUE_INVALID,
+                    resource_type=resource_type,
+                    reason=(
+                        f"invalid {resource_type} type: "
+                        f"expected {resource_class_type.__name__}, "
+                        f"got {type(instance).__name__}"
+                    )
+                )
+
+            try:
+                if resource_type == "tool":
+                    ResourceMgr._inner_validate_resource_card(instance.card, resource_type, ToolCard)
+                    ResourceMgr._inner_validate_resource_id(instance.card.id, resource_type)
+            except ValidationError as e:
+                raise build_error(
+                    StatusCode.RESOURCE_VALUE_INVALID,
+                    resource_type=resource_type,
+                    reason=f"{resource_type} has invalid card: {e.message}"
+                )
+
+    @staticmethod
+    def _inner_validate_provider(provider, resource_type):
         """
         Validate resource provider.
 
@@ -1476,10 +1770,24 @@ class ResourceMgr:
         Raises:
             Error if provider is invalid.
         """
-        if not provider:
-            raise build_error(StatusCode.RESOURCE_PROVIDER_INVALID, card=card, reason="provider is not None")
-        if not isinstance(provider, Callable):
-            raise build_error(StatusCode.RESOURCE_PROVIDER_INVALID, card=card, reason="provider is not callable")
+        if provider is None:
+            raise build_error(
+                StatusCode.RESOURCE_PROVIDER_INVALID,
+                resource_type=resource_type,
+                reason=(
+                    f"provider cannot be None, must be a callable function"
+                )
+            )
+        if not (resource_type == "agent" and isinstance(provider, RemoteAgent)):
+            if not isinstance(provider, Callable):
+                raise build_error(
+                    StatusCode.RESOURCE_PROVIDER_INVALID,
+                    resource_type=resource_type,
+                    reason=(
+                        f"invalid provider type, "
+                        f"expected callable, got {type(provider).__name__}"
+                    )
+                )
 
     def _inner_get_server_ids(self, server_id, server_name, tag, tag_match_strategy, skip_if_tag_not_exists,
                               error_code):
