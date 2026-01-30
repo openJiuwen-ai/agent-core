@@ -76,6 +76,7 @@ from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import (
     MilvusIVF,
     MilvusSCANN,
 )
+from openjiuwen.core.retrieval.indexing.vector_fields.pg_fields import PGVectorField
 from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
 from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 
@@ -106,6 +107,7 @@ from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 # Vector store related
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
+from openjiuwen.core.retrieval.vector_store.pg_store import PGVectorStore
 
 _KNOWLEDGE_BASE_CLASSES = [
     "KnowledgeBase",
@@ -146,6 +148,7 @@ _EMBEDDING_CLASSES = [
 _VECTOR_STORE_CLASSES = [
     "VectorStore",
     "MilvusVectorStore",
+    "PGVectorStore",
 ]
 
 _INDEXER_CLASSES = [
@@ -206,6 +209,7 @@ _VECTOR_FIELD_CLASSES = [
     "MilvusHNSW",
     "MilvusIVF",
     "MilvusSCANN",
+    "PGVectorField",
 ]
 
 try:

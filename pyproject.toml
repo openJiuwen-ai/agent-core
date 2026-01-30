@@ -37,6 +37,7 @@ dependencies = [
 
     # Vector database
     "pymilvus>=2.6.2",
+    "pgvector>=0.2.0",
 
     # MCP server
     "fastmcp>=2.14.2,<3.0",
