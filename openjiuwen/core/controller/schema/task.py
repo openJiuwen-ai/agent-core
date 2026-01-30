@@ -84,6 +84,7 @@ class Task(BaseModel):
     input_required_fields: Optional[Union[Dict[str, Any], BaseModel]] = Field(default=None)
     error_message: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    extensions: Optional[Dict[str, Any]] = None
 
     @field_validator('task_id', 'session_id', 'task_type')
     @classmethod

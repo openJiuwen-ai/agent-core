@@ -304,7 +304,7 @@ class TaskScheduler:
             error_message: Error message to publish
         """
         # Update task status to FAILED
-        await self._task_manager.update_task_status(task_id, TaskStatus.FAILED)
+        await self._task_manager.update_task_status(task_id, TaskStatus.FAILED, error_message=error_message)
 
         # Publish failure event
         failed_chunk = ControllerOutputChunk(
@@ -461,7 +461,7 @@ class TaskScheduler:
             session_tasks = await self._task_manager.get_task(task_filter=TaskFilter(session_id=session_id))
             if not session_tasks:
                 logger.warning(f"No tasks found for session {session_id}")
-                return False
+                return True
 
             # Check if any task is still actively working or submitted
             active_states = {TaskStatus.SUBMITTED, TaskStatus.WORKING}

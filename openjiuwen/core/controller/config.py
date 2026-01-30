@@ -100,11 +100,11 @@ class ControllerConfig(BaseModel):
         description="Event queue size. Limits the number of events that can be stored in the queue. Default is 10000."
     )
     event_timeout: Optional[float] = Field(
-        default=120000.0,
-        ge=600,
+        default=300,
+        ge=100,
         description="Event processing timeout in seconds. "
                     "Events that are not processed within this time are discarded. "
-                    "Default timeout is 120000.0 ms."
+                    "Default timeout is 300 s."
     )
 
     # ==================== Intent recognition configuration ====================

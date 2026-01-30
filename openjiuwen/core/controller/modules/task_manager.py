@@ -159,7 +159,7 @@ class TaskManager:
         """
         async with self._lock:
             return TaskManagerState(
-                tasks=self.tasks.copy(),
+                tasks={k: v.model_copy(deep=True) for k, v in self.tasks.items()},
                 priority_index=dict(self._priority_index),
                 parent_to_children={k: v.copy() for k, v in self._parent_to_children.items()},
                 children_to_parent=self._child_to_parent.copy(),
@@ -314,7 +314,8 @@ class TaskManager:
                     if cid in self.tasks:
                         result_tasks.append(self.tasks[cid])
 
-            return result_tasks
+            # Return deep copies to prevent external modifications to internal state
+            return [task.model_copy(deep=True) for task in result_tasks]
 
     def _collect_all_children(self, parent_id: str, children_set: Set[str]):
         """Recursively collect all child task IDs
@@ -426,6 +427,9 @@ class TaskManager:
 
             # Collect all task IDs to remove
             task_ids_to_remove_set = {task.task_id for task in tasks}
+            
+            # Create deep copies before removing from internal state
+            tasks_to_return = [task.model_copy(deep=True) for task in tasks]
 
             # Remove tasks from manager
             for tid in task_ids_to_remove_set:
@@ -476,7 +480,7 @@ class TaskManager:
                 # Remove from task dictionary
                 del self.tasks[tid]
 
-            return tasks
+            return tasks_to_return
 
     async def update_task(self, task: Union[Task, List[Task]]) -> bool:
         """Update task(s)
@@ -738,8 +742,8 @@ class TaskManager:
                     else:
                         children_ids.update(self._parent_to_children[tid])
 
-            # Return list of child task objects
-            return [self.tasks[cid] for cid in children_ids if cid in self.tasks]
+            # Return deep copies of child task objects to prevent external modifications
+            return [self.tasks[cid].model_copy(deep=True) for cid in children_ids if cid in self.tasks]
 
     # ==================== Task Execution Status Management ====================
     async def update_task_status(
@@ -748,6 +752,7 @@ class TaskManager:
             new_status: "TaskStatus",
             with_children: bool = False,
             is_recursive: bool = False,
+            error_message: Optional[str] = None,
     ):
         """Update task status
 
@@ -758,6 +763,7 @@ class TaskManager:
             new_status: New status
             with_children: Whether to also update child task status
             is_recursive: Whether to recursively update child task status
+            error_message: Error message to update
         """
         async with self._lock:
             task_ids = [task_id] if isinstance(task_id, str) else task_id
@@ -776,6 +782,9 @@ class TaskManager:
             for tid in all_task_ids:
                 if tid in self.tasks:
                     self.tasks[tid].status = new_status
+                    # Set error_message when status is FAILED
+                    if new_status == TaskStatus.FAILED:
+                        self.tasks[tid].error_message = error_message or "Task execution failed"
 
     # ==================== Task Priority Management ====================
     async def set_priority(
