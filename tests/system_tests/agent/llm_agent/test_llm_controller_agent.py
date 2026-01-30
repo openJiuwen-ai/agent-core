@@ -571,3 +571,50 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         print(f"page2: memory result:{result}")
         result = await memory_engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id, page_size=99, page_idx=1)
         print(f"total memory result:{result}")
+
+    @unittest.skip("skip system test")
+    async def test_llm_agent_with_memory_variable(self):
+        os.environ.setdefault("LLM_SSL_VERIFY", "false")
+        os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
+        user_id = "default_user_id_var"
+        scope_id = "react_agent_123_var"
+        model_config = self._create_model_config()
+        prompt_template = self._create_prompt_template_with_memory()
+        memory_engine = await self._create_memory_engine()
+        llm_agent_config = create_llm_agent_config(
+            agent_id="react_agent_123_var",
+            agent_version="0.0.1",
+            description="AI助手",
+            plugins=[],
+            workflows=[],
+            model=model_config,
+            prompt_template=prompt_template,
+            tools=[]
+        )
+        llm_agent_config.memory_config = self._create_memory_scope_config()
+        llm_agent_config.agent_memory_config = AgentMemoryConfig(
+            mem_variables=[
+                Param.string(name="name", description="用户的姓名", required=False),
+                Param.string(name="career", description="用户的职业", required=False),
+            ],
+            enable_long_term_mem=False
+        )
+        llm_agent: LLMAgent = create_llm_agent(
+            agent_config=llm_agent_config,
+            workflows=[],
+            tools=[]
+        )
+
+        # 调用
+        result = await llm_agent.invoke({"query": "我叫张明，目前刚到杭州来杭州做软件开发工作",
+                                         "user_id": user_id,
+                                         "scope_id": scope_id})
+        print(f"LLMAgent 输出结果：{result}")
+        await asyncio.sleep(30)
+        result = await llm_agent.invoke({"query": "我叫什么名字",
+                                         "user_id": user_id,
+                                         "scope_id": scope_id})
+        print(f"LLMAgent 输出结果：{result}")
+        result = await memory_engine.get_variables(user_id=user_id, scope_id=scope_id)
+        print(f"mem_variables:{result}")
+        self.assertEqual(len(result), 2)

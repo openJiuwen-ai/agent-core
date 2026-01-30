@@ -76,7 +76,8 @@ class LLMController(BaseController):
     ):
         super().__init__(config, context_engine, session)
         self.config = config
-        self._enable_memory = self.config.agent_memory_config.enable_long_term_mem
+        self._enable_long_term_mem = self.config.agent_memory_config.enable_long_term_mem
+        self._enable_mem_variables = len(self.config.agent_memory_config.mem_variables) > 0
         self._long_term_memory_instance = LongTermMemory()
         self._memory_inited = False
 
@@ -1291,7 +1292,7 @@ class LLMController(BaseController):
 
     async def _get_system_prompt_keywords(self, inputs: Any, user_id: str):
         result = {}
-        if self._enable_memory:
+        if self._enable_long_term_mem or self._enable_mem_variables:
             if not self._memory_inited:
                 await self._init_memory_config()
             memory_keywords = await self._get_keywords_from_memory(inputs, user_id)
@@ -1312,18 +1313,24 @@ class LLMController(BaseController):
         if not memory_engine:
             return result
         if user_id and scope_id:
-            memory_variables = await memory_engine.get_variables(
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            if memory_variables:
-                cur_variables_config = [config.name for config in self.config.agent_memory_config.mem_variables]
-                filter_memory_variables = {k: v for k, v in memory_variables.items() if k in cur_variables_config}
-                result.update({"sys_memory_variables":
-                                   JsonUtils.safe_json_dumps(filter_memory_variables, ensure_ascii=False)})
-            logger.info(f"memory_variables: {memory_variables}")
+            if self._enable_mem_variables:
+                memory_variables = await memory_engine.get_variables(
+                    user_id=user_id,
+                    scope_id=scope_id
+                )
+                if memory_variables:
+                    cur_variables_config = [config.name for config in self.config.agent_memory_config.mem_variables]
+                    filter_memory_variables = {k: v for k, v in memory_variables.items() if k in cur_variables_config}
+                    result.update({"sys_memory_variables":
+                                       JsonUtils.safe_json_dumps(filter_memory_variables, ensure_ascii=False)})
+                logger.info(f"memory_variables: {memory_variables}")
+            else:
+                logger.info("[LongTermMemory] not enable memory variables")
 
             try:
+                if not self._enable_long_term_mem:
+                    logger.info("[LongTermMemory] not enable long_term_memory")
+                    return result
                 long_term_memory = await memory_engine.search_user_mem(
                     user_id=user_id,
                     scope_id=scope_id,
