@@ -8,9 +8,9 @@ from openjiuwen.core.skills.skill_manager import SkillManager
 from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
 
 SKILL_PROMPT_CONTENT = '''
-To help you better complete tasks, the following skill knowledge is provided:
+To help you better complete tasks, the following skill knowledge is equipped:
 {{skills}}
-You can use the view_file tool to read the corresponding Skill.md file to obtain the relevant skill knowledge.
+You can use the view_file tool to read the corresponding Skill.md file to obtain the relevant skill.
 '''
 skill_prompt = PromptTemplate(content=SKILL_PROMPT_CONTENT)
 

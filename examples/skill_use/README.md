@@ -13,8 +13,8 @@ MODEL_PROVIDER=""
 MODEL_NAME=""
 LLM_SSL_VERIFY="false"
 MAX_ITERATIONS=""
-SKILLS_DIR=                          ##示例"D:\agent-core\openjiuwen\skills-dir"
-FILES_DIR=                           ##示例"D:\agent-core\openjiuwen\"
+SKILLS_DIR=                          
+FILES_BASE_DIR=                           
 ```
 
 字段说明：
@@ -30,7 +30,14 @@ FILES_DIR=                           ##示例"D:\agent-core\openjiuwen\"
 ## 2. 下载并准备 skills
 
 运行前先从git下载技能库，然后把你要用的技能目录放到 `.env` 里配置的 `SKILLS_DIR` 下。
-![img.png](img.png)
+![img_1.png](Resource/img_1.png)
+
+发票处理的skill的链接，：https://www.agentskills.in/marketplace/%40Microck%2Ffinancial-document-parser
+![img_3.png](Resource/img_3.png)
+
+点击Repository进入仓库
+
+![img_2.png](Resource/img_2.png)
 
 然后把仓库中的 `skills/`（或其中你需要的具体技能目录）复制到你的 `SKILLS_DIR` 目录里，结构示例：
 
