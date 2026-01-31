@@ -28,6 +28,7 @@ class Generator:
         history_messages = kwargs.get("history_messages")
         message_mem_id = kwargs.get("message_mem_id")
         timestamp = kwargs.get("timestamp")
+        summary_max_token = kwargs.get("summary_max_token")
         if not all([messages, config, user_id, scope_id, model]):
             memory_logger.error(
                 "Messages, config, user_id, scope_id, model are required parameters",
@@ -51,6 +52,7 @@ class Generator:
             history_messages=history_messages,
             base_chat_model=model,
             memory_config=config,
+            summary_max_token=summary_max_token
         )
         variable_units = self._process_extracted_data(
             user_id=user_id,
@@ -59,12 +61,6 @@ class Generator:
         )
         all_memory_results += variable_units
 
-        summary_unit = await self._process_summary_data(user_id=user_id,
-                                                        scope_id=scope_id,
-                                                        message_mem_id=message_mem_id,
-                                                        summary=memory_analyze_res.summary,
-                                                        timestamp=timestamp)
-        all_memory_results.append(summary_unit)
         if not config.enable_long_term_mem:
             memory_logger.info(
                 "Not enable long term memory",
@@ -73,6 +69,13 @@ class Generator:
                 scope_id=scope_id,
             )
             return all_memory_results
+
+        summary_unit = await self._process_summary_data(user_id=user_id,
+                                                        scope_id=scope_id,
+                                                        message_mem_id=message_mem_id,
+                                                        summary=memory_analyze_res.summary,
+                                                        timestamp=timestamp)
+        all_memory_results.append(summary_unit)
         try:
             merged_units = await self._categories_to_memory_unit(
                 categories=memory_analyze_res.categories,

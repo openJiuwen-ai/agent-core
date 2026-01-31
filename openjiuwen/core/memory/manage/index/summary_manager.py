@@ -150,7 +150,8 @@ class SummaryManager(BaseMemoryManager):
             self,
             user_id: str,
             scope_id: str,
-            memory_id: List[str]):
+            memory_id: List[str]
+    ):
         """Delete summary memory from vector store by IDs."""
         if not self.semantic_recall:
             raise build_error(
@@ -166,7 +167,8 @@ class SummaryManager(BaseMemoryManager):
             query: str,
             user_id: str,
             scope_id: str,
-            top_k: int = 5) -> tuple[List[str], dict[str, float]]:
+            top_k: int = 5
+    ) -> tuple[List[str], dict[str, float]]:
         """Semantic recall summary memory IDs and similarity scores."""
         table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=MemoryType.SUMMARY.value)
         memory_hit_info = await self.semantic_recall.search(query=query, table_name=table_name,

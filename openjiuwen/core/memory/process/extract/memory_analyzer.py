@@ -58,6 +58,8 @@ class MemoryAnalyzer:
             history_messages: List[BaseMessage],
             base_chat_model: Tuple[str, Model],
             memory_config: AgentMemoryConfig,
+            summary_max_token: int,
+            *,
             retries: int = 3
     ) -> MemoryAnalyzerResult | None:
         if len(messages) == 0:
@@ -67,16 +69,11 @@ class MemoryAnalyzer:
                 metadata={"messages_len": len(messages)}
             )
             return None
-        need_summary, raw_summary = MemoryAnalyzer._check_summary(
-            messages=messages,
-            summary_max_length_threshold=memory_config.summary_config.threshold
-        )
         model_input = MemoryAnalyzer._build_model_input(
             messages=messages,
             history_messages=history_messages,
             memory_config=memory_config,
-            need_summary=need_summary,
-            raw_summary_len=len(raw_summary),
+            summary_max_token=summary_max_token
         )
 
         model_name, model_client = base_chat_model
@@ -89,8 +86,8 @@ class MemoryAnalyzer:
                 )
                 res = await parser.parse(response.content)
                 analyze_result = MemoryAnalyzerResult.model_validate(res)
-                if not need_summary:
-                    analyze_result.summary = raw_summary
+                if not memory_config.enable_long_term_mem:
+                    analyze_result.summary = ""
                 return analyze_result
             except json.JSONDecodeError as e:
                 if attempt < retries - 1:
@@ -108,20 +105,10 @@ class MemoryAnalyzer:
             messages: List[BaseMessage],
             history_messages: List[BaseMessage],
             memory_config: AgentMemoryConfig,
-            need_summary: bool,
-            raw_summary_len: int
+            summary_max_token: int
     ) -> List:
         variables_description, variables_output_format = MemoryAnalyzer._build_variable_prompt(memory_config)
-        if need_summary:
-            summary_max_token = max(int(raw_summary_len * memory_config.summary_config.fraction),
-                                    memory_config.summary_config.max_token)
-            memory_logger.debug(
-                "Building model input to analyze the memories contained in the messages",
-                event_type=LogEventType.MEMORY_PROCESS,
-                metadata={"summary_max_token": summary_max_token, "raw_summary_len": raw_summary_len,
-                          "fraction": memory_config.summary_config.fraction,
-                          "config_max_token": memory_config.summary_config.max_token}
-            )
+        if memory_config.enable_long_term_mem:
             summary_description, summary_output_format = \
                 MemoryAnalyzer._build_summary_prompt(
                     max_message_token=summary_max_token,

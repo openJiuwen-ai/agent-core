@@ -6,6 +6,7 @@ from typing import Optional, Any
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
 from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
@@ -24,7 +25,7 @@ class SearchParams(BaseModel):
 
 
 class SearchManager:
-    user_mem_manager_list = [MemoryType.USER_PROFILE.value, MemoryType.SUMMARY.value]
+    user_mem_manager_list = [MemoryType.USER_PROFILE.value]
     all_mem_manager_list = [item.value for item in MemoryType]
 
     def __init__(self,
@@ -101,6 +102,22 @@ class SearchManager:
         return await self.managers[MemoryType.USER_PROFILE.value].list_user_profile(user_id=user_id,
                                                                                     scope_id=scope_id,
                                                                                     profile_type=profile_type)
+
+    async def list_user_summary(self, user_id: str, scope_id: str) -> list[dict]:
+        if MemoryType.SUMMARY.value not in self.managers:
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.SUMMARY.value,
+                error_msg=f"{MemoryType.SUMMARY.value} memory manager not inited",
+            )
+        if not isinstance(self.managers[MemoryType.SUMMARY.value], SummaryManager):
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.SUMMARY.value,
+                error_msg=f"{MemoryType.SUMMARY.value} manager class is not SummaryManager",
+            )
+        return await self.managers[MemoryType.SUMMARY.value].list_user_summary(user_id=user_id,
+                                                                                    scope_id=scope_id)
 
     async def get_user_variable(self, user_id: str, scope_id: str, var_name: str) -> str | None:
         if MemoryType.VARIABLE.value not in self.managers:

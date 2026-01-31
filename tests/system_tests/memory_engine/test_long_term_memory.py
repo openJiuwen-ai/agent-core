@@ -30,13 +30,6 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
             crypto_key = base64.b64decode(os.getenv("SERVER_AES_MASTER_KEY_ENV", ""))
         except Exception:
             crypto_key = b""
-
-        embed_config = EmbeddingConfig(
-            model_name=os.getenv("EMBED_MODEL_NAME", "xxxx"),
-            api_key=os.getenv("EMBED_API_KEY", "xxxx"),
-            base_url=os.getenv("EMBED_API_BASE", "xxxxx"),
-        )
-
         # ---------- KV Store ----------
         kv_store = InMemoryKVStore
 
@@ -196,14 +189,6 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
     async def test_add_messages(self):
         scope_id = "app0108_1"
         user_id = "user0108_1"
-        # scope_model_cfg = ModelRequestConfig(model="deepseek-chat", temperature=0.05)
-        # scope_model_client_cfg = ModelClientConfig(
-        #     client_id="1",
-        #     client_type="OpenAI",
-        #     api_key="sk-86ef526f551b4770bcb83ad2d99e9c45",
-        #     api_base="https://api.deepseek.com/v1",
-        #     verify_ssl=False
-        # )
         scope_model_cfg = ModelRequestConfig(model="qwen-max", temperature=0.05)
         scope_model_client_cfg = ModelClientConfig(
             client_id="1",

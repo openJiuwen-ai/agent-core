@@ -432,14 +432,15 @@ class LongTermMemory(metaclass=Singleton):
                 config=agent_config,
                 base_chat_model=llm,
                 message_mem_id=msg_id,
-                timestamp=timestamp_str
+                timestamp=timestamp_str,
+                summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token
             )
             try:
                 await self.write_manager.add_mem(mem_units=all_memory, llm=llm)
                 memory_logger.debug(
                     "Successfully added memory units.",
                     event_type=LogEventType.MEMORY_STORE,
-                    memory_conut=len(all_memory),
+                    memory_count=len(all_memory),
                     memory_type="all type",
                     user_id=user_id,
                     scope_id=scope_id
@@ -747,6 +748,101 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id,
                 exception=str(e),
                 memory_type=MemoryType.USER_PROFILE.value,
+                query=query
+            )
+            return []
+
+    async def search_user_history_summary(
+            self,
+            query: str,
+            num: int,
+            user_id: str = DEFAULT_VALUE,
+            scope_id: str = DEFAULT_VALUE,
+            threshold: float = 0.3
+    ) -> list[MemResult]:
+        """
+        Search user summary.
+
+        Args:
+            query: Search query string
+            num: Number of results to return
+            user_id: user identifier
+            scope_id: scope identifier
+            threshold: Minimum similarity threshold for results
+
+        Returns:
+            List of memory information
+        """
+        if not self._validate_id(event_type=LogEventType.MEMORY_RETRIEVE, scope_id=scope_id):
+            memory_logger.error(
+                "Invalid scope_id format.",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                query=query,
+                memory_type=MemoryType.SUMMARY.value,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return []
+        # Set the correct embedding model for this scope
+        await self._set_semantic_store_embedding_model(scope_id)
+        if not self.search_manager:
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type="all",
+                error_msg=f"search manager is not initialized",
+            )
+        params = SearchParams(
+            query=query,
+            scope_id=scope_id,
+            top_k=num,
+            user_id=user_id,
+            threshold=threshold,
+            search_type=MemoryType.SUMMARY.value
+        )
+        try:
+            search_data = await self.search_manager.search(params)
+            mem_results: list[MemResult] = [
+                MemResult(
+                    mem_info=MemInfo(
+                        mem_id=item["id"],
+                        content=item["mem"],
+                        type=item.get("mem_type", MemoryType.SUMMARY)
+                    ),
+                    score=item.get("score", 0.0)
+                )
+                for item in search_data
+            ]
+            return mem_results
+        except AttributeError as e:
+            memory_logger.debug(
+                "Search user history summary has attribute exception.",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                exception=str(e),
+                user_id=user_id,
+                scope_id=scope_id,
+                query=query,
+                memory_type=MemoryType.SUMMARY.value
+            )
+            return []
+        except ValueError as e:
+            memory_logger.warning(
+                "Search user history summary has value exception.",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                user_id=user_id,
+                scope_id=scope_id,
+                exception=str(e),
+                memory_type=MemoryType.SUMMARY.value,
+                query=query
+            )
+            return []
+        except Exception as e:
+            memory_logger.warning(
+                "Search user history summary has exception.",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                user_id=user_id,
+                scope_id=scope_id,
+                exception=str(e),
+                memory_type=MemoryType.SUMMARY.value,
                 query=query
             )
             return []
