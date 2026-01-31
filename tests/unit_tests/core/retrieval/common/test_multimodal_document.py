@@ -88,7 +88,7 @@ class TestMultimodalDocument:
         doc = MultimodalDocument()
         assert doc.id_ is not None
         assert doc.metadata == {}
-        assert doc.text is None
+        assert doc.text == ""
         assert isinstance(doc.content, list) and not doc.content
 
     @staticmethod
@@ -103,6 +103,12 @@ class TestMultimodalDocument:
         metadata = {"source": "test", "author": "test_author"}
         doc = MultimodalDocument(metadata=metadata)
         assert doc.metadata == metadata
+
+    @staticmethod
+    def test_create_multimodal_document_with_text():
+        """Test creating multimodal document with text caption"""
+        doc = MultimodalDocument(text="dummy")
+        assert doc.text == "dummy"
 
     @staticmethod
     def test_add_text_field():

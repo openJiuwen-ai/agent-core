@@ -6,7 +6,6 @@ OpenAI Embedding Model Implementation
 Embedding client implementation for services following OpenAI standard.
 """
 
-import os
 import ssl
 from typing import List, Optional
 

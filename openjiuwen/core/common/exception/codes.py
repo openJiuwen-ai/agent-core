@@ -458,6 +458,14 @@ class StatusCode(Enum):
     )
     RETRIEVAL_KB_DATABASE_CONFIG_INVALID = (155508, "retrieval kb_database_config is invalid, reason: {error_msg}")
 
+    # KnowledgeBase Retrieval - Reranker 155600 - 155699
+    RETRIEVAL_RERANKER_REQUEST_CALL_FAILED = (
+        155600,
+        "retrieval reranker_request call failed, reason: {error_msg}",
+    )
+    RETRIEVAL_RERANKER_UNREACHABLE_CALL_FAILED = (155601, "retrieval reranker call failed, reason: {error_msg}")
+    RETRIEVAL_RERANKER_INPUT_INVALID = (155602, "retrieval reranker_input is invalid, reason: {error_msg}")
+
     # =========================
     # Memory Engine 158000 – 159999
     # =========================

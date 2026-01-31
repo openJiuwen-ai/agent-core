@@ -11,7 +11,7 @@ import mimetypes
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Self, overload
+from typing import Any, Dict, Literal, Self, overload
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 from pydantic_core import PydanticCustomError
@@ -56,7 +56,11 @@ class MultimodalDocument(Document):
     different content types that can be used together for multimodal embedding and
     retrieval tasks.
 
-    Supported Modalities:
+    The `text` field serves as a fallback for text-only services that don't support
+    multimodal content. Multimodal content should be added via the `add_field()` method,
+    which stores the content in the internal `_data` structure.
+
+    Supported Modalities (via add_field method):
         - text: Plain text content
         - image: Image files (supports common formats like jpg, png, etc.)
         - audio: Audio files (supports various audio formats)
@@ -86,14 +90,17 @@ class MultimodalDocument(Document):
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    text: Optional[str] = Field(default=None, max_length=0, init=False, repr=False)
+    text: str = Field(
+        default="",
+        description="Document text content. This field serves as a fallback for text-only services that don't support multimodal content. For multimodal content, use add_field() method instead.",
+    )
     _data: list[tuple[Literal["text", "image", "audio", "video"], str, str]] = PrivateAttr(
         default_factory=list, init=False
     )
 
     @property
     def content(self) -> list[dict[str, Any]]:
-        """Get the whole content field"""
+        """Get the content field"""
         content = []
         for kind, data, data_id in self._data:
             match kind:
