@@ -1,9 +1,10 @@
-#!/usr/bin/python3.11
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved
 import asyncio
+import gzip
 import json
 import os
+from contextlib import contextmanager
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -11,7 +12,7 @@ import aiohttp
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import ValidationError
+from openjiuwen.core.common.exception.errors import BaseError, ValidationError
 from openjiuwen.core.foundation.tool import ToolInfo, RestfulApiCard
 from openjiuwen.core.foundation.tool.service_api.restful_api import RestfulApi
 
@@ -21,10 +22,127 @@ os.environ["SSRF_PROTECT_ENABLED"] = "false"
 @pytest.mark.asyncio
 class TestRestFulApi:
     def assertEqual(self, left, right):
+        """Assert helper method for equality comparison"""
         assert left == right
+
+    def _create_mocked_session_context(self, mock_response):
+        """Create a mocked aiohttp ClientSession context manager
+
+        Args:
+            mock_response: Mocked aiohttp response object
+
+        Returns:
+            Mocked ClientSession instance
+        """
+        mock_session = AsyncMock()
+
+        class MockResponseContext:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        mock_context = MockResponseContext(mock_response)
+        mock_session.request = Mock(return_value=mock_context)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        return mock_session
+
+    @contextmanager
+    def _ssl_mock_context(self):
+        """SSL mock configuration context manager
+
+        Yields:
+            tuple: (mock_get_ssl, mock_create_ssl) mocked objects
+        """
+        with patch('openjiuwen.core.common.security.ssl_utils.SslUtils.get_ssl_config') as mock_get_ssl, \
+                patch(
+                    'openjiuwen.core.common.security.ssl_utils.SslUtils.create_strict_ssl_context') as mock_create_ssl:
+            mock_get_ssl.return_value = (False, None)
+            mock_create_ssl.return_value = None
+            yield mock_get_ssl, mock_create_ssl
+
+
+    @staticmethod
+    def _create_mock_response(status=200, content_type="application/json", url="http://example.com/api/test",
+                              reason="OK", content_bytes=None):
+        """Create a mocked aiohttp response with specified parameters
+
+        Args:
+            status: HTTP status code
+            content_type: Content-Type header value
+            url: Response URL
+            reason: HTTP reason phrase
+            content_bytes: Response content bytes
+
+        Returns:
+            Mocked response object
+        """
+        mock_response = AsyncMock()
+        mock_response.status = status
+        mock_response.headers = {"Content-Type": content_type}
+        mock_response.url = url
+        mock_response.reason = reason
+        mock_response.raise_for_status = Mock()
+
+        if content_bytes:
+            async def content_iter():
+                yield content_bytes
+
+            mock_response.content.iter_chunked = Mock(return_value=content_iter())
+        else:
+            async def empty_iterator():
+                if False:  # This will never yield
+                    yield b""
+
+            mock_response.content.iter_chunked = Mock(return_value=empty_iterator())
+
+        return mock_response
+
+    def _create_json_response(self, data, status=200, content_type="application/json",
+                              url="http://example.com/api/test", reason="OK"):
+        """Create a mocked JSON response
+
+        Args:
+            data: JSON-serializable data
+            status: HTTP status code
+            content_type: Content-Type header value
+            url: Response URL
+            reason: HTTP reason phrase
+
+        Returns:
+            Mocked response object with JSON content
+        """
+        json_bytes = json.dumps(data).encode('utf-8')
+        response = self._create_mock_response(status, content_type, url, reason, json_bytes)
+        return response
+
+    def _create_text_response(self, text, status=200, content_type="text/plain; charset=utf-8",
+                              url="http://example.com/api/test", reason="OK"):
+        """Create a mocked text response
+
+        Args:
+            text: Plain text content
+            status: HTTP status code
+            content_type: Content-Type header value
+            url: Response URL
+            reason: HTTP reason phrase
+
+        Returns:
+            Mocked response object with text content
+        """
+        text_bytes = text.encode('utf-8')
+        response = self._create_mock_response(status, content_type, url, reason, text_bytes)
+        return response
 
     @pytest.fixture(autouse=True)
     def setUp(self):
+        """Automatically setup mock functions before each test"""
         response_mock = MagicMock()
         response_mock.status_code = 200
         response_mock.text = "{}"
@@ -36,10 +154,12 @@ class TestRestFulApi:
         self.mocked_functions.start()
 
     def tearDown(self):
+        """Clean up mock functions after each test"""
         self.mocked_functions.stop()
 
     @patch('requests.sessions.Session.request')
     async def test_invoke(self, mock_request):
+        """Test invoke method with SSL certificate"""
         mock_data = RestfulApi(
             card=RestfulApiCard(
                 name="test",
@@ -60,6 +180,7 @@ class TestRestFulApi:
 
     @patch("requests.sessions.Session.request")
     async def test_stream(self, mock_request):
+        """Test stream method with SSL certificate"""
         mock_data = RestfulApi(
             card=RestfulApiCard(
                 name="test",
@@ -76,6 +197,7 @@ class TestRestFulApi:
         del os.environ["RESTFUL_SSL_CERT"]
 
     def test_get_tool_info(self):
+        """Test tool_info method returns correct ToolInfo object"""
         mock_data = RestfulApi(
             card=RestfulApiCard(
                 name="test",
@@ -104,6 +226,483 @@ class TestRestFulApi:
         )
         self.assertEqual(res, too_info)
 
+    @pytest.fixture
+    def mock_card(self):
+        """Create a mocked RestfulApiCard instance"""
+        card = RestfulApiCard(**dict(
+            name="test_api",
+            description="Test API",
+            url="http://example.com/api/test",
+            method="POST",
+            timeout=60.0,
+            max_response_byte_size=10 * 1024 * 1024,
+            headers={},
+            queries={},
+            paths={},
+            input_params={}))
+        return card
+
+    @pytest.fixture
+    def restful_api(self, mock_card):
+        """Create a RestfulApi instance with mocked card"""
+        return RestfulApi(mock_card)
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_json_response(self, restful_api):
+        """Test invoke method handling JSON response"""
+        # Create mocked JSON response using helper method
+        response_data = {
+            "code": 200,
+            "data": {"id": 123, "name": "test_user", "status": "active"},
+            "message": "success"
+        }
+        mock_response = self._create_json_response(response_data)
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result format
+                assert result["code"] == 200
+                assert result["message"] == "success"
+                assert result["url"] == "http://example.com/api/test"
+                assert "headers" in result
+                assert result["headers"]["Content-Type"] == "application/json"
+                assert result["data"] == response_data
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_text_response(self, restful_api):
+        """Test invoke method handling plain text response"""
+        # Create mocked text response using helper method
+        text_content = "Operation completed successfully"
+        mock_response = self._create_text_response(text_content)
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 200
+                assert result["message"] == "success"
+                assert result["data"] == text_content
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_error_response(self, restful_api):
+        """Test invoke method handling error response"""
+        # Create mocked error JSON response using helper method
+        error_data = {
+            "code": 400,
+            "message": "Invalid request parameters",
+            "details": ["field1 is required", "field2 must be integer"]
+        }
+        mock_response = self._create_json_response(
+            error_data,
+            status=400,
+            reason="Bad Request",
+            url="http://example.com/api/error"
+        )
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 400
+                assert result["message"] == "Bad Request"
+                assert result["data"] == error_data
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_gzipped_response(self, restful_api):
+        """Test invoke method handling GZIP compressed response"""
+        # Create compressed data
+        original_data = {
+            "compressed": True,
+            "items": [{"id": i, "name": f"item{i}"} for i in range(5)]
+        }
+        json_bytes = json.dumps(original_data).encode('utf-8')
+        gzipped_bytes = gzip.compress(json_bytes)
+
+        # Create mocked response with GZIP header
+        mock_response = self._create_mock_response(
+            status=200,
+            content_type="application/json",
+            url="http://example.com/api/gzipped",
+            reason="OK",
+            content_bytes=gzipped_bytes
+        )
+        mock_response.headers = {
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip"
+        }
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 200
+                assert result["message"] == "success"
+                assert result["data"] == original_data
+                assert result["headers"]["Content-Encoding"] == "gzip"
+
+    @pytest.mark.asyncio
+    async def test_invoke_response_size_exceeded(self, restful_api):
+        """Test invoke method handling response size limit exceeded"""
+        # Create large response data
+        large_content = "x" * 2048  # 2KB
+        large_bytes = large_content.encode('utf-8')
+
+        # Create mocked response with chunked content
+        mock_response = self._create_mock_response(
+            status=200,
+            content_type="text/plain",
+            url="http://example.com/api/large",
+            reason="OK"
+        )
+
+        async def content_iter():
+            chunk_size = 512
+            for i in range(0, len(large_bytes), chunk_size):
+                yield large_bytes[i:i + chunk_size]
+
+        mock_response.content.iter_chunked = Mock(return_value=content_iter())
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Set smaller max_response_byte_size
+
+                # Call invoke method, expect exception
+                with pytest.raises(BaseError) as exc_info:
+                    await restful_api.invoke({}, max_response_byte_size=1024)
+
+                # Verify exception
+                assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_RESPONSE_SIZE_EXCEED_LIMIT.code
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_invalid_json_response(self, restful_api):
+        """Test invoke method handling invalid JSON response"""
+        invalid_json = b'{invalid: json, missing: quotes}'
+        mock_response = self._create_mock_response(
+            status=200,
+            content_type="application/json",
+            url="http://example.com/api/invalid",
+            reason="OK",
+            content_bytes=invalid_json
+        )
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method, expect exception
+                with pytest.raises(Exception) as exc_info:
+                    await restful_api.invoke({})
+
+                # Verify exception
+                assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_RESPONSE_PROCESS_ERROR.code
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_html_response(self, restful_api):
+        """Test invoke method handling HTML response"""
+        html_content = """<!DOCTYPE html>
+<html>
+<head><title>Test Page</title></head>
+<body>
+    <h1>Hello World</h1>
+    <p>This is an HTML response</p>
+</body>
+</html>"""
+
+        mock_response = self._create_text_response(
+            html_content,
+            content_type="text/html; charset=utf-8",
+            url="http://example.com/api/html"
+        )
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 200
+                assert result["message"] == "success"
+                assert result["data"] == html_content
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_xml_response(self, restful_api):
+        """Test invoke method handling XML response"""
+        xml_content = """<?xml version="1.0" encoding="UTF-8"?>
+<response>
+    <status>success</status>
+    <code>200</code>
+    <data>
+        <item id="1">Item 1</item>
+        <item id="2">Item 2</item>
+    </data>
+</response>"""
+
+        mock_response = self._create_text_response(
+            xml_content,
+            content_type="application/xml",
+            url="http://example.com/api/xml"
+        )
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 200
+                assert result["message"] == "success"
+                assert result["data"] == xml_content
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_empty_response(self, restful_api):
+        """Test invoke method handling empty response"""
+        mock_response = self._create_mock_response(
+            status=204,
+            content_type="application/json",
+            url="http://example.com/api/empty",
+            reason="No Content",
+            content_bytes=b""
+        )
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 204
+                assert result["message"] == "success"
+                assert result["data"] == {}
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_custom_headers_in_response(self, restful_api):
+        """Test invoke method handling response with custom headers"""
+        response_data = {"status": "success", "data": {"id": 1}}
+        mock_response = self._create_json_response(response_data)
+
+        # Add custom headers
+        mock_response.headers = {
+            "Content-Type": "application/json",
+            "X-Custom-Header": "custom-value",
+            "X-RateLimit-Limit": "1000",
+            "X-RateLimit-Remaining": "950",
+            "X-Request-ID": "req-123456789"
+        }
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 200
+                assert result["message"] == "success"
+                assert result["data"] == response_data
+
+                # Verify headers
+                headers = result["headers"]
+                assert headers["X-Custom-Header"] == "custom-value"
+                assert headers["X-RateLimit-Limit"] == "1000"
+                assert headers["X-RateLimit-Remaining"] == "950"
+                assert headers["X-Request-ID"] == "req-123456789"
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_redirect_response(self, restful_api):
+        """Test invoke method handling redirect response"""
+        redirect_message = "Resource has moved to new location"
+        mock_response = self._create_text_response(
+            redirect_message,
+            status=302,
+            reason="Found",
+            url="http://example.com/api/old"
+        )
+
+        # Add redirect header
+        mock_response.headers = {
+            "Content-Type": "text/plain",
+            "Location": "http://example.com/api/new-location"
+        }
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 302
+                assert result["message"] == "Found"
+                assert result["data"] == redirect_message
+                assert result["headers"]["Location"] == "http://example.com/api/new-location"
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_chunked_stream_response(self, restful_api):
+        """Test invoke method handling chunked stream response"""
+        mock_response = self._create_mock_response(
+            status=200,
+            content_type="application/json",
+            url="http://example.com/api/stream",
+            reason="OK"
+        )
+
+        # Prepare chunked data
+        chunks = [
+            b'[{"id": 1, "name": "item1", "progress": 33},',
+            b'{"id": 2, "name": "item2", "progress": 66},',
+            b'{"id": 3, "name": "item3", "progress": 100, "complete": true}]'
+        ]
+
+        async def content_iter():
+            for chunk in chunks:
+                yield chunk
+
+        mock_response.content.iter_chunked = Mock(return_value=content_iter())
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method
+                result = await restful_api.invoke({})
+
+                # Verify result
+                assert result["code"] == 200
+                assert result["message"] == "success"
+                assert result["data"][2]["id"] == 3
+                assert result["data"][2]["name"] == "item3"
+                assert result["data"][2]["complete"] is True
+
+    @pytest.fixture
+    def card_with_input_params(self):
+        """Create RestfulApiCard with input parameters"""
+        input_schema = {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "integer",
+                    "description": "User ID",
+                    "location": "query"
+                },
+                "data": {
+                    "type": "object",
+                    "description": "Request data",
+                    "location": "body"
+                }
+            },
+            "required": ["user_id"]
+        }
+
+        card = RestfulApiCard(**dict(
+            name="user_api",
+            description="User API",
+            url="http://example.com/api/users",
+            method="POST",
+            timeout=30.0,
+            max_response_byte_size=5 * 1024 * 1024,
+            headers={},
+            queries={},
+            paths={},
+            input_params=input_schema
+        ))
+        return card
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_inputs_and_json_response(self, card_with_input_params):
+        """Test invoke method with input parameters handling JSON response"""
+        restful_api = RestfulApi(card_with_input_params)
+
+        response_data = {
+            "user": {"id": 123, "name": "张三", "email": "zhangsan@example.com"},
+            "status": "active"
+        }
+        mock_response = self._create_json_response(
+            response_data,
+            url="http://example.com/api/users?user_id=123"
+        )
+
+        # Use helper method to create mocked session
+        with patch('aiohttp.ClientSession') as mock_session_class:
+            mock_session = self._create_mocked_session_context(mock_response)
+            mock_session_class.return_value = mock_session
+
+            # Use SSL mock context manager
+            with self._ssl_mock_context():
+                # Call invoke method with input parameters
+                result = await restful_api.invoke({
+                    "user_id": 123,
+                    "data": {"action": "update_profile"}
+                })
+
+                # Verify result
+                assert result["code"] == 200
+                assert result["message"] == "success"
+                assert result["data"] == response_data
+                assert "user_id=123" in result["url"]
+
 
 MOCK_SUCCESS_RESPONSE = {
     "code": 200,
@@ -128,7 +727,7 @@ class TestRestfulApiInvokeWithLocation:
         """模拟 aiohttp 响应对象 - 修复版本"""
         response = AsyncMock()
         response.status = 200
-        response.headers = {"content-type": "application/json"}
+        response.headers = {"Content-Type": "application/json"}
         response.content_type = "application/json"
         response.raise_for_status = Mock()
         response.json = AsyncMock(return_value=MOCK_SUCCESS_RESPONSE)
@@ -221,7 +820,7 @@ class TestRestfulApiInvokeWithLocation:
                 "filter": "active"
             })
 
-            assert result == MOCK_SUCCESS_RESPONSE
+            assert result.get("data") == MOCK_SUCCESS_RESPONSE
             mock_session = mock_client_session
 
             assert mock_session.request.called
@@ -285,7 +884,7 @@ class TestRestfulApiInvokeWithLocation:
                 "action": "enable",
                 "data": {"status": "active", "role": "admin"}
             })
-            assert result == MOCK_SUCCESS_RESPONSE
+            assert result.get("data") == MOCK_SUCCESS_RESPONSE
             mock_session = mock_client_session
             call_args = mock_session.request.call_args
             assert call_args[0][1] == "http://127.0.0.1/api/v1/users/456/actions/enable"
@@ -334,7 +933,7 @@ class TestRestfulApiInvokeWithLocation:
                 "content_type": "application/json",
                 "payload": {"name": "test_resource", "type": "document"}
             })
-            assert result == MOCK_SUCCESS_RESPONSE
+            assert result.get("data") == MOCK_SUCCESS_RESPONSE
             mock_session = mock_client_session
             call_args = mock_session.request.call_args
 
@@ -407,11 +1006,12 @@ class TestRestfulApiInvokeWithLocation:
                 "search_criteria": {"keywords": ["AI", "ML"], "date_range": "2024"},
                 "sort_by": "date"
             })
-            assert result == MOCK_SUCCESS_RESPONSE
+            assert result.get("data") == MOCK_SUCCESS_RESPONSE
             mock_session = mock_client_session
             call_args = mock_session.request.call_args
             expected_url = (""
-                "http://127.0.0.1/api/v1/resources/789/items?limit=10&category=technology&page=1&sort_by=date")
+                            "http://127.0.0.1/api/v1/resources/789/items?limit=10"
+                            "&category=technology&page=1&sort_by=date")
             assert call_args[0][1] == expected_url
             expected_headers = {
                 "X-Request-ID": "req-123",
@@ -452,13 +1052,12 @@ class TestRestfulApiInvokeWithLocation:
                 "username": "testuser",
                 "email": "test@example.com"
             })
-            assert result == MOCK_SUCCESS_RESPONSE
+            assert result.get("data") == MOCK_SUCCESS_RESPONSE
             mock_session = mock_client_session
             call_args = mock_session.request.call_args
             assert call_args[0][1] == "http://127.0.0.1/api/v1/users/register"
             assert "json" in call_args[1]
             assert call_args[1]["json"] == {"username": "testuser", "email": "test@example.com"}
-
 
     async def test_invoke_with_default_values_override(self, mock_client_session, mock_connector):
         with patch('openjiuwen.core.common.security.ssl_utils.SslUtils.get_ssl_config') as mock_get_ssl, \
@@ -495,7 +1094,7 @@ class TestRestfulApiInvokeWithLocation:
                 "format": "json",
                 "api_token": "user_provided_token"
             })
-            assert result == MOCK_SUCCESS_RESPONSE
+            assert result.get("data") == MOCK_SUCCESS_RESPONSE
             mock_session = mock_client_session
             call_args = mock_session.request.call_args
             assert "format=json" in call_args[0][1]
@@ -508,11 +1107,8 @@ class TestRestfulApiInvokeWithLocation:
 
 
 class TestRestfulApiExceptions:
-    """测试 RestfulApi 的异常场景"""
-
     @pytest.fixture
     def mock_card(self):
-        """创建模拟的 RestfulApiCard"""
         card = RestfulApiCard(**dict(
             name="demo",
             url="https://127.0.0.1/api.example.com/users",
@@ -527,25 +1123,19 @@ class TestRestfulApiExceptions:
 
     @pytest.fixture
     def restful_api(self, mock_card):
-        """创建 RestfulApi 实例"""
         return RestfulApi(mock_card)
 
     @pytest.mark.asyncio
     async def test_invoke_timeout_error(self, restful_api, mock_card):
-        """测试请求超时异常"""
-        # 模拟超时异常
         with patch.object(restful_api, '_async_request',
                           side_effect=asyncio.TimeoutError("Request timeout")):
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(BaseError) as exc_info:
                 await restful_api.invoke({})
 
             assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_EXECUTION_TIMEOUT.code
 
-
     @pytest.mark.asyncio
     async def test_invoke_response_error(self, restful_api, mock_card):
-        """测试 HTTP 响应错误异常"""
-        # 模拟 aiohttp.ClientResponseError
         mock_response_error = aiohttp.ClientResponseError(
             request_info=Mock(),
             history=(),
@@ -556,7 +1146,7 @@ class TestRestfulApiExceptions:
 
         with patch.object(restful_api, '_async_request',
                           side_effect=mock_response_error):
-            with pytest.raises(Exception) as exc_info:
+            with pytest.raises(BaseError) as exc_info:
                 await restful_api.invoke({})
 
             assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_RESPONSE_ERROR.code

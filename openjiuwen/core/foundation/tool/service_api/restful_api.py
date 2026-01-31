@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
-import json
 from typing import AsyncIterator, ClassVar, Dict, Any, Literal, Set
 
 import aiohttp
@@ -16,12 +15,13 @@ from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool.base import Input, Output, ToolCard
 from openjiuwen.core.foundation.tool.service_api.api_param_mapper import APIParamLocation, APIParamMapper
+from openjiuwen.core.foundation.tool.service_api.response_parser import ParserRegistry
 
 
 class RestfulApiCard(ToolCard):
     """RESTful API tool card with HTTP method validation."""
     SUPPORTED_METHODS: ClassVar[Set[str]] = ["POST", "GET"]
-    url: str = Field(..., description="RESTful API path, such as: /api/v1/users")
+    url: str = Field(..., description="Restful API path, such as: /api/v1/users")
     method: Literal["POST", "GET"] = Field(default="POST", description="HTTP method, only POST or GET supported")
     headers: Dict[str, Any] = Field(default_factory=dict, description="Request headers")
     queries: Dict[str, Any] = Field(default_factory=dict, description="Request query parameters")
@@ -65,7 +65,8 @@ class RestfulApi(Tool):
                                                 default_paths=card.paths,
                                                 default_headers=card.headers)
 
-    async def _async_request(self, map_results: dict, timeout: float, max_response_byte_size: int):
+    async def _async_request(self, map_results: dict, timeout: float, max_response_byte_size: int,
+                             raise_for_status: True):
         request_arg = {}
         if self._method in ["GET"]:
             request_arg["params"] = map_results.get(APIParamLocation.BODY)
@@ -94,7 +95,8 @@ class RestfulApi(Tool):
                     timeout=aiohttp.ClientTimeout(total=timeout),
                     **request_arg,
             ) as response:
-                response.raise_for_status()
+                if raise_for_status is not False:
+                    response.raise_for_status()
                 response_data = await self._format_response(response, max_response_byte_size)
         return response_data
 
@@ -109,7 +111,8 @@ class RestfulApi(Tool):
             final_timeout = kwargs.get("timeout", self._timeout)
             return await self._async_request(map_results,
                                              final_timeout,
-                                             kwargs.get("max_response_byte_size", self._max_response_byte_size))
+                                             kwargs.get("max_response_byte_size", self._max_response_byte_size),
+                                             kwargs.get("raise_for_status", True))
         except (aiohttp.ConnectionTimeoutError, asyncio.TimeoutError) as e:
             raise build_error(StatusCode.TOOL_RESTFUL_API_EXECUTION_TIMEOUT, cause=e,
                               method="invoke", timeout=final_timeout, card=self.card)
@@ -128,12 +131,37 @@ class RestfulApi(Tool):
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
 
     async def _format_response(self, response: aiohttp.ClientResponse, response_bytes_size_limit):
-        content = b""
+        """Format response using parser registry"""
+        content = bytearray()
+        response_headers = dict(response.headers)
         async for chunk in response.content.iter_chunked(1024):
-            content += chunk
+            content.extend(chunk)
             if len(content) > response_bytes_size_limit:
                 raise build_error(StatusCode.TOOL_RESTFUL_API_RESPONSE_SIZE_EXCEED_LIMIT,
                                   method="invoke", max_length=response_bytes_size_limit, actual_length=len(content),
                                   card=self._card)
-        res = json.loads(content.decode("utf-8"))
-        return res
+
+        status_code = response.status
+        try:
+            parsed_response = ParserRegistry().parse(
+                response_headers=response_headers,
+                response_data=content,
+                status_code=status_code
+            )
+            results = dict(code=status_code,
+                           data=parsed_response,
+                           url=str(response.url),
+                           headers=response_headers,
+                           reason=response.reason)
+            if 200 <= status_code < 300:
+                results["message"] = "success"
+            else:
+                results["message"] = response.reason
+            return results
+        except Exception as e:
+            raise build_error(
+                StatusCode.TOOL_RESTFUL_API_RESPONSE_PROCESS_ERROR,
+                cause=e,
+                card=self._card,
+                reason=e
+            )

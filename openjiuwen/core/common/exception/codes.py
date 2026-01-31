@@ -552,6 +552,7 @@ class StatusCode(Enum):
     TOOP_CARD_INVALID = (182000, "card is invalid, card={card}, error='{reason}'")
     TOOL_STREAM_NOT_SUPPORTED = (182010, "stream is not support, card={card}")
     TOOL_INVOKE_NOT_SUPPORTED = (182011, "invoke is not support, card={card}")
+    TOOL_EXECUTION_ERROR = (182012, "tool execution error, too card={card}, reason={reason}")
 
     # 1. restuful api 182100 - 182199
     TOOL_RESTFUL_API_CARD_CONFIG_INVALID = (182100, "config failed, {reason}")
@@ -565,6 +566,8 @@ class StatusCode(Enum):
         182103, "execute {method} failed, response error, code={code}, error='{reason}'")
     TOOL_RESTFUL_API_EXECUTION_ERROR = (
         182104, "RestfulApi execute {method} failed, error='{reason}', card=[{card}]")
+    TOOL_RESTFUL_API_RESPONSE_PROCESS_ERROR = (
+        182105, "RestfulApi parse response failed, error='{reason}', card=[{card}]")
     # 2. local function 182200 - 182299
     TOOL_LOCAL_FUNCTION_FUNC_NOT_SUPPORTED = (
         182200, "func is not supported, card={card}")

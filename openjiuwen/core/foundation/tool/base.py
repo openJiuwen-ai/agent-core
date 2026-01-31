@@ -17,6 +17,7 @@ Output = TypeVar('Output', contravariant=True)
 
 class ToolCard(BaseCard):
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)
+    properties: Dict[str, Any] = Field(default_factory=dict)
 
     def tool_info(self):
         return ToolInfo(name=self.name, description=self.description, parameters=self.input_params)

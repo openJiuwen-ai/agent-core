@@ -6,11 +6,11 @@ from typing import Union, Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from openjiuwen.core.common.exception.errors import build_error, BaseError
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.foundation.tool import RestfulApi, Tool
 from openjiuwen.core.graph.executable import Executable, Input, Output
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.workflow.components.base import ComponentConfig
@@ -74,8 +74,9 @@ class ToolExecutable(ComponentExecutable):
                 err_msg = e.message
                 err_code = e.code
             else:
-                err_msg = "Failed to execute tool"
-                err_code = StatusCode.PLUGIN_UNEXPECTED_ERROR.code
+                err_msg = StatusCode.TOOL_EXECUTION_ERROR.errmsg.format(card=self._tool.card,
+                                                                        reason=str(e) if e else "unknown exception")
+                err_code = StatusCode.TOOL_EXECUTION_ERROR.code
             response = {ERR_MESSAGE: err_msg, ERR_CODE: err_code}
         return self._create_output(response)
 
