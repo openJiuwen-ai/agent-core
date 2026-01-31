@@ -243,7 +243,9 @@ class StatusCode(Enum):
 
     # specific_resource error 110500 - 110599
     # mcp resource error 110510 - 110519
-    RESOURCE_MCP_SERVER_PARAM_INVALID = (110510, "server param is invalid, param='{param}', error='{reason}'")
+    RESOURCE_MCP_SERVER_PARAM_INVALID = (
+        110510,
+        "server param is invalid, server_config='{server_config}', error='{reason}'")
 
     RESOURCE_MCP_SERVER_CONNECTION_ERROR = (
         110511,

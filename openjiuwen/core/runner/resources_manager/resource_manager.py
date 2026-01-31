@@ -1255,7 +1255,7 @@ class ResourceMgr:
         ids_to_get = None
         exact_match = False
         if resource_id is not None:
-            self._inner_validate_resource_id(resource_id)
+            self._inner_validate_resource_ids(resource_id)
             ids_to_get = resource_id if isinstance(resource_id, list) else [resource_id]
             exact_match = True
         if not ids_to_get:
