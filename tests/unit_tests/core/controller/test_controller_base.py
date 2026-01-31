@@ -201,6 +201,165 @@ class FailingTaskExecutor(TaskExecutor):
         return True
 
 
+class PauseExceptionTaskExecutor(TaskExecutor):
+    """Task executor that throws exception during pause
+
+    Used to test exception handling when pause() fails.
+    """
+
+    async def execute_ability(self, task_id: str, session: Session) -> AsyncIterator[ControllerOutputChunk]:
+        """Execute task"""
+        yield ControllerOutputChunk(
+            index=0,
+            type="controller_output",
+            payload=ControllerOutputPayload(
+                type="processing",
+                data=[TextDataFrame(type="text", text=f"Task {task_id} running")]
+            ),
+            last_chunk=False
+        )
+
+        # Run for a long time
+        for i in range(100):
+            await asyncio.sleep(0.1)
+            yield ControllerOutputChunk(
+                index=i + 1,
+                type="controller_output",
+                payload=ControllerOutputPayload(
+                    type="processing",
+                    data=[TextDataFrame(type="text", text=f"Task {task_id} progress {i+1}")]
+                ),
+                last_chunk=False
+            )
+
+        yield ControllerOutputChunk(
+            index=101,
+            type="controller_output",
+            payload=ControllerOutputPayload(
+                type=EventType.TASK_COMPLETION,
+                data=[TextDataFrame(type="text", text=f"Task {task_id} completed")]
+            ),
+            last_chunk=True
+        )
+
+    async def can_pause(self, task_id: str, session: Session) -> Tuple[bool, str]:
+        return True, ""
+
+    async def pause(self, task_id: str, session: Session) -> bool:
+        # Throw exception during pause
+        raise RuntimeError(f"Pause failed for task {task_id}")
+
+    async def can_cancel(self, task_id: str, session: Session) -> Tuple[bool, str]:
+        return True, ""
+
+    async def cancel(self, task_id: str, session: Session) -> bool:
+        return True
+
+
+class CancelExceptionTaskExecutor(TaskExecutor):
+    """Task executor that throws exception during cancel
+
+    Used to test exception handling when cancel() fails.
+    """
+
+    async def execute_ability(self, task_id: str, session: Session) -> AsyncIterator[ControllerOutputChunk]:
+        """Execute task"""
+        yield ControllerOutputChunk(
+            index=0,
+            type="controller_output",
+            payload=ControllerOutputPayload(
+                type="processing",
+                data=[TextDataFrame(type="text", text=f"Task {task_id} running")]
+            ),
+            last_chunk=False
+        )
+
+        # Run for a long time
+        for i in range(100):
+            await asyncio.sleep(0.1)
+            yield ControllerOutputChunk(
+                index=i + 1,
+                type="controller_output",
+                payload=ControllerOutputPayload(
+                    type="processing",
+                    data=[TextDataFrame(type="text", text=f"Task {task_id} progress {i+1}")]
+                ),
+                last_chunk=False
+            )
+
+        yield ControllerOutputChunk(
+            index=101,
+            type="controller_output",
+            payload=ControllerOutputPayload(
+                type=EventType.TASK_COMPLETION,
+                data=[TextDataFrame(type="text", text=f"Task {task_id} completed")]
+            ),
+            last_chunk=True
+        )
+
+    async def can_pause(self, task_id: str, session: Session) -> Tuple[bool, str]:
+        return True, ""
+
+    async def pause(self, task_id: str, session: Session) -> bool:
+        return True
+
+    async def can_cancel(self, task_id: str, session: Session) -> Tuple[bool, str]:
+        return True, ""
+
+    async def cancel(self, task_id: str, session: Session) -> bool:
+        # Throw exception during cancel
+        raise RuntimeError(f"Cancel failed for task {task_id}")
+
+
+class InteractionTaskExecutor(TaskExecutor):
+    """Task executor that requires user interaction
+
+    Used to test handle_task_interaction flow.
+    """
+
+    async def execute_ability(self, task_id: str, session: Session) -> AsyncIterator[ControllerOutputChunk]:
+        """Execute task - will request user interaction"""
+        yield ControllerOutputChunk(
+            index=0,
+            type="controller_output",
+            payload=ControllerOutputPayload(
+                type="processing",
+                data=[TextDataFrame(type="text", text=f"Task {task_id} started")]
+            ),
+            last_chunk=False
+        )
+
+        tasks = await self._task_manager.get_task(TaskFilter(task_id=task_id))
+        if tasks:
+            task = tasks[0]
+            task.input_required_fields = {"id": "questioner"}
+            await self._task_manager.update_task(task)
+
+        # Request user interaction
+        yield ControllerOutputChunk(
+            index=1,
+            type="controller_output",
+            payload=ControllerOutputPayload(
+                type=EventType.TASK_INTERACTION,
+                data=[TextDataFrame(type="text", text=f"Task {task_id} needs user input")]
+            ),
+            last_chunk=False
+        )
+
+
+    async def can_pause(self, task_id: str, session: Session) -> Tuple[bool, str]:
+        return True, ""
+
+    async def pause(self, task_id: str, session: Session) -> bool:
+        return True
+
+    async def can_cancel(self, task_id: str, session: Session) -> Tuple[bool, str]:
+        return True, ""
+
+    async def cancel(self, task_id: str, session: Session) -> bool:
+        return True
+
+
 # ==================== Test EventHandler ====================
 
 class SimpleEventHandler(EventHandler):
@@ -594,6 +753,155 @@ class CancelNonCancellableEventHandler(EventHandler):
         return {"status": "failed"}
 
 
+class InteractionEventHandler(EventHandler):
+    """Event handler for testing task interaction
+
+    Used to test handle_task_interaction flow.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.interaction_handled = False
+
+    async def handle_input(self, inputs: EventHandlerInput):
+        """Handle input event - create an interaction task"""
+        task = Task(
+            session_id=inputs.session.session_id(),
+            task_id="interaction_task_1",
+            task_type="interaction",
+            priority=1,
+            status=TaskStatus.SUBMITTED,
+            context_id="interaction_context_1"
+        )
+        await self.task_manager.add_task([task])
+        logger.info("InteractionEventHandler: Created interaction task")
+        return {"status": "success", "tasks_created": 1}
+
+    async def handle_task_interaction(self, inputs: EventHandlerInput):
+        """Handle task interaction event"""
+        self.interaction_handled = True
+        logger.info(f"InteractionEventHandler: Task interaction handled - {inputs.event.task.task_id}")
+        return {"status": "success", "interaction_handled": True}
+
+    async def handle_task_completion(self, inputs: EventHandlerInput):
+        """Handle task completion event"""
+        logger.info(f"InteractionEventHandler: Task completed - {inputs.event.task.task_id}")
+        return {"status": "success"}
+
+    async def handle_task_failed(self, inputs: EventHandlerInput):
+        """Handle task failure event"""
+        logger.error(f"InteractionEventHandler: Task failed - {inputs.event.task.task_id}")
+        return {"status": "failed"}
+
+
+class PauseExceptionEventHandler(EventHandler):
+    """Event handler that triggers pause exception
+
+    Used to test exception handling when pause() throws exception.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.first_task_completed = False
+
+    async def handle_input(self, inputs: EventHandlerInput):
+        """Handle input event - create two tasks"""
+        tasks = [
+            Task(
+                session_id=inputs.session.session_id(),
+                task_id="pause_exception_task_1",
+                task_type="cancellable",
+                priority=1,
+                status=TaskStatus.SUBMITTED,
+                context_id="pause_exception_context_1"
+            ),
+            Task(
+                session_id=inputs.session.session_id(),
+                task_id="pause_exception_task_2",
+                task_type="pause_exception",
+                priority=1,
+                status=TaskStatus.SUBMITTED,
+                context_id="pause_exception_context_2"
+            )
+        ]
+        await self.task_manager.add_task(tasks)
+        logger.info("PauseExceptionEventHandler: Created 2 tasks")
+        return {"status": "success", "tasks_created": 2}
+
+    async def handle_task_interaction(self, inputs: EventHandlerInput):
+        pass
+
+    async def handle_task_completion(self, inputs: EventHandlerInput):
+        """Handle task completion event - try to pause task that will throw exception"""
+        if not self.first_task_completed:
+            self.first_task_completed = True
+            # Try to pause task that will throw exception
+            try:
+                success = await self.task_scheduler.pause_task("pause_exception_task_2", inputs.session)
+                logger.info(f"Pause attempt result: {success}")
+            except Exception as e:
+                logger.error(f"Exception during pause: {e}")
+        return {"status": "success"}
+
+    async def handle_task_failed(self, inputs: EventHandlerInput):
+        logger.error(f"PauseExceptionEventHandler: Task failed - {inputs.event.task.task_id}")
+        return {"status": "failed"}
+
+
+class CancelExceptionEventHandler(EventHandler):
+    """Event handler that triggers cancel exception
+
+    Used to test exception handling when cancel() throws exception.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.first_task_completed = False
+
+    async def handle_input(self, inputs: EventHandlerInput):
+        """Handle input event - create two tasks"""
+        tasks = [
+            Task(
+                session_id=inputs.session.session_id(),
+                task_id="cancel_exception_task_1",
+                task_type="cancellable",
+                priority=1,
+                status=TaskStatus.SUBMITTED,
+                context_id="cancel_exception_context_1"
+            ),
+            Task(
+                session_id=inputs.session.session_id(),
+                task_id="cancel_exception_task_2",
+                task_type="cancel_exception",
+                priority=1,
+                status=TaskStatus.SUBMITTED,
+                context_id="cancel_exception_context_2"
+            )
+        ]
+        await self.task_manager.add_task(tasks)
+        logger.info("CancelExceptionEventHandler: Created 2 tasks")
+        return {"status": "success", "tasks_created": 2}
+
+    async def handle_task_interaction(self, inputs: EventHandlerInput):
+        pass
+
+    async def handle_task_completion(self, inputs: EventHandlerInput):
+        """Handle task completion event - try to cancel task that will throw exception"""
+        if not self.first_task_completed:
+            self.first_task_completed = True
+            # Try to cancel task that will throw exception
+            try:
+                success = await self.task_scheduler.cancel_task("cancel_exception_task_2", inputs.session)
+                logger.info(f"Cancel attempt result: {success}")
+            except Exception as e:
+                logger.error(f"Exception during cancel: {e}")
+        return {"status": "success"}
+
+    async def handle_task_failed(self, inputs: EventHandlerInput):
+        logger.error(f"CancelExceptionEventHandler: Task failed - {inputs.event.task.task_id}")
+        return {"status": "failed"}
+
+
 # ==================== EventHandlers for state persistence tests ====================
 
 class StatePersistenceEventHandler(EventHandler):
@@ -756,6 +1064,21 @@ def build_non_cancellable_executor(dependencies: TaskExecutorDependencies):
 def build_failing_executor(dependencies: TaskExecutorDependencies):
     """Build failing task executor"""
     return FailingTaskExecutor(dependencies)
+
+
+def build_pause_exception_executor(dependencies: TaskExecutorDependencies):
+    """Build pause exception task executor"""
+    return PauseExceptionTaskExecutor(dependencies)
+
+
+def build_cancel_exception_executor(dependencies: TaskExecutorDependencies):
+    """Build cancel exception task executor"""
+    return CancelExceptionTaskExecutor(dependencies)
+
+
+def build_interaction_executor(dependencies: TaskExecutorDependencies):
+    """Build interaction task executor"""
+    return InteractionTaskExecutor(dependencies)
 
 
 # ==================== Agent factory function ====================
@@ -1030,6 +1353,210 @@ class TestEventHandlerTaskControl:
 
         logger.info("✅ test_pause_then_cancel_in_event_handler passed")
 
+    @pytest.mark.asyncio
+    async def test_pause_non_existent_task(self):
+        """Test attempting to pause a non-existent task
+
+        Test goals:
+        1. Try to pause a task that doesn't exist
+        2. Verify pause fails gracefully
+        3. Verify no exception is thrown
+        """
+        # Build Agent
+        agent = await build_test_agent(
+            agent_id="test_pause_non_existent",
+            event_handler=SimpleEventHandler(),
+            task_executors={"cancellable": build_cancellable_executor}
+        )
+
+        session = TaskSession(session_id="test_pause_non_existent")
+
+        # Try to pause non-existent task
+        success = await agent.controller.task_scheduler.pause_task("non_existent_task", session)
+
+        assert not success, "Pausing non-existent task should fail"
+
+        logger.info("✅ test_pause_non_existent_task passed")
+
+    @pytest.mark.asyncio
+    async def test_pause_completed_task(self):
+        """Test attempting to pause a completed task
+
+        Test goals:
+        1. Create and complete a task
+        2. Try to pause the completed task
+        3. Verify pause fails gracefully
+        """
+        # Build Agent
+        agent = await build_test_agent(
+            agent_id="test_pause_completed",
+            event_handler=SimpleEventHandler(),
+            task_executors={"cancellable": build_cancellable_executor}
+        )
+
+        session = TaskSession(session_id="test_pause_completed")
+
+        input_event = InputEvent(
+            event_type=EventType.INPUT,
+            content={"query": "test pause completed"}
+        )
+
+        # Execute and wait for completion
+        await collect_stream_output(agent.stream(input_event, session))
+
+        # Try to pause completed task
+        success = await agent.controller.task_scheduler.pause_task("test_task_1", session)
+
+        assert not success, "Pausing completed task should fail"
+
+        logger.info("✅ test_pause_completed_task passed")
+
+    @pytest.mark.asyncio
+    async def test_pause_with_executor_exception(self):
+        """Test pause when executor.pause() throws exception
+
+        Test goals:
+        1. Create a task whose executor throws exception during pause
+        2. Try to pause the task
+        3. Verify exception is handled gracefully
+        4. Verify task status is not updated to PAUSED
+        """
+        # Build Agent
+        agent = await build_test_agent(
+            agent_id="test_pause_exception",
+            event_handler=PauseExceptionEventHandler(),
+            task_executors={
+                "cancellable": build_cancellable_executor,
+                "pause_exception": build_pause_exception_executor
+            }
+        )
+
+        session = TaskSession(session_id="test_pause_exception")
+
+        input_event = InputEvent(
+            event_type=EventType.INPUT,
+            content={"query": "test pause exception"}
+        )
+
+        # Execute agent stream
+        output_texts = await collect_stream_output(agent.stream(input_event, session))
+
+        # Verify first task completed
+        assert any("pause_exception_task_1" in text and "completed" in text for text in output_texts), \
+            "First task should complete"
+
+        # Verify second task is not paused (because pause threw exception)
+        tasks = await agent.controller.task_manager.get_task(
+            task_filter=TaskFilter(task_id="pause_exception_task_2")
+        )
+        task_2 = tasks[0]
+        assert task_2.status != TaskStatus.PAUSED, \
+            f"Task should not be PAUSED when pause() throws exception, actual status: {task_2.status}"
+
+        logger.info("✅ test_pause_with_executor_exception passed")
+
+    @pytest.mark.asyncio
+    async def test_cancel_non_existent_task(self):
+        """Test attempting to cancel a non-existent task
+
+        Test goals:
+        1. Try to cancel a task that doesn't exist
+        2. Verify cancel fails gracefully
+        3. Verify no exception is thrown
+        """
+        # Build Agent
+        agent = await build_test_agent(
+            agent_id="test_cancel_non_existent",
+            event_handler=SimpleEventHandler(),
+            task_executors={"cancellable": build_cancellable_executor}
+        )
+
+        session = TaskSession(session_id="test_cancel_non_existent")
+
+        # Try to cancel non-existent task
+        success = await agent.controller.task_scheduler.cancel_task("non_existent_task", session)
+
+        assert not success, "Cancelling non-existent task should fail"
+
+        logger.info("✅ test_cancel_non_existent_task passed")
+
+    @pytest.mark.asyncio
+    async def test_cancel_completed_task(self):
+        """Test attempting to cancel a completed task
+
+        Test goals:
+        1. Create and complete a task
+        2. Try to cancel the completed task
+        3. Verify cancel fails gracefully
+        """
+        # Build Agent
+        agent = await build_test_agent(
+            agent_id="test_cancel_completed",
+            event_handler=SimpleEventHandler(),
+            task_executors={"cancellable": build_cancellable_executor}
+        )
+
+        session = TaskSession(session_id="test_cancel_completed")
+
+        input_event = InputEvent(
+            event_type=EventType.INPUT,
+            content={"query": "test cancel completed"}
+        )
+
+        # Execute and wait for completion
+        await collect_stream_output(agent.stream(input_event, session))
+
+        # Try to cancel completed task
+        success = await agent.controller.task_scheduler.cancel_task("test_task_1", session)
+
+        assert not success, "Cancelling completed task should fail"
+
+        logger.info("✅ test_cancel_completed_task passed")
+
+    @pytest.mark.asyncio
+    async def test_cancel_with_executor_exception(self):
+        """Test cancel when executor.cancel() throws exception
+
+        Test goals:
+        1. Create a task whose executor throws exception during cancel
+        2. Try to cancel the task
+        3. Verify exception is handled gracefully
+        4. Verify task status is not updated to CANCELED
+        """
+        # Build Agent
+        agent = await build_test_agent(
+            agent_id="test_cancel_exception",
+            event_handler=CancelExceptionEventHandler(),
+            task_executors={
+                "cancellable": build_cancellable_executor,
+                "cancel_exception": build_cancel_exception_executor
+            }
+        )
+
+        session = TaskSession(session_id="test_cancel_exception")
+
+        input_event = InputEvent(
+            event_type=EventType.INPUT,
+            content={"query": "test cancel exception"}
+        )
+
+        # Execute agent stream
+        output_texts = await collect_stream_output(agent.stream(input_event, session))
+
+        # Verify first task completed
+        assert any("cancel_exception_task_1" in text and "completed" in text for text in output_texts), \
+            "First task should complete"
+
+        # Verify second task is not canceled (because cancel threw exception)
+        tasks = await agent.controller.task_manager.get_task(
+            task_filter=TaskFilter(task_id="cancel_exception_task_2")
+        )
+        task_2 = tasks[0]
+        assert task_2.status != TaskStatus.CANCELED, \
+            f"Task should not be CANCELED when cancel() throws exception, actual status: {task_2.status}"
+
+        logger.info("✅ test_cancel_with_executor_exception passed")
+
 
 # ==================== State persistence tests ====================
 
@@ -1302,6 +1829,55 @@ class TestLifecycleManagement:
 
         logger.info("✅ test_controller_stop_cleanup_all passed")
 
+    @pytest.mark.asyncio
+    async def test_multiple_stream_calls_no_duplicate_start(self):
+        """Test multiple stream() calls in same event loop don't duplicate start
+
+        Test goals:
+        1. Call stream() multiple times in the same event loop
+        2. Verify EventQueue and TaskScheduler are not restarted
+        3. Verify all streams work correctly
+        """
+        agent = await build_test_agent(
+            agent_id="test_multiple_start",
+            event_handler=DynamicTaskEventHandler(),
+            task_executors={"cancellable": build_cancellable_executor}
+        )
+
+        session = TaskSession(session_id="test_multiple_start")
+
+        input_event = InputEvent(
+            event_type=EventType.INPUT,
+            content={"query": "test"}
+        )
+
+        # First stream call
+        output_1 = await collect_stream_output(agent.stream(input_event, session))
+        assert len(output_1) > 0, "First stream should have output"
+
+        # Get references to EventQueue and TaskScheduler
+        event_queue_id_1 = id(agent.controller.event_queue)
+        task_scheduler_id_1 = id(agent.controller.task_scheduler)
+
+        # Second stream call (should reuse existing components)
+        output_2 = await collect_stream_output(agent.stream(input_event, session))
+        assert len(output_2) > 0, "Second stream should have output"
+
+        # Verify same instances are used (no restart)
+        event_queue_id_2 = id(agent.controller.event_queue)
+        task_scheduler_id_2 = id(agent.controller.task_scheduler)
+
+        assert event_queue_id_1 == event_queue_id_2, \
+            "EventQueue should not be recreated on second stream call"
+        assert task_scheduler_id_1 == task_scheduler_id_2, \
+            "TaskScheduler should not be recreated on second stream call"
+
+        # Third stream call
+        output_3 = await collect_stream_output(agent.stream(input_event, session))
+        assert len(output_3) > 0, "Third stream should have output"
+
+        logger.info("✅ test_multiple_stream_calls_no_duplicate_start passed")
+
 
 # ==================== Session management tests ====================
 
@@ -1435,6 +2011,82 @@ class TestEventSystem:
         assert any("started" in text for text in output), "There should be task start information"
 
         logger.info("✅ test_event_subscribe_and_publish passed")
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_cleanup(self):
+        """Test unsubscribe() correctly cleans up subscriptions
+
+        Test goals:
+        1. Start a stream (creates subscriptions)
+        2. Complete the stream (should unsubscribe)
+        3. Verify subscriptions are cleaned up
+        4. Start another stream to verify no subscription leaks
+        """
+        agent = await build_test_agent(
+            agent_id="test_unsubscribe",
+            event_handler=DynamicTaskEventHandler(),
+            task_executors={"cancellable": build_cancellable_executor}
+        )
+
+        session = TaskSession(session_id="test_unsubscribe")
+
+        input_event = InputEvent(
+            event_type=EventType.INPUT,
+            content={"query": "test unsubscribe"}
+        )
+
+        # First stream
+        output_1 = await collect_stream_output(agent.stream(input_event, session))
+        assert len(output_1) > 0, "First stream should have output"
+
+        # Verify session is cleaned up after stream ends
+        assert session.session_id() not in agent.controller.task_scheduler.sessions, \
+            "Session should be removed after stream ends (unsubscribe should be called)"
+
+        # Second stream - should work normally without subscription leaks
+        output_2 = await collect_stream_output(agent.stream(input_event, session))
+        assert len(output_2) > 0, "Second stream should have output"
+
+        # Verify session is cleaned up again
+        assert session.session_id() not in agent.controller.task_scheduler.sessions, \
+            "Session should be removed after second stream ends"
+
+        logger.info("✅ test_unsubscribe_cleanup passed")
+
+    @pytest.mark.asyncio
+    async def test_handle_task_interaction(self):
+        """Test handle_task_interaction event handling
+
+        Test goals:
+        1. Create a task that triggers interaction event
+        2. Verify handle_task_interaction is called
+        3. Verify interaction is handled correctly
+        """
+        agent = await build_test_agent(
+            agent_id="test_interaction",
+            event_handler=InteractionEventHandler(),
+            task_executors={"interaction": build_interaction_executor}
+        )
+
+        session = TaskSession(session_id="test_interaction")
+
+        input_event = InputEvent(
+            event_type=EventType.INPUT,
+            content={"query": "test interaction"}
+        )
+
+        # Execute agent stream
+        output_texts = await collect_stream_output(agent.stream(input_event, session))
+
+        # Verify interaction was triggered
+        assert any("needs user input" in text for text in output_texts), \
+            "Task should request user interaction"
+
+        # Verify handle_task_interaction was called
+        assert agent.controller.event_handler.interaction_handled == True, \
+            "handle_task_interaction should have been called"
+
+        logger.info("✅ test_handle_task_interaction passed")
 
 
 if __name__ == "__main__":

@@ -143,6 +143,11 @@ class Controller:
         """Get task scheduler"""
         return self._task_scheduler
 
+    @property
+    def event_handler(self) -> Optional[EventHandler]:
+        """Get event handler"""
+        return self._event_handler
+
     def set_event_handler(self, event_handler: EventHandler):  # pylint: disable=attribute-defined-outside-init
         """Set event handler
 

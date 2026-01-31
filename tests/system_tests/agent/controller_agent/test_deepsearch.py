@@ -525,6 +525,7 @@ class DeepSearchEventHandler(EventHandler):
     def __init__(self):
         """Initialize event handler"""
         super().__init__()
+        self.round = 1
 
     async def _planning(self, event: Event, session: Session) -> Dict:
         """Plan tasks
@@ -588,7 +589,7 @@ class DeepSearchEventHandler(EventHandler):
         for i, task_info in enumerate(planning_task["data_collect_tasks"]):
             task = Task(
                 session_id=session.session_id(),
-                task_id="task_DC_id{}".format(i),
+                task_id="task_DC_id{}_{}".format(i, self.round),
                 task_type="data_collect",
                 priority=1,
                 status=TaskStatus.SUBMITTED,
@@ -625,7 +626,7 @@ class DeepSearchEventHandler(EventHandler):
         for i, task_info in enumerate(planning_task["data_analysis_tasks"]):
             task = Task(
                 session_id=session.session_id(),
-                task_id="task_DA_id{}".format(i),
+                task_id="task_DA_id{}_{}".format(i, self.round),
                 task_type="data_analysis",
                 priority=2,
                 status=TaskStatus.WAITING,
@@ -662,7 +663,7 @@ class DeepSearchEventHandler(EventHandler):
         for i, task_info in enumerate(planning_task["report_generate_tasks"]):
             task = Task(
                 session_id=session.session_id(),
-                task_id="task_RG_id{}".format(i),
+                task_id="task_RG_id{}_{}".format(i, self.round),
                 task_type="report_generate",
                 priority=3,
                 status=TaskStatus.WAITING,
@@ -712,6 +713,7 @@ class DeepSearchEventHandler(EventHandler):
             last_chunk=False
         )
         await inputs.session.write_stream(output_chunk)
+        self.round += 1
         return {"status": "success", "tasks_created": 1}
 
     async def handle_task_interaction(self, inputs: EventHandlerInput):
@@ -931,3 +933,103 @@ class DeepSearchAgentTest(unittest.IsolatedAsyncioTestCase):
         assert full_output.count("成功调用handle_task_completion回调") == 3, \
             "断言失败：handle_task_completion 回调未被调用 3 次"
         logger.info("✅ test_deepsearch_end_to_end_invoke passed")
+
+    async def test_deepsearch_multi_turn_conversation(self):
+        """Test multi-turn conversation E2E
+
+        Test goals:
+        1. First turn: create tasks and complete full workflow
+        2. Second turn: create new tasks and complete workflow
+        3. Verify tasks from first turn don't interfere with second turn
+        4. Verify EventHandler callbacks work correctly in both turns
+        """
+        agent_card = AgentCard(
+            id="deepsearch_multi_turn",
+            name="DeepSearch Multi-Turn",
+            description="Arxiv研究报告智能体，支持多轮对话",
+        )
+        agent = await build_deepsearch_agent(agent_card)
+        session = TaskSession(session_id="multi_turn_deepsearch")
+
+        # ========== First turn ==========
+        logger.info("========== First turn: 查询芯片相关论文 ==========")
+        output_texts_1: List[str] = []
+
+        async for chunk in agent.stream("帮我查找芯片相关研究论文", session):
+            if isinstance(chunk, ControllerOutputChunk):
+                if chunk.payload and chunk.payload.data:
+                    for item in chunk.payload.data:
+                        if isinstance(item, TextDataFrame):
+                            output_texts_1.append(item.text)
+
+        full_output_1 = "\n".join(output_texts_1)
+
+        # Verify first turn completed successfully
+        assert "正在收集芯片相关的Arxiv论文数据..." in full_output_1, \
+            "第一轮：数据收集阶段未启动"
+        assert "芯片相关Arxiv论文数据收集完成" in full_output_1, \
+            "第一轮：数据收集阶段未报告完成"
+        assert "正在分析芯片相关的Arxiv论文数据..." in full_output_1, \
+            "第一轮：数据分析阶段未启动"
+        assert "芯片相关Arxiv论文数据分析完成" in full_output_1, \
+            "第一轮：数据分析阶段未报告完成"
+        assert "正在生成芯片研究报告..." in full_output_1, \
+            "第一轮：报告生成阶段未启动"
+        assert "芯片研究报告生成完成" in full_output_1, \
+            "第一轮：报告生成阶段未报告完成"
+        assert full_output_1.count("成功调用handle_task_completion回调") == 3, \
+            "第一轮：handle_task_completion 回调未被调用 3 次"
+
+        logger.info("✅ First turn completed successfully")
+
+        # Record first turn task count
+        first_turn_tasks = await agent.controller.task_manager.get_task(task_filter=None)
+        first_turn_task_count = len(first_turn_tasks)
+        logger.info(f"First turn created {first_turn_task_count} tasks")
+
+        # ========== Second turn ==========
+        logger.info("========== Second turn: 查询AI相关论文 ==========")
+        output_texts_2: List[str] = []
+
+        async for chunk in agent.stream("帮我查找AI相关研究论文", session):
+            if isinstance(chunk, ControllerOutputChunk):
+                if chunk.payload and chunk.payload.data:
+                    for item in chunk.payload.data:
+                        if isinstance(item, TextDataFrame):
+                            output_texts_2.append(item.text)
+
+        full_output_2 = "\n".join(output_texts_2)
+
+        # Verify second turn completed successfully
+        assert "正在收集芯片相关的Arxiv论文数据..." in full_output_2, \
+            "第二轮：数据收集阶段未启动"
+        assert "芯片相关Arxiv论文数据收集完成" in full_output_2, \
+            "第二轮：数据收集阶段未报告完成"
+        assert "正在分析芯片相关的Arxiv论文数据..." in full_output_2, \
+            "第二轮：数据分析阶段未启动"
+        assert "芯片相关Arxiv论文数据分析完成" in full_output_2, \
+            "第二轮：数据分析阶段未报告完成"
+        assert "正在生成芯片研究报告..." in full_output_2, \
+            "第二轮：报告生成阶段未启动"
+        assert "芯片研究报告生成完成" in full_output_2, \
+            "第二轮：报告生成阶段未报告完成"
+        assert full_output_2.count("成功调用handle_task_completion回调") == 3, \
+            "第二轮：handle_task_completion 回调未被调用 3 次"
+
+        logger.info("✅ Second turn completed successfully")
+
+        # Verify tasks from both turns
+        all_tasks = await agent.controller.task_manager.get_task(task_filter=None)
+        second_turn_task_count = len(all_tasks)
+        logger.info(f"After second turn, total tasks: {second_turn_task_count}")
+
+        # Verify second turn created new tasks (not reusing first turn tasks)
+        assert second_turn_task_count >= first_turn_task_count, \
+            f"Second turn should have at least as many tasks as first turn"
+
+        # Verify all tasks are completed
+        completed_tasks = [t for t in all_tasks if t.status == TaskStatus.COMPLETED]
+        assert len(completed_tasks) >= 6, \
+            f"Should have at least 6 completed tasks (3 per turn), got {len(completed_tasks)}"
+
+        logger.info("✅ test_deepsearch_multi_turn_conversation passed")
