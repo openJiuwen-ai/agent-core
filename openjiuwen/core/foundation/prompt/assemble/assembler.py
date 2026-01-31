@@ -7,6 +7,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.prompt.assemble.variables.textable import TextableVariable
+from openjiuwen.core.foundation.prompt.assemble.variables.dictable import DictableVariable
 from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variable
 
 
@@ -47,19 +48,27 @@ class PromptAssembler:
             return template_formatter_list
         else:
             for msg in self.template_content:
-                # Process BaseMessage type
                 if isinstance(msg, BaseMessage):
-                    if not isinstance(msg.content, str):
-                        template_formatter_list.append(None)
-                        continue
-                    template_formatter_list.append(
-                        TextableVariable(
-                            msg.content,
-                            name="__inner__",
-                            prefix=self.placeholder_prefix,
-                            suffix=self.placeholder_suffix
+                    if isinstance(msg.content, str):
+                        template_formatter_list.append(
+                            TextableVariable(
+                                msg.content,
+                                name="__inner__",
+                                prefix=self.placeholder_prefix,
+                                suffix=self.placeholder_suffix
+                            )
                         )
-                    )
+                    elif isinstance(msg.content, list) and msg.content and isinstance(msg.content[0], dict):
+                        template_formatter_list.append(
+                            DictableVariable(
+                                msg.content,
+                                name="__inner__",
+                                prefix=self.placeholder_prefix,
+                                suffix=self.placeholder_suffix
+                            )
+                        )
+                    else:
+                        template_formatter_list.append(None)
                     continue
         return template_formatter_list
 
