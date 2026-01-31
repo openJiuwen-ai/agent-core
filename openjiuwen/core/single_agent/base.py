@@ -50,6 +50,7 @@ class BaseAgent(ABC):
         card: Agent card (required)
         _ability_manager: Ability manager
     """
+    _config = None
 
     def __init__(
             self,
@@ -68,6 +69,11 @@ class BaseAgent(ABC):
     def configure(self, config) -> 'BaseAgent':
         """Set configuration"""
         pass
+
+    @property
+    def config(self):
+        """get config"""
+        return self._config
 
     @property
     def ability_manager(self) -> AbilityManager:
@@ -157,11 +163,6 @@ class ControllerAgent(BaseAgent):
     def _create_default_config(self) -> ControllerConfig:
         """Create default configuration"""
         return ControllerConfig()
-
-    @property
-    def config(self):
-        """get config"""
-        return self._config
 
     def configure(self, config: Union[dict, BaseModel]) -> 'BaseAgent':
         """Set uconfiguration

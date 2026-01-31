@@ -277,23 +277,23 @@ class ReActAgent(BaseAgent):
         Args:
             card: Agent card (required)
         """
-        self.config = self._create_default_config()
+        self._config = self._create_default_config()
         self.context_engine = ContextEngine(
-            self.config.context_engine_config
+            self._config.context_engine_config
         )
         self._llm = None
         self._init_memory_scope()
         # 延迟导入以避免循环依赖：skills -> runner -> single_agent -> skills
         from openjiuwen.core.skills.skill_util import SkillUtil
-        self._skill_util = SkillUtil(self.config.sys_operation_id)
+        self._skill_util = SkillUtil(self._config.sys_operation_id)
         super().__init__(card)
 
     def _init_memory_scope(self) -> None:
         """Initialize memory scope (subclass can override configuration)"""
-        if self.config.mem_scope_id:
+        if self._config.mem_scope_id:
             asyncio.run(
                 LongTermMemory().set_scope_config(
-                    self.config.mem_scope_id,
+                    self._config.mem_scope_id,
                     MemoryScopeConfig()
                 )
             )
@@ -315,8 +315,8 @@ class ReActAgent(BaseAgent):
             After config update, context_engine and memory_scope
             will be updated accordingly
         """
-        old_config = self.config
-        self.config = config
+        old_config = self._config
+        self._config = config
 
         # Reset LLM if model config changed
         if (old_config.model_provider != config.model_provider or
@@ -350,14 +350,14 @@ class ReActAgent(BaseAgent):
             ValueError: If model_client_config is not configured
         """
         if self._llm is None:
-            if self.config.model_client_config is None:
+            if self._config.model_client_config is None:
                 raise ValueError(
                     "model_client_config is required. "
                     "Use configure_model_client() to set it."
                 )
             self._llm = Model(
-                model_client_config=self.config.model_client_config,
-                model_config=self.config.model_config_obj
+                model_client_config=self._config.model_client_config,
+                model_config=self._config.model_config_obj
             )
         return self._llm
 
@@ -381,7 +381,7 @@ class ReActAgent(BaseAgent):
         """
         llm = self._get_llm()
         return await llm.invoke(
-            model=self.config.model_name,
+            model=self._config.model_name,
             messages=messages,
             tools=tools
         )
@@ -390,11 +390,11 @@ class ReActAgent(BaseAgent):
             self,
             session: Optional[Session]
     ) -> ModelContext:
-        if self.config.context_processors:
+        if self._config.context_processors:
             from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
             context = await self.context_engine.create_context(
                 session=session,
-                processors=self.config.context_processors,
+                processors=self._config.context_processors,
                 token_counter=TiktokenCounter()
             )
         else:
@@ -402,7 +402,7 @@ class ReActAgent(BaseAgent):
                 session=session
             )
         context_reloader = context.reloader_tool()
-        if self.config.context_engine_config.enable_reload:
+        if self._config.context_engine_config.enable_reload:
             self.ability_manager.add(context_reloader.card)
             from openjiuwen.core.runner import Runner
             if not Runner.resource_mgr.get_tool(context_reloader.card.id):
@@ -447,7 +447,7 @@ class ReActAgent(BaseAgent):
         # prompt_template is List[Dict], access via dict keys
         system_messages = [
             SystemMessage(role=msg["role"], content=msg["content"])
-            for msg in self.config.prompt_template
+            for msg in self._config.prompt_template
             if msg.get("role") == "system"
         ]
 
@@ -460,9 +460,9 @@ class ReActAgent(BaseAgent):
         tools = await self.ability_manager.list_tool_info()
 
         # ReAct loop
-        for iteration in range(self.config.max_iterations):
+        for iteration in range(self._config.max_iterations):
             logger.info(
-                f"ReAct iteration {iteration + 1}/{self.config.max_iterations}"
+                f"ReAct iteration {iteration + 1}/{self._config.max_iterations}"
             )
 
             # Get context window with system messages and tools

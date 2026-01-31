@@ -18,7 +18,7 @@ from openjiuwen.core.runner.runner_config import RunnerConfig, DEFAULT_RUNNER_CO
 
 from openjiuwen.core.session import get_default_inmemory_checkpointer
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
-from openjiuwen.core.session import Session
+from openjiuwen.core.session import Session, Config
 from openjiuwen.core.workflow import Session as WorkflowSession
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.single_agent import Session as AgentSession, create_agent_session
@@ -318,30 +318,13 @@ class Runner:
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
                 return agent_instance, None
-            if hasattr(agent_instance, "card"):
-                card = agent_instance.card
-            else:
-                # LegacyBaseAgent does not have card attribute
-                card = AgentCard(id=agent_instance.config().get_agent_config().id)
-            task_session = create_agent_session(session_id=session_id,
-                                                envs=getattr(agent_instance.config(), "_env"), card=card)
+
+            task_session = self._create_task_session(agent_instance, session_id)
             await get_default_inmemory_checkpointer().pre_agent_execute(
                 getattr(getattr(task_session, "_inner"), "_inner"), inputs)
             return agent_instance, task_session
 
-        if hasattr(agent, "card"):
-            card = agent.card
-        else:
-            # LegacyBaseAgent does not have card attribute
-            card = AgentCard(id=agent.config().get_agent_config().id)
-
-        if callable(getattr(agent, "config", None)):
-            config_obj = agent.config()
-        else:
-            config_obj = agent.config
-
-        task_session = create_agent_session(session_id=session_id,
-                                            envs=getattr(config_obj, "_env", None), card=card)
+        task_session = self._create_task_session(agent, session_id)
         await get_default_inmemory_checkpointer().pre_agent_execute(getattr(getattr(task_session, "_inner"), "_inner"),
                                                                     inputs)
         return agent, task_session
@@ -367,6 +350,21 @@ class Runner:
                 group_id=agent_group
             )
         return agent_group
+
+    @staticmethod
+    def _create_task_session(agent, session_id):
+        envs = None
+        if hasattr(agent, "card"):
+            config = agent.config
+            card = agent.card
+        else:
+            # LegacyBaseAgent does not have card attribute
+            config = agent.config()
+            card = AgentCard(id=config.get_agent_config().id)
+        if isinstance(config, Config):
+            envs = getattr(config, "_env", None)
+        task_session = create_agent_session(session_id=session_id, envs=envs, card=card)
+        return task_session
 
 
 Runner = Runner(config=DEFAULT_RUNNER_CONFIG)
