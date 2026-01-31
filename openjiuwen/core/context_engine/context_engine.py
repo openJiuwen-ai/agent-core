@@ -174,6 +174,7 @@ class ContextEngine:
                 event_type=LogEventType.CONTEXT_CLEAR,
                 metadata={"session_id": session_id}
             )
+            return
 
         del self._context_pool[full_context_id]
 
@@ -257,7 +258,7 @@ class ContextEngine:
         if not processor_class:
             raise build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
-                msg=f"cannot find processor type '{processor_type}'"
+                error_msg=f"cannot find processor type '{processor_type}'"
             )
 
         try:
@@ -265,7 +266,7 @@ class ContextEngine:
         except Exception as e:
             raise build_error(
                 StatusCode.CONTEXT_EXECUTION_ERROR,
-                msg=f"init processor type '{processor_type}' failed",
+                error_msg=f"init processor type '{processor_type}' failed",
                 cause=e
             ) from e
 

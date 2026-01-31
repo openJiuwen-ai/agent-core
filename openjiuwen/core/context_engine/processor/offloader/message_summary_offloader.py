@@ -5,8 +5,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
-from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import (
     BaseMessage, SystemMessage, UserMessage,
     ModelRequestConfig, ModelClientConfig, Model
@@ -119,4 +120,8 @@ class MessageSummaryOffloader(MessageOffloader):
             and self.config.messages_threshold
             and self.config.messages_to_keep >= self.config.messages_threshold
         ):
-            raise ValueError()
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"messages_to_keep {self.config.messages_to_keep} cannot larger than "
+                          f"messages_threshold {self.config.messages_threshold}"
+            )

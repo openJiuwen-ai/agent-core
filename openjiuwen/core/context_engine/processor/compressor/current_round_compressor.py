@@ -5,6 +5,8 @@ from typing import List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
 from openjiuwen.core.context_engine.base import ModelContext
@@ -97,11 +99,12 @@ class CurrentRoundCompressor(ContextProcessor):
             self.config.model
         )
 
-    async def on_add_messages(self,
-                              context: ModelContext,
-                              messages_to_add: List[BaseMessage],
-                              **kwargs
-                              ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
+    async def on_add_messages(
+            self,
+            context: ModelContext,
+            messages_to_add: List[BaseMessage],
+            **kwargs
+    ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         context_messages = context.get_messages() + messages_to_add
         last_user_idx = await self.get_compress_idx(context_messages)
         end_idx = len(context_messages) - 1
@@ -130,17 +133,22 @@ class CurrentRoundCompressor(ContextProcessor):
                     context
                 )
             except Exception as e:
-                raise e
+                raise build_error(
+                    StatusCode.CONTEXT_EXECUTION_ERROR,
+                    error_msg=f"compress messages failed",
+                    cause=e
+                ) from e
             event.messages_to_modify += list(range(last_user_idx, end_idx))
             context.set_messages(compressed_context)
             return None, []
 
 
-    async def trigger_add_messages(self,
-                                   context: ModelContext,
-                                   messages_to_add: List[BaseMessage],
-                                   **kwargs
-                                   ) -> bool:
+    async def trigger_add_messages(
+            self,
+            context: ModelContext,
+            messages_to_add: List[BaseMessage],
+            **kwargs
+    ) -> bool:
         config = self.config
         message_size = len(context) + len(messages_to_add)
         if message_size > self._message_num_threshold:

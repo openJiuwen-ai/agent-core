@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
@@ -6,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngineConfig
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
     MessageSummaryOffloader,
@@ -220,7 +220,7 @@ class TestMessageSummaryOffloader:
         )
         
         with patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model'):
-            with pytest.raises(ValueError):
+            with pytest.raises(BaseError):
                 MessageSummaryOffloader(config)
 
     @pytest.mark.asyncio
@@ -232,7 +232,7 @@ class TestMessageSummaryOffloader:
         )
         
         with patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model'):
-            with pytest.raises(ValueError):
+            with pytest.raises(BaseError):
                 MessageSummaryOffloader(config)
 
     @pytest.mark.asyncio

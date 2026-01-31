@@ -5,11 +5,12 @@ from typing import List, Dict, Any, Literal, Tuple
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage
 
 
@@ -51,7 +52,7 @@ class MessageOffloaderConfig(BaseModel):
     messages_to_keep: int | None = Field(default=None, gt=0)
     """Guaranteed number of most-recent messages to retain, regardless of any other threshold."""
 
-    keep_last_round: bool = Field(default=True, alias="include_last_round")
+    keep_last_round: bool = Field(default=True)
     """If True, the most recent user-assistant round is always preserved even if it would otherwise be offloaded."""
 
 
@@ -169,10 +170,18 @@ class MessageOffloader(ContextProcessor):
 
     def _validate_config(self):
         if self.config.trim_size >= self.config.large_message_threshold:
-            raise ValueError()
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"trim_size {self.config.trim_size} cannot larger than "
+                          f"large_message_threshold {self.config.large_message_threshold}"
+            )
         if (
             self.config.messages_to_keep
             and self.config.messages_threshold
             and self.config.messages_to_keep >= self.config.messages_threshold
         ):
-            raise ValueError()
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"messages_to_keep {self.config.messages_to_keep} cannot larger than "
+                          f"messages_threshold {self.config.messages_threshold}"
+            )

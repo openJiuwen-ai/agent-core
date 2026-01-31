@@ -133,6 +133,7 @@ class SessionModelContext(ModelContext):
 
     def clear_messages(self, with_history: bool = True):
         self.pop_messages(len(self), with_history=with_history)
+        self._offload_message_buffer = OffloadMessageBuffer()
         return
 
     async def get_context_window(

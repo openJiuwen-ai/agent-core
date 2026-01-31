@@ -12,6 +12,8 @@ class ContextMessageBuffer:
         self._history_messages_size = len(history_messages)
 
     def size(self) -> int:
+        if self._max_buffer_size is not None:
+            return min(len(self._context_messages), self._max_buffer_size)
         return len(self._context_messages)
 
     def add_back(self, messages: Union[BaseMessage, List[BaseMessage]]):
