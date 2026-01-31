@@ -28,7 +28,7 @@ fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
 
 fake_exception_module = types.ModuleType("base")
-fake_exception_module.JiuWenBaseException = Mock()
+fake_exception_module.BaseError = Mock()
 
 sys.modules["openjiuwen.core.common.logging.base"] = fake_base
 sys.modules["openjiuwen.core.common.exception.base"] = fake_exception_module

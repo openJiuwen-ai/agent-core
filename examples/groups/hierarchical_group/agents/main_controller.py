@@ -5,12 +5,12 @@
 import time
 from typing import Optional
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.controller.legacy.controller import BaseController
 from openjiuwen.core.controller.legacy import IntentDetectionConfig, IntentDetector, Event
 from openjiuwen.core.common.constants import constant as const
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 
 
 class HierarchicalMainController(BaseController):
@@ -192,11 +192,9 @@ class HierarchicalMainController(BaseController):
                     f"fallback to {fallback}"
                 )
                 return fallback
-            raise JiuWenBaseException(
-                StatusCode.AGENT_GROUP_EXECUTION_ERROR.code,
-                StatusCode.AGENT_GROUP_EXECUTION_ERROR.errmsg.format(
-                    reason="HierarchicalMainController: No agents available"
-                )
+            raise build_error(
+                StatusCode.AGENT_GROUP_EXECUTION_ERROR,
+                error_msg="HierarchicalMainController: No agents available"
             )
         
         try:

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from typing import Dict, Optional, List, Any
 
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.single_agent.legacy import (
     LegacyReActAgentConfig as ReActAgentConfig, PluginSchema,
 )
@@ -17,7 +17,6 @@ from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.common.constants.enums import TaskType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.security.json_utils import JsonUtils
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.security.user_config import UserConfig
@@ -106,7 +105,7 @@ class LLMController(BaseController):
             return await self._handle_user_input(event, session)
         except Exception as e:
             logger.error(f"Error in handling message: {e}")
-            if isinstance(e, JiuWenBaseException):
+            if isinstance(e, BaseError):
                 raise e
             else:
                 raise build_error(
@@ -602,7 +601,7 @@ class LLMController(BaseController):
                     output=output_stream_data,
                     metadata={"workflow_id": task.input.target_id}
                 )
-        except JiuWenBaseException as e:
+        except BaseError as e:
             logger.error(f"Error executing workflow task {task.input.target_name}: {e}")
             raise build_error(
                 StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR,
@@ -647,7 +646,7 @@ class LLMController(BaseController):
                 output=output_stream_data,
                 metadata={"tool_name": task.input.target_name}
             )
-        except JiuWenBaseException as e:
+        except BaseError as e:
             logger.error(f"Error executing plugin task {task.input.target_name}: {e}")
             raise build_error(
                 StatusCode.AGENT_TOOL_EXECUTION_ERROR,
@@ -696,7 +695,7 @@ class LLMController(BaseController):
                 logger.info(f"React llm output: {llm_output}")
         except Exception as e:
             logger.error(f"Failed to invoke model, {e}")
-            if isinstance(e, JiuWenBaseException):
+            if isinstance(e, BaseError):
                 raise e
             else:
                 raise build_error(
@@ -728,7 +727,7 @@ class LLMController(BaseController):
             AIMessage: Accumulated complete message from all chunks
 
         Raises:
-            JiuWenBaseException: If LLM returns empty response or invocation fails
+            BaseError: If LLM returns empty response or invocation fails
         """
         accumulated_chunk = None
         stream_index = 0

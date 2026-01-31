@@ -10,12 +10,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Dict, AsyncIterator, Optional, Union, List
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.session.agent_group import Session
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.multi_agent.config import GroupConfig
 from openjiuwen.core.multi_agent.schema.group_card import GroupCard
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 
 
@@ -80,7 +80,7 @@ class BaseGroup(ABC):
             self (supports chaining)
 
         Raises:
-            JiuWenBaseException: If agent ID already exists or max reached
+            BaseError: If agent ID already exists or max reached
 
         Example:
             # New pattern (recommended)
@@ -93,28 +93,22 @@ class BaseGroup(ABC):
             if hasattr(agent, 'card') and hasattr(agent.card, 'name'):
                 agent_id = agent.card.name
             else:
-                raise JiuWenBaseException(
-                    StatusCode.AGENT_GROUP_ADD_FAILED.code,
-                    StatusCode.AGENT_GROUP_ADD_FAILED.errmsg.format(
-                        reason="Agent must have card.name or provide agent_id"
-                    )
+                raise build_error(
+                    StatusCode.AGENT_GROUP_ADD_RUNTIME_ERROR,
+                    error_msg="Agent must have card.name or provide agent_id"
                 )
 
         if agent_id in self.agents:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_GROUP_ADD_FAILED.code,
-                StatusCode.AGENT_GROUP_ADD_FAILED.errmsg.format(
-                    reason=f"Agent ID '{agent_id}' already exists"
-                )
+            raise build_error(
+                StatusCode.AGENT_GROUP_ADD_RUNTIME_ERROR,
+                error_msg=f"Agent ID '{agent_id}' already exists"
             )
 
         if self.get_agent_count() >= self.config.max_agents:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_GROUP_ADD_FAILED.code,
-                StatusCode.AGENT_GROUP_ADD_FAILED.errmsg.format(
-                    reason=f"Agent count exceeds max_agents "
+            raise build_error(
+                StatusCode.AGENT_GROUP_ADD_RUNTIME_ERROR,
+                error_msg=f"Agent count exceeds max_agents "
                            f"({self.config.max_agents})"
-                )
             )
 
         self.agents[agent_id] = agent

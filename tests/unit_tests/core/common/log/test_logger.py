@@ -16,6 +16,7 @@ from unittest import mock
 
 import pytest
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import (
     LogManager,
     LoggerProtocol,
@@ -606,8 +607,7 @@ class TestLogDirectoryCreation:
     @staticmethod
     def test_create_log_directory_failure_raises_exception(temp_config_dir):
         """An exception was thrown when the test failed to create the log directory"""
-        from openjiuwen.core.common.exception.exception import JiuWenBaseException
-        from openjiuwen.core.common.exception.status_code import StatusCode
+        from openjiuwen.core.common.exception.codes import StatusCode
 
         if sys.platform == "win32":
             invalid_log_file = "Z:\\invalid\\drive\\test.log"
@@ -626,10 +626,10 @@ class TestLogDirectoryCreation:
         with mock.patch("os.makedirs") as mock_makedirs:
             mock_makedirs.side_effect = OSError("Permission denied")
 
-            with pytest.raises(JiuWenBaseException) as exc_info:
+            with pytest.raises(BaseError) as exc_info:
                 DefaultLogger('test_failure', config)
             
-            assert exc_info.value.error_code == StatusCode.COMMON_LOG_PATH_INIT_FAILED.code
+            assert exc_info.value.code == StatusCode.COMMON_LOG_PATH_INIT_FAILED.code
             assert "common log_path initialization failed" in exc_info.value.message
     
     @staticmethod
@@ -665,8 +665,7 @@ class TestLogDirectoryCreation:
     @staticmethod
     def test_log_path_validation(temp_config_dir):
         """Verify the legitimacy of the test log path"""
-        from openjiuwen.core.common.exception.exception import JiuWenBaseException
-        from openjiuwen.core.common.exception.status_code import StatusCode
+        from openjiuwen.core.common.exception.codes import StatusCode
 
         if sys.platform == "win32":
             sensitive_path = "C:\\Windows\\System32\\test.log"
@@ -682,8 +681,8 @@ class TestLogDirectoryCreation:
             "format": "%(asctime)s | %(levelname)s | %(message)s",
         }
 
-        with pytest.raises(JiuWenBaseException) as exc_info:
+        with pytest.raises(BaseError) as exc_info:
             DefaultLogger('test_sensitive', config)
         
-        assert exc_info.value.error_code == StatusCode.COMMON_LOG_PATH_INVALID.code
+        assert exc_info.value.code == StatusCode.COMMON_LOG_PATH_INVALID.code
         assert "common log_path is invalid" in exc_info.value.message.lower()

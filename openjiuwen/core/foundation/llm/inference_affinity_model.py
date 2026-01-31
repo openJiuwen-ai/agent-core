@@ -2,8 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Union, List, Optional, AsyncIterator
 
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -43,9 +43,8 @@ class InferenceAffinityModel:
         if model_client_config is not None:
             self._client = InferenceAffinityModelClient(model_config, model_client_config)
         else:
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          "model client config is none."))
+            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                              error_msg="model client config is none")
 
     async def invoke(
             self,

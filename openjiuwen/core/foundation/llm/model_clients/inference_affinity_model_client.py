@@ -7,8 +7,8 @@ from typing import List, Dict, Any, Optional, AsyncIterator, Union
 from contextlib import asynccontextmanager
 import aiohttp
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage,
@@ -136,11 +136,9 @@ class InferenceAffinityModelClient(BaseModelClient):
 
         except Exception as e:
             logger.error(f"InferenceAffinity API async invoke error: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.MODEL_CALL_FAILED.code,
-                message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"InferenceAffinity API async invoke error: {str(e)}"
-                )
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"InferenceAffinity API async invoke error: {str(e)}"
             ) from e
 
     async def stream(
@@ -203,11 +201,9 @@ class InferenceAffinityModelClient(BaseModelClient):
 
         except Exception as e:
             logger.error(f"InferenceAffinity API async stream error: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.MODEL_CALL_FAILED.code,
-                message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"InferenceAffinity API async stream error: {str(e)}"
-                )
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"InferenceAffinity API async stream error: {str(e)}"
             ) from e
 
     async def release(
@@ -234,7 +230,7 @@ class InferenceAffinityModelClient(BaseModelClient):
             bool: Whether release was successful
 
         Raises:
-            JiuWenBaseException: If release request fails
+            BaseError: If release request fails
         """
         try:
             # Build release request parameters
@@ -269,11 +265,9 @@ class InferenceAffinityModelClient(BaseModelClient):
 
         except Exception as e:
             logger.error(f"Release error: {e}")
-            raise JiuWenBaseException(
-                error_code=StatusCode.MODEL_CALL_FAILED.code,
-                message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"Release error: {str(e)}"
-                )
+            raise build_error(
+                error_code=StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"Release error: {str(e)}"
             ) from e
 
     async def _make_async_request(self, params: Dict) -> Dict:

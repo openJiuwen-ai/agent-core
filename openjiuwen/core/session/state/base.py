@@ -4,7 +4,8 @@ from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import Any, Union, Optional, Callable
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.utils import update_dict, get_by_schema
 
@@ -130,11 +131,11 @@ class InMemoryCommitState(CommitStateLike):
         self._updates: dict[str, list[dict]] = dict()
 
     def update(self, data: dict) -> None:
-        raise JiuWenBaseException(-1, "commit state update must support node_id")
+        raise build_error(StatusCode.ERROR, msg="commit state update must support node_id")
 
     def update_by_id(self, node_id: str, data: dict) -> None:
         if node_id is None:
-            raise JiuWenBaseException(1, "can not update state by none node_id")
+            raise build_error(StatusCode.ERROR, msg="can not update state by none node_id")
         if node_id not in self._updates:
             self._updates[node_id] = []
         self._updates[node_id].append(deepcopy(data))

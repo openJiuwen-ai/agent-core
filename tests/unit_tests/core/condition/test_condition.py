@@ -4,7 +4,6 @@ import pytest
 
 from openjiuwen.core.common.constants.constant import MAX_EXPRESSION_LENGTH, MAX_AST_DEPTH
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow import Condition, FuncCondition, AlwaysTrue
 from openjiuwen.core.workflow import ExpressionCondition

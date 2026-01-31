@@ -352,6 +352,14 @@ class StatusCode(Enum):
     PREGEL_GRAPH_CONDITION_EDGE_INVALID = (112103, "condition edge is invalid, source_id={source_id}, error='{reason}'")
 
     # =========================
+    # Multi-Agent 130000 - 130999
+    # =========================
+
+    AGENT_GROUP_ADD_RUNTIME_ERROR = (132000, "agent group_add runtime error, reason: {error_msg}")
+    AGENT_GROUP_CREATE_RUNTIME_ERROR = (132001, "agent group_create runtime error, reason: {error_msg}")
+    AGENT_GROUP_EXECUTION_ERROR = (132002, "agent group execution error, reason: {error_msg}")
+
+    # =========================
     # ContextEngine 150000 - 154999
     # =========================
 

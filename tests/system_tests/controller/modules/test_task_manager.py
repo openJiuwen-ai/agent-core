@@ -245,7 +245,7 @@ class TestTaskManager(unittest.IsolatedAsyncioTestCase):
         """Test that get_task raises error for 'highest' priority"""
         await self.task_manager.add_task(self.sample_tasks)
 
-        with self.assertRaises(Exception):  # Should raise JiuWenBaseException
+        with self.assertRaises(Exception):  # Should raise BaseError
             await self.task_manager.get_task(task_filter=TaskFilter(priority="highest"))
 
     # ==================== Pop Task Tests ====================
@@ -370,7 +370,7 @@ class TestTaskManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_remove_task_no_filter_error(self):
         """Test that remove_task raises error when no filter criteria provided"""
-        with self.assertRaises(Exception):  # Should raise JiuWenBaseException
+        with self.assertRaises(Exception):  # Should raise BaseError
             await self.task_manager.remove_task(task_filter=TaskFilter(task_id=None, session_id=None, 
                                                                   user_id=None, priority=None, 
                                                                   status=None, is_root=False))
@@ -379,17 +379,17 @@ class TestTaskManager(unittest.IsolatedAsyncioTestCase):
         """Test that remove_task raises error for 'highest' priority"""
         await self.task_manager.add_task(self.sample_tasks)
 
-        with self.assertRaises(Exception):  # Should raise JiuWenBaseException
+        with self.assertRaises(Exception):  # Should raise BaseError
             await self.task_manager.remove_task(task_filter=TaskFilter(priority="highest"))
 
     async def test_pop_task_none_filter_error(self):
         """Test that pop_task raises error when task_filter is None"""
-        with self.assertRaises(Exception):  # Should raise JiuWenBaseException
+        with self.assertRaises(Exception):  # Should raise BaseError
             await self.task_manager.pop_task(task_filter=None)
 
     async def test_remove_task_none_filter_error(self):
         """Test that remove_task raises error when task_filter is None"""
-        with self.assertRaises(Exception):  # Should raise JiuWenBaseException
+        with self.assertRaises(Exception):  # Should raise BaseError
             await self.task_manager.remove_task(task_filter=None)
 
     # ==================== Get Child Task Tests ====================

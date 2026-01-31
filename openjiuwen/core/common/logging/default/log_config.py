@@ -10,8 +10,8 @@ from typing import (
 
 import yaml
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging.default.constant import DEFAULT_INNER_LOG_CONFIG
 from openjiuwen.core.common.logging.utils import normalize_and_validate_log_path
 
@@ -35,11 +35,9 @@ class LogConfig:
                 config = yaml.safe_load(f)
 
             if "logging" not in config:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.COMMON_LOG_CONFIG_INVALID.code,
-                    message=StatusCode.COMMON_LOG_CONFIG_INVALID.errmsg.format(
-                        error_msg="YAML configuration file is missing 'logging' section"
-                    )
+                raise build_error(
+                    StatusCode.COMMON_LOG_CONFIG_INVALID,
+                    error_msg="YAML configuration file is missing 'logging' section"
                 )
 
             return config["logging"]
@@ -61,22 +59,19 @@ class LogConfig:
                 "backup_file_pattern": None,
             }
         except yaml.YAMLError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
-                message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
-                    error_msg=f"YAML configuration file format is incorrect: {e}")
+            raise build_error(
+                StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR,
+                error_msg=f"YAML configuration file format is incorrect: {e}"
             ) from e
         except OSError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
-                message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
-                    error_msg=f"failed to read configuration file: {e}")
+            raise build_error(
+                StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR,
+                error_msg=f"failed to read configuration file: {e}"
             ) from e
         except Exception as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
-                message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
-                    error_msg=f"unexpected error while loading configuration file: {e}")
+            raise build_error(
+                StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR,
+                error_msg=f"unexpected error while loading configuration file: {e}"
             ) from e
 
     def _get_log_path(self) -> str:

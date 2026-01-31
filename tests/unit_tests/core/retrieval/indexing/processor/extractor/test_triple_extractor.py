@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.indexing.processor.extractor.triple_extractor import TripleExtractor
 

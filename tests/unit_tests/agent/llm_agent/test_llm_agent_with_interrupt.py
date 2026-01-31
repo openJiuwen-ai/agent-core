@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from openjiuwen.core.common.constants.enums import ControllerType, TaskType
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
 from openjiuwen.core.application.llm_agent import (
     create_llm_agent_config,
@@ -17,7 +18,6 @@ from openjiuwen.core.application.workflow_agent import (
     WorkflowAgent
 )
 from openjiuwen.core.controller.legacy import Task, TaskInput
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.foundation.llm import ModelConfig, ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.workflow import End, WorkflowCard
 from openjiuwen.core.workflow import FieldInfo, QuestionerConfig, QuestionerComponent
@@ -325,7 +325,7 @@ class TestReActAgentInterrupt:
             if result.get("result_type") == 'question':
                 result = await react_agent.invoke({"conversation_id": "12345", "query": "查询杭州天气"})
                 print(f"LLMAgent 第二次输出结果：{result}")
-        except JiuWenBaseException:
+        except BaseError:
             assert True
 
     @pytest.mark.asyncio

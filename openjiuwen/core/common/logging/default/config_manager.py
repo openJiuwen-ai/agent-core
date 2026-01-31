@@ -6,10 +6,10 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.logging.default.constant import DEFAULT_LOG_CONFIG
 from openjiuwen.core.common.security.path_checker import is_sensitive_path
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 
 CRITICAL = 50
 FATAL = CRITICAL
@@ -52,21 +52,18 @@ class ConfigManager:
                     real_path = os.path.abspath(os.path.expanduser(config_path))
                 
                 if is_sensitive_path(real_path):
-                    raise JiuWenBaseException(
-                        error_code=StatusCode.COMMON_LOG_PATH_INVALID.code,
-                        message=StatusCode.COMMON_LOG_PATH_INVALID.errmsg.format(
-                            error_msg=f'the path is {real_path}'
-                        )
+                    raise build_error(
+                        StatusCode.COMMON_LOG_PATH_INVALID,
+                        error_msg=f'the path is {real_path}'
                     )
                 
                 try:
                     with open(real_path, "r", encoding="utf-8") as f:
                         config_dict = yaml.safe_load(f)
                 except OSError as e:
-                    raise JiuWenBaseException(
-                        error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
-                        message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
-                            error_msg=f"failed to read configuration file: {e}")
+                    raise build_error(
+                        StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR,
+                        error_msg=f"failed to read configuration file: {e}"
                     ) from e
 
             if 'logging' in config_dict:
@@ -80,20 +77,18 @@ class ConfigManager:
                     'level': WARNING
                 }
             }
-        except JiuWenBaseException:
-            # Re-raise JiuWenBaseException as-is
+        except BaseError:
+            # Re-raise BaseError as-is
             raise
         except yaml.YAMLError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
-                message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
-                    error_msg=f"YAML configuration file format is incorrect: {e}")
+            raise build_error(
+                StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR,
+                error_msg=f"YAML configuration file format is incorrect: {e}"
             ) from e
         except Exception as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.code,
-                message=StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR.errmsg.format(
-                    error_msg=f"unexpected error while loading configuration file: {e}")
+            raise build_error(
+                StatusCode.COMMON_LOG_CONFIG_PROCESS_ERROR,
+                error_msg=f"unexpected error while loading configuration file: {e}"
             ) from e
 
     def get(self, key: str, default: Any = None) -> Any:

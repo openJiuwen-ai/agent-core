@@ -4,13 +4,13 @@
 
 from typing import TYPE_CHECKING, Any
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.multi_agent.legacy.group_controller import (
     BaseGroupController
 )
 from openjiuwen.core.controller.legacy import Event
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 
 from openjiuwen.core.session.agent import Session
 
@@ -93,12 +93,10 @@ class HierarchicalGroupController(BaseGroupController):
         # Rule 3: Default - route to leader
         leader = self.agent_group.agents.get(self.leader_agent_id)
         if not leader:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_GROUP_CREATE_FAILED.code,
-                StatusCode.AGENT_GROUP_CREATE_FAILED.errmsg.format(
-                    reason=f"Leader single_agent '{self.leader_agent_id}' not found in group. "
+            raise build_error(
+                StatusCode.AGENT_GROUP_CREATE_RUNTIME_ERROR,
+                error_msg=f"Leader single_agent '{self.leader_agent_id}' not found in group. "
                            f"Available agents: {list(self.agent_group.agents.keys())}"
-                )
             )
 
         logger.info(

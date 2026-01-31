@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, Awaitable, TypeVar, Optional
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 
 Output = TypeVar("Output", covariant=True)
 

@@ -4,9 +4,8 @@ import types
 import unittest
 from typing import Any, Union, List, Dict, AsyncIterator
 
+from unittest.mock import patch, Mock
 import pytest
-from unittest.mock import Mock
-
 
 from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.common.exception.errors import BaseError
@@ -26,16 +25,13 @@ fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
 
 fake_exception_module = types.ModuleType("base")
-fake_exception_module.JiuWenBaseException = Mock()
+fake_exception_module.BaseError = Mock()
 
 sys.modules["openjiuwen.core.common.logging.base"] = fake_base
 sys.modules["openjiuwen.core.common.exception.base"] = fake_exception_module
 
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode
 
-from unittest.mock import patch, AsyncMock
-
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.workflow import LLMCompConfig, LLMComponent
 from openjiuwen.core.session import WorkflowSession, NodeSession
 from openjiuwen.core.session.node import Session

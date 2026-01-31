@@ -435,7 +435,7 @@ def _evaluate_name(node: ast.Name, runtime: dict) -> Any:
                 return False
             elif node.id == 'None':
                 return None
-            # According to test requirements, raise JiuWenBaseException instead of NameError
+            # According to test requirements, raise BaseError instead of NameError
             raise build_error(
                 StatusCode.EXPRESSION_EVAL_ERROR,
                 error_msg=f"name '{node.id}' is not defined",

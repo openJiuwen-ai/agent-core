@@ -15,7 +15,7 @@ from examples.super_agent.agent.super_config import (
 from examples.super_agent.agent.super_react_agent import (
     SuperReActAgent
 )
-from openjiuwen.core.single_agent import PluginSchema, WorkflowSchema
+from openjiuwen.core.single_agent.legacy.schema import PluginSchema, WorkflowSchema
 from openjiuwen.core.foundation.llm import ModelConfig
 from openjiuwen.core.foundation.llm import BaseModelInfo as ModelInfo
 from openjiuwen.core.foundation.tool import Tool

@@ -79,7 +79,7 @@ class TaskFilter(BaseModel):
             TaskFilter: The validated TaskFilter instance
             
         Raises:
-            JiuWenBaseException: If all filter parameters are None
+            BaseError: If all filter parameters are None
         """
         params_to_check = [
             self.task_id,
@@ -556,7 +556,7 @@ class TaskManager:
             task_filter: TaskFilter object containing filter criteria. Cannot be None.
 
         Raises:
-            JiuWenBaseException: If task_filter is None or no filter criteria are provided
+            BaseError: If task_filter is None or no filter criteria are provided
         """
         if task_filter is None:
             raise build_error(
