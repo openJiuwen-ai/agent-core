@@ -77,6 +77,8 @@ class LLMController(BaseController):
         self.config = config
         self._enable_long_term_mem = self.config.agent_memory_config.enable_long_term_mem
         self._enable_mem_variables = len(self.config.agent_memory_config.mem_variables) > 0
+        self._enable_memory = (self.config.memory_scope_id and
+                               (self._enable_long_term_mem or self._enable_mem_variables))
         self._long_term_memory_instance = LongTermMemory()
         self._memory_inited = False
 
@@ -1291,16 +1293,14 @@ class LLMController(BaseController):
 
     async def _get_system_prompt_keywords(self, inputs: Any, user_id: str):
         result = {}
-        if self._enable_long_term_mem or self._enable_mem_variables:
-            if not self._memory_inited:
-                await self._init_memory_config()
+        if self._enable_memory:
             memory_keywords = await self._get_keywords_from_memory(inputs, user_id)
             result.update(memory_keywords)
         return result
 
     async def _get_keywords_from_memory(self, inputs: Any, user_id: str):
         result = {}
-        scope_id = f"{self._config.id}"
+        scope_id = f"{self.config.memory_scope_id}"
         if isinstance(inputs, str):
             query = inputs
         elif isinstance(inputs, dict):
@@ -1308,12 +1308,11 @@ class LLMController(BaseController):
         else:
             query = ""
         logger.info(f"scope_id: {scope_id} | user_id: {user_id} | inputs: {inputs}")
-        memory_engine = LongTermMemory()
-        if not memory_engine:
+        if not self._long_term_memory_instance:
             return result
         if user_id and scope_id:
             if self._enable_mem_variables:
-                memory_variables = await memory_engine.get_variables(
+                memory_variables = await self._long_term_memory_instance.get_variables(
                     user_id=user_id,
                     scope_id=scope_id
                 )
@@ -1330,7 +1329,7 @@ class LLMController(BaseController):
                 if not self._enable_long_term_mem:
                     logger.info("[LongTermMemory] not enable long_term_memory")
                     return result
-                long_term_memory = await memory_engine.search_user_mem(
+                long_term_memory = await self._long_term_memory_instance.search_user_mem(
                     user_id=user_id,
                     scope_id=scope_id,
                     query=query,
@@ -1445,17 +1444,6 @@ class LLMController(BaseController):
             f"no match found for node_id={node_ids}"
         )
         return None
-
-    async def _init_memory_config(self):
-        scope_id = f"{self.config.id}"
-        memory_scope_config = self.config.memory_config
-        logger.info(f"When init Memory Engine, scope_id: {scope_id}")
-        if memory_scope_config is not None:
-            if (self._long_term_memory_instance and
-                    hasattr(memory_scope_config, 'model_cfg') and
-                    memory_scope_config.model_cfg is not None):
-                await self._long_term_memory_instance.set_scope_config(scope_id, memory_scope_config)
-            self._memory_inited = True
 
     def _find_plugin_id_by_name(self, tool_name: str) -> Optional[str]:
         config = self.config
