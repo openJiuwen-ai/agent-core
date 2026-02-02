@@ -159,3 +159,29 @@ class TestToolComponent:
         workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         invoke_result = await flow.invoke({"query": "你好"}, workflow_session, workflow_context)
         assert invoke_result.result["response"] == "{'res': '你好', 'info': 789}"
+
+    @pytest.mark.asyncio
+    async def test_invoke_workflow_with_start_tool_end_with_compatible_interface(self):
+        flow = Workflow(card=WorkflowCard(name="tool", id="mock", version="1.0"))
+
+        start_component = Start()
+        end_component = End({"responseTemplate": "{{output}}"})
+
+        tool_component = ToolComponent(ToolComponentConfig())
+        tool_component.bind_tool(test_local_function)
+
+        flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}", "name": "${name}"})
+        flow.set_end_comp("e", end_component,
+                          inputs_schema={"output": "${tool.data}"})
+        flow.add_workflow_comp("tool", tool_component, inputs_schema={"a": "${s.query}", "b": "${s.name}"})
+
+        flow.add_connection("s", "tool")
+        flow.add_connection("tool", "e")
+
+        session_id = "test_tool_2"
+        config = ContextEngineConfig()
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="tool_workflow")
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
+        invoke_result = await flow.invoke({"query": "你好"}, workflow_session, workflow_context)
+        assert invoke_result.result["response"] == "{'res': '你好', 'info': 789}"

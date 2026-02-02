@@ -99,18 +99,18 @@ class ToolComponent(ComponentComposable):
         super().__init__()
         self._config = config
         tool_id = self._config.tool_id
-        if tool_id is None:
-            raise build_error(
-                StatusCode.COMPONENT_TOOL_INIT_FAILED,
-                error_msg="tool_id in ToolComponentConfig is empty"
-            )
-        from openjiuwen.core.runner import Runner
-        self._tool = Runner.resource_mgr.get_tool(tool_id=tool_id)
+        if tool_id is not None:
+            from openjiuwen.core.runner import Runner
+            self._tool = Runner.resource_mgr.get_tool(tool_id=tool_id)
+
+    def to_executable(self) -> Executable:
         if self._tool is None:
             raise build_error(
                 StatusCode.COMPONENT_TOOL_INIT_FAILED,
-                error_msg=f"{tool_id} is not found in runner"
+                error_msg="tool component not bind a valid tool"
             )
-
-    def to_executable(self) -> Executable:
         return ToolExecutable(self._config).set_tool(self._tool)
+
+    def bind_tool(self, tool: Tool):
+        self._tool = tool
+        return self
