@@ -80,7 +80,7 @@ class LogConfig:
         return log_path
 
     def _get_base_config(self, log_file: str, output: List[str] = None) -> Dict[str, Any]:
-        from .config_manager import name_to_level
+        from openjiuwen.core.common.logging.default.config_manager import name_to_level
 
         level_str = self._log_config.get("level", "INFO").upper()
         level_value = name_to_level.get(level_str, 20)
