@@ -635,7 +635,7 @@ class LLMExecutable(ComponentExecutable):
                                                             self._config.output_config)
             return formatted_res
         except BaseError as e:
-            if e.error_code == StatusCode.COMPONENT_LLM_CONFIG_INVALID.code:
+            if e.code == StatusCode.COMPONENT_LLM_CONFIG_INVALID.code:
                 raise build_error(
                     StatusCode.COMPONENT_LLM_EXECUTION_PROCESS_ERROR,
                     error_msg=e.message,
