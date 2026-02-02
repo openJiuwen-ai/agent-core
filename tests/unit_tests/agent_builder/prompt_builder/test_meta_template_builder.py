@@ -2,17 +2,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import List, AsyncIterator, Union, Optional
-from unittest.mock import patch
 
 import pytest
 
-import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
+import openjiuwen.dev_tools.prompt_builder.builder.prompt_zh as TEMPLATE_ZH
 from openjiuwen.dev_tools.prompt_builder import MetaTemplateBuilder
 from openjiuwen.dev_tools.prompt_builder.builder.meta_template_builder import META_TEMPLATE_NAME_PREFIX
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
-    ModelRequestConfig, ModelClientConfig, AssistantMessage, Model, BaseModelClient,
+    ModelRequestConfig, ModelClientConfig, AssistantMessage, BaseModelClient,
     BaseMessage, BaseOutputParser, AssistantMessageChunk
 )
 from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
@@ -104,22 +103,22 @@ async def test_build_with_default_meta_template():
     )
     response = await builder.build(prompt="你是一个旅行助手")
     assert response == (
-        TEMPLATE.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE.content[0].content +
-        TEMPLATE.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE.format(
+        TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE.content[0].content +
+        TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE.format(
             dict(instruction="你是一个旅行助手")).content[0].content
     )
 
     response = await builder.build(prompt="你是一个旅行助手", template_type="general")
     assert response == (
-        TEMPLATE.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE.content[0].content +
-        TEMPLATE.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE.format(
+        TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE.content[0].content +
+        TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE.format(
             dict(instruction="你是一个旅行助手")).content[0].content
     )
 
     response = await builder.build(prompt="你是一个旅行助手", template_type="plan")
     assert response == (
-        TEMPLATE.PROMPT_BUILD_PLAN_META_SYSTEM_TEMPLATE.content[0].content +
-        TEMPLATE.PROMPT_BUILD_PLAN_META_USER_TEMPLATE.format(
+        TEMPLATE_ZH.PROMPT_BUILD_PLAN_META_SYSTEM_TEMPLATE.content[0].content +
+        TEMPLATE_ZH.PROMPT_BUILD_PLAN_META_USER_TEMPLATE.format(
             dict(instruction="你是一个旅行助手", tools="None")).content[0].content
     )
 
