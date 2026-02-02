@@ -28,11 +28,19 @@ class McpServerResource:
     expiry_time: Optional[float] = None
 
 
+@dataclass
+class SysOpToolResource:
+    sys_op_id: str
+    tool_ids: list[str]
+    last_update_time: Any
+
+
 class ToolMgr:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
         self._mcp_server_name_to_ids: dict[str, list[str]] = {}
         self._mcp_server_resources: dict[str, McpServerResource] = {}
+        self._sys_op_resources: dict[str, SysOpToolResource] = {}
 
     def add_tool(self, tool_id: str, tool: Tool) -> None:
         if self._tools.get(tool_id) is not None:
@@ -133,6 +141,21 @@ class ToolMgr:
             if not ids:
                 self._mcp_server_name_to_ids.pop(mcp_server_resource.config.server_name)
         return mcp_server_resource.tool_ids
+
+    def add_sys_operation_tools(self, sys_op_id: str, tool_ids: list[str]) -> None:
+        """Register tools associated with a SysOperation."""
+        if not tool_ids:
+            return
+        self._sys_op_resources[sys_op_id] = SysOpToolResource(
+            sys_op_id=sys_op_id,
+            tool_ids=deepcopy(tool_ids),
+            last_update_time=time.time()
+        )
+
+    def remove_sys_operation_tools(self, sys_op_id: str) -> list[str]:
+        """Unregister and return tool IDs associated with a SysOperation."""
+        resource = self._sys_op_resources.pop(sys_op_id, None)
+        return resource.tool_ids if resource else []
 
     async def refresh_tool_server(self, server_id: str, skip_not_exist: bool = False, force: bool = False) -> list[
         McpToolCard]:

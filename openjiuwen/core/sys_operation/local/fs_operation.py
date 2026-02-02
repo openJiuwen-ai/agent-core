@@ -1,18 +1,20 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 import asyncio
 import datetime
 import os
 import pathlib
 import re
-from collections import deque
-from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator, Iterator
+from pydantic import BaseModel, field_validator
 
 import aiofiles
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.sys_operation.fs import BaseFsOperation
+from openjiuwen.core.sys_operation.fs import BaseFsOperation, DEFAULT_READ_STREAM_CHUNK_SIZE, DEFAULT_READ_CHUNK_SIZE, \
+    DEFAULT_UPLOAD_CHUNK_SIZE, DEFAULT_UPLOAD_STREAM_CHUNK_SIZE, DEFAULT_DOWNLOAD_CHUNK_SIZE, \
+    DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE, TAIL_CHUNK_SIZE
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.registry import operation
 from openjiuwen.core.sys_operation.result import (
@@ -23,11 +25,8 @@ from openjiuwen.core.sys_operation.result import (
     FileSystemItem, FileSystemData, SearchFilesData, DownloadFileChunkData, UploadFileChunkData
 )
 
-SAFE_PATH_PATTERN = re.compile(r'[^\w.-]')
 
-
-@dataclass(frozen=True)
-class _ListItemsSpec:
+class _ListItemsSpec(BaseModel):
     path: str
 
     include_files: bool = True
@@ -40,6 +39,77 @@ class _ListItemsSpec:
     sort_descending: bool = False
 
     file_types: Optional[List[str]] = None
+
+
+class _ReadParams(BaseModel):
+    """Read parameters for file operations."""
+
+    path: str
+    head: Optional[int] = None
+    tail: Optional[int] = None
+    line_range: Optional[Tuple[int, int]] = None
+    is_stream: bool = False
+    encoding: str = "utf-8"
+    mode: Literal['text', 'bytes'] = "text"
+    file_path: Optional[pathlib.Path] = None
+    chunk_size: int = DEFAULT_READ_CHUNK_SIZE
+
+    @field_validator('head', 'tail')
+    @classmethod
+    def validate_non_negative(cls, v):
+        """Validate that head and tail are non-negative."""
+        if v == 0:
+            return None
+        return v
+
+    @field_validator('chunk_size')
+    @classmethod
+    def validate_chunk_size(cls, v, info):
+        """Validate chunk size based on operation type."""
+        # Get is_stream from the values dict if available
+        is_stream = info.data.get('is_stream', False)
+
+        if is_stream:
+            # For streaming operations: use default stream chunk size if 0 or negative
+            if v <= 0:
+                return DEFAULT_READ_STREAM_CHUNK_SIZE
+        else:
+            # For non-streaming operations: use default chunk size if negative, keep 0 as is
+            if v < 0:
+                return DEFAULT_READ_CHUNK_SIZE
+        return v
+
+    def validate_mutually_exclusive(self):
+        """Validate that mutually exclusive parameters are not specified together."""
+        if self.tail is not None:
+            if self.head is not None:
+                raise build_error(
+                    status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                    execution="validate_read_params",
+                    error_msg="tail and head cannot be specified simultaneously"
+                )
+            if self.line_range is not None:
+                raise build_error(
+                    status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                    execution="validate_read_params",
+                    error_msg="tail and line_range cannot be specified simultaneously"
+                )
+        elif self.head is not None and self.line_range is not None:
+            raise build_error(
+                status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                execution="validate_read_params",
+                error_msg="head and line_range cannot be specified simultaneously"
+            )
+
+    def validate_binary_mode(self):
+        """Validate that text mode only parameters are not specified in binary mode."""
+        if self.mode == "bytes":
+            if self.head is not None or self.tail is not None or self.line_range is not None:
+                raise build_error(
+                    status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                    execution="validate_read_params",
+                    error_msg="Parameters 'head', 'tail', and 'line_range' are only supported in text mode"
+                )
 
 
 @operation(name="fs", mode=OperationMode.LOCAL, description="local fs operation")
@@ -55,52 +125,59 @@ class FsOperation(BaseFsOperation):
             tail: Optional[int] = None,
             line_range: Optional[Tuple[int, int]] = None,
             encoding: str = "utf-8",
-            chunk_size: int = 8192,
+            chunk_size: int = DEFAULT_READ_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> ReadFileResult:
         """
         Asynchronously read file with specified mode and parameters.
+        Mutually exclusive parameters: Only one of head, tail, or line_range can be specified.
 
         Args:
             path: Full or relative path to the file to read (required).
             mode: Reading mode - "text" (line-based, default) or "bytes" (raw bytes).
-            head: Number of lines to read from the start (text mode only).
-            tail: Number of lines to read from the end (text mode only).
+            head: Number of lines to read from the start (text mode only).0 is equivalent to None.
+            tail: Number of lines to read from the end (text mode only).0 is equivalent to None.
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
+                  If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
-            chunk_size: Buffer size for bytes mode reading (default: 8192 bytes).
+            chunk_size: Maximum number of bytes to read at once (default: 0, unlimited)
             options: Extended configuration options (dict, optional).
 
         Returns:
             ReadFileResult: Structured result.
         """
         try:
-            file_path = self._resolve_path(path)
-            if not file_path.is_file():
-                return ReadFileResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="read_file",
-                        error_msg=f"File not found: {file_path}")
-                )
+            # Create _ReadParams object
+            read_params = _ReadParams(
+                path=path,
+                head=head,
+                tail=tail,
+                line_range=line_range,
+                is_stream=False,
+                encoding=encoding,
+                mode=mode,
+                chunk_size=chunk_size
+            )
+
+            # Validate binary mode parameters
+            read_params.validate_binary_mode()
+
+            # Validate parameters and resolve path
+            validated_params = await self._validate_and_resolve_path(
+                read_params, "read_file"
+            )
+
+            # Extract validated parameters
+            file_path = validated_params.file_path
 
             if mode == "bytes":
-                async with aiofiles.open(file_path, mode="rb") as f:
-                    final_content = await f.read(chunk_size)
-            elif head is None and tail is None and line_range is None:
-                # Fast path for full text reading
-                async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
-                    final_content = await f.read()
+                final_content = await self._read_bytes(file_path, validated_params.chunk_size)
             else:
-                # Reuse read_file_stream for slicing logic
+                # Line-based operations - lines already contain original line endings
                 lines = []
-                async for res in self.read_file_stream(
-                        path, mode=mode, head=head, tail=tail, line_range=line_range, encoding=encoding
-                ):
-                    if res.code != 0:
-                        return ReadFileResult(code=res.code, message=res.message)
-                    lines.append(res.data.chunk_content)
-                final_content = "\n".join(lines)
+                async for line in FsOperation._read_text_content(validated_params):
+                    lines.append(line)
+                final_content = "".join(lines)
 
             data = ReadFileData(path=str(file_path), content=final_content, mode=mode)
             return ReadFileResult(
@@ -109,12 +186,7 @@ class FsOperation(BaseFsOperation):
                 data=data
             )
         except Exception as e:
-            return ReadFileResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="read_file",
-                    error_msg=str(e))
-            )
+            return self._create_error_result("read_file", str(e), ReadFileResult)
 
     async def read_file_stream(
             self,
@@ -125,18 +197,20 @@ class FsOperation(BaseFsOperation):
             tail: Optional[int] = None,
             line_range: Optional[Tuple[int, int]] = None,
             encoding: str = "utf-8",
-            chunk_size: int = 8192,
+            chunk_size: int = DEFAULT_READ_STREAM_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ReadFileStreamResult]:
         """
         Asynchronously read file streaming with specified mode and parameters.
+        Mutually exclusive parameters: Only one of head, tail, or line_range can be specified.
 
         Args:
             path: Full or relative path to the file to read (required).
             mode: Reading mode - "text" (line-based, default) or "bytes" (raw bytes).
-            head: Number of lines to read from the start (text mode only).
-            tail: Number of lines to read from the end (text mode only).
+            head: Number of lines to read from the start (text mode only).0 is equivalent to None.
+            tail: Number of lines to read from the end (text mode only).0 is equivalent to None.
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
+                  If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
             chunk_size: Buffer size for bytes mode reading (default: 8192 bytes).
             options: Extended configuration options (dict, optional).
@@ -145,79 +219,41 @@ class FsOperation(BaseFsOperation):
             AsyncIterator[ReadFileStreamResult]: Streaming structured results, line-by-line or chunk-by-chunk.
         """
         try:
-            file_path = self._resolve_path(path)
-            if not file_path.is_file():
-                yield ReadFileStreamResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="read_file_stream",
-                        error_msg=f"File not found: {file_path}")
-                )
+            # Create _ReadParams object
+            read_params = _ReadParams(
+                path=path,
+                head=head,
+                tail=tail,
+                line_range=line_range,
+                is_stream=True,
+                encoding=encoding,
+                mode=mode,
+                chunk_size=chunk_size
+            )
+
+            # Validate binary mode parameters
+            read_params.validate_binary_mode()
+
+            # Validate parameters and resolve path
+            validated_params = await self._validate_and_resolve_path(
+                read_params, "read_file_stream"
+            )
+
+            # Extract validated parameters
+            file_path = validated_params.file_path
+
+            # bytes mode
+            if mode != "text":
+                async for chunk in self._read_bytes_stream(file_path, validated_params.chunk_size):
+                    yield chunk
                 return
 
-            if mode == "text":
-                if tail is not None:
-                    buf = deque(maxlen=tail)
-                    async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
-                        async for line in f:
-                            buf.append(line.rstrip("\n"))
-                    for i, content in enumerate(buf):
-                        yield ReadFileStreamResult(
-                            code=StatusCode.SUCCESS.code,
-                            message=StatusCode.SUCCESS.errmsg,
-                            data=ReadFileChunkData(
-                                path=str(file_path), chunk_content=content, mode=mode,
-                                chunk_size=len(content.encode(encoding)), chunk_index=i,
-                                is_last_chunk=(i == len(buf) - 1)
-                            )
-                        )
-                    return
+            # text mode
+            async for chunk in self._stream_text_file(validated_params):
+                yield chunk
 
-                async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
-                    index = 0
-                    async for line in f:
-                        content_str = line.rstrip("\n")
-                        line_no = index + 1
-                        if line_range:
-                            start, end = line_range
-                            if not (start <= line_no <= end):
-                                index += 1
-                                continue
-                        elif head is not None and index >= head:
-                            break
-
-                        yield ReadFileStreamResult(
-                            code=StatusCode.SUCCESS.code,
-                            message=StatusCode.SUCCESS.errmsg,
-                            data=ReadFileChunkData(
-                                path=str(file_path), chunk_content=content_str, mode=mode,
-                                chunk_size=len(content_str.encode(encoding)), chunk_index=index, is_last_chunk=False
-                            )
-                        )
-                        index += 1
-            else:
-                async with aiofiles.open(file_path, mode="rb") as f:
-                    index = 0
-                    while True:
-                        chunk_bytes = await f.read(chunk_size)
-                        if not chunk_bytes:
-                            break
-                        yield ReadFileStreamResult(
-                            code=StatusCode.SUCCESS.code,
-                            message=StatusCode.SUCCESS.errmsg,
-                            data=ReadFileChunkData(
-                                path=str(file_path), chunk_content=chunk_bytes, mode=mode,
-                                chunk_size=len(chunk_bytes), chunk_index=index, is_last_chunk=False
-                            )
-                        )
-                        index += 1
         except Exception as e:
-            yield ReadFileStreamResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="read_file_stream",
-                    error_msg=str(e))
-            )
+            yield self._create_error_result("read_file_stream", str(e), ReadFileStreamResult)
 
     async def write_file(
             self,
@@ -252,19 +288,11 @@ class FsOperation(BaseFsOperation):
         try:
             file_path = self._resolve_path(path, create_parent=True)
             if file_path.is_dir():
-                return WriteFileResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="write_file",
-                        error_msg=f"Target path is a directory: {file_path}")
-                )
+                return self._create_error_result("write_file", f"Target path is a directory:"
+                                                               f" {file_path}", WriteFileResult)
             if not create_if_not_exist and not file_path.exists():
-                return WriteFileResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="write_file",
-                        error_msg=f"File does not exist: {file_path}")
-                )
+                return self._create_error_result("write_file", f"File does not exist: {file_path}",
+                                                 WriteFileResult)
 
             if mode == "text":
                 txt = str(content)
@@ -287,12 +315,7 @@ class FsOperation(BaseFsOperation):
                 data=WriteFileData(path=str(file_path), size=len(data_bytes), mode=mode)
             )
         except Exception as e:
-            return WriteFileResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="write_file",
-                    error_msg=str(e))
-            )
+            return self._create_error_result("write_file", str(e), WriteFileResult)
 
     async def upload_file(
             self,
@@ -302,7 +325,7 @@ class FsOperation(BaseFsOperation):
             overwrite: bool = False,
             create_parent_dirs: bool = True,
             preserve_permissions: bool = True,
-            chunk_size: int = 1024 * 1024,
+            chunk_size: int = DEFAULT_UPLOAD_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> UploadFileResult:
         """
@@ -314,7 +337,7 @@ class FsOperation(BaseFsOperation):
             overwrite: Whether to overwrite existing target file (default: False).
             create_parent_dirs: Whether to auto-create target parent directories (default: True).
             preserve_permissions: Whether to preserve file permissions (default: True, Unix/Linux only).
-            chunk_size: Chunk size for cross-filesystem transfers (default: 1MB, bytes).
+            chunk_size: Maximum number of bytes to upload at once (default: 0, unlimited)
             options: Extended configuration options (dict, optional).
 
         Returns:
@@ -324,19 +347,9 @@ class FsOperation(BaseFsOperation):
             src = pathlib.Path(local_path).expanduser().resolve()
             dst = self._resolve_path(target_path, create_parent=create_parent_dirs)
             if not src.is_file():
-                return UploadFileResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="upload_file",
-                        error_msg=f"Source not found: {src}")
-                )
+                return self._create_error_result("upload_file", f"Source not found: {src}", UploadFileResult)
             if dst.exists() and not overwrite:
-                return UploadFileResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="upload_file",
-                        error_msg=f"Target exists: {dst}")
-                )
+                return self._create_error_result("upload_file", f"Target exists: {dst}", UploadFileResult)
 
             size = await self._transfer_file(src, dst, chunk_size)
             if preserve_permissions:
@@ -347,12 +360,7 @@ class FsOperation(BaseFsOperation):
                 data=UploadFileData(local_path=str(src), target_path=str(dst), size=size)
             )
         except Exception as e:
-            return UploadFileResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="upload_file",
-                    error_msg=str(e))
-            )
+            return self._create_error_result("upload_file", str(e), UploadFileResult)
 
     async def upload_file_stream(
             self,
@@ -362,7 +370,7 @@ class FsOperation(BaseFsOperation):
             overwrite: bool = False,
             create_parent_dirs: bool = True,
             preserve_permissions: bool = True,
-            chunk_size: int = 1024 * 1024,
+            chunk_size: int = DEFAULT_UPLOAD_STREAM_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[UploadFileStreamResult]:
         """
@@ -384,28 +392,21 @@ class FsOperation(BaseFsOperation):
             src = pathlib.Path(local_path).expanduser().resolve()
             dst = self._resolve_path(target_path, create_parent=create_parent_dirs)
             if not src.is_file():
-                yield UploadFileStreamResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="upload_file_stream",
-                        error_msg=f"Source not found: {src}")
-                )
+                yield self._create_error_result("upload_file_stream", f"Source not found: {src}",
+                                                UploadFileStreamResult)
                 return
             if dst.exists() and not overwrite:
-                yield UploadFileStreamResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="upload_file_stream",
-                        error_msg=f"Target exists: {dst}")
-                )
+                yield self._create_error_result("upload_file_stream", f"Target exists: {dst}", UploadFileStreamResult)
                 return
 
             async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
                 index = 0
-                while True:
-                    chunk_bytes = await src_f.read(chunk_size)
-                    if not chunk_bytes:
-                        break
+                # Read first chunk
+                chunk_bytes = await src_f.read(chunk_size)
+                while chunk_bytes:
+                    # Read next chunk to check if this is the last one
+                    next_chunk = await src_f.read(chunk_size)
+                    is_last = not next_chunk
 
                     await dst_f.write(chunk_bytes)
                     yield UploadFileStreamResult(
@@ -413,20 +414,18 @@ class FsOperation(BaseFsOperation):
                         message=StatusCode.SUCCESS.errmsg,
                         data=UploadFileChunkData(
                             local_path=str(src), target_path=str(dst), chunk_size=len(chunk_bytes), chunk_index=index,
-                            is_last_chunk=False
+                            is_last_chunk=is_last
                         )
                     )
                     index += 1
 
+                    # Move to next chunk
+                    chunk_bytes = next_chunk
+
             if preserve_permissions:
                 self._copy_permissions(src, dst)
         except Exception as e:
-            yield UploadFileStreamResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="upload_file_stream",
-                    error_msg=str(e))
-            )
+            yield self._create_error_result("upload_file_stream", str(e), UploadFileStreamResult)
 
     async def download_file(
             self,
@@ -436,7 +435,7 @@ class FsOperation(BaseFsOperation):
             overwrite: bool = False,
             create_parent_dirs: bool = True,
             preserve_permissions: bool = True,
-            chunk_size: int = 1024 * 1024,
+            chunk_size: int = DEFAULT_DOWNLOAD_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> DownloadFileResult:
         """
@@ -448,7 +447,7 @@ class FsOperation(BaseFsOperation):
             overwrite: Whether to overwrite existing target file (default: False).
             create_parent_dirs: Whether to auto-create target parent directories (default: True).
             preserve_permissions: Whether to preserve file permissions (default: True, Unix/Linux only).
-            chunk_size: Chunk size for cross-filesystem transfers (default: 1MB, bytes).
+            chunk_size: Maximum number of bytes to download at once (default: 0, unlimited)
             options: Extended configuration options (dict, optional).
 
         Returns:
@@ -458,19 +457,11 @@ class FsOperation(BaseFsOperation):
             src = self._resolve_path(source_path)
             dst = pathlib.Path(local_path).expanduser().resolve()
             if not src.is_file():
-                return DownloadFileResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="download_file",
-                        error_msg=f"Source not found: {src}")
-                )
+                return self._create_error_result("download_file", f"Source not found: {src}",
+                                                 DownloadFileResult)
             if dst.exists() and not overwrite:
-                return DownloadFileResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="download_file",
-                        error_msg=f"Destination exists: {dst}")
-                )
+                return self._create_error_result("download_file", f"Destination exists: {dst}",
+                                                 DownloadFileResult)
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -483,12 +474,7 @@ class FsOperation(BaseFsOperation):
                 data=DownloadFileData(source_path=str(src), local_path=str(dst), size=size)
             )
         except Exception as e:
-            return DownloadFileResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="download_file",
-                    error_msg=str(e))
-            )
+            return self._create_error_result("download_file", str(e), DownloadFileResult)
 
     async def download_file_stream(
             self,
@@ -498,7 +484,7 @@ class FsOperation(BaseFsOperation):
             overwrite: bool = False,
             create_parent_dirs: bool = True,
             preserve_permissions: bool = True,
-            chunk_size: int = 1024 * 1024,
+            chunk_size: int = DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[DownloadFileStreamResult]:
         """
@@ -520,30 +506,24 @@ class FsOperation(BaseFsOperation):
             src = self._resolve_path(source_path)
             dst = pathlib.Path(local_path).expanduser().resolve()
             if not src.is_file():
-                yield DownloadFileStreamResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="download_file_stream",
-                        error_msg=f"Source not found: {src}")
-                )
+                yield self._create_error_result("download_file_stream", f"Source not found: {src}",
+                                                DownloadFileStreamResult)
                 return
             if dst.exists() and not overwrite:
-                yield DownloadFileStreamResult(
-                    code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                        execution="download_file_stream",
-                        error_msg=f"Destination exists: {dst}")
-                )
+                yield self._create_error_result("download_file_stream", f"Destination exists: {dst}",
+                                                DownloadFileStreamResult)
                 return
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
 
             async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
                 index = 0
-                while True:
-                    chunk_bytes = await src_f.read(chunk_size)
-                    if not chunk_bytes:
-                        break
+                # Read first chunk
+                chunk_bytes = await src_f.read(chunk_size)
+                while chunk_bytes:
+                    # Read next chunk to check if this is the last one
+                    next_chunk = await src_f.read(chunk_size)
+                    is_last = not next_chunk
 
                     await dst_f.write(chunk_bytes)
                     yield DownloadFileStreamResult(
@@ -551,20 +531,18 @@ class FsOperation(BaseFsOperation):
                         message=StatusCode.SUCCESS.errmsg,
                         data=DownloadFileChunkData(
                             source_path=str(src), local_path=str(dst), chunk_size=len(chunk_bytes), chunk_index=index,
-                            is_last_chunk=False
+                            is_last_chunk=is_last
                         )
                     )
                     index += 1
 
+                    # Move to next chunk
+                    chunk_bytes = next_chunk
+
             if preserve_permissions:
                 self._copy_permissions(src, dst)
         except Exception as e:
-            yield DownloadFileStreamResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="download_file_stream",
-                    error_msg=str(e))
-            )
+            yield self._create_error_result("download_file_stream", str(e), DownloadFileStreamResult)
 
     async def list_files(
             self,
@@ -618,12 +596,7 @@ class FsOperation(BaseFsOperation):
                                     max_depth=max_depth)
             )
         except Exception as e:
-            return ListFilesResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="list_files",
-                    error_msg=str(e))
-            )
+            return self._create_error_result("list_files", str(e), ListFilesResult)
 
     async def list_directories(
             self,
@@ -682,13 +655,7 @@ class FsOperation(BaseFsOperation):
             )
 
         except Exception as e:
-            return ListDirsResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="list_directories",
-                    error_msg=str(e)
-                ),
-            )
+            return self._create_error_result("list_directories", str(e), ListDirsResult)
 
     async def search_files(
             self,
@@ -727,12 +694,7 @@ class FsOperation(BaseFsOperation):
                 )
             )
         except Exception as e:
-            return SearchFilesResult(
-                code=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-                    execution="search_files",
-                    error_msg=str(e))
-            )
+            return self._create_error_result("search_files", str(e), SearchFilesResult)
 
     def _search_files_internal_sync(
             self,
@@ -812,13 +774,20 @@ class FsOperation(BaseFsOperation):
         """Asynchronously copy file contents from src to dst in chunks. Returns total size."""
         total_size = 0
         async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
-            while True:
-                chunk = await src_f.read(chunk_size)
-                if not chunk:
-                    break
+            if chunk_size <= 0:
+                # Read entire file at once
+                content = await src_f.read()
+                await dst_f.write(content)
+                total_size = len(content)
+            else:
+                # Read in chunks
+                while True:
+                    chunk = await src_f.read(chunk_size)
+                    if not chunk:
+                        break
 
-                await dst_f.write(chunk)
-                total_size += len(chunk)
+                    await dst_f.write(chunk)
+                    total_size += len(chunk)
         return total_size
 
     @staticmethod
@@ -897,3 +866,422 @@ class FsOperation(BaseFsOperation):
 
         self._sort_items(items, spec.sort_by, spec.sort_descending)
         return items
+
+    @staticmethod
+    def _create_error_result(execution: str, error_msg: str, result_class: Any):
+        """
+        Create error result for file operations.
+
+        Args:
+            execution: The operation being executed.
+            error_msg: The error message.
+            result_class: The result class to instantiate.
+
+        Returns:
+            An instance of result_class with error information.
+        """
+        error_code = StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code
+        error_message = StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
+            execution=execution,
+            error_msg=error_msg
+        )
+        return result_class(
+            code=error_code,
+            message=error_message
+        )
+
+    async def _validate_and_resolve_path(
+            self,
+            read_params: _ReadParams,
+            execution: str,
+    ):
+        """
+        Validate parameters and resolve path for file operations.
+        
+        Args:
+            read_params: ReadParams object with parameters to validate
+            execution: Name of the operation being executed
+            
+        Returns:
+            _ReadParams: Validated ReadParams object with resolved file_path
+        """
+        # Validate mutually exclusive parameters
+        read_params.validate_mutually_exclusive()
+
+        # Resolve path
+        file_path = self._resolve_path(read_params.path)
+        if not file_path.is_file():
+            raise build_error(
+                status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                execution=execution,
+                error_msg=f"File not found: {file_path}"
+            )
+
+        # Create a new _ReadParams with resolved file_path
+        validated_params = read_params.model_copy()
+        validated_params.file_path = file_path
+
+        return validated_params
+
+    @staticmethod
+    async def _read_bytes(file_path: pathlib.Path, chunk_size: int):
+        """
+        Read file in binary mode.
+
+        Args:
+            file_path: The path to the file.
+            chunk_size: Buffer size for reading. Pass 0 or -1 to read the entire file.
+
+        Returns:
+            The read bytes content.
+        """
+        async with aiofiles.open(file_path, mode="rb") as f:
+            if chunk_size <= 0:
+                return await f.read()
+            return await f.read(chunk_size)
+
+    @staticmethod
+    async def _read_bytes_stream(file_path: pathlib.Path, chunk_size: int):
+        """
+        Read file in binary mode as a stream.
+
+        Args:
+            file_path: The path to the file.
+            chunk_size: Buffer size for reading. Pass 0 or -1 to use the default 8192 bytes.
+                       Pass a positive value to specify the chunk size for each read operation.
+
+        Yields:
+            ReadFileStreamResult with chunk data.
+        
+        Note:
+            Streaming always reads the entire file, as the caller can cancel at any time.
+            The chunk_size parameter only affects how much data is read at once per yield.
+        """
+        # Use default chunk size if 0 or -1 is passed
+        if chunk_size <= 0:
+            chunk_size = DEFAULT_READ_STREAM_CHUNK_SIZE
+
+        async with aiofiles.open(file_path, mode="rb") as f:
+            index = 0
+            while True:
+                chunk_bytes = await f.read(chunk_size)
+                if not chunk_bytes:
+                    break
+                yield ReadFileStreamResult(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=ReadFileChunkData(
+                        path=str(file_path), chunk_content=chunk_bytes, mode="bytes",
+                        chunk_size=len(chunk_bytes), chunk_index=index, is_last_chunk=False
+                    )
+                )
+                index += 1
+
+    @staticmethod
+    async def _read_head(file_path: pathlib.Path, head: int, encoding: str):
+        """
+        Read the first n lines of a file as a generator.
+        
+        Args:
+            file_path: Path to the file
+            head: Number of lines to read from the start
+            encoding: File encoding
+            
+        Yields:
+            Lines from the start of the file (with original line endings)
+        """
+        if head <= 0:
+            return
+
+        count = 0
+
+        async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
+            content = await f.read()
+            lines = content.splitlines(True)
+            for line in lines:
+                if count >= head:
+                    break
+                yield line
+                count += 1
+
+    @staticmethod
+    async def _read_line_range(file_path: pathlib.Path, start: int, end: int, encoding: str):
+        """
+        Read lines from a specific range in a file as a generator.
+        
+        Args:
+            file_path: Path to the file
+            start: Start line number (1-indexed)
+            end: End line number (1-indexed, inclusive)
+            encoding: File encoding
+            
+        Yields:
+            Lines within the specified range (with original line endings)
+        """
+        if start <= 0 or end <= 0 or start > end:
+            return
+
+        current_line = 1
+
+        async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
+            content = await f.read()
+            for line in content.splitlines(True):
+                if current_line >= start and current_line <= end:
+                    yield line
+                elif current_line > end:
+                    break
+                current_line += 1
+
+    @staticmethod
+    async def _read_tail(
+            file_path: pathlib.Path,
+            tail: int,
+            encoding: str,
+    ):
+        """
+        Read the last n lines of a file as a generator.
+        
+        Args:
+            file_path: Path to the file
+            tail: Number of lines to read from the end
+            encoding: File encoding
+            
+        Yields:
+            Lines from the end of the file (with original line endings preserved)
+        """
+        if tail <= 0:
+            return
+
+        lines_found: list[str] = []
+        byte_buffer = b""
+
+        async with aiofiles.open(file_path, mode="rb") as f:
+            await f.seek(0, os.SEEK_END)
+            current_pos = await f.tell()
+
+            while current_pos > 0 and len(lines_found) < tail:
+                read_size = min(TAIL_CHUNK_SIZE, current_pos)
+                current_pos -= read_size
+
+                await f.seek(current_pos)
+                # Read a chunk and prepend it to the buffer
+                byte_buffer = (await f.read(read_size)) + byte_buffer
+
+                try:
+                    # Attempt decode. UnicodeDecodeError occurs if a char is split across chunks.
+                    text = byte_buffer.decode(encoding)
+                except UnicodeDecodeError:
+                    if current_pos > 0:
+                        continue  # Need more data to complete the multi-byte char
+                    text = byte_buffer.decode(encoding, errors="replace")
+
+                lines = text.splitlines(True)
+
+                # If not at the start, the first line segment is partial (belongs to an earlier block).
+                if current_pos > 0 and lines:
+                    byte_buffer = lines.pop(0).encode(encoding)
+                else:
+                    byte_buffer = b""
+
+                if lines:
+                    # Prepend found lines to the list
+                    lines_found = lines + lines_found
+                    if len(lines_found) > tail:
+                        lines_found = lines_found[-tail:]
+
+            # Finish up any leftover in the buffer (first line of the file)
+            if byte_buffer and len(lines_found) < tail:
+                text = byte_buffer.decode(encoding, errors="replace")
+                lines_found = text.splitlines(True) + lines_found
+
+        # Yield results starting from the beginning of the captured tail
+        for line in lines_found[-tail:]:
+            yield line
+
+    @staticmethod
+    async def _read_full(file_path: pathlib.Path, encoding: str):
+        """
+        Read the full file as a generator.
+        
+        Args:
+            file_path: Path to the file
+            encoding: File encoding
+            
+        Yields:
+            Lines from the file (with original line endings)
+        """
+        async with aiofiles.open(file_path, mode="r", encoding=encoding) as f:
+            async for line in f:
+                yield line
+
+    @staticmethod
+    async def _read_text_content(read_params: _ReadParams):
+        """
+        Unified text content reader that handles all cases (head, tail, range, full).
+        
+        Args:
+            read_params: Read parameters including file path, reading mode, etc.
+            
+        Yields:
+            Lines of text content based on the specified reading mode
+        """
+        file_path = read_params.file_path
+        encoding = read_params.encoding
+        head = read_params.head
+        tail = read_params.tail
+        line_range = read_params.line_range
+
+        # tail mode
+        if tail is not None:
+            async for line in FsOperation._read_tail(file_path, tail, encoding):
+                yield line
+            return
+
+        # head mode
+        if head is not None:
+            async for line in FsOperation._read_head(file_path, head, encoding):
+                yield line
+            return
+
+        # line_range mode
+        if line_range is not None:
+            start, end = line_range
+            async for line in FsOperation._read_line_range(file_path, start, end, encoding):
+                yield line
+            return
+
+        # full file mode
+        async for line in FsOperation._read_full(file_path, encoding):
+            yield line
+
+    @staticmethod
+    async def _stream_text_file(read_params: _ReadParams):
+        file_path = read_params.file_path
+        encoding = read_params.encoding
+        mode = read_params.mode
+        head = read_params.head
+        tail = read_params.tail
+        line_range = read_params.line_range
+
+        # Edge case: negative tail
+        if tail is not None and tail < 0:
+            yield ReadFileStreamResult(
+                code=StatusCode.SUCCESS.code,
+                message=StatusCode.SUCCESS.errmsg,
+                data=ReadFileChunkData(
+                    path=str(file_path),
+                    chunk_content="",
+                    mode=mode,
+                    chunk_size=0,
+                    chunk_index=0,
+                    is_last_chunk=True,
+                ),
+            )
+            return
+
+        # Edge case: negative head
+        if head is not None and head < 0:
+            yield ReadFileStreamResult(
+                code=StatusCode.SUCCESS.code,
+                message=StatusCode.SUCCESS.errmsg,
+                data=ReadFileChunkData(
+                    path=str(file_path),
+                    chunk_content="",
+                    mode=mode,
+                    chunk_size=0,
+                    chunk_index=0,
+                    is_last_chunk=True,
+                ),
+            )
+            return
+
+        # Edge case: invalid line_range
+        if line_range is not None:
+            start, end = line_range
+            if start <= 0 or end <= 0 or start > end:
+                yield ReadFileStreamResult(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=ReadFileChunkData(
+                        path=str(file_path),
+                        chunk_content="",
+                        mode=mode,
+                        chunk_size=0,
+                        chunk_index=0,
+                        is_last_chunk=True,
+                    ),
+                )
+                return
+
+        # Tail mode: needs to collect all lines first to set is_last_chunk correctly
+        if tail is not None:
+            tail_lines = []
+            # Collect all tail lines
+            async for content in FsOperation._read_text_content(read_params):
+                tail_lines.append(content)
+
+            # Yield lines with proper is_last_chunk flag
+            for i, content in enumerate(tail_lines):
+                yield ReadFileStreamResult(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=ReadFileChunkData(
+                        path=str(file_path),
+                        chunk_content=content,
+                        mode=mode,
+                        chunk_size=len(content.encode(encoding)),
+                        chunk_index=i,
+                        is_last_chunk=(i == len(tail_lines) - 1),
+                    ),
+                )
+
+            # If no lines, return empty content
+            if not tail_lines:
+                yield ReadFileStreamResult(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=ReadFileChunkData(
+                        path=str(file_path),
+                        chunk_content="",
+                        mode=mode,
+                        chunk_size=0,
+                        chunk_index=0,
+                        is_last_chunk=True,
+                    ),
+                )
+            return
+
+        # For head, line_range, and full file modes: use real-time streaming
+        # Use _read_text_content for all reading logic with peek-ahead to detect last chunk
+        index = 0
+        line_iter = FsOperation._read_text_content(read_params)
+
+        # Get the first line
+        current_line = await anext(line_iter, None)
+        if current_line is None:
+            # Empty result
+            return
+
+        while True:
+            # Peek at the next line to determine if current is last
+            next_line = await anext(line_iter, None)
+            is_last = (next_line is None)
+
+            yield ReadFileStreamResult(
+                code=StatusCode.SUCCESS.code,
+                message=StatusCode.SUCCESS.errmsg,
+                data=ReadFileChunkData(
+                    path=str(file_path),
+                    chunk_content=current_line,
+                    mode=mode,
+                    chunk_size=len(current_line.encode(encoding)),
+                    chunk_index=index,
+                    is_last_chunk=is_last,
+                ),
+            )
+
+            if is_last:
+                break
+
+            current_line = next_line
+            index += 1

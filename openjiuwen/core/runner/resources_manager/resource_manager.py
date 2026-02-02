@@ -31,7 +31,7 @@ from openjiuwen.core.runner.resources_manager.tag_manager import TagMgr
 from openjiuwen.core.session import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
-from openjiuwen.core.sys_operation import SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation import SysOperationCard, SysOperation, SysOperationToolAdapter
 from openjiuwen.core.workflow.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
 
@@ -613,10 +613,10 @@ class ResourceMgr:
                                          resource_type="prompt")
 
     def add_sys_operation(self,
-                          card: SysOperationCard,
+                          card: SysOperationCard | List[SysOperationCard],
                           *,
                           tag: Optional[Tag | List[Tag]] = None
-                          ) -> Result[SysOperationCard, Exception]:
+                          ) -> Union[Result[SysOperationCard, Exception], List[Result[SysOperationCard, Exception]]]:
         """Add sys operation via SysOperationCard (with optional tags).
 
         Args:
@@ -624,21 +624,32 @@ class ResourceMgr:
             tag: Optional single/tag list for classification
 
         Returns:
-            Result[SysOperationCard, Exception]: Success card or error
+            Result[SysOperationCard, Exception] or List[Result[SysOperationCard, Exception]]]:
+             Success card or error
         """
-        self._inner_validate_resource_card(card, "sys_operation", SysOperationCard)
-        if tag is not None:
-            self._inner_validate_tag(tag)
-        return self._inner_add_resource(resource_id=card.id,
-                                        resource=SysOperation(card),
-                                        resource_card=card,
-                                        tag=tag,
-                                        resource_type="sys_operation")
+        cards = [card] if isinstance(card, SysOperationCard) else (card or [])
+
+        results = []
+        for single_card in cards:
+            self._inner_validate_resource_card(single_card, "sys_operation", SysOperationCard)
+            if tag is not None:
+                self._inner_validate_tag(tag)
+            instance = SysOperation(single_card)
+            res = self._inner_add_resource(resource_id=single_card.id,
+                                           resource=instance,
+                                           resource_card=single_card,
+                                           tag=tag,
+                                           resource_type="sys_operation")
+            if res.is_ok():
+                self._register_sys_operation_tools(single_card, instance, tag=tag)
+            results.append(res)
+
+        return results[0] if isinstance(card, SysOperationCard) else results
 
     def remove_sys_operation(self,
+                             sys_operation_id: str | List[str],
                              *,
-                             sys_operation_id: Optional[str | List[str]] = None,
-                             tag: Optional[Tag | List[Tag]] = None,
+                             tag: Optional[Tag | List[Tag]] = GLOBAL,
                              tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                              skip_if_tag_not_exists: bool = False,
                              ) -> Union[Result[Optional[SysOperationCard], Exception],
@@ -646,7 +657,7 @@ class ResourceMgr:
         """Remove sys operation(s) by ID/tag (supports batch).
 
         Args:
-            sys_operation_id: Optional single/ID list to remove
+            sys_operation_id: Single ID or list of IDs of sys_operation to remove
             tag: Optional single/tag list filter (if no ID)
             tag_match_strategy: ALL/ANY for tag matching (default: ALL)
             skip_if_tag_not_exists: Ignore missing tags (default: False)
@@ -654,14 +665,44 @@ class ResourceMgr:
         Returns:
             Result/Result list: Removed card(s) or error
         """
-        return self._inner_remove_resources(resource_id=sys_operation_id,
-                                            tag=tag,
-                                            tag_match_strategy=tag_match_strategy,
-                                            skip_if_tag_not_exists=skip_if_tag_not_exists,
-                                            resource_type="sys_operation")
+        results = self._inner_remove_resources(resource_id=sys_operation_id,
+                                               tag=tag,
+                                               tag_match_strategy=tag_match_strategy,
+                                               skip_if_tag_not_exists=skip_if_tag_not_exists,
+                                               resource_type="sys_operation")
+        sys_op_ids = [sys_operation_id] if isinstance(sys_operation_id, str) else (sys_operation_id or [])
+
+        tool_ids_to_remove = []
+        for op_id in sys_op_ids:
+            ids = self._resource_registry.tool().remove_sys_operation_tools(op_id)
+            if ids:
+                tool_ids_to_remove.extend(ids)
+
+        if tool_ids_to_remove:
+            self._inner_remove_resources(resource_id=tool_ids_to_remove,
+                                         tag=tag,
+                                         resource_type="tool", skip_if_tag_not_exists=skip_if_tag_not_exists)
+        return results
+
+    def _register_sys_operation_tools(self, card: SysOperationCard, instance: SysOperation,
+                                      tag: Optional[Tag | List[Tag]] = None):
+        """Automatically register operation methods as tools."""
+        tools = SysOperationToolAdapter.extract_tools(card, instance)
+
+        tool_ids = []
+        # Register each tool
+        for tool_id, local_func in tools:
+            self._inner_add_resource(resource_id=tool_id,
+                                     resource=local_func,
+                                     resource_card=local_func.card,
+                                     tag=tag,
+                                     resource_type="tool")
+            tool_ids.append(tool_id)
+
+        self._resource_registry.tool().add_sys_operation_tools(card.id, tool_ids)
 
     def get_sys_operation(self,
-                          sys_operation_id: Optional[str] = None,
+                          sys_operation_id: str | List[str] = None,
                           *,
                           tag: Optional[Tag | List[Tag]] = None,
                           tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
@@ -670,7 +711,7 @@ class ResourceMgr:
         """Get sys operation(s) by ID/tag.
 
         Args:
-            sys_operation_id: Optional specific operation ID
+            sys_operation_id: Single ID or list of IDs of sys_operation
             tag: Optional single/tag list filter (if no ID)
             tag_match_strategy: ALL/ANY for tag matching (default: ALL)
             session: Optional context session
@@ -681,6 +722,7 @@ class ResourceMgr:
         return self._inner_get_resources(resource_id=sys_operation_id,
                                          tag=tag,
                                          tag_match_strategy=tag_match_strategy,
+                                         session=session,
                                          resource_type="sys_operation")
 
     async def get_tool_infos(self,

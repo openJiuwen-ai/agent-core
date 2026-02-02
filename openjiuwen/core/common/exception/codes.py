@@ -622,6 +622,9 @@ class StatusCode(Enum):
     SYS_OPERATION_CODE_EXECUTION_ERROR = (
         199005,
         "code operation execution error, execution: {execution}, reason: {error_msg}")
+    SYS_OPERATION_REGISTRY_ERROR = (
+        199006,
+        "sys operation registry error, process: {process}, reason: {error_msg}")
 
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.

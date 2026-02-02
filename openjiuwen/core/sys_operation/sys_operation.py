@@ -12,6 +12,32 @@ from openjiuwen.core.sys_operation.registry import OperationRegistry
 
 
 class SysOperationCard(BaseCard):
+    """Configuration card for system operations
+
+    Attributes:
+        mode: Operation mode (local or sandbox)
+        work_config: Local work configuration (required for local mode)
+        gateway_config: Sandbox gateway configuration (required for sandbox mode)
+
+    Examples:
+        # 1. Create a sys operation card with local mode
+        card = SysOperationCard(
+            id="sys_op",
+            mode=OperationMode.LOCAL,
+            work_config=LocalWorkConfig(work_dir="/tmp/test")
+        )
+
+        # 2. Register the operation with resource manager
+        Runner.resource_mgr.add_sys_operation(card)
+
+        # 3. Direct call
+        op = Runner.resource_mgr.get_sys_operation(card.id)
+        await op.fs().write_file("test.txt", "content")
+
+        # 4. Call as LocalFunction Tool (Recommended for Agents)
+        tool = Runner.resource_mgr.get_tool(card.fs.read_file)
+        await tool.invoke({"path": "test.txt"})
+    """
     mode: OperationMode = Field(
         default=OperationMode.LOCAL,
         description="Running mode, available values: local / sandbox"
@@ -39,6 +65,50 @@ class SysOperationCard(BaseCard):
                                   cause=ex) from ex
         return v
 
+    @property
+    def fs(self):
+        return ToolIdProxy(self.id, "fs")
+
+    @property
+    def shell(self):
+        return ToolIdProxy(self.id, "shell")
+
+    @property
+    def code(self):
+        return ToolIdProxy(self.id, "code")
+
+    def __getattr__(self, name):
+        """Dynamic access to operation proxies.
+        
+        Example: card.browser.navigate -> "card_id.browser.navigate"
+        """
+        # Pydantic handles defined fields; __getattr__ is only called for missing ones.
+        return ToolIdProxy(self.id, name)
+
+    @staticmethod
+    def generate_tool_id(card_id: str, op_type: str, method_name: str) -> str:
+        """Centralized tool ID generation for SysOperation methods.
+
+        Format: "{card_id}.{op_type}.{method_name}"
+        """
+        return f"{card_id}.{op_type}.{method_name}"
+
+
+class ToolIdProxy:
+    """A helper for generating tool IDs via attribute access.
+
+    Tool ID format: "{card.id}.{op_type}.{method}"
+
+    Example: card.fs.read_file -> "sys_op.fs.read_file"
+    """
+
+    def __init__(self, card_id: str, op_type: str):
+        self._card_id = card_id
+        self._op_type = op_type
+
+    def __getattr__(self, name: str) -> str:
+        return SysOperationCard.generate_tool_id(self._card_id, self._op_type, name)
+
 
 class SysOperation:
     """SysOperation"""
@@ -52,7 +122,14 @@ class SysOperation:
         self._instances = {}
 
     def __getattr__(self, name):
-        return self._get_operation(name)
+        """Dynamic access to operations.
+        
+        This allows calling custom operations like sys_op.calculator().
+        """
+        # Ensure operation exists before returning lambda to avoid confusing errors
+        if OperationRegistry.get_operation_info(name, self.mode):
+            return lambda: self._get_operation(name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def fs(self):
         return self._get_operation("fs")
@@ -67,13 +144,10 @@ class SysOperation:
         """get operation"""
         if name in self._instances:
             return self._instances[name]
-        operation_info = OperationRegistry.get_operation_info(name, self.mode)
-        if operation_info is None:
+        operation_def = OperationRegistry.get_operation_info(name, self.mode)
+        if operation_def is None:
             return None
-        operation_cls = operation_info.get("cls", None)
-        operation_desc = operation_info.get("description", "")
-        if not (isinstance(operation_cls, type) and callable(operation_cls)):
-            return None
-        instance = operation_cls(name, self.mode, operation_desc, self._run_config)
+            
+        instance = operation_def.create_instance(self._run_config)
         self._instances[name] = instance
         return instance

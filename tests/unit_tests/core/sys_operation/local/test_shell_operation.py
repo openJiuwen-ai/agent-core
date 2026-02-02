@@ -180,3 +180,19 @@ async def test_shell_allowlist(work_dir):
         Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
     finally:
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_shell_list_tools(sys_op):
+    """Test list_tools for Shell operation."""
+    tools = sys_op.shell().list_tools()
+
+    assert len(tools) == 2
+    tool_names = [t.name for t in tools]
+    assert "execute_cmd" in tool_names
+    assert "execute_cmd_stream" in tool_names
+
+    # Verify command parameter
+    exec_tool = next(t for t in tools if t.name == "execute_cmd")
+    assert "command" in exec_tool.input_params["properties"]
+    assert exec_tool.input_params["required"] == ["command"]
