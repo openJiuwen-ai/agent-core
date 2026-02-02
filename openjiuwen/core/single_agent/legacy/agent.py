@@ -377,7 +377,7 @@ class BaseAgent(ABC):
                     name=workflow_card.name,
                     version=workflow_card.version,
                     description=workflow_card.description or "",
-                    inputs={}
+                    input_params=workflow_card.input_params
                 )
 
                 self.agent_config.workflows.append(workflow_schema)
