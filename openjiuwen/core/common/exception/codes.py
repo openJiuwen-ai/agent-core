@@ -591,6 +591,15 @@ class StatusCode(Enum):
     # Foundation - Exception Handling 184000 - 184999
     # Foundation - Support Mcp Tool 185000 - 185999
 
+    # Foundation - Store supporting 186000 - 186100
+    STORE_VECTOR_FIELD_DIM_INVALID = (186000, "dim of vector field is invalid, field={field}, dim={dim}")
+    STORE_VECTOR_FIELD_DIM_MISSING = (186001, "dim of vector field is missing, field={field}, dim={dim}")
+    STORE_VECTOR_PRIMARY_KEY_FIELD_DUPLICATED = (
+        186002,
+        "collection can have at most one primary key field, primary_field={primary_field}, field={field}"
+    )
+    STORE_VECTOR_FIELD_NAME_DUPLICATED = (186003, "field name already exists, field={field}")
+
     # Foundation - Common Utility 188000 - 188999
     COMMON_SSL_CONTEXT_INIT_FAILED = (188000, "common ssl_context initialization failed, reason: {error_msg}")
     COMMON_USER_CONFIG_PROCESS_ERROR = (188001, "common user_config process error, reason: {error_msg}")
