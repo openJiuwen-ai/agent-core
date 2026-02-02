@@ -38,6 +38,7 @@ USER_PROFILE_CATEGORY = """INDEX. `user_profile`: 指与用户相关的具体信
 VARIABLES_DESCRIPTION_TEMPLATE_PROMPT = """
 ### 步骤2：变量提取
 分析对话内容，根据预定义的变量名称和变量描述，完成变量值提取，填充到输出模板`variables`字段。
+注意：先分析下面`variables`字段中需要提取和填充的变量内容，`variables`字段中没有出现的变量不需要提取。
 变量定义如下：
 VARIABLES_DEFINE_TEMPLATE
 """

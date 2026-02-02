@@ -903,8 +903,14 @@ class LongTermMemory(metaclass=Singleton):
                 memory_type="all",
                 error_msg=f"search manager is not initialized",
             )
+
+        if memory_type == MemoryType.UNKNOWN:
+            search_memory_type = None
+        else:
+            search_memory_type = memory_type.value
         search_data = await self.search_manager.list_user_mem(user_id=user_id, scope_id=scope_id,
-                                                              nums=page_size, pages=page_idx)
+                                                              nums=page_size, pages=page_idx,
+                                                              mem_type=search_memory_type)
 
         if not search_data:
             return []
@@ -912,15 +918,13 @@ class LongTermMemory(metaclass=Singleton):
         mem_results: list[MemInfo] = []
         for item in search_data:
             mem_type = item.get("mem_type", MemoryType.UNKNOWN.value)
-            # Apply filtering if type is not UNKNOWN
-            if memory_type == MemoryType.UNKNOWN or mem_type == memory_type.value:
-                mem_results.append(
-                    MemInfo(
-                        mem_id=item["id"],
-                        content=item["mem"],
-                        type=mem_type
-                    )
+            mem_results.append(
+                MemInfo(
+                    mem_id=item["id"],
+                    content=item["mem"],
+                    type=mem_type
                 )
+            )
         return mem_results
 
     async def update_variables(self,

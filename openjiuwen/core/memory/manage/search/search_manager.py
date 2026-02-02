@@ -76,8 +76,15 @@ class SearchManager:
             result.sort(key=lambda item: item["score"], reverse=True)
         return [item for item in result if item["score"] >= threshold][:top_k]
 
-    async def list_user_mem(self, user_id: str, scope_id: str, nums: int, pages: int) -> list[dict[str, Any]] | None:
-        list_res = await self.mem_store.get_in_range(user_id, scope_id, nums * (pages - 1), nums * pages)
+    async def list_user_mem(
+        self,
+        user_id: str,
+        scope_id: str,
+        nums: int,
+        pages: int,
+        mem_type: str = None
+    ) -> list[dict[str, Any]] | None:
+        list_res = await self.mem_store.get_in_range(user_id, scope_id, nums * (pages - 1), nums * pages, mem_type)
         if not list_res:
             return list_res
         for item in list_res:

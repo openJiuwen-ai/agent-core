@@ -145,9 +145,15 @@ class UserMemStore:
         mem_ids = [str(mem_id) for mem_id in all_ids]
         return await self.batch_get(user_id, scope_id, mem_ids)
 
-    async def get_in_range(self, user_id: str, scope_id: str, start_idx: int, end_idx: int) -> list[dict[
-        str, Any]] | None:
-        user_ids_key = self.__get_user_ids_key(user_id, scope_id)
+    async def get_in_range(
+        self,
+        user_id: str,
+        scope_id: str,
+        start_idx: int,
+        end_idx: int,
+        mem_type: str = None
+    ) -> list[dict[str, Any]] | None:
+        user_ids_key = self.__get_user_ids_key(user_id, scope_id, mem_type)
         if not await self.kv_store.exists(user_ids_key):
             return None
         user_ids_value = await self.kv_store.get(user_ids_key) or ""
