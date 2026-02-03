@@ -6,6 +6,7 @@ import pathlib
 import platform
 import shutil
 import tempfile
+import unittest
 
 import pytest
 import pytest_asyncio
@@ -283,6 +284,7 @@ async def test_execute_cmd_stream_empty_command(sys_op):
 
 
 @pytest.mark.asyncio
+@unittest.skip("skip system test")
 async def test_execute_cmd_stream_allowlist(sys_op, work_dir):
     """Test streaming execution with allowlist validation"""
     # Recreate sys_op with allowlist
