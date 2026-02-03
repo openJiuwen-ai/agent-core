@@ -13,22 +13,22 @@ from typing import (
 
 from sqlalchemy import (
     Column,
-    String,
     delete,
     select,
+    String,
 )
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import (
+    async_sessionmaker,
     AsyncEngine,
     AsyncSession,
-    async_sessionmaker,
 )
 from sqlalchemy.orm import DeclarativeBase
 
 from openjiuwen.core.foundation.store.base_kv_store import (
-    BaseKVStore,
     BasedKVStorePipeline,
+    BaseKVStore,
 )
 
 EXCLUSIVE_EXPIRY_KEY = "exclusive_expiry"
@@ -333,7 +333,7 @@ class DbBasedKVStore(BaseKVStore):
                                 exists_results[key] = False
 
                     # Build results in the order operations were added
-                    for op in self._operations:
+                    for op in operations:
                         op_type = op[0]
                         key = op[1]
                         if op_type == 'set':
@@ -343,7 +343,6 @@ class DbBasedKVStore(BaseKVStore):
                         elif op_type == 'exists':
                             results.append(exists_results.get(key, False))
 
-            self._operations = []
             return results
 
         return BasedKVStorePipeline(execute)
