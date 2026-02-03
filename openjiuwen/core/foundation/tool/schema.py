@@ -10,3 +10,7 @@ class ToolInfo(BaseModel):
     name: str = Field(default="")
     description: str = Field(default="")
     parameters: Union[Dict[str, Any], Type[BaseModel]] = Field(default_factory=dict)
+
+
+class McpToolInfo(ToolInfo):
+    server_name: str

@@ -15,8 +15,8 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.security.path_checker import is_sensitive_path
 
 # Use ContextVar instead of threading.local() to support async environments
@@ -66,11 +66,9 @@ def get_log_max_bytes(max_bytes_config: Any) -> int:
     try:
         max_bytes = int(max_bytes_config)
     except (ValueError, TypeError) as e:
-        raise JiuWenBaseException(
-            error_code=StatusCode.COMMON_LOG_CONFIG_INVALID.code,
-            message=StatusCode.COMMON_LOG_CONFIG_INVALID.errmsg.format(
-                error_msg=f"invalid max_bytes configuration: {max_bytes_config}, error: {e}"
-            )
+        raise build_error(
+            StatusCode.COMMON_LOG_CONFIG_INVALID,
+            error_msg=f"invalid max_bytes configuration: {max_bytes_config}, error: {e}"
         ) from e
 
     default_log_max_bytes = 100 * 1024 * 1024
@@ -85,7 +83,7 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
     Normalize log path (realpath -> abspath) and check sensitivity.
 
     This helper is shared by logger config and default logger implementation.
-    It raises JiuWenBaseException when:
+    It raises BaseError when:
       - the value type is invalid, or
       - the normalized path is considered sensitive/unsafe.
     """
@@ -93,19 +91,15 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
     try:
         path_str = os.fspath(path_value)
     except TypeError:
-        raise JiuWenBaseException(
-            error_code=StatusCode.COMMON_LOG_PATH_INVALID.code,
-            message=StatusCode.COMMON_LOG_PATH_INVALID.errmsg.format(
-                error_msg=f'the path_value is {path_value}'
-            ),
-        ) from None
+        raise build_error(
+            StatusCode.COMMON_LOG_PATH_INVALID,
+            error_msg=f'the path_value is {path_value}'
+        ) from e
 
     if not path_str or str(path_str).strip() == "":
-        raise JiuWenBaseException(
-            error_code=StatusCode.COMMON_LOG_PATH_INVALID.code,
-            message=StatusCode.COMMON_LOG_PATH_INVALID.errmsg.format(
-                error_msg=f'the path_str is {path_str}'
-            ),
+        raise build_error(
+            StatusCode.COMMON_LOG_PATH_INVALID,
+            error_msg=f'the path_str is {path_str}'
         )
 
     try:
@@ -114,11 +108,9 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
         real_path = os.path.abspath(os.path.expanduser(path_str))
 
     if is_sensitive_path(real_path):
-        raise JiuWenBaseException(
-            error_code=StatusCode.COMMON_LOG_PATH_INVALID.code,
-            message=StatusCode.COMMON_LOG_PATH_INVALID.errmsg.format(
-                error_msg=f'the real_path is {real_path}'
-            ),
+        raise build_error(
+            StatusCode.COMMON_LOG_PATH_INVALID,
+            error_msg=f'the real_path is {real_path}'
         )
 
     return real_path

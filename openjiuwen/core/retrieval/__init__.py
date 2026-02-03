@@ -1,32 +1,39 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+from openjiuwen.core.common.logging import logger
+
 # Knowledge base implementations
 # Common data models and configs
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback, TqdmCallback
 from openjiuwen.core.retrieval.common.config import (
     EmbeddingConfig,
+    RerankerConfig,
     IndexConfig,
     KnowledgeBaseConfig,
     RetrievalConfig,
     VectorStoreConfig,
 )
-from openjiuwen.core.retrieval.common.document import Document, TextChunk
+from openjiuwen.core.retrieval.common.document import Document, MultimodalDocument, TextChunk
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.common.triple import Triple
 from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
-from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 
 # Embedding related
+from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.embedding.ollama_embedding import OllamaEmbedding
 from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
+from openjiuwen.core.retrieval.embedding.vllm_embedding import VLLMEmbedding
 from openjiuwen.core.retrieval.embedding.utils import parse_base64_embedding
-from openjiuwen.core.retrieval.graph_knowledge_base import GraphKnowledgeBase
+
+# Reranker related
+from openjiuwen.core.retrieval.reranker.base import Reranker
+from openjiuwen.core.retrieval.reranker.standard_reranker import StandardReranker
+from openjiuwen.core.retrieval.reranker.chat_reranker import ChatReranker
 
 # Indexer related
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
-from openjiuwen.core.retrieval.indexing.indexer.chroma_indexer import ChromaIndexer
 from openjiuwen.core.retrieval.indexing.indexer.milvus_indexer import MilvusIndexer
 
 # Processor base classes
@@ -67,7 +74,6 @@ from openjiuwen.core.retrieval.indexing.processor.splitter.base import Splitter
 from openjiuwen.core.retrieval.indexing.processor.splitter.splitter import SentenceSplitter
 
 # Vector field related
-from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
 from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import (
     MilvusAUTO,
     MilvusFLAT,
@@ -75,10 +81,9 @@ from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import (
     MilvusIVF,
     MilvusSCANN,
 )
-from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
-from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 
 # Retriever related
+from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
 from openjiuwen.core.retrieval.retriever.hybrid_retriever import HybridRetriever
@@ -89,6 +94,8 @@ from openjiuwen.core.retrieval.simple_knowledge_base import (
     retrieve_multi_kb,
     retrieve_multi_kb_with_source,
 )
+from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
+from openjiuwen.core.retrieval.graph_knowledge_base import GraphKnowledgeBase
 
 # Utilities
 from openjiuwen.core.retrieval.utils.config_manager import ConfigManager
@@ -104,7 +111,6 @@ from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 
 # Vector store related
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
 from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
 
 _KNOWLEDGE_BASE_CLASSES = [
@@ -124,7 +130,9 @@ _COMMON_CLASSES = [
     "IndexConfig",
     "VectorStoreConfig",
     "EmbeddingConfig",
+    "RerankerConfig",
     "Document",
+    "MultimodalDocument",
     "TextChunk",
     "RetrievalResult",
     "SearchResult",
@@ -139,17 +147,22 @@ _EMBEDDING_CLASSES = [
     "APIEmbedding",
     "OllamaEmbedding",
     "OpenAIEmbedding",
+    "VLLMEmbedding",
+]
+
+_RERANKER_CLASSES = [
+    "Reranker",
+    "StandardReranker",
+    "ChatReranker",
 ]
 
 _VECTOR_STORE_CLASSES = [
     "VectorStore",
-    "ChromaVectorStore",
     "MilvusVectorStore",
 ]
 
 _INDEXER_CLASSES = [
     "Indexer",
-    "ChromaIndexer",
     "MilvusIndexer",
 ]
 
@@ -201,7 +214,6 @@ _UTILS = [
 ]
 
 _VECTOR_FIELD_CLASSES = [
-    "ChromaVectorField",
     "MilvusAUTO",
     "MilvusFLAT",
     "MilvusHNSW",
@@ -209,11 +221,33 @@ _VECTOR_FIELD_CLASSES = [
     "MilvusSCANN",
 ]
 
+try:
+    from openjiuwen.core.retrieval.indexing.indexer.chroma_indexer import ChromaIndexer
+    from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+    from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
+
+    _INDEXER_CLASSES.append("ChromaIndexer")
+    _VECTOR_STORE_CLASSES.append("ChromaVectorStore")
+    _VECTOR_FIELD_CLASSES.append("ChromaVectorField")
+except Exception as e:
+    logger.warning("Chroma database is disabled, reason: %r", e)
+
+try:
+    from openjiuwen.core.retrieval.vector_store.pg_store import PGVectorStore
+    from openjiuwen.core.retrieval.indexing.vector_fields.pg_fields import PGVectorField
+
+    _VECTOR_STORE_CLASSES.append("PGVectorStore")
+    _VECTOR_FIELD_CLASSES.append("PGVectorField")
+except Exception as e:
+    logger.warning("PGVector database is disabled, reason: %r", e)
+
+
 __all__ = (
     _KNOWLEDGE_BASE_CLASSES
     + _KNOWLEDGE_BASE_FUNCTIONS
     + _COMMON_CLASSES
     + _EMBEDDING_CLASSES
+    + _RERANKER_CLASSES
     + _VECTOR_STORE_CLASSES
     + _INDEXER_CLASSES
     + _PROCESSOR_CLASSES

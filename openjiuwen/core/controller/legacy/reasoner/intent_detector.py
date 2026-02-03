@@ -6,6 +6,7 @@ import re
 import secrets
 from typing import List, Union
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.controller.legacy.config.reasoner_config import (
     IntentDetectionConfig
@@ -15,9 +16,8 @@ from openjiuwen.core.controller.legacy.task.task import Task, TaskInput
 from openjiuwen.core.controller.legacy.constants import IntentDetectionConstants
 from openjiuwen.core.controller.legacy.utils import ReasonerUtils
 from openjiuwen.core.common.constants.enums import TaskType
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.security.user_config import UserConfig
@@ -229,9 +229,9 @@ class IntentDetector:
             )
             llm_output_content = llm_output.content.strip()
         except Exception as e:
-            ExceptionUtils.raise_exception(
-                StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED, str(e), e
-            )
+            raise build_error(
+                StatusCode.AGENT_CONTROLLER_INVOKE_CALL_FAILED, error_msg=str(e)
+            ) from e
 
         return llm_output_content
 

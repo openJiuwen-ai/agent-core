@@ -10,13 +10,11 @@
 import os
 import uuid
 
-os.environ["LLM_SSL_VERIFY"] = "false"
-os.environ["RESTFUL_SSL_VERIFY"] = "false"
-
 import unittest
 from dataclasses import dataclass, field
 from typing import Any, List
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig
 from openjiuwen.core.application.workflow_agent import WorkflowAgent
 from openjiuwen.core.workflow import ComponentConfig, WorkflowCard, WorkflowComponent
@@ -28,11 +26,12 @@ from openjiuwen.core.session import Session
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.workflow import Workflow
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.common.logging import logger
 
+os.environ["LLM_SSL_VERIFY"] = "false"
+os.environ["RESTFUL_SSL_VERIFY"] = "false"
 API_BASE = os.getenv("API_BASE", "mock://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
@@ -87,10 +86,7 @@ class UserInputComponent(WorkflowComponent):
             if not isinstance(input_elem, UserInputElem):
                 raise ValueError("Node data type is wrong")
             if result.get(input_elem.input_name) is None and input_elem.required is True:
-                raise JiuWenBaseException(
-                    StatusCode.USERINPUT_COMPONENT_INVOKE_ERROR.code,
-                    StatusCode.USERINPUT_COMPONENT_INVOKE_ERROR.errmsg,
-                )
+                raise build_error(StatusCode.ERROR)
         return result
 
 

@@ -2,8 +2,7 @@ from typing import AsyncIterator
 
 import pytest
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, WorkflowError
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start
@@ -43,7 +42,7 @@ class TestSubWorkflowComp:
         main_workflow.set_end_comp("end", End())
         main_workflow.add_connection("start", 'fick_comp')
         main_workflow.add_connection('fick_comp', "end")
-        with pytest.raises(JiuWenBaseException):
+        with pytest.raises(BaseError):
             await main_workflow.invoke(inputs={}, session=create_workflow_session())
 
     def create_nesting_workflow(self, sub_workflow_depth=0, **kwargs):
@@ -61,13 +60,11 @@ class TestSubWorkflowComp:
         return workflow
 
     async def test_sub_invoke(self):
-        with pytest.raises(JiuWenBaseException) as err:
+        with pytest.raises(WorkflowError) as err:
             main_workflow = self.create_nesting_workflow(3, workflow_max_nesting_depth=1)
             await main_workflow.invoke(inputs={}, session=create_workflow_session())
-        sub_workflow_err = StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
-            error_msg="workflow nesting hierarchy is too big, must <= 1"
-        )
-        assert f"node_id: sub2, ability: invoke, error: [101141] {sub_workflow_err}" in err.value.message
+
+        assert f"workflow nesting hierarchy is too big, must <= 1" in str(err.value)
         main_workflow = self.create_nesting_workflow(3, workflow_max_nesting_depth=3)
 
         await main_workflow.invoke(inputs={}, session=create_workflow_session())

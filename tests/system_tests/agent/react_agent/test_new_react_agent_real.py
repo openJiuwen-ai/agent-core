@@ -164,7 +164,7 @@ class TestNewReActAgentReal(unittest.IsolatedAsyncioTestCase):
         agent.configure(config)
 
         # 4. 添加工具到 Agent 的能力列表
-        agent.add_ability(add_tool.card)
+        agent.ability_manager.add(add_tool.card)
 
         # 5. 创建真实的 Session
         session = create_agent_session(session_id="test_calc_session")

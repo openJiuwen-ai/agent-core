@@ -4,14 +4,13 @@ import json
 import re
 from typing import Optional, Literal, List, AsyncGenerator
 
-import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
 from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import prompt_builder_logger, LogEventType
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, BaseMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
-
+from openjiuwen.dev_tools.prompt_builder.builder.utils import get_string_prompt, select_template
 
 INSERT_STR: str = "[用户要插入的位置]"
 MODE_GENERAL: str = "general"
@@ -23,15 +22,19 @@ JSON_STRING_MAX_LENGTH: int = 10000
 class FeedbackPromptBuilder(BasePromptBuilder):
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
+        self.template = select_template()
 
     async def build(self,
                     prompt: str | PromptTemplate,
+                    *,
                     feedback: str,
                     mode: Literal[MODE_GENERAL, MODE_INSERT, MODE_SELECT] = MODE_GENERAL,
                     start_pos: Optional[int] = None,
                     end_pos: Optional[int] = None,
+                    language: Literal["zh-CN", "en-US"] = "zh-CN",
                     ) -> Optional[str]:
-        prompt = TEMPLATE.get_string_prompt(prompt)
+        self.template = select_template(language)
+        prompt = get_string_prompt(prompt)
         self._is_valid_prompt(prompt, feedback)
         messages = await self._format_feedback_template(prompt, feedback, mode, start_pos, end_pos)
         response = await self._model.invoke(messages)
@@ -41,16 +44,18 @@ class FeedbackPromptBuilder(BasePromptBuilder):
 
     async def stream_build(self,
                            prompt: str | PromptTemplate,
+                           *,
                            feedback: str,
                            mode: Literal[MODE_GENERAL, MODE_INSERT, MODE_SELECT] = MODE_GENERAL,
                            start_pos: Optional[int] = None,
                            end_pos: Optional[int] = None,
+                           language: Literal["zh-CN", "en-US"] = "zh-CN",
                            ) -> AsyncGenerator:
-        prompt = TEMPLATE.get_string_prompt(prompt)
+        self.template = select_template(language)
+        prompt = get_string_prompt(prompt)
         self._is_valid_prompt(prompt, feedback)
         messages = await self._format_feedback_template(prompt, feedback, mode, start_pos, end_pos)
-        chunks = await self._model.stream(messages)
-        async for chunk in chunks:
+        async for chunk in self._model.stream(messages):
             yield chunk.content
 
     async def _format_feedback_template(self,
@@ -79,7 +84,7 @@ class FeedbackPromptBuilder(BasePromptBuilder):
                                          prompt: str,
                                          feedback: str,
                                          ) -> List[BaseMessage]:
-        feedback_general_template = TEMPLATE.PROMPT_FEEDBACK_GENERAL_TEMPLATE
+        feedback_general_template = self.template.PROMPT_FEEDBACK_GENERAL_TEMPLATE
         messages = feedback_general_template.format(
             dict(original_prompt=prompt,
                  suggestion=feedback
@@ -95,7 +100,7 @@ class FeedbackPromptBuilder(BasePromptBuilder):
         self._is_index_within_bounds(prompt, MODE_INSERT, start_pos)
         optimized_feedback = await self._is_feedback_valid(prompt, feedback)
         tagged_prompt = self._insert_sting(prompt, start_pos)
-        feedback_insert_template = TEMPLATE.PROMPT_FEEDBACK_INSERT_TEMPLATE
+        feedback_insert_template = self.template.PROMPT_FEEDBACK_INSERT_TEMPLATE
         messages = feedback_insert_template.format(
             dict(original_prompt=tagged_prompt,
                  suggestion=optimized_feedback
@@ -112,7 +117,7 @@ class FeedbackPromptBuilder(BasePromptBuilder):
         self._is_index_within_bounds(prompt, MODE_SELECT, start_pos, end_pos)
         optimized_feedback = await self._is_feedback_valid(prompt, feedback)
         prompt_to_modify = prompt[start_pos:end_pos]
-        feedback_select_template = TEMPLATE.PROMPT_FEEDBACK_SELECT_TEMPLATE
+        feedback_select_template = self.template.PROMPT_FEEDBACK_SELECT_TEMPLATE
         messages = feedback_select_template.format(
             dict(original_prompt=prompt,
                  suggestion=optimized_feedback,
@@ -131,7 +136,7 @@ class FeedbackPromptBuilder(BasePromptBuilder):
                                  prompt: str,
                                  feedback: str
                                  ) -> str:
-        feedback_intent_template = TEMPLATE.PROMPT_FEEDBACK_INTENT_TEMPLATE
+        feedback_intent_template = self.template.PROMPT_FEEDBACK_INTENT_TEMPLATE
         messages = feedback_intent_template.format(
             dict(original_prompt=prompt,
                  feedbacks=feedback

@@ -2,12 +2,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved
 
+from typing import Annotated, List, Literal, Optional, Tuple
 import pytest
-from typing import Annotated, Any, List, Dict
 from pydantic import Field, BaseModel
 
-from openjiuwen.core.foundation.tool.tool import tool, ToolCard
 from openjiuwen.core.foundation.tool.schema import ToolInfo
+from openjiuwen.core.foundation.tool.tool import tool, ToolCard
 
 
 @tool(
@@ -58,10 +58,46 @@ def summarize(
     return total
 
 
+@tool
+def read_write_tool(
+        path: str,
+        *,
+        mode: Literal['text', 'bytes'] = "text",
+        head: Optional[int] = None,
+        tail: Optional[int] = None,
+        line_range: Optional[Tuple[int, int]] = None,
+        content: str | bytes,
+) -> str:
+    """Test function to verify tool parameter fixes"""
+    """
+    Test function to verify tool parameter fixes
+    
+    Args:
+        path: Path to the file
+        mode: Reading mode - "text" (line-based, default) or "bytes" (raw bytes).
+        head: Number of lines to read from the start (text mode only)
+        tail: Number of lines to read from the end (text mode only)
+        line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only)
+        content: Data to write to the file (string for text mode, bytes for binary mode).
+    
+    Returns:
+        Verification message
+    """
+    return f"Verified: path={path}, mode={mode}, head={head}, tail={tail}, line_range={line_range}"
+
+
 @pytest.mark.asyncio
 class TestToolDecorator:
     def assertEqual(self, left, right):
         assert left == right
+
+    @staticmethod
+    def assert_in(member, container):
+        assert member in container
+
+    @staticmethod
+    def assert_not_in(member, container):
+        assert member not in container
 
     async def test_tool(self):
         # invoke
@@ -205,3 +241,83 @@ class TestToolDecorator:
 
         )
         self.assertEqual(summarize_res, summarize_tool_info)
+
+    async def test_literal_mode_param(self):
+        """Test Literal mode parameter parsing."""
+        # Verify tool info for mode parameter
+        tool_info = read_write_tool.card.tool_info()
+        parameters = tool_info.parameters
+        properties = parameters.get("properties", {})
+
+        # Verify mode parameter (Literal type)
+        mode_prop = properties.get("mode", {})
+        self.assertEqual(mode_prop.get("type"), "string")
+        self.assertEqual(mode_prop.get("enum"), ["text", "bytes"])
+
+    async def test_optional_params_without_defaults(self):
+        """Test optional parameters without defaults."""
+        # Test invoke with only required parameters
+        result = await read_write_tool.invoke({"path": "test.txt", "content": "test content"})
+        self.assertEqual(read_write_tool.card.name, "read_write_tool")
+        self.assert_in("Verified: path=test.txt", result)
+
+        # Verify required parameters
+        tool_info = read_write_tool.card.tool_info()
+        parameters = tool_info.parameters
+        required = parameters.get("required", [])
+        self.assert_in("path", required)
+        self.assert_in("content", required)
+        self.assert_not_in("mode", required)
+        self.assert_not_in("head", required)
+        self.assert_not_in("tail", required)
+        self.assert_not_in("line_range", required)
+
+    async def test_union_str_bytes_param(self):
+        """Test str | bytes union type annotation."""
+        # Test invoke with string content
+        result = await read_write_tool.invoke({"path": "test.txt", "content": "test content"})
+        self.assert_in("Verified: path=test.txt", result)
+
+        # Test invoke with binary content
+        result = await read_write_tool.invoke({
+            "path": "test.bin",
+            "mode": "bytes",
+            "content": b"\x00\x01\x02\x03"
+        })
+        self.assert_in("Verified: path=test.bin", result)
+        self.assert_in("mode=bytes", result)
+
+        # Verify content parameter (union type)
+        tool_info = read_write_tool.card.tool_info()
+        parameters = tool_info.parameters
+        properties = parameters.get("properties", {})
+        content_prop = properties.get("content", {})
+        self.assert_in("anyOf", content_prop)
+        any_of = content_prop.get("anyOf", [])
+        self.assertEqual(len(any_of), 2)
+        self.assertEqual(any_of[0], {"type": "string"})
+        self.assertEqual(any_of[1], {"type": "string", "format": "binary"})
+
+    async def test_tuple_line_range_param(self):
+        """Test Tuple line_range parameter parsing."""
+        # Test invoke with line_range parameter
+        result = await read_write_tool.invoke({
+            "path": "test.txt",
+            "line_range": [1, 10],
+            "content": "test content"
+        })
+        self.assert_in("Verified: path=test.txt", result)
+        self.assert_in("line_range=[1, 10]", result)
+
+        # Verify line_range parameter (tuple type)
+        tool_info = read_write_tool.card.tool_info()
+        parameters = tool_info.parameters
+        properties = parameters.get("properties", {})
+        line_range_prop = properties.get("line_range", {})
+        self.assertEqual(line_range_prop.get("type"), "array")
+        items = line_range_prop.get("items", {})
+        self.assert_in("anyOf", items)
+        items_any_of = items.get("anyOf", [])
+        self.assertEqual(len(items_any_of), 2)
+        self.assertEqual(items_any_of[0], {"type": "integer"})
+        self.assertEqual(items_any_of[1], {"type": "integer"})

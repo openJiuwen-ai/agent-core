@@ -7,17 +7,16 @@ from datetime import datetime, timezone
 
 from typing import Dict, Optional, List, Any
 
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.single_agent.legacy import (
     LegacyReActAgentConfig as ReActAgentConfig, PluginSchema,
 )
-from openjiuwen.core.controller import BaseController, Event, EventType, Task, TaskResult, TaskStatus
+from openjiuwen.core.controller.legacy import BaseController, Event, EventType, Task, TaskResult, TaskStatus
 from openjiuwen.core.controller.legacy.utils import MessageHandlerUtils
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.common.constants.enums import TaskType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.security.json_utils import JsonUtils
 from openjiuwen.core.session import Session
 from openjiuwen.core.common.security.user_config import UserConfig
@@ -76,7 +75,10 @@ class LLMController(BaseController):
     ):
         super().__init__(config, context_engine, session)
         self.config = config
-        self._enable_memory = self.config.agent_memory_config.enable_long_term_mem
+        self._enable_long_term_mem = self.config.agent_memory_config.enable_long_term_mem
+        self._enable_mem_variables = len(self.config.agent_memory_config.mem_variables) > 0
+        self._enable_memory = (self.config.memory_scope_id and
+                               (self._enable_long_term_mem or self._enable_mem_variables))
         self._long_term_memory_instance = LongTermMemory()
         self._memory_inited = False
 
@@ -105,7 +107,7 @@ class LLMController(BaseController):
             return await self._handle_user_input(event, session)
         except Exception as e:
             logger.error(f"Error in handling message: {e}")
-            if isinstance(e, JiuWenBaseException):
+            if isinstance(e, BaseError):
                 raise e
             else:
                 raise build_error(
@@ -601,7 +603,7 @@ class LLMController(BaseController):
                     output=output_stream_data,
                     metadata={"workflow_id": task.input.target_id}
                 )
-        except JiuWenBaseException as e:
+        except BaseError as e:
             logger.error(f"Error executing workflow task {task.input.target_name}: {e}")
             raise build_error(
                 StatusCode.AGENT_WORKFLOW_EXECUTION_ERROR,
@@ -646,7 +648,7 @@ class LLMController(BaseController):
                 output=output_stream_data,
                 metadata={"tool_name": task.input.target_name}
             )
-        except JiuWenBaseException as e:
+        except BaseError as e:
             logger.error(f"Error executing plugin task {task.input.target_name}: {e}")
             raise build_error(
                 StatusCode.AGENT_TOOL_EXECUTION_ERROR,
@@ -695,7 +697,7 @@ class LLMController(BaseController):
                 logger.info(f"React llm output: {llm_output}")
         except Exception as e:
             logger.error(f"Failed to invoke model, {e}")
-            if isinstance(e, JiuWenBaseException):
+            if isinstance(e, BaseError):
                 raise e
             else:
                 raise build_error(
@@ -727,7 +729,7 @@ class LLMController(BaseController):
             AIMessage: Accumulated complete message from all chunks
 
         Raises:
-            JiuWenBaseException: If LLM returns empty response or invocation fails
+            BaseError: If LLM returns empty response or invocation fails
         """
         accumulated_chunk = None
         stream_index = 0
@@ -1292,15 +1294,13 @@ class LLMController(BaseController):
     async def _get_system_prompt_keywords(self, inputs: Any, user_id: str):
         result = {}
         if self._enable_memory:
-            if not self._memory_inited:
-                await self._init_memory_config()
             memory_keywords = await self._get_keywords_from_memory(inputs, user_id)
             result.update(memory_keywords)
         return result
 
     async def _get_keywords_from_memory(self, inputs: Any, user_id: str):
         result = {}
-        scope_id = f"{self._config.id}"
+        scope_id = f"{self.config.memory_scope_id}"
         if isinstance(inputs, str):
             query = inputs
         elif isinstance(inputs, dict):
@@ -1308,23 +1308,28 @@ class LLMController(BaseController):
         else:
             query = ""
         logger.info(f"scope_id: {scope_id} | user_id: {user_id} | inputs: {inputs}")
-        memory_engine = LongTermMemory()
-        if not memory_engine:
+        if not self._long_term_memory_instance:
             return result
         if user_id and scope_id:
-            memory_variables = await memory_engine.get_variables(
-                user_id=user_id,
-                scope_id=scope_id
-            )
-            if memory_variables:
-                filter_memory_variables = {k: v for k, v in memory_variables.items()
-                                           if k in self.config.memory_config.mem_variables}
-                result.update({"sys_memory_variables":
-                                   JsonUtils.safe_json_dumps(filter_memory_variables, ensure_ascii=False)})
-            logger.info(f"memory_variables: {memory_variables}")
+            if self._enable_mem_variables:
+                memory_variables = await self._long_term_memory_instance.get_variables(
+                    user_id=user_id,
+                    scope_id=scope_id
+                )
+                if memory_variables:
+                    cur_variables_config = [config.name for config in self.config.agent_memory_config.mem_variables]
+                    filter_memory_variables = {k: v for k, v in memory_variables.items() if k in cur_variables_config}
+                    result.update({"sys_memory_variables":
+                                       JsonUtils.safe_json_dumps(filter_memory_variables, ensure_ascii=False)})
+                logger.info(f"memory_variables: {memory_variables}")
+            else:
+                logger.info("[LongTermMemory] not enable memory variables")
 
             try:
-                long_term_memory = await memory_engine.search_user_mem(
+                if not self._enable_long_term_mem:
+                    logger.info("[LongTermMemory] not enable long_term_memory")
+                    return result
+                long_term_memory = await self._long_term_memory_instance.search_user_mem(
                     user_id=user_id,
                     scope_id=scope_id,
                     query=query,
@@ -1439,17 +1444,6 @@ class LLMController(BaseController):
             f"no match found for node_id={node_ids}"
         )
         return None
-
-    async def _init_memory_config(self):
-        scope_id = f"{self.config.id}"
-        memory_scope_config = self.config.memory_config
-        logger.info(f"When init Memory Engine, scope_id: {scope_id}")
-        if memory_scope_config is not None:
-            if (self._long_term_memory_instance and
-                    hasattr(memory_scope_config, 'model_cfg') and
-                    memory_scope_config.model_cfg is not None):
-                await self._long_term_memory_instance.set_scope_config(scope_id, memory_scope_config)
-            self._memory_inited = True
 
     def _find_plugin_id_by_name(self, tool_name: str) -> Optional[str]:
         config = self.config

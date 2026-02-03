@@ -3,12 +3,20 @@
 ChromaDB vector store test cases
 """
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 
+chromadb = pytest.importorskip("chromadb", reason="chromadb not installed")
+
+from unittest.mock import (
+    MagicMock,
+    patch,
+)
+
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.retrieval import ChromaVectorStore, VectorStoreConfig
+from openjiuwen.core.retrieval import (
+    ChromaVectorStore,
+    VectorStoreConfig,
+)
 
 
 @pytest.fixture

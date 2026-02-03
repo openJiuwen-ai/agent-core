@@ -13,8 +13,8 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import AIMessage, UsageMetadata, AIMessageChunk
-from openjiuwen.core.foundation.tool import ToolCall
+from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata, AssistantMessageChunk
+from openjiuwen.core.foundation.llm import ToolCall
 
 from openjiuwen.core.foundation.llm import BaseModelClient
 
@@ -103,7 +103,7 @@ class OpenRouterLLM(BaseModelClient):
         return "openrouter"
 
     def _invoke(self, model_name: str, messages: List[Dict], tools: List[Dict] = None,
-                temperature: float = 0.1, top_p: float = 0.1, **kwargs: Any) -> AIMessage:
+                temperature: float = 0.1, top_p: float = 0.1, **kwargs: Any) -> AssistantMessage:
         """Sync invoke - delegates to async"""
         return asyncio.run(self._ainvoke(model_name, messages, tools, temperature, top_p, **kwargs))
 
@@ -115,7 +115,7 @@ class OpenRouterLLM(BaseModelClient):
         temperature: float = 0.1,
         top_p: float = 0.1,
         **kwargs: Any
-    ) -> AIMessage:
+    ) -> AssistantMessage:
         """Async invoke - main LLM call implementation"""
 
         try:
@@ -165,7 +165,7 @@ class OpenRouterLLM(BaseModelClient):
             raise
 
     def _stream(self, model_name: str, messages: List[Dict], tools: List[Dict] = None,
-                temperature: float = 0.1, top_p: float = 0.1, **kwargs: Any) -> Iterator[AIMessageChunk]:
+                temperature: float = 0.1, top_p: float = 0.1, **kwargs: Any) -> Iterator[AssistantMessageChunk]:
         """Sync stream - not implemented, delegates to async"""
         raise NotImplementedError("Use async streaming with _astream")
 
@@ -177,11 +177,11 @@ class OpenRouterLLM(BaseModelClient):
         temperature: float = 0.1,
         top_p: float = 0.1,
         **kwargs: Any
-    ) -> AsyncIterator[AIMessageChunk]:
+    ) -> AsyncIterator[AssistantMessageChunk]:
         """Async streaming - for future implementation"""
         # For now, just yield a single chunk from invoke
         result = await self._ainvoke(model_name, messages, tools, temperature, top_p, **kwargs)
-        yield AIMessageChunk(
+        yield AssistantMessageChunk(
             role="assistant",
             content=result.content,
             tool_calls=result.tool_calls
@@ -312,7 +312,7 @@ class OpenRouterLLM(BaseModelClient):
             f"Cache: {self.token_usage.total_cache_read_input_tokens}"
         )
 
-    def _parse_response(self, response) -> AIMessage:
+    def _parse_response(self, response) -> AssistantMessage:
         """Parse OpenRouter/OpenAI API response to AIMessage"""
         if not response or not response.choices:
             raise ValueError("LLM did not return a valid response")
@@ -344,7 +344,7 @@ class OpenRouterLLM(BaseModelClient):
                 finish_reason=choice.finish_reason
             )
 
-        return AIMessage(
+        return AssistantMessage(
             role="assistant",
             content=content,
             tool_calls=tool_calls,

@@ -1,13 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Optional, AsyncIterator, Union, Dict, Any
+from typing import List, Optional, AsyncIterator, Union, Any
 
 import httpx
 import openai
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
@@ -51,6 +51,12 @@ class OpenAIModelClient(BaseModelClient):
 
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
+        llm_logger.info(
+            "Before create openai client, model client config params ready.",
+            event_type=LogEventType.LLM_CALL_START,
+            timeout=final_timeout,
+            max_retries=self.model_client_config.max_retries
+        )
 
         return openai.AsyncOpenAI(
             api_key=self.model_client_config.api_key,
@@ -154,11 +160,9 @@ class OpenAIModelClient(BaseModelClient):
                 is_stream=False,
                 exception=str(e)
             )
-            raise JiuWenBaseException(
-                error_code=StatusCode.MODEL_CALL_FAILED.code,
-                message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"openAI API async invoke error: {str(e)}"
-                )
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"openAI API async invoke error: {str(e)}"
             ) from e
         finally:
             if async_client is not None:
@@ -242,11 +246,9 @@ class OpenAIModelClient(BaseModelClient):
                 is_stream=True,
                 exception=str(e)
             )
-            raise JiuWenBaseException(
-                error_code=StatusCode.MODEL_CALL_FAILED.code,
-                message=StatusCode.MODEL_CALL_FAILED.errmsg.format(
-                    error_msg=f"openAI API async stream error: {str(e)}"
-                )
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"openAI API async stream error: {str(e)}"
             ) from e
         finally:
             if async_client is not None:

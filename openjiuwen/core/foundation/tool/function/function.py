@@ -23,7 +23,7 @@ class LocalFunction(Tool):
                                                     skip_none_value=kwargs.get("skip_none_value", False),
                                                     skip_validate=kwargs.get("skip_inputs_validate", False))
         if inspect.isgeneratorfunction(self._func) or inspect.isasyncgenfunction(self._func):
-            raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_EXECUTION_ERROR, interface="invoke",
+            raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_EXECUTION_ERROR, method="invoke",
                               reason="func can not be generator", card=self._card)
         if inspect.iscoroutinefunction(self._func):
             res = await self._func(**inputs)
@@ -43,5 +43,5 @@ class LocalFunction(Tool):
             for item in self._func(**inputs):
                 yield item
         else:
-            raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_EXECUTION_ERROR, interface="stream",
+            raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_EXECUTION_ERROR, method="stream",
                               reason="func is not generator", card=self._card)

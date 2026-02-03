@@ -19,12 +19,12 @@ from fastmcp.server.openapi import OpenAPITool
 from fastmcp.tools.tool import ToolResult
 from jsonschema_path import SchemaPath
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool import McpClient
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 
 
 class ToolManager:
@@ -47,9 +47,8 @@ class ToolManager:
         try:
             return await tool.run(arguments)
         except Exception as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.AGENT_TOOL_EXECUTION_ERROR.code, message=f"call tool {key} failed: {e}"
-            ) from e
+            raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, cause=e,
+                              reason=f"call tool {key} failed: {e}")
 
 
 class OpenApiClient(McpClient):
@@ -74,6 +73,7 @@ class OpenApiClient(McpClient):
 
     asyncio.run(main())
     """
+
     def __init__(self, server_path: str, name: str):
         super().__init__(str(server_path))
         self._director = None
@@ -185,7 +185,7 @@ class OpenApiClient(McpClient):
                 server_name=self._name,
                 description=getattr(tool, "description", ""),
                 input_params=getattr(tool, "inputSchema", {}),
-                )
+            )
             )
         return tools_info
 
@@ -194,12 +194,7 @@ class OpenApiClient(McpClient):
             tool_result = await self._tool_manager.call_tool(tool_name, arguments)
             return tool_result.to_mcp_result()
         except Exception as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
-                message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                    error_msg=f"{e}"
-                )
-            ) from e
+            raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, cause=e, reason=e)
 
     async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Any:
         tool = await self._tool_manager.get_tool(tool_name)
@@ -214,27 +209,11 @@ class OpenApiClient(McpClient):
 async def load_conf(file: Union[str, Path]) -> Dict[str, Any]:
     path = Path(file).expanduser().resolve()
     if not path.exists():
-        raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
-            message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                error_msg=f"path not exists: {path}"
-            )
-        )
+        raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, reason=f"path not exists: {path}")
     if not path.is_file():
-        raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
-            message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                error_msg=f"the {path} is not a file"
-            )
-        )
+        raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, reason=f"the {path} is not a file")
     if path.is_symlink():
-        raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
-            message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                error_msg=f"symbolic link not allowed:{path}"
-            )
-        )
-
+        raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, reason=f"symbolic link not allowed:{path}")
 
     suffix = path.suffix.lower()
 
@@ -248,28 +227,15 @@ async def load_conf(file: Union[str, Path]) -> Dict[str, Any]:
             elif suffix in {".yaml", ".yml"}:
                 return yaml.safe_load(content)
             else:
-                raise JiuWenBaseException(
-                    error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
-                    message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                        error_msg=f"only supports. json/. yaml/. yml, "
-                        f"current extension: {suffix}"
-                    )
-                )
+                raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR,
+                                  reason=f"only supports. json/. yaml/. yml, "
+                                         f"current extension: {suffix}")
         except Exception as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
-                message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                    error_msg=f"{e}"
-                )
-            )from e
+            raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, cause=e, reason=e)
 
     data = await anyio.to_thread.run_sync(parse)
 
     if not isinstance(data, dict):
-        raise JiuWenBaseException(
-            error_code=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.code,
-            message=StatusCode.PLUGIN_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                error_msg=f"only support dict type: {type(data)}"
-            )
-        )
+        raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR,
+                          reason=f"only support dict type: {type(data)}")
     return data

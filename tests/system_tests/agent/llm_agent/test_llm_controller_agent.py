@@ -5,6 +5,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from openjiuwen.core.common import Param
 from openjiuwen.core.memory import MemoryChromaVectorStore
 from openjiuwen.core.foundation.store import DbBasedKVStore
 from openjiuwen.core.retrieval import EmbeddingConfig
@@ -123,6 +124,15 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         system_prompt = "你是一个AI助手，在适当的时候调用合适的工具，帮助我完成任务！今天的日期为：{}\n注意：1. 如果用户请求中未指定具体时间，则默认为今天。"
         return [
             dict(role="system", content=system_prompt.format(build_current_date()))
+        ]
+
+    @staticmethod
+    def _create_prompt_template_with_memory():
+        system_prompt = "你是一个AI助手，在适当的时候调用合适的工具，帮助我完成任务！今天的日期为：{}\n注意：1. 如果用户请求中未指定具体时间，则默认为今天。"
+        system_prompt = system_prompt.format(build_current_date())
+        system_prompt += "\n以下列出的是用户历史保存的记忆变量\n{{sys_memory_variables}}\n以下列出的是用户的长期记忆信息\n{{sys_long_term_memory}}"
+        return [
+            dict(role="system", content=system_prompt)
         ]
 
     @staticmethod
@@ -474,7 +484,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         user_id = "default_user_id"
         scope_id = "react_agent_123"
         model_config = self._create_model_config()
-        prompt_template = self._create_prompt_template()
+        prompt_template = self._create_prompt_template_with_memory()
         memory_engine = await self._create_memory_engine()
         llm_agent_config = create_llm_agent_config(
             agent_id="react_agent_123",
@@ -486,11 +496,50 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             prompt_template=prompt_template,
             tools=[]
         )
-        llm_agent_config.memory_config = self._create_memory_scope_config()
         llm_agent_config.agent_memory_config = AgentMemoryConfig(
-            mem_variables=[],
+            mem_variables=[
+                Param.string(name="name", description="用户的姓名", required=False),
+                Param.string(name="career", description="用户的职业", required=False),
+            ],
             enable_long_term_mem=True
         )
+        await memory_engine.set_scope_config(scope_id, self._create_memory_scope_config())
+
+        # no scope id in llm_agent_config, should not get memory and add memory
+        llm_agent_no_scope_id: LLMAgent = create_llm_agent(
+            agent_config=llm_agent_config,
+            workflows=[],
+            tools=[]
+        )
+        result = await llm_agent_no_scope_id.invoke({"query": "我叫张明，目前刚到杭州来杭州做软件开发工作",
+                                         "user_id": user_id})
+        print(f"LLMAgent 输出结果：{result}")
+        await asyncio.sleep(10)
+        result = await memory_engine.get_variables(user_id=user_id, scope_id=scope_id)
+        print(f"memory variables: {result}")
+        self.assertEqual(len(result), 0)
+        result = await memory_engine.search_user_mem(user_id=user_id, scope_id=scope_id, query="我叫什么名字", num=1)
+        self.assertEqual(len(result), 0)
+
+        # set wrong scope id in llm_agent_config, should call llm failed
+        llm_agent_config.memory_scope_id = "wrong_scope_id"
+        llm_agent_wrong_scope_id: LLMAgent = create_llm_agent(
+            agent_config=llm_agent_config,
+            workflows=[],
+            tools=[]
+        )
+        result = await llm_agent_wrong_scope_id.invoke({"query": "我叫张明，目前刚到杭州来杭州做软件开发工作",
+                                         "user_id": user_id})
+        print(f"LLMAgent 输出结果：{result}")
+        await asyncio.sleep(10)
+        result = await memory_engine.get_variables(user_id=user_id, scope_id=scope_id)
+        print(f"memory variables: {result}")
+        self.assertEqual(len(result), 0)
+        result = await memory_engine.search_user_mem(user_id=user_id, scope_id=scope_id, query="我叫什么名字", num=1)
+        self.assertEqual(len(result), 0)
+
+        # set scope id in llm_agent_config, should get memory and add memory
+        llm_agent_config.memory_scope_id = scope_id
         llm_agent: LLMAgent = create_llm_agent(
             agent_config=llm_agent_config,
             workflows=[],
@@ -499,14 +548,15 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
 
         # 调用
         result = await llm_agent.invoke({"query": "我叫张明，目前刚到杭州来杭州做软件开发工作",
-                                         "user_id": user_id,
-                                         "scope_id": scope_id})
+                                         "user_id": user_id})
         print(f"LLMAgent 输出结果：{result}")
+        await asyncio.sleep(30)
         result = await llm_agent.invoke({"query": "我叫什么名字",
-                                         "user_id": user_id,
-                                         "scope_id": scope_id})
+                                         "user_id": user_id})
         print(f"LLMAgent 输出结果：{result}")
-        await asyncio.sleep(20)
+        result = await memory_engine.get_variables(user_id=user_id, scope_id=scope_id)
+        print(f"memory variables: {result}")
+        self.assertEqual(len(result), 2)
         result = await memory_engine.search_user_mem(user_id=user_id, scope_id=scope_id, query="我叫什么名字", num=1)
         self.assertEqual(len(result), 1)  # may be [] is llm_agent.invoke return too fast
         print("memory result:", result[0])
@@ -530,7 +580,8 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
             prompt_template=prompt_template,
             tools=[]
         )
-        llm_agent_config.memory_config = self._create_memory_scope_config()
+        llm_agent_config.memory_scope_id = scope_id
+        await memory_engine.set_scope_config(scope_id, self._create_memory_scope_config())
         llm_agent_config.agent_memory_config = AgentMemoryConfig(
             mem_variables=[],
             enable_long_term_mem=True
@@ -542,11 +593,10 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         )
 
         # 调用
-        querys = ["我叫张明", "我喜欢运动", "我今年20岁", "我的工作是软件工程师", "我来自杭州"]
-        for query in querys:
+        queries = ["我叫张明", "我喜欢运动", "我今年20岁", "我的工作是软件工程师", "我来自杭州"]
+        for query in queries:
             result = await llm_agent.invoke({"query": query,
-                                             "user_id": user_id,
-                                             "scope_id": scope_id})
+                                             "user_id": user_id})
             print(f"LLMAgent 输出结果：{result}")
         await asyncio.sleep(30)
         result = await memory_engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id, page_size=4, page_idx=1)
@@ -555,3 +605,49 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         print(f"page2: memory result:{result}")
         result = await memory_engine.get_user_mem_by_page(user_id=user_id, scope_id=scope_id, page_size=99, page_idx=1)
         print(f"total memory result:{result}")
+
+    @unittest.skip("skip system test")
+    async def test_llm_agent_only_with_memory_variable(self):
+        os.environ.setdefault("LLM_SSL_VERIFY", "false")
+        os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
+        user_id = "default_user_id_var"
+        scope_id = "react_agent_123_var"
+        model_config = self._create_model_config()
+        prompt_template = self._create_prompt_template_with_memory()
+        memory_engine = await self._create_memory_engine()
+        llm_agent_config = create_llm_agent_config(
+            agent_id="react_agent_123_var",
+            agent_version="0.0.1",
+            description="AI助手",
+            plugins=[],
+            workflows=[],
+            model=model_config,
+            prompt_template=prompt_template,
+            tools=[]
+        )
+        llm_agent_config.memory_scope_id = scope_id
+        await memory_engine.set_scope_config(scope_id, self._create_memory_scope_config())
+        llm_agent_config.agent_memory_config = AgentMemoryConfig(
+            mem_variables=[
+                Param.string(name="name", description="用户的姓名", required=False),
+                Param.string(name="career", description="用户的职业", required=False),
+            ],
+            enable_long_term_mem=False
+        )
+        llm_agent: LLMAgent = create_llm_agent(
+            agent_config=llm_agent_config,
+            workflows=[],
+            tools=[]
+        )
+
+        # 调用
+        result = await llm_agent.invoke({"query": "我叫张明，目前刚到杭州来杭州做软件开发工作",
+                                         "user_id": user_id})
+        print(f"LLMAgent 输出结果：{result}")
+        await asyncio.sleep(30)
+        result = await llm_agent.invoke({"query": "我叫什么名字",
+                                         "user_id": user_id})
+        print(f"LLMAgent 输出结果：{result}")
+        result = await memory_engine.get_variables(user_id=user_id, scope_id=scope_id)
+        print(f"mem_variables:{result}")
+        self.assertEqual(len(result), 2)

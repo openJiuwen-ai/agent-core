@@ -2,10 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Union, List, Optional, AsyncIterator, Type, Dict
 
-from openjiuwen.core.common.exception.status_code import StatusCode
-
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -54,9 +52,8 @@ class Model:
         if model_client_config is not None:
             self._client = self._create_model_client(model_client_config)
         else:
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          error_msg="model client config is none."))
+            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                              error_msg="model client config is none")
 
     def _create_model_client(self, client_config: ModelClientConfig) -> BaseModelClient:
         """Create corresponding ModelClient instance based on client_type
@@ -71,13 +68,11 @@ class Model:
             ValueError: When client_provider is not supported
         """
         if client_config.client_provider is None:
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          error_msg="model client config client_provider is none."))
+            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                              error_msg="model client config client_provider is none")
         if client_config.client_id is None:
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          error_msg="model client config client_id is none."))
+            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                              error_msg="model client config client_id is none")
         client_provider = client_config.client_provider
 
         client_class = _CLIENT_TYPE_REGISTRY.get(client_provider)
@@ -85,10 +80,10 @@ class Model:
         if client_class is None:
             supported_types = ", ".join(_CLIENT_TYPE_REGISTRY.keys())
 
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          error_msg=f"Unsupported client_type: '{client_provider}'. "
-                                          f"Supported types: {supported_types}"))
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg=f"Unsupported client_type: '{client_provider}', Supported types: {supported_types}"
+            )
 
         return client_class(self.model_config, client_config)
 

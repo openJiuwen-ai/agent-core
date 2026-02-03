@@ -17,6 +17,7 @@ Output = TypeVar('Output', contravariant=True)
 
 class ToolCard(BaseCard):
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)
+    properties: Dict[str, Any] = Field(default_factory=dict)
 
     def tool_info(self):
         return ToolInfo(name=self.name, description=self.description, parameters=self.input_params)
@@ -36,9 +37,9 @@ class Tool:
             metadata purposes throughout the tool's lifecycle.
         """
         if card is None:
-            raise build_error(StatusCode.TOOL_CARD_NOT_SUPPORTED)
+            raise build_error(StatusCode.TOOP_CARD_INVALID, card=card, reason="card is None")
         if not card.id:
-            raise build_error(StatusCode.TOOL_CARD_ID_NOT_SUPPORTED, card=card)
+            raise build_error(StatusCode.TOOP_CARD_INVALID, card=card, reason="card is is None or empty")
         self._card = card
 
     @property

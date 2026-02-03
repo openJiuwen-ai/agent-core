@@ -323,6 +323,12 @@ class BaseAgent(ABC):
         """
         logger.info(f"BaseAgent.add_workflows called with {len(workflows)} workflows")
 
+        def make_workflow_provider(workflow):
+            """Create a provider function that returns the workflow instance."""
+            def provider():
+                return workflow
+            return provider
+
         for item in workflows:
             # Extract workflow_id, workflow_version, and provider/workflow
             workflow_card = None
@@ -346,8 +352,8 @@ class BaseAgent(ABC):
                     f"Use @workflow_provider decorator or WorkflowFactory class."
                 )
             else:
-                # Workflow instance: use directly
-                provider = lambda: item
+                # Create a provider function to wrap the instance
+                provider = make_workflow_provider(item)
                 workflow_card = item.card
                 is_provider = False
 
@@ -371,7 +377,7 @@ class BaseAgent(ABC):
                     name=workflow_card.name,
                     version=workflow_card.version,
                     description=workflow_card.description or "",
-                    inputs={}
+                    input_params=workflow_card.input_params
                 )
 
                 self.agent_config.workflows.append(workflow_schema)
@@ -588,6 +594,7 @@ class ControllerAgent(BaseAgent):
             # Fully delegate to controller
             result = await self.controller.invoke(inputs, agent_session)
             if session is None:
+                await self.context_engine.save_contexts(agent_session)
                 await agent_session.post_run()
 
             return result
@@ -662,6 +669,7 @@ class ControllerAgent(BaseAgent):
                             await agent_session.write_stream(item)
             finally:
                 if need_cleanup:
+                    await self.context_engine.save_contexts(agent_session)
                     await agent_session.post_run()
 
         task = asyncio.create_task(stream_process())

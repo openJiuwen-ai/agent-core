@@ -4,8 +4,8 @@
 import asyncio
 from typing import AsyncGenerator
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.runner.drunner.remote_client.mq_remote_clent import MqRemoteClient
 from openjiuwen.core.runner.drunner.remote_client.remote_client import RemoteClient
 from openjiuwen.core.runner.drunner.remote_client.remote_client_config import RemoteClientConfig, ProtocolEnum
@@ -26,10 +26,11 @@ class RemoteAgent:
         self.config = RemoteClientConfig(id=agent_id, protocol=protocol, topic=self.topic, **(config or {}))
         self.client = self._create_client()
 
-    def _create_client(self) -> RemoteClient:
+    def _create_client(self) -> RemoteClient | None:
         if self.protocol == ProtocolEnum.MQ:
             client = MqRemoteClient(config=self.config)
             return client
+        return None
 
     async def invoke(self, inputs: dict, timeout: float = None):
         try:
@@ -37,13 +38,11 @@ class RemoteAgent:
             return await self.client.invoke(inputs, timeout=timeout)
         except asyncio.CancelledError as e:
             # Timeout cancellation call set externally
-            raise JiuWenBaseException(StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.code,
-                                      StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.errmsg.format(
-                                          f"agent_id:{self.agent_id}"))
+            raise build_error(StatusCode.REMOTE_AGENT_EXECUTION_ERROR, cause=e, agent_id=self.agent_id,
+                              reason="cancelled")
         except TimeoutError as e:
-            raise JiuWenBaseException(StatusCode.REMOTE_AGENT_REQUEST_TIMEOUT.code,
-                                      StatusCode.REMOTE_AGENT_REQUEST_TIMEOUT.errmsg.format(
-                                          self.agent_id))
+            raise build_error(StatusCode.REMOTE_AGENT_EXECUTION_TIMEOUT, cause=e, agent_id=self.agent_id,
+                              timeout=timeout)
 
     async def stream(self, inputs: dict, timeout: float = None) -> AsyncGenerator:
         try:
@@ -52,10 +51,8 @@ class RemoteAgent:
                 yield chunk
         except asyncio.CancelledError as e:
             # Runner stop causes client cancellation
-            raise JiuWenBaseException(StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.code,
-                                      StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.errmsg.format(
-                                          f"agent_id:{self.agent_id}"))
+            raise build_error(StatusCode.REMOTE_AGENT_EXECUTION_ERROR, cause=e, agent_id=self.agent_id,
+                              reason="cancelled")
         except TimeoutError as e:
-            raise JiuWenBaseException(StatusCode.REMOTE_AGENT_REQUEST_TIMEOUT.code,
-                                      StatusCode.REMOTE_AGENT_REQUEST_TIMEOUT.errmsg.format(
-                                          self.agent_id))
+            raise build_error(StatusCode.REMOTE_AGENT_EXECUTION_TIMEOUT, cause=e, agent_id=self.agent_id,
+                              timeout=timeout)

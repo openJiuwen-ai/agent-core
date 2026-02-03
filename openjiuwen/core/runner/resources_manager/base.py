@@ -6,7 +6,7 @@ from typing import Awaitable, Callable, Generic, TypeAlias, TypeVar
 from pydantic import BaseModel
 
 from openjiuwen.core.multi_agent import BaseGroup, GroupCard
-from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
@@ -15,7 +15,7 @@ from openjiuwen.core.workflow import WorkflowCard
 # Type Aliases
 # ============================================================================
 
-AgentProvider = Callable[[AgentCard], Awaitable[BaseAgent]] | Callable[[AgentCard], BaseAgent]
+AgentProvider = Callable[['AgentCard'], Awaitable['BaseAgent']] | Callable[['AgentCard'], 'BaseAgent']
 """
 Agent provider type definition.
 
@@ -24,7 +24,7 @@ Used for lazy loading of Agent resources to avoid immediate creation upon regist
 Enables deferred initialization until the agent is actually needed.
 """
 
-AgentGroupProvider = Callable[[GroupCard], Awaitable[BaseGroup]] | Callable[[GroupCard], BaseGroup]
+AgentGroupProvider = Callable[['GroupCard'], Awaitable['BaseGroup']] | Callable[['GroupCard'], 'BaseGroup']
 """
 Agent group provider type definition.
 

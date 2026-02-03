@@ -6,9 +6,8 @@ import stat
 
 from requests.adapters import HTTPAdapter
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class SslUtils:
@@ -44,11 +43,9 @@ class SslUtils:
             return False, False
 
         if ssl_cert is None:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_SSL_CERT_INVALID.code,
-                message=StatusCode.COMMON_SSL_CERT_INVALID.errmsg(
-                    error_msg=f"when {verify_switch_env}=true, must provide ssl cert {ssl_cert_env}"
-                )
+            raise build_error(
+                StatusCode.COMMON_SSL_CERT_INVALID,
+                error_msg=f"when {verify_switch_env}=true, must provide ssl cert {ssl_cert_env}"
             )
         return True, ssl_cert
 
@@ -77,14 +74,15 @@ class SslUtils:
                 if safe_cert_dir:
                     safe_prefix = os.path.realpath(safe_cert_dir)
                     if not real_cert_path.startswith(safe_prefix + os.sep):
-                        ExceptionUtils.raise_exception(
+                        raise build_error(
                             StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED,
-                            "certificate path is outside the allowed directory"
+                            error_msg="certificate path is outside the allowed directory"
                         )
                 else:
-                    ExceptionUtils.raise_exception(
+                    raise build_error(
                         StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED,
-                        f"SAFE_CERT_DIR is not set")
+                        error_msg="SAFE_CERT_DIR is not set"
+                    )
 
                 SslUtils._secure_load_cert(ctx, real_cert_path)
 
@@ -101,30 +99,30 @@ class SslUtils:
         mode = stat.S_IRUSR
         try:
             fd = os.open(ssl_cert, flags, mode)
-        except OSError:
-            ExceptionUtils.raise_exception(
-                StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, "failed to open certificate file"
-            )
+        except OSError as e:
+            raise build_error(
+                StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, error_msg="failed to open certificate file"
+            ) from e
 
         try:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
-                ExceptionUtils.raise_exception(
-                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, "file path is invalid")
+                raise build_error(
+                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, error_msg="file path is invalid")
             if st.st_size == 0 or st.st_size > 1024 * 1024:
-                ExceptionUtils.raise_exception(
-                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, "file size is invalid")
+                raise build_error(
+                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, error_msg="file size is invalid")
 
             with os.fdopen(fd, "rb") as f:
                 ca_pem = f.read()
             if not ca_pem:
-                ExceptionUtils.raise_exception(
-                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, "file content is empty")
-        except Exception:
+                raise build_error(
+                    StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED, error_msg="file content is empty")
+        except Exception as e:
             os.close(fd)
-            ExceptionUtils.raise_exception(
+            raise build_error(
                 StatusCode.COMMON_SSL_CONTEXT_INIT_FAILED,
-                "failed to read certificate file"
-            )
+                error_msg="failed to read certificate file"
+            ) from e
 
         ctx.load_verify_locations(cadata=ca_pem.decode("ascii"))

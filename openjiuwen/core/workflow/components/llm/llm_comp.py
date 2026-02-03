@@ -7,11 +7,9 @@ from typing import List, Any, Dict, Optional, AsyncIterator, Union
 
 from pydantic import ValidationError, Field, BaseModel
 
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
@@ -133,7 +131,7 @@ class ValidationUtils:
         for i, item in enumerate(instance):
             try:
                 ValidationUtils.validate_json_schema(instance=item, schema=schema["items"])
-            except JiuWenBaseException as e:
+            except BaseError as e:
                 ValidationUtils.raise_invalid_params_error(f"invalid array item {i}: {type(e).__name__}")
 
     @staticmethod
@@ -252,7 +250,7 @@ class OutputFormatter:
     def _validate_json_schema(parsed_json: dict, json_schema: dict, original_content: str) -> None:
         try:
             ValidationUtils.validate_json_schema(parsed_json, json_schema)
-        except JiuWenBaseException as e:
+        except BaseError as e:
             raise e
         except Exception as e:
             if UserConfig.is_sensitive():
@@ -636,8 +634,8 @@ class LLMExecutable(ComponentExecutable):
                                                             self._config.response_format,
                                                             self._config.output_config)
             return formatted_res
-        except JiuWenBaseException as e:
-            if e.error_code == StatusCode.COMPONENT_LLM_CONFIG_INVALID.code:
+        except BaseError as e:
+            if e.code == StatusCode.COMPONENT_LLM_CONFIG_INVALID.code:
                 raise build_error(
                     StatusCode.COMPONENT_LLM_EXECUTION_PROCESS_ERROR,
                     error_msg=e.message,

@@ -8,11 +8,13 @@ from typing import Optional, Dict, Any, AsyncIterator
 from _pytest import pathlib
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.sys_operation.local.utils import OperationUtils, StreamEvent, StreamEventType
+from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.shell import BaseShellOperation
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.registry import operation
 from openjiuwen.core.sys_operation.result import (
-    ExecuteCmdResult, ExecuteCmdStreamResult, ExecuteCmdData
+    ExecuteCmdResult, ExecuteCmdStreamResult, ExecuteCmdData, ExecuteCmdChunkData
 )
 
 
@@ -42,21 +44,30 @@ class ShellOperation(BaseShellOperation):
         Returns:
             ExecuteCmdResult: Execution result.
         """
+
+        def _create_exec_cmd_err(error_msg: str, data: Optional[ExecuteCmdData] = None) -> ExecuteCmdResult:
+            """Create standard error result for cmd execution"""
+            if data and hasattr(data, "exit_code") and data.exit_code is None:
+                data.exit_code = -1
+            return build_operation_error_result(
+                error_type=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                msg_format_kwargs={"execution": "execute_cmd", "error_msg": error_msg},
+                result_cls=ExecuteCmdResult,
+                data=data
+            )
+
+        if not command or not command.strip():
+            return _create_exec_cmd_err(error_msg="command can not be empty")
+
+        actual_cwd = None
         try:
-            if not self._check_allowlist(command):
-                return ExecuteCmdResult(
-                    code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
-                        execution="execute_cmd",
-                        error_msg="Command not allowed by allowlist")
-                )
-
-            exec_env = self._prepare_environment(environment)
-            encoding = (options or {}).get("encoding", "utf-8")
-
             # Resolve CWD
             actual_cwd = self._resolve_cwd(cwd)
+            if not self._check_allowlist(command):
+                return _create_exec_cmd_err(error_msg="command not allowed by allowlist",
+                                            data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
 
+            exec_env = OperationUtils.prepare_environment(environment)
             proc = await asyncio.create_subprocess_shell(
                 command,
                 cwd=str(actual_cwd),
@@ -65,78 +76,33 @@ class ShellOperation(BaseShellOperation):
                 stderr=asyncio.subprocess.PIPE
             )
 
-            stdout_chunks = []
-            stderr_chunks = []
-
-            async def read_stream(stream, chunks):
-                try:
-                    while True:
-                        chunk = await stream.read(4096)
-                        if not chunk:
-                            break
-                        chunks.append(chunk)
-                except Exception as e:
-                    return ExecuteCmdResult(
-                        code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
-                        message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
-                            execution="execute_cmd",
-                            error_msg=f"Read stream error {e}")
-                    )
-
-            stdout_task = asyncio.create_task(read_stream(proc.stdout, stdout_chunks))
-            stderr_task = asyncio.create_task(read_stream(proc.stderr, stderr_chunks))
-
-            timed_out = False
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=timeout or 300)
-            except asyncio.TimeoutError:
-                timed_out = True
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception as e:
-                    return ExecuteCmdResult(
-                        code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
-                        message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
-                            execution="execute_cmd",
-                            error_msg=f"Stop process error {e}")
-                    )
-
-            # Wait for readers to finish capturing remaining output
-            await asyncio.wait([stdout_task, stderr_task], timeout=5)
-
-            stdout_str = b"".join(stdout_chunks).decode(encoding, errors='replace')
-            stderr_str = b"".join(stderr_chunks).decode(encoding, errors='replace')
-
-            res_data = ExecuteCmdData(
-                command=command,
-                cwd=str(actual_cwd),
-                exit_code=proc.returncode if proc.returncode is not None else -1,
-                stdout=stdout_str,
-                stderr=stderr_str
-            )
-
-            if timed_out:
-                return ExecuteCmdResult(
-                    code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
-                    message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
-                        execution="execute_cmd",
-                        error_msg=f"Command timed out after {timeout} seconds"),
-                    data=res_data
-                )
-
+            encoding = (options or {}).get("encoding", "utf-8")
+            process_handler = OperationUtils.create_handler(process=proc, encoding=encoding, timeout=timeout)
+            invoke_data = await process_handler.invoke()
+            invoke_exception = getattr(invoke_data, "exception", None)
+            if isinstance(invoke_exception, asyncio.TimeoutError):
+                return _create_exec_cmd_err(f"execution timeout after {timeout} seconds",
+                                            data=ExecuteCmdData(
+                                                command=command,
+                                                cwd=str(actual_cwd),
+                                                exit_code=invoke_data.exit_code,
+                                                stdout=invoke_data.stdout,
+                                                stderr=invoke_data.stderr
+                                            ))
             return ExecuteCmdResult(
                 code=StatusCode.SUCCESS.code,
-                message=StatusCode.SUCCESS.errmsg,
-                data=res_data
+                message="Command executed successfully",
+                data=ExecuteCmdData(
+                    command=command,
+                    cwd=str(actual_cwd),
+                    exit_code=invoke_data.exit_code,
+                    stdout=invoke_data.stdout,
+                    stderr=invoke_data.stderr
+                )
             )
         except Exception as e:
-            return ExecuteCmdResult(
-                code=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code,
-                message=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.errmsg.format(
-                    execution="execute_cmd",
-                    error_msg=str(e))
-            )
+            return _create_exec_cmd_err(error_msg=f"unexpected error: {str(e)}",
+                                        data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
 
     async def execute_cmd_stream(
             self,
@@ -160,14 +126,99 @@ class ShellOperation(BaseShellOperation):
         Returns:
             AsyncIterator[ExecuteCmdStreamResult]: Streaming structured results.
         """
-        pass
 
-    def _prepare_environment(self, custom_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        """Prepare environment variables."""
-        env = os.environ.copy()
-        if custom_env:
-            env.update(custom_env)
-        return env
+        def _create_exec_cmd_stream_err(error_msg: str,
+                                        data: Optional[ExecuteCmdChunkData] = None) -> ExecuteCmdStreamResult:
+            """Create standardized error result for streaming command execution"""
+            if data and hasattr(data, "exit_code") and data.exit_code is None:
+                data.exit_code = -1
+            return build_operation_error_result(
+                error_type=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                msg_format_kwargs={"execution": "execute_cmd_stream", "error_msg": error_msg},
+                result_cls=ExecuteCmdStreamResult,
+                data=data
+            )
+
+        chunk_index = 0
+
+        if not command or not command.strip():
+            yield _create_exec_cmd_stream_err(
+                error_msg="command can not be empty",
+                data=ExecuteCmdChunkData(chunk_index=chunk_index, exit_code=-1)
+            )
+            return
+
+        try:
+            actual_cwd = self._resolve_cwd(cwd)
+
+            if not self._check_allowlist(command):
+                yield _create_exec_cmd_stream_err(
+                    error_msg="command not allowed by allowlist",
+                    data=ExecuteCmdChunkData(chunk_index=chunk_index, exit_code=-1))
+                return
+
+            exec_env = OperationUtils.prepare_environment(environment)
+            process = await asyncio.create_subprocess_shell(
+                command,
+                cwd=str(actual_cwd),
+                env=exec_env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            chunk_size = (options or {}).get("chunk_size", 1024)
+            encoding = (options or {}).get("encoding", "utf-8")
+            process_handler = OperationUtils.create_handler(process=process, chunk_size=chunk_size, encoding=encoding,
+                                                            timeout=timeout)
+
+            def _stream_event_trans(stream_event_data: StreamEvent, data_idx: int) -> Optional[ExecuteCmdStreamResult]:
+                """Transform raw StreamEvent to structured ExecuteCmdStreamResult"""
+                def _handle_std_out_err(event: StreamEvent, idx: int) -> ExecuteCmdStreamResult:
+                    """Handle STDOUT/STDERR stream events"""
+                    chunk_data = ExecuteCmdChunkData(text=event.data, type=event.type.value, chunk_index=idx)
+                    return ExecuteCmdStreamResult(
+                        code=StatusCode.SUCCESS.code,
+                        message=f"Get {chunk_data.type} stream successfully",
+                        data=chunk_data
+                    )
+
+                def _handle_exec_error(event: StreamEvent, idx: int) -> ExecuteCmdStreamResult:
+                    """Handle execution error events"""
+                    chunk_data = ExecuteCmdChunkData(chunk_index=idx, exit_code=-1)
+                    error_msg = f"execution receive error: {event.data}"
+                    return _create_exec_cmd_stream_err(error_msg, chunk_data)
+
+                def _handle_process_exit(event: StreamEvent, idx: int) -> ExecuteCmdStreamResult:
+                    """Handle process exit event (final chunk)"""
+                    exit_code = event.data
+                    chunk_data = ExecuteCmdChunkData(chunk_index=idx, exit_code=exit_code)
+                    return ExecuteCmdStreamResult(
+                        code=StatusCode.SUCCESS.code,
+                        message="Command executed successfully",
+                        data=chunk_data
+                    )
+
+                event_handler_map: dict[StreamEventType, Any] = {
+                    StreamEventType.STDOUT: _handle_std_out_err,
+                    StreamEventType.STDERR: _handle_std_out_err,
+                    StreamEventType.ERROR: _handle_exec_error,
+                    StreamEventType.EXIT: _handle_process_exit
+                }
+                handler = event_handler_map.get(stream_event_data.type)
+                return handler(stream_event_data, data_idx) if handler else None
+
+            async for chunk in process_handler.stream():
+                modify_data = _stream_event_trans(chunk, chunk_index)
+                if modify_data:
+                    yield modify_data
+                    chunk_index += 1
+                if chunk.type in (StreamEventType.ERROR, StreamEventType.EXIT):
+                    return
+
+        except Exception as e:
+            yield _create_exec_cmd_stream_err(error_msg=f"unexpected error: {str(e)}",
+                                              data=ExecuteCmdChunkData(chunk_index=chunk_index, exit_code=-1))
+            return
 
     def _check_allowlist(self, command: str) -> bool:
         """Check if command is in allowlist."""

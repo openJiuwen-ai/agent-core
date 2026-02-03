@@ -6,6 +6,7 @@ from typing import Optional, Any
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
+from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
 from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
@@ -75,8 +76,15 @@ class SearchManager:
             result.sort(key=lambda item: item["score"], reverse=True)
         return [item for item in result if item["score"] >= threshold][:top_k]
 
-    async def list_user_mem(self, user_id: str, scope_id: str, nums: int, pages: int) -> list[dict[str, Any]] | None:
-        list_res = await self.mem_store.get_in_range(user_id, scope_id, nums * (pages - 1), nums * pages)
+    async def list_user_mem(
+        self,
+        user_id: str,
+        scope_id: str,
+        nums: int,
+        pages: int,
+        mem_type: str = None
+    ) -> list[dict[str, Any]] | None:
+        list_res = await self.mem_store.get_in_range(user_id, scope_id, nums * (pages - 1), nums * pages, mem_type)
         if not list_res:
             return list_res
         for item in list_res:
@@ -101,6 +109,22 @@ class SearchManager:
         return await self.managers[MemoryType.USER_PROFILE.value].list_user_profile(user_id=user_id,
                                                                                     scope_id=scope_id,
                                                                                     profile_type=profile_type)
+
+    async def list_user_summary(self, user_id: str, scope_id: str) -> list[dict]:
+        if MemoryType.SUMMARY.value not in self.managers:
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.SUMMARY.value,
+                error_msg=f"{MemoryType.SUMMARY.value} memory manager not inited",
+            )
+        if not isinstance(self.managers[MemoryType.SUMMARY.value], SummaryManager):
+            raise build_error(
+                StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+                memory_type=MemoryType.SUMMARY.value,
+                error_msg=f"{MemoryType.SUMMARY.value} manager class is not SummaryManager",
+            )
+        return await self.managers[MemoryType.SUMMARY.value].list_user_summary(user_id=user_id,
+                                                                                    scope_id=scope_id)
 
     async def get_user_variable(self, user_id: str, scope_id: str, var_name: str) -> str | None:
         if MemoryType.VARIABLE.value not in self.managers:

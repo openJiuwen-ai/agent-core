@@ -3,8 +3,6 @@
 
 from typing import List, Tuple, Optional
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.runner.resources_manager.thread_safe_dict import ThreadSafeDict
 
@@ -15,13 +13,9 @@ class PromptMgr:
 
     def add_prompt(self, template_id: str, template: PromptTemplate) -> None:
         if template_id is None:
-            raise JiuWenBaseException(StatusCode.SESSION_PROMPT_ADD_FAILED.code,
-                                      StatusCode.SESSION_PROMPT_ADD_FAILED.errmsg.format(
-                                          reason='template_id is invalid, can not be None'))
+            raise ValueError('template_id is invalid, can not be None')
         if template is None:
-            raise JiuWenBaseException(StatusCode.SESSION_PROMPT_ADD_FAILED.code,
-                                      StatusCode.SESSION_PROMPT_ADD_FAILED.errmsg.format(
-                                          reason='template is invalid, can not be None'))
+            raise ValueError('template is invalid, can not be None')
         self._repo[template_id] = template
 
     def add_prompts(self, templates: List[Tuple[str, PromptTemplate]]) -> None:
@@ -35,7 +29,5 @@ class PromptMgr:
 
     def get_prompt(self, template_id: str) -> Optional[PromptTemplate]:
         if template_id is None:
-            raise JiuWenBaseException(StatusCode.SESSION_PROMPT_GET_FAILED.code,
-                                      StatusCode.SESSION_PROMPT_GET_FAILED.errmsg.format(
-                                          reason='template_id is invalid, can not be None'))
+            raise ValueError('template_id is invalid, can not be None')
         return self._repo.get(template_id)

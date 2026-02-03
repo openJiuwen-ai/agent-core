@@ -6,10 +6,11 @@ import re
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from typing import Self, Union
+from typing import Callable, Self, Union
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.utils.dict_utils import flatten_dict
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.workflow.components.component import ComponentComposable
 from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter, WORKFLOW_DRAWABLE
@@ -24,8 +25,7 @@ from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import WorkflowSession
 
 from openjiuwen.core.graph.stream_actor.base import StreamGraph
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig
-from openjiuwen.core.common.schema.workflow_spec import CompIOConfig, NodeSpec
+from openjiuwen.core.workflow.workflow_config import WorkflowConfig, CompIOConfig, NodeSpec
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.graph.graph import PregelGraph
 
@@ -71,37 +71,8 @@ class BaseWorkflow:
     def config(self):
         return self._workflow_config
 
-    @classmethod
-    def _validate_comp_id(cls, comp_id: str) -> None:
-        """validate compnent id"""
-        if len(comp_id) > 100:
-            raise JiuWenBaseException(-1, "workflow component id length must not exceed 100")
-        if not re.match(r'^[A-Za-z0-9_-]+$', comp_id):
-            raise JiuWenBaseException(-1, "workflow component id must contain only letters (a–z, A–Z), "
-                                          "digits (0–9), underscores (_) or hyphens (-)")
-
-    def _validate_connection_comp_ids(self, src_comp_id: str, target_comp_id: str,
-                                      connection_type: ConnectionType = ConnectionType.CONNECTION) -> None:
-        """Validate that component IDs exist in comp_configs before adding connection.
-
-        This prevents KeyError in _auto_complete_abilities when edges reference non-existent components.
-        """
-        registered_comps = set(self._workflow_spec.comp_configs.keys())
-
-        missing_comps = []
-        if src_comp_id not in registered_comps:
-            missing_comps.append(f"source '{src_comp_id}'")
-        if target_comp_id not in registered_comps:
-            missing_comps.append(f"target '{target_comp_id}'")
-
-        if missing_comps:
-            raise JiuWenBaseException(
-                StatusCode.WORKFLOW_COMPONENT_CONFIG_ERROR.code,
-                f"Cannot add {connection_type.value} from '{src_comp_id}' to '{target_comp_id}': "
-                f"component(s) {', '.join(missing_comps)} not registered. "
-                f"Please call add_workflow_comp/set_start_comp/set_end_comp first. "
-                f"Currently registered components: {sorted(registered_comps) if registered_comps else '(none)'}"
-            )
+    def stream_actor(self):
+        return self._stream_actor
 
     def add_workflow_comp(
             self,
@@ -116,17 +87,12 @@ class BaseWorkflow:
             comp_ability: list[ComponentAbility] = None
     ) -> Self:
         self._validate_comp_id(comp_id)
+        self._validate_schemas(comp_id, inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
+        self._validate_comp_ability(comp_id, comp_ability, wait_for_all)
         node_spec = NodeSpec(
             io_config=CompIOConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema),
             stream_io_configs=CompIOConfig(inputs_schema=stream_inputs_schema, outputs_schema=stream_outputs_schema),
             abilities=comp_ability if comp_ability is not None else [])
-
-        for ability in node_spec.abilities:
-            if ability in [ComponentAbility.TRANSFORM, ComponentAbility.COLLECT]:
-                if wait_for_all is None:
-                    wait_for_all = True
-                if not wait_for_all:
-                    raise JiuWenBaseException(-1, "stream components need to wait for all")
         self._workflow_spec.comp_configs[comp_id] = node_spec
         if wait_for_all is None:
             wait_for_all = False
@@ -140,8 +106,8 @@ class BaseWorkflow:
             self,
             start_comp_id: str,
     ) -> Self:
+        self._validate_comp_id(start_comp_id)
         self._graph.start_node(start_comp_id)
-
         if self._drawable:
             self._drawable.set_start_node(start_comp_id)
         return self
@@ -150,13 +116,14 @@ class BaseWorkflow:
             self,
             end_comp_id: str,
     ) -> Self:
+        self._validate_comp_id(end_comp_id)
         self._graph.end_node(end_comp_id)
-
         if self._drawable:
             self._drawable.set_end_node(end_comp_id)
         return self
 
     def add_connection(self, src_comp_id: Union[str, list[str]], target_comp_id: str) -> Self:
+        self._validate_edge(src_comp_id, target_comp_id, StatusCode.WORKFLOW_EDGE_INVALID)
         self._graph.add_edge(src_comp_id, target_comp_id)
         if isinstance(src_comp_id, list):
             for source_id in src_comp_id:
@@ -176,6 +143,7 @@ class BaseWorkflow:
         return self
 
     def add_stream_connection(self, src_comp_id: str, target_comp_id: str) -> Self:
+        self._validate_edge(src_comp_id, target_comp_id, StatusCode.WORKFLOW_STREAM_EDGE_INVALID)
         self._graph.add_edge(src_comp_id, target_comp_id)
         stream_executables = self._graph.get_nodes()
         self._stream_actor.add_stream_consumer(stream_executables[target_comp_id], target_comp_id)
@@ -189,6 +157,22 @@ class BaseWorkflow:
         return self
 
     def add_conditional_connection(self, src_comp_id: str, router: Router) -> Self:
+        if not src_comp_id:
+            raise build_error(StatusCode.WORKFLOW_CONDITION_EDGE_INVALID, src_comp_id=src_comp_id,
+                              reason="src_comp_id cannot be empty or None",
+                              workflow=self._workflow_config.card.str())
+        if not isinstance(src_comp_id, str):
+            raise build_error(StatusCode.WORKFLOW_CONDITION_EDGE_INVALID, src_comp_id=src_comp_id,
+                              reason=f"src_comp_id must be a string, got {type(src_comp_id).__name__}",
+                              workflow=self._workflow_config.card.str())
+        if not router:
+            raise build_error(StatusCode.WORKFLOW_CONDITION_EDGE_INVALID, src_comp_id=src_comp_id,
+                              reason="router function is required for conditional edges",
+                              workflow=self._workflow_config.card.str())
+        elif not isinstance(router, Callable):
+            raise build_error(StatusCode.WORKFLOW_CONDITION_EDGE_INVALID, src_comp_id=src_comp_id,
+                              reason=f"router must be a callable function, got {type(router).__name__}",
+                              workflow=self._workflow_config.card.str())
         if isinstance(router, BranchRouter):
             router.set_session(self._session)
             self._graph.add_conditional_edges(source_node_id=src_comp_id, router=router)
@@ -210,22 +194,22 @@ class BaseWorkflow:
         if isinstance(session, WorkflowSession):
             session.set_workflow_id(self._workflow_config.card.id)
         session.config().add_workflow_config(self._workflow_config.card.id, self._workflow_config)
-
         if isinstance(session, SubWorkflowSession):
             main_workflow_config = session.config().get_workflow_config(
                 session.main_workflow_id())
-            if main_workflow_config is None:
-                raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.code,
-                                          StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
-                                              error_msg=f"main workflow config is not exit,"
-                                                        f" main workflow_id={session.main_workflow_id()}"))
-            if session.workflow_nesting_depth() > main_workflow_config.workflow_max_nesting_depth:
-                raise JiuWenBaseException(StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.code,
-                                          StatusCode.COMPONENT_SUB_WORKFLOW_RUNTIME_ERROR.errmsg.format(
-                                              error_msg=f"workflow nesting hierarchy is too big, must <= "
-                                                        f"{main_workflow_config.workflow_max_nesting_depth}"))
+            if (main_workflow_config and
+                    session.workflow_nesting_depth() > main_workflow_config.workflow_max_nesting_depth):
+                raise build_error(StatusCode.WORKFLOW_COMPILE_ERROR,
+                                  reason=f"workflow nesting hierarchy is too big, must <= "
+                                         f"{main_workflow_config.workflow_max_nesting_depth}",
+                                  workflow=main_workflow_config.card.str() if main_workflow_config
+                                  else self._workflow_config.card.str())
         self._session.set_session(session)
-        return self._graph.compile(session, context=context)
+        try:
+            return self._graph.compile(session, context=context)
+        except Exception as e:
+            raise build_error(StatusCode.WORKFLOW_COMPILE_ERROR, cause=e, reason=str(e),
+                              workflow=self._workflow_config.card)
 
     @property
     def drawable(self):
@@ -250,7 +234,7 @@ class BaseWorkflow:
     async def reset(self):
         await self._graph.reset()
 
-    def _auto_complete_abilities(self):
+    def auto_complete_abilities(self):
         """Auto-complete component abilities based on edge topology."""
         edge_topology = self._build_edge_topology()
         self._validate_edge_nodes(edge_topology)
@@ -281,13 +265,11 @@ class BaseWorkflow:
             return
 
         edge_details = self._collect_problematic_edges(edge_topology, missing_nodes)
-        raise JiuWenBaseException(
-            StatusCode.WORKFLOW_COMPONENT_CONFIG_ERROR.code,
-            f"Component ID mismatch: nodes {sorted(missing_nodes)} are referenced in edges "
-            f"but not registered via add_workflow_comp/set_start_comp/set_end_comp.\n"
-            f"Registered components: {sorted(registered_comps)}\n"
-            f"Problematic edges:\n" + "\n".join(edge_details)
-        )
+        raise build_error(StatusCode.WORKFLOW_COMPILE_ERROR,
+                          reason=f"Component ID mismatch: nodes {sorted(missing_nodes)} are referenced in edges "
+                                 f"but not registered via add_workflow_comp/set_start_comp/set_end_comp.\n"
+                                 f"Registered components: {sorted(registered_comps)}\n"
+                                 f"Problematic edges:\n" + "\n".join(edge_details))
 
     @staticmethod
     def _collect_problematic_edges(edge_topology: EdgeTopology, missing_nodes: set) -> list[str]:
@@ -367,3 +349,82 @@ class BaseWorkflow:
                     target_map[target] = []
                 target_map[target].append(source)
         return target_map
+
+    def _validate_comp_id(self, comp_id: str) -> None:
+        """validate component id"""
+        if not comp_id:
+            raise build_error(StatusCode.WORKFLOW_COMPONENT_ID_INVALID, comp_id=comp_id, reason="is None or empty",
+                              workflow=self._workflow_config.card.str())
+        if not isinstance(comp_id, str):
+            raise build_error(StatusCode.WORKFLOW_COMPONENT_ID_INVALID, comp_id=comp_id, reason="type is not string",
+                              workflow=self._workflow_config.card.str())
+        if len(comp_id) > 100:
+            raise build_error(StatusCode.WORKFLOW_COMPONENT_ID_INVALID, comp_id=comp_id,
+                              reason="length must not between [1, 100]", workflow=self._workflow_config.card.str())
+        if not re.match(r'^[A-Za-z0-9_-]+$', comp_id):
+            raise build_error(StatusCode.WORKFLOW_COMPONENT_ID_INVALID, comp_id=comp_id,
+                              reason="only support letters (a–z, A–Z), "
+                                     "digits (0–9), underscores (_) or hyphens (-)",
+                              workflow=self._workflow_config.card.str())
+
+    def _validate_comp_ability(self, comp_id: str, abilities, wait_for_all):
+        if abilities is None:
+            return
+        for ability in abilities:
+            if ability in [ComponentAbility.TRANSFORM, ComponentAbility.COLLECT]:
+                if wait_for_all is None:
+                    wait_for_all = True
+                if not wait_for_all:
+                    raise build_error(StatusCode.WORKFLOW_COMPONENT_ABILITY_INVALID, comp_id=comp_id,
+                                      reason="stream components (TRANSFORM/COLLECT) must set 'wait_for_all' to True",
+                                      workflow=self._workflow_config.card.str())
+
+    def _validate_edge(self, src_comp_id: Union[str, list[str]], target_comp_id: str, error_code):
+        if not src_comp_id:
+            raise build_error(error_code, src_comp_id=src_comp_id,
+                              target_comp_id=target_comp_id, reason="src_comp_id cannot be empty or None",
+                              workflow=self._workflow_config.card.str())
+        if isinstance(src_comp_id, list):
+            for idx, comp_id in enumerate(src_comp_id):
+                if not comp_id:
+                    raise build_error(error_code, src_comp_id=src_comp_id,
+                                      target_comp_id=target_comp_id,
+                                      reason="src_comp_id list contains empty or None value at index {idx}",
+                                      workflow=self._workflow_config.card.str())
+                if not isinstance(comp_id, str):
+                    raise build_error(error_code, src_comp_id=src_comp_id,
+                                      target_comp_id=target_comp_id,
+                                      reason="src_comp_id list contains non-string value at index {idx}: "
+                                             f"{type(comp_id).__name__}",
+                                      workflow=self._workflow_config.card.str())
+        elif not isinstance(src_comp_id, str):
+            raise build_error(error_code, src_comp_id=src_comp_id,
+                              target_comp_id=target_comp_id,
+                              reason=f"src_comp_id must be a string or list[string], got {type(src_comp_id).__name__}",
+                              workflow=self._workflow_config.card.str())
+
+    def _validate_schemas(self, comp_id, inputs_schema: dict | Transformer = None,
+                          outputs_schema: dict | Transformer = None,
+                          stream_inputs_schema: dict | Transformer = None,
+                          stream_outputs_schema: dict | Transformer = None):
+        if isinstance(inputs_schema, dict) and isinstance(stream_inputs_schema, dict):
+            flatten_inputs_schema = flatten_dict(inputs_schema)
+            flatten_stream_inputs_schema = flatten_dict(stream_inputs_schema)
+            for key in flatten_inputs_schema.keys():
+                if key in flatten_stream_inputs_schema.keys():
+                    raise build_error(
+                        StatusCode.WORKFLOW_COMPONENT_SCHEMA_INVALID,
+                        comp_id=comp_id,
+                        reason=f"duplicate key both exist in inputs_schema with stream_inputs_schema, "
+                               f"key={key}",
+                        workflow=self._workflow_config.card.str()
+                    )
+        if isinstance(outputs_schema, dict) and isinstance(stream_outputs_schema, dict):
+            flatten_outputs_schema = flatten_dict(outputs_schema)
+            flatten_stream_outputs_schema = flatten_dict(stream_outputs_schema)
+            for key in flatten_outputs_schema.keys():
+                if key in flatten_stream_outputs_schema.keys():
+                    raise build_error(
+                        StatusCode.WORKFLOW_COMPONENT_SCHEMA_INVALID,
+                        reason=f"duplicate key both exist in outputs_schema with stream_outputs_schema, "
+                               f"key={key}")

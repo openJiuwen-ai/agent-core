@@ -1,39 +1,27 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+from __future__ import annotations
 
-"""Event data model definitions.
-
-This module defines data models related to controller events, including:
-
-- EventType: enumeration of event types.
-- Event: base event model.
-- InputEvent: input event from the user.
-- TaskInteractionEvent: interaction event during task execution.
-- TaskCompletionEvent: event emitted when a task completes.
-- TaskFailedEvent: event emitted when a task fails.
-
-Events are the primary input to the controller and are used to pass
-information between internal components.
-"""
+import uuid
 from enum import Enum
-from typing import Optional, Dict, Any, List
-
+from typing import List, Optional, Union, Dict, Any, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.controller.schema.dataframe import DataFrame
-from openjiuwen.core.controller.schema.task import Task
+from openjiuwen.core.controller.schema.dataframe import DataFrame, TextDataFrame, JsonDataFrame
+
+if TYPE_CHECKING:
+    from openjiuwen.core.controller.schema.task import Task
 
 
 class EventType(str, Enum):
-    """Event type enumeration.
+    """Event Type Enumeration
 
     Defines all supported event types:
-        - INPUT: user input events.
-        - TASK_INTERACTION: task interaction events (when a task needs user
-          interaction).
-        - TASK_COMPLETION: task completion events.
-        - TASK_FAILED: task failure events.
+    - INPUT: User input event
+    - TASK_INTERACTION: Task interaction event (requires user interaction during task execution)
+    - TASK_COMPLETION: Task completion event
+    - TASK_FAILED: Task failed event
     """
     INPUT = "input"
     TASK_INTERACTION = "task_interaction",
@@ -42,94 +30,108 @@ class EventType(str, Enum):
 
 
 class Event(BaseModel):
-    """Base event model.
+    """Event Base Class
 
-    All events extend this base model and include an event type, an optional
-    event ID and optional metadata.
+    Base class for all events, containing event type, event ID, and metadata.
     """
     event_type: EventType
-    event_id: Optional[str] = None
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     metadata: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
-        """Post-init hook to ensure metadata is not ``None``."""
+        """Post-initialization processing
+
+        Ensures metadata is not None.
+        """
         if self.metadata is None:
             self.metadata = {}
 
 
 class InputEvent(Event):
-    """Input event from the user.
+    """Input Event
 
-    Represents user input into the controller and is the main entrypoint
-    for requests.
+    User input event containing input data.
+    This is the main input type for the controller, used to receive user requests.
 
     Attributes:
-        event_type: Event type, fixed to ``EventType.INPUT``.
-        input_data: List of input data frames (text, file, JSON).
+        event_type: Event type, fixed as EventType.INPUT
+        input_data: Input data list, supports text, file, and JSON formats
     """
     event_type: EventType = EventType.INPUT
     input_data: List[DataFrame] = Field(default_factory=list)
 
     @classmethod
-    def from_user_input(cls, user_input: str) -> "Event":
-        """Create an ``InputEvent`` from raw user input.
+    def from_user_input(cls, user_input: Union[str, dict, 'InputEvent']) -> "InputEvent":
+        """Create input event from user input
 
-        Convenience constructor that converts a plain string into an
-        ``InputEvent`` instance.
+        Convenience method to convert user input to InputEvent.
 
         Args:
-            user_input: Raw user input string.
+            user_input: User input, supports string, dictionary, and InputEvent
 
         Returns:
-            Event: Input event instance.
+            InputEvent: Input event object
         """
-        ...
+        if isinstance(user_input, cls):
+            return user_input
+
+        if isinstance(user_input, str):
+            return cls(
+                event_type=EventType.INPUT,
+                input_data=[TextDataFrame(text=user_input)]
+            )
+        if isinstance(user_input, dict):
+            return cls(
+                event_type=EventType.INPUT,
+                input_data=[JsonDataFrame(data=user_input)]
+            )
+
+        raise TypeError(f"Unsupported user input type: {type(user_input)}. Must be str, dict, or InputEvent.")
 
 
 class TaskInteractionEvent(Event):
-    """Task interaction event.
+    """Task Interaction Event
 
-    Emitted during task execution when user interaction is required (e.g.
-    to provide additional information or confirmation).
+    Event generated when user interaction is required during task execution.
+    This event is generated when a task requires the user to provide additional information or confirmation.
 
     Attributes:
-        event_type: Event type, fixed to ``EventType.TASK_INTERACTION``.
-        interaction: List of interaction payloads that should be surfaced
-            to the user.
-        task: Associated task instance.
+        event_type: Event type, fixed as EventType.TASK_INTERACTION
+        interaction: Interaction content list, containing information that requires user interaction
+        task: Associated task object
     """
-    event_type = EventType.TASK_INTERACTION
+    event_type: EventType = EventType.TASK_INTERACTION
     interaction: List[DataFrame] = Field(default_factory=list)
-    task: Task = None
+    task: Optional[Task] = None
 
 
 class TaskCompletionEvent(Event):
-    """Task completion event.
+    """Task Completion Event
 
-    Emitted when task execution finishes successfully and contains the
-    resulting outputs.
+    Event generated when task execution is completed, containing task results.
+    This event is generated when a task successfully completes and includes the task's output results.
 
     Attributes:
-        event_type: Event type, fixed to ``EventType.TASK_COMPLETION``.
-        task_result: List of result data frames produced by the task.
-        task: Associated task instance.
+        event_type: Event type, fixed as EventType.TASK_COMPLETION
+        task_result: Task result list, containing the task's output data
+        task: Associated task object
     """
-    event_type = EventType.TASK_COMPLETION
+    event_type: EventType = EventType.TASK_COMPLETION
     task_result: List[DataFrame] = Field(default_factory=list)
-    task: Task = None
+    task: Optional[Task] = None
 
 
 class TaskFailedEvent(Event):
-    """Task failure event.
+    """Task Failed Event
 
-    Emitted when task execution fails and includes error information.
+    Event generated when task execution fails, containing error information.
+    This event is generated when an error occurs during task execution and includes error details.
 
     Attributes:
-        event_type: Event type, fixed to ``EventType.TASK_FAILED``.
-        error_message: Error message describing the failure.
-        task: Associated task instance.
+        event_type: Event type, fixed as EventType.TASK_FAILED
+        error_message: Error message describing the reason for task failure
+        task: Associated task object
     """
-    event_type = EventType.TASK_FAILED
-    error_message: str = None
-    task: Task = None
-
+    event_type: EventType = EventType.TASK_FAILED
+    error_message: Optional[str] = None
+    task: Optional[Task] = None

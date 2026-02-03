@@ -9,9 +9,8 @@ import configparser
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 DEFAULT_SENSITIVE_PATH_STR = ("/etc/passwd,/etc/shadow,/etc/hosts,/etc/hostname,/etc/ssh/,"
                               "C:\\Windows\\System32\\,C:\\Windows\\SysWOW64\\,C:\\Windows\\System\\")
@@ -43,11 +42,9 @@ class UserConfig:
     def set_config_path(cls, path: Path) -> None:
         """set config file path"""
         if cls._instance is not None:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR.code,
-                message=StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR.errmsg.format(
-                    error_msg="config already initialized"
-                )
+            raise build_error(
+                StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR,
+                error_msg="config already initialized"
             )
         cls._user_path = cls._resolve_and_check(path)
 
@@ -88,11 +85,9 @@ class UserConfig:
         try:
             path.relative_to(root)
         except ValueError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR.code,
-                message=StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR.errmsg.format(
-                    error_msg="config file must inside root"
-                ),
+            raise build_error(
+                StatusCode.COMMON_USER_CONFIG_PROCESS_ERROR,
+                error_msg="config file must inside root"
             ) from e
 
         return path

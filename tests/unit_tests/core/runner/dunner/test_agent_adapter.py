@@ -19,9 +19,9 @@ from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, Node1, Mock
 class TestRunnerIntegration:
 
     @staticmethod
-    def _build_workflow(name, id, version):
+    def _build_workflow(name, workflow_id, version):
         workflow_card = WorkflowCard(
-            id=id,
+            id=workflow_id,
             version=version,
             name=name,
         )
@@ -43,13 +43,13 @@ class TestRunnerIntegration:
         try:
             from openjiuwen.core.runner.runner import Runner
             await Runner.start()
-            id = "test_workflow"
+            workflow_id = "test_workflow"
             name = "test_workflow"
             version = "1"
             description = "test_workflow"
-            workflow1 = self._build_workflow(name, id, version)
+            workflow1 = self._build_workflow(name, workflow_id, version)
             test_workflow_schema = WorkflowSchema(
-                id=id,
+                id=workflow_id,
                 version=version,
                 name=name,
                 description=description,
@@ -63,7 +63,7 @@ class TestRunnerIntegration:
             )
             agent = WorkflowAgent(workflow_config)
             agent.bind_workflows([workflow1])
-            Runner.resource_mgr.add_workflow(WorkflowCard(id=id + "_" + version), lambda: workflow1)
+            Runner.resource_mgr.add_workflow(WorkflowCard(id=workflow_id + "_" + version), lambda: workflow1)
             Runner.resource_mgr.add_agent(AgentCard(id="workflow-single_agent"), lambda: agent)
             # Simulate client sending request
             client = RemoteAgent(agent_id="workflow-single_agent")

@@ -56,7 +56,7 @@ class OutputCallback(LoopCallback):
     def end_round(self, session: BaseSession, loop_times: int) -> Output:
         results: list[Any] = session.state().get(self._round_result_root)
         if not isinstance(results, list):
-            raise RuntimeError("error results in round process")
+            raise ValueError("error results in round process")
         if len(results) >= loop_times:
             return None
         results.append(session.state().get_inputs(self._outputs_format))

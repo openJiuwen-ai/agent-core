@@ -1,9 +1,10 @@
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage, ToolCall
+from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage, ToolCall, SystemMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
+from openjiuwen.core.foundation.prompt.assemble.variables.dictable import DictableVariable
 from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variable
 from openjiuwen.core.foundation.prompt.assemble.variables.textable import TextableVariable
 
@@ -254,3 +255,99 @@ class TestPromptAssemble:
         template5 = PromptTemplate(card=None, content="Hi {{name}}")
         formatted5 = template5.format({"name": "Bob", "age": 20})
         self.assert_equal("Hi Bob", formatted5.content)
+
+    def test_dictable_variable_initialization(self):
+        data = {"text": "Hello {{name}}", "info": {"age": "{{age}}"}}
+        var = DictableVariable(data=data)
+        self.assert_equal({"name", "age"}, set(var.input_keys))
+        self.assert_equal({"name", "age"}, set(var.placeholders))
+
+        data2 = [{"type": "text", "content": "{{user.profile.name}}"}]
+        var2 = DictableVariable(data=data2)
+        self.assert_equal(["user"], var2.input_keys)
+        self.assert_equal(["user.profile.name"], var2.placeholders)
+
+        data3 = {"key": "{{}}"}
+        pytest.raises(BaseError, DictableVariable, data=data3)
+
+    def test_dictable_variable_update(self):
+        data = {
+            "message": "Hi {{user}}",
+            "details": {
+                "id": 101,
+                "tag": "{{tag}}"
+            }
+        }
+        var = DictableVariable(data=data)
+        result = var.update(user="Alice", tag="VIP")
+        expected = {
+            "message": "Hi Alice",
+            "details": {
+                "id": 101,
+                "tag": "VIP"
+            }
+        }
+        self.assert_equal(expected, result)
+        self.assert_equal(expected, var.value)
+
+        data2 = [
+            {"type": "text", "text": "{{query}}"},
+            {"type": "image_url", "image_url": {"url": "{{url}}"}}
+        ]
+        var2 = DictableVariable(data=data2)
+        result2 = var2.update(query="What is this?", url="http://example.com/1.jpg")
+        expected2 = [
+            {"type": "text", "text": "What is this?"},
+            {"type": "image_url", "image_url": {"url": "http://example.com/1.jpg"}}
+        ]
+        self.assert_equal(expected2, result2)
+
+    def test_dictable_variable_nested_obj(self):
+        data = {"info": "Author is {{author.name}}"}
+        var = DictableVariable(data=data)
+
+        var.update(author={"name": "Bob"})
+        self.assert_equal({"info": "Author is Bob"}, var.value)
+
+        class Author:
+            name = "Charlie"
+
+        var.update(author=Author())
+        self.assert_equal({"info": "Author is Charlie"}, var.value)
+
+    def test_dict_template_integration(self):
+        template_content = [
+            SystemMessage(content="You are a helper."),
+            UserMessage(content=[
+                {"type": "text", "text": "Describe this: {{query}}"},
+                {"type": "image_url", "image_url": {"url": "{{image_url}}"}}
+            ])
+        ]
+        template = PromptTemplate(content=template_content)
+
+        formatted_template = template.format({
+            "query": "a cute cat",
+            "image_url": "https://picsum.photos/200"
+        })
+
+        messages = formatted_template.to_messages()
+
+        self.assert_equal(2, len(messages))
+
+        self.assert_equal("You are a helper.", messages[0].content)
+
+        expected_user_content = [
+            {"type": "text", "text": "Describe this: a cute cat"},
+            {"type": "image_url", "image_url": {"url": "https://picsum.photos/200"}}
+        ]
+        self.assert_equal(expected_user_content, messages[1].content)
+
+    def test_dictable_variable_non_string_log(self):
+        data = {"count": "Total: {{num}}"}
+        var = DictableVariable(data=data)
+
+        var.update(num=100)
+        self.assert_equal({"count": "Total: 100"}, var.value)
+
+        var.update(num=True)
+        self.assert_equal({"count": "Total: True"}, var.value)

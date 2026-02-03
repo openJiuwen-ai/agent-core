@@ -2,17 +2,15 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import copy
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.constants.enums import TaskType
-from openjiuwen.core.runner import Runner
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.controller.legacy.event.event import Event
 from openjiuwen.core.controller.legacy.task.task import Task, TaskInput
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.common.security.json_utils import JsonUtils
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.common.utils.hash_util import generate_key
@@ -25,6 +23,9 @@ from openjiuwen.core.foundation.llm import ModelConfig, BaseMessage, AssistantMe
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.workflow import WorkflowOutput
+
+if TYPE_CHECKING:
+    from openjiuwen.core.runner import Runner
 
 
 class MessageHandlerUtils:
@@ -92,14 +93,14 @@ class MessageHandlerUtils:
                     except Exception as e:
                         if UserConfig.is_sensitive():
                             logger.error("LLM Agent parse tool call workflow's arguments error")
-                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
-                                                           "LLM-generated workflow arguments are invalid", e)
+                            raise build_error(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
+                                              error_msg="LLM-generated workflow arguments are invalid") from e
                         else:
                             logger.error(f"LLM Agent parse tool call workflow({tool_name})'s arguments error: "
                                          f"{tool_call.arguments}")
-                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
-                                                           f"LLM-generated workflow ({tool_name}) arguments "
-                                                           f"are invalid: {tool_call.arguments}", e)
+                            raise build_error(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
+                                              error_msg=f"LLM-generated workflow ({tool_name}) arguments "
+                                                        f"are invalid: {tool_call.arguments}") from e
 
                     result.append(Task(
                         task_id=tool_call.id,
@@ -120,14 +121,14 @@ class MessageHandlerUtils:
                     except Exception as e:
                         if UserConfig.is_sensitive():
                             logger.error("LLM Agent parse tool call plugin's arguments error")
-                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
-                                                           "LLM-generated plugin arguments are invalid", e)
+                            raise build_error(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
+                                              error_msg="LLM-generated plugin arguments are invalid") from e
                         else:
                             logger.error(f"LLM Agent parse tool call plugin({tool_name})'s arguments error: "
                                          f"{tool_call.arguments}")
-                            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
-                                                           f"LLM-generated plugin ({tool_name}) arguments "
-                                                           f"are invalid: {tool_call.arguments}", e)
+                            raise build_error(StatusCode.AGENT_CONTROLLER_TOOL_EXECUTION_PROCESS_ERROR,
+                                              error_msg=f"LLM-generated plugin ({tool_name}) arguments "
+                                                        f"are invalid: {tool_call.arguments}") from e
                     result.append(Task(
                         task_id=tool_call.id,
                         input=TaskInput(
@@ -138,9 +139,9 @@ class MessageHandlerUtils:
                     ))
                     break
         if not result:
-            raise JiuWenBaseException(
-                error_code=StatusCode.AGENT_TOOL_NOT_FOUND.code,
-                message=StatusCode.AGENT_TOOL_NOT_FOUND.errmsg
+            raise build_error(
+                StatusCode.AGENT_TOOL_NOT_FOUND,
+                error_msg="failed to create task from tool calls"
             )
         return result
 
@@ -154,7 +155,7 @@ class MessageHandlerUtils:
             if tool_name == plugin.name:
                 return TaskType.PLUGIN
 
-        raise JiuWenBaseException(StatusCode.AGENT_TOOL_NOT_FOUND.code, f"not find tool call type: {tool_name}")
+        raise build_error(StatusCode.AGENT_TOOL_NOT_FOUND, error_msg=f"not find tool call type: {tool_name}")
 
     @staticmethod
     def is_interaction_result(exec_result: Any) -> bool:
@@ -277,6 +278,7 @@ class ReasonerUtils:
     @staticmethod
     async def get_model(model_config: ModelConfig):
         """Get model instance by config"""
+        from openjiuwen.core.runner import Runner
         model_id = generate_key(
             model_config.model_info.api_key,
             model_config.model_info.api_base,

@@ -14,10 +14,11 @@ from typing import (
     Optional,
 )
 
-from .events import (
+from openjiuwen.core.common.logging.events import (
     AgentEvent,
     BaseLogEvent,
     ContextEvent,
+    create_log_event,
     EventStatus,
     LLMEvent,
     LogEventType,
@@ -26,18 +27,17 @@ from .events import (
     ModuleType,
     PerformanceEvent,
     RetrievalEvent,
+    sanitize_event_for_logging,
     SessionEvent,
     SystemEvent,
     ToolEvent,
     UserInteractionEvent,
-    WorkflowEvent,
-    create_log_event,
-    sanitize_event_for_logging,
     validate_event,
+    WorkflowEvent,
 )
-from .manager import LogManager
-from .protocol import LoggerProtocol
-from .utils import (
+from openjiuwen.core.common.logging.manager import LogManager
+from openjiuwen.core.common.logging.protocol import LoggerProtocol
+from openjiuwen.core.common.logging.utils import (
     get_session_id,
     set_session_id,
 )
@@ -140,6 +140,9 @@ tool_logger = LazyLogger(lambda: LogManager.get_logger("tool"))
 # Prompt module logger - for prompt processing related logs
 prompt_logger = LazyLogger(lambda: LogManager.get_logger("prompt"))
 
+# Store module logger - for data store related logs
+store_logger = LazyLogger(lambda: LogManager.get_logger("store"))
+
 # ========== Data and Retrieval Module Loggers ==========
 
 # Memory module logger - for memory management related logs
@@ -187,6 +190,7 @@ __all__ = [
     "llm_logger",
     "tool_logger",
     "prompt_logger",
+    "store_logger",
     # Data and retrieval module loggers
     "memory_logger",
     "retrieval_logger",

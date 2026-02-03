@@ -1,9 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Any, Dict, List
 
-from pydantic import BaseModel, Field
-from sympy.testing import pytest
+from typing import (
+    Any,
+    Dict,
+    List,
+)
+
+import pytest
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
 from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
@@ -108,6 +116,7 @@ def test_format_empty_dict():
     assert "name" in result
     assert "age" in result
     assert "email" in result
+
 
 def test_validate_valid_data():
     VALID_USER_DATA = {

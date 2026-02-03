@@ -9,7 +9,7 @@ Author: huenrui1@huawei.com
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, List, Optional, Union, Tuple
 
 from pydantic import Field, BaseModel
 
@@ -18,8 +18,11 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig
 )
-from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.context_engine import (
+    ContextEngine,
+    ContextEngineConfig,
+    ModelContext
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
@@ -28,10 +31,10 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
-from openjiuwen.core.single_agent.agent import BaseAgent
+from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
@@ -54,10 +57,7 @@ class ReActAgentConfig(BaseModel):
         default_factory=list,
         description="Prompt template list"
     )
-    context_window_limit: Optional[int] = Field(
-        default=20,
-        description="Context window limit"
-    )
+
     max_iterations: int = Field(default=5, description="Maximum iterations")
 
     # LLM configuration objects (for Model initialization)
@@ -71,6 +71,19 @@ class ReActAgentConfig(BaseModel):
     )
 
     sys_operation_id: Optional[str] = None
+
+    context_engine_config: ContextEngineConfig = Field(
+        default=ContextEngineConfig(
+            max_context_message_num=200,
+            default_window_round_num=10
+        ),
+        description="Context engine configuration"
+    )
+
+    context_processors: List[Tuple[str, BaseModel]] = Field(
+        default=None,
+        description="Context processors configuration"
+    )
 
     def configure_model(self, model_name: str) -> 'ReActAgentConfig':
         """Configure model name
@@ -133,16 +146,37 @@ class ReActAgentConfig(BaseModel):
         self.prompt_template = prompt_template
         return self
 
-    def configure_context_limit(self, limit: Optional[int]) -> 'ReActAgentConfig':
-        """Configure context window limit
-
-        Args:
-            limit: Context window limit (message count)
-
-        Returns:
-            self (supports chaining)
+    def configure_context_engine(
+            self,
+            max_context_message_num: Optional[int] = 200,
+            default_window_round_num: Optional[int] = 10,
+            enable_reload: bool = False
+    ) -> 'ReActAgentConfig':
         """
-        self.context_window_limit = limit
+        Configure the context-engine parameters that control how conversation history
+        is truncated, offloaded and reloaded.
+
+        Parameters
+        ----------
+        max_context_message_num : int, optional, default 200
+            Hard upper bound on the total number of messages kept in the context
+            window.  `None` means no hard limit.
+        default_window_round_num : int, optional, default 10
+            Number of **most-recent conversation rounds** to retain (a round =
+            user message → final assistant reply without tool calls).  When set,
+            it takes precedence over `default_window_message_num`.  Must be > 0
+            if given.
+        enable_reload : bool, default False
+            Whether the agent is allowed to **automatically reload** messages that
+            were previously off-loaded (via hints such as `[[OFFLOAD:...]]`).
+            Enable this if you want the model to retrieve long content on demand;
+            disable it to keep hints as plain text.
+        """
+        self.context_engine_config = ContextEngineConfig(
+            max_context_message_num=max_context_message_num,
+            default_window_round_num=default_window_round_num,
+            enable_reload=enable_reload
+        )
         return self
 
     def configure_mem_scope(self, mem_scope_id: str) -> 'ReActAgentConfig':
@@ -211,6 +245,12 @@ class ReActAgentConfig(BaseModel):
         )
         return self
 
+    def configure_context_processors(
+            self,
+            processors: List[Tuple[str, BaseModel]]
+    ):
+        self.context_processors = processors
+
 
 class ReActAgent(BaseAgent):
     """ReAct paradigm Agent implementation
@@ -237,25 +277,25 @@ class ReActAgent(BaseAgent):
         Args:
             card: Agent card (required)
         """
-        self.config = self._create_default_config()
+        self._config = self._create_default_config()
         self.context_engine = ContextEngine(
-            ContextEngineConfig(
-                default_window_message_num=self.config.context_window_limit
-            )
+            self._config.context_engine_config
         )
         self._llm = None
         self._init_memory_scope()
         # 延迟导入以避免循环依赖：skills -> runner -> single_agent -> skills
         from openjiuwen.core.skills.skill_util import SkillUtil
-        self._skill_util = SkillUtil(self.config.sys_operation_id)
+        self._skill_util = SkillUtil(self._config.sys_operation_id)
         super().__init__(card)
 
     def _init_memory_scope(self) -> None:
         """Initialize memory scope (subclass can override configuration)"""
-        if self.config.mem_scope_id:
-            LongTermMemory().set_scope_config(
-                self.config.mem_scope_id,
-                MemoryScopeConfig()
+        if self._config.mem_scope_id:
+            asyncio.run(
+                LongTermMemory().set_scope_config(
+                    self._config.mem_scope_id,
+                    MemoryScopeConfig()
+                )
             )
 
     def _create_default_config(self) -> ReActAgentConfig:
@@ -275,8 +315,8 @@ class ReActAgent(BaseAgent):
             After config update, context_engine and memory_scope
             will be updated accordingly
         """
-        old_config = self.config
-        self.config = config
+        old_config = self._config
+        self._config = config
 
         # Reset LLM if model config changed
         if (old_config.model_provider != config.model_provider or
@@ -285,11 +325,9 @@ class ReActAgent(BaseAgent):
             self._llm = None
 
         # Update context_engine if context window limit changed
-        if old_config.context_window_limit != config.context_window_limit:
+        if old_config.context_engine_config != config.context_engine_config:
             self.context_engine = ContextEngine(
-                ContextEngineConfig(
-                    default_window_message_num=config.context_window_limit
-                )
+                config.context_engine_config
             )
 
         # Update memory_scope if memory scope ID changed
@@ -312,14 +350,14 @@ class ReActAgent(BaseAgent):
             ValueError: If model_client_config is not configured
         """
         if self._llm is None:
-            if self.config.model_client_config is None:
+            if self._config.model_client_config is None:
                 raise ValueError(
                     "model_client_config is required. "
                     "Use configure_model_client() to set it."
                 )
             self._llm = Model(
-                model_client_config=self.config.model_client_config,
-                model_config=self.config.model_config_obj
+                model_client_config=self._config.model_client_config,
+                model_config=self._config.model_config_obj
             )
         return self._llm
 
@@ -343,11 +381,35 @@ class ReActAgent(BaseAgent):
         """
         llm = self._get_llm()
         return await llm.invoke(
-            model=self.config.model_name,
+            model=self._config.model_name,
             messages=messages,
             tools=tools
         )
 
+    async def _init_context(
+            self,
+            session: Optional[Session]
+    ) -> ModelContext:
+        if self._config.context_processors:
+            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
+            context = await self.context_engine.create_context(
+                session=session,
+                processors=self._config.context_processors,
+                token_counter=TiktokenCounter()
+            )
+        else:
+            context = await self.context_engine.create_context(
+                session=session
+            )
+        context_reloader = context.reloader_tool()
+        if self._config.context_engine_config.enable_reload:
+            self.ability_manager.add(context_reloader.card)
+            from openjiuwen.core.runner import Runner
+            if not Runner.resource_mgr.get_tool(context_reloader.card.id):
+                Runner.resource_mgr.add_tool(context_reloader)
+        else:
+            self.ability_manager.remove(context_reloader.card.name)
+        return context
 
     async def invoke(
             self,
@@ -376,7 +438,7 @@ class ReActAgent(BaseAgent):
             raise ValueError("Input must be dict with 'query' or str")
 
         # Get or create model context
-        context = await self.context_engine.create_context(session=session)
+        context = await self._init_context(session)
 
         # Add user message to context
         await context.add_messages(UserMessage(content=user_input))
@@ -385,7 +447,7 @@ class ReActAgent(BaseAgent):
         # prompt_template is List[Dict], access via dict keys
         system_messages = [
             SystemMessage(role=msg["role"], content=msg["content"])
-            for msg in self.config.prompt_template
+            for msg in self._config.prompt_template
             if msg.get("role") == "system"
         ]
 
@@ -394,20 +456,19 @@ class ReActAgent(BaseAgent):
             last_msg = system_messages[-1]
             last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
 
-        # Get tool info from _ability_kit
-        tools = await self.list_tool_info()
+        # Get tool info from _ability_manager
+        tools = await self.ability_manager.list_tool_info()
 
         # ReAct loop
-        for iteration in range(self.config.max_iterations):
+        for iteration in range(self._config.max_iterations):
             logger.info(
-                f"ReAct iteration {iteration + 1}/{self.config.max_iterations}"
+                f"ReAct iteration {iteration + 1}/{self._config.max_iterations}"
             )
 
             # Get context window with system messages and tools
             context_window = await context.get_context_window(
                 system_messages=system_messages,
                 tools=tools if tools else None,
-                window_size=self.config.context_window_limit
             )
 
             # Call LLM with messages and tools from context window
@@ -433,7 +494,7 @@ class ReActAgent(BaseAgent):
                     )
 
                 # Execute tools using _execute_ability (supports parallel)
-                results = await self._execute_ability(
+                results = await self.ability_manager.execute(
                     ai_message.tool_calls, session
                 )
 
@@ -443,12 +504,14 @@ class ReActAgent(BaseAgent):
                     await context.add_messages(tool_msg)
             else:
                 # No tool calls, return AI response
+                await self.context_engine.save_contexts(session)
                 return {
                     "output": ai_message.content,
                     "result_type": "answer"
                 }
 
         # Max iterations reached
+        await self.context_engine.save_contexts(session)
         return {
             "output": "Max iterations reached without completion",
             "result_type": "error"
@@ -472,12 +535,15 @@ class ReActAgent(BaseAgent):
         """
         final_result_holder = {"result": None}
 
+        if session is not None:
+            await session.pre_run()
+
         async def stream_process():
             try:
                 final_result = await self.invoke(inputs, session)
                 final_result_holder["result"] = final_result
                 # Write to session stream if available
-                if session is not None and hasattr(session, 'write_stream'):
+                if session is not None:
                     await session.write_stream(OutputSchema(
                         type="answer",
                         index=0,
@@ -494,13 +560,14 @@ class ReActAgent(BaseAgent):
                 }
             finally:
                 # Close stream
-                if session is not None and hasattr(session, 'post_run'):
+                if session is not None:
+                    await self.context_engine.save_contexts(session)
                     await session.post_run()
 
         task = asyncio.create_task(stream_process())
 
         # Read from stream_iterator and yield
-        if session is not None and hasattr(session, 'stream_iterator'):
+        if session is not None:
             async for result in session.stream_iterator():
                 yield result
 

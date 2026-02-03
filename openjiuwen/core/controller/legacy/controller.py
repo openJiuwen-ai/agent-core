@@ -5,12 +5,11 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
+from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.controller.legacy.event.event import Event
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.runner.message_queue_base import InvokeQueueMessage
 from openjiuwen.core.runner.message_queue_inmemory import MessageQueueInMemory
@@ -137,7 +136,8 @@ class BaseController(ABC):
             current_loop = asyncio.get_running_loop()
         except RuntimeError as e:
             logger.error("No running event loop")
-            ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, "no running event loop", e)
+            raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
+                              error_msg="no running event loop") from e
         
         if self._msg_queue_loop is not current_loop:
             # Event loop changed or first time - (re)start message queue
@@ -214,10 +214,10 @@ class BaseController(ABC):
         except Exception as e:
             error_msg = f"BaseController: handle_event raised exception: {e}"
             logger.error(error_msg, exc_info=True)
-            if isinstance(e, JiuWenBaseException):
+            if isinstance(e, BaseError):
                 raise e
             else:
-                ExceptionUtils.raise_exception(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, str(e), e)
+                raise build_error(StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR, error_msg=str(e)) from e
 
     # ===== Abstract methods (developers must implement) =====
     @abstractmethod

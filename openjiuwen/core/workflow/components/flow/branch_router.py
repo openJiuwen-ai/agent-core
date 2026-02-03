@@ -28,10 +28,7 @@ class Branch:
         elif isinstance(condition, Callable):
             self._condition = FuncCondition(condition)
         else:
-            raise build_error(
-                StatusCode.COMPONENT_BRANCH_PARAM_ERROR,
-                error_msg="branch condition type does not meet the requirements"
-            )
+            raise ValueError("branch condition type does not meet the requirements")
         self.target = target
 
     def evaluate(self, session: BaseSession) -> bool:
@@ -55,8 +52,7 @@ class BranchRouter:
                    branch_id: str = None):
         if condition is None or target is None:
             raise build_error(
-                StatusCode.COMPONENT_BRANCH_PARAM_ERROR,
-                error_msg="condition is None or target is None"
+                StatusCode.COMPONENT_BRANCH_PARAM_INVALID, reason="condition is None or target is None"
             )
         target = [target] if isinstance(target, str) else target
         if self._drawable_branch_router:
@@ -66,7 +62,11 @@ class BranchRouter:
             for t in target:
                 self._drawable_branch_router.targets.append(t)
                 self._drawable_branch_router.datas.append(branch_data)
-        self._branches.append(Branch(condition, target, branch_id))
+        try:
+            self._branches.append(Branch(condition, target, branch_id))
+        except ValueError as e:
+            raise build_error(StatusCode.COMPONENT_BRANCH_PARAM_INVALID, reason=str(e))
+
 
     def get_drawable_branch_router(self):
         return self._drawable_branch_router
@@ -78,10 +78,7 @@ class BranchRouter:
         if isinstance(session, BaseSession):
             self._session = session
             return
-        raise build_error(
-            StatusCode.COMPONENT_BRANCH_PARAM_ERROR,
-            error_msg="session type is wrong"
-        )
+        raise ValueError("session type is wrong")
 
     async def __call__(self, *args, **kwargs) -> list[str]:
         session = self._session
@@ -101,5 +98,5 @@ class BranchRouter:
                 return branch.target
         raise build_error(
             StatusCode.COMPONENT_BRANCH_EXECUTION_ERROR,
-            error_msg="branch meeting the condition was not found"
+            reason="branch meeting the condition was not found"
         )

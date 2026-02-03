@@ -3,10 +3,11 @@
 import json
 from typing import Any
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class UserMemStore:
@@ -30,12 +31,23 @@ class UserMemStore:
     async def write(self, user_id: str, scope_id: str, mem_id: str, data: dict[str, Any]) -> bool:
         """write data to store"""
         if not data:
-            logger.error(f"write failed, because data is empty")
+            memory_logger.error(
+                "Write failed, because data is empty",
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return False
         user_mem_key = self.__get_user_mem_key(user_id, scope_id, mem_id)
         if await self.kv_store.exists(user_mem_key):
-            logger.error(f"write failed, user memory already exists for user_id={user_id}, scope_id={scope_id}, "
-                         f"mem_id={mem_id}")
+            memory_logger.error(
+                "Write failed, user memory already exists",
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return False
 
         # Set user mem id
@@ -68,8 +80,13 @@ class UserMemStore:
         """update the data of given id"""
         user_mem_key = self.__get_user_mem_key(user_id, scope_id, mem_id)
         if not await self.kv_store.exists(user_mem_key):
-            logger.error(f"update failed, user memory does not exists for user_id={user_id}, scope_id={scope_id}, "
-                         f"mem_id={mem_id}")
+            memory_logger.error(
+                "Update failed, user memory does not exists",
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_UPDATE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return False
         old_data = await self.kv_store.get(user_mem_key) or ""
         if not old_data:
@@ -128,9 +145,15 @@ class UserMemStore:
         mem_ids = [str(mem_id) for mem_id in all_ids]
         return await self.batch_get(user_id, scope_id, mem_ids)
 
-    async def get_in_range(self, user_id: str, scope_id: str, start_idx: int, end_idx: int) -> list[dict[
-        str, Any]] | None:
-        user_ids_key = self.__get_user_ids_key(user_id, scope_id)
+    async def get_in_range(
+        self,
+        user_id: str,
+        scope_id: str,
+        start_idx: int,
+        end_idx: int,
+        mem_type: str = None
+    ) -> list[dict[str, Any]] | None:
+        user_ids_key = self.__get_user_ids_key(user_id, scope_id, mem_type)
         if not await self.kv_store.exists(user_ids_key):
             return None
         user_ids_value = await self.kv_store.get(user_ids_key) or ""
@@ -157,8 +180,13 @@ class UserMemStore:
     async def __inner_delete(self, user_id: str, scope_id: str, mem_id: str):
         user_mem_key = self.__get_user_mem_key(user_id, scope_id, mem_id)
         if not await self.kv_store.exists(user_mem_key):
-            logger.warning(f"delete failed, user memory does not exists for user_id={user_id}, scope_id={scope_id}, "
-                           f"mem_id={mem_id}")
+            memory_logger.warning(
+                "Delete failed, user memory does not exists",
+                memory_id=[mem_id],
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
             return
         data = await self.kv_store.get(user_mem_key) or ""
         if data:

@@ -9,8 +9,9 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 
 from openjiuwen.core.foundation.store import BaseDbStore
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
-logger = logging.getLogger(__name__)
 
 
 class SqlDbStore:
@@ -31,7 +32,12 @@ class SqlDbStore:
                     await session.execute(stmt)
                 return True
         except Exception as e:
-            logger.error("Write failed", exc_info=e)
+            memory_logger.error(
+                "Write failed",
+                event_type=LogEventType.MEMORY_STORE,
+                exception=str(e),
+                metadata={"table_name": table}
+            )
             return False
 
     async def get(self, table: str, record_id: str, columns: list[str] | None = None) -> dict[str, Any] | None:
@@ -51,7 +57,12 @@ class SqlDbStore:
                     row = execute_result.mappings().first()
                     return dict(row) if row else None
         except Exception as e:
-            logger.error("Failed to get data", exc_info=e)
+            memory_logger.error(
+                "Failed to get data",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                exception=str(e),
+                metadata={"table_name": table, "record_id": record_id}
+            )
             return None
 
     async def get_with_sort(self, table: str, filters: Dict[str, Any], sort_by: str = "timestamp",
@@ -82,7 +93,12 @@ class SqlDbStore:
                     result = execute_result.mappings().fetchall()
                     return [dict(row) for row in result]
         except Exception as e:
-            logger.error("Failed to fetch filtered and sorted data", exc_info=e)
+            memory_logger.error(
+                "Failed to fetch filtered and sorted data",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                exception=str(e),
+                metadata={"table_name": table}
+            )
             return []
 
     async def exist(self, table: str, conditions: Dict[str, Any]) -> bool:
@@ -131,7 +147,12 @@ class SqlDbStore:
                     rows = execute_result.mappings().fetchall()
                     return [dict(r) for r in rows]
         except Exception as e:
-            logger.error("Failed to get data via condition_get", exc_info=e)
+            memory_logger.error(
+                "Failed to get data via condition_get",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                exception=str(e),
+                metadata={"table_name": table}
+            )
             return None
 
     async def update(self, table: str, conditions: dict, data: dict) -> bool:
@@ -145,7 +166,12 @@ class SqlDbStore:
                     await session.execute(stmt)
             return True
         except Exception as e:
-            logger.error("Update failed", exc_info=e)
+            memory_logger.error(
+                "Update failed",
+                event_type=LogEventType.MEMORY_UPDATE,
+                exception=str(e),
+                metadata={"table_name": table}
+            )
             return False
 
     async def delete(self, table: str, conditions: dict) -> bool:
@@ -159,7 +185,12 @@ class SqlDbStore:
                     await session.execute(stmt)
             return True
         except Exception as e:
-            logger.error("Delete failed", exc_info=e)
+            memory_logger.error(
+                "Delete failed",
+                event_type=LogEventType.MEMORY_DELETE,
+                exception=str(e),
+                metadata={"table_name": table}
+            )
             return False
 
     async def delete_table(self, table_name: str) -> bool:
@@ -170,7 +201,12 @@ class SqlDbStore:
                 await conn.run_sync(t.drop, checkfirst=True)
             return True
         except Exception as e:
-            logger.error("Delete table failed", exc_info=e)
+            memory_logger.error(
+                "Delete table failed",
+                event_type=LogEventType.MEMORY_DELETE,
+                exception=str(e),
+                metadata={"table_name": table_name}
+            )
             return False
 
     async def get_table(self, table_name: str) -> Table:

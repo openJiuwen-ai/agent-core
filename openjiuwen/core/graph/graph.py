@@ -5,21 +5,46 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Union, Self, AsyncIterator, Any, Callable, Hashable, Sequence, Tuple
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Hashable,
+    Self,
+    Sequence,
+    Tuple,
+    Union,
+)
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.graph.base import Graph, Router, ExecutableGraph
-from openjiuwen.core.graph.executable import Executable, Input, Output
-from openjiuwen.core.graph.vertex import Vertex
-from openjiuwen.core.session import Checkpointer
-from openjiuwen.core.session import get_default_inmemory_checkpointer
-from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.session import BaseSession
-from openjiuwen.core.session.workflow import Session
-from openjiuwen.core.graph.pregel import Pregel, PregelBuilder, PregelConfig, MAX_RECURSIVE_LIMIT, START, END
+from openjiuwen.core.graph.base import (
+    ExecutableGraph,
+    Graph,
+    Router,
+)
+from openjiuwen.core.graph.executable import (
+    Executable,
+    Input,
+    Output,
+)
+from openjiuwen.core.graph.pregel import (
+    END,
+    MAX_RECURSIVE_LIMIT,
+    Pregel,
+    PregelBuilder,
+    PregelConfig,
+    START,
+)
 from openjiuwen.core.graph.store import GraphStore
+from openjiuwen.core.graph.vertex import Vertex
+from openjiuwen.core.session import (
+    BaseSession,
+    Checkpointer,
+    InteractiveInput,
+)
+from openjiuwen.core.session.workflow import Session
 
 
 @dataclass(slots=True)
@@ -39,17 +64,16 @@ class PregelGraph(Graph):
         self._session = None
 
     def start_node(self, node_id: str) -> Self:
-        if node_id is None:
-            raise JiuWenBaseException(StatusCode.GRAPH_SET_START_NODE_FAILED.code,
-                                      StatusCode.GRAPH_SET_START_NODE_FAILED.errmsg.format(detail="node_id is None"))
+        self._validate_node_id(node_id)
         self.add_edge([START], node_id)
         return self
 
+    def _validate_node_id(self, node_id):
+        if not node_id:
+            raise build_error(StatusCode.PREGEL_GRAPH_NODE_ID_INVALID, node_id=node_id, reason="is None or empty")
+
     def end_node(self, node_id: str) -> Self:
-        if node_id is None:
-            raise JiuWenBaseException(StatusCode.GRAPH_SET_END_NODE_FAILED.code,
-                                      StatusCode.GRAPH_SET_END_NODE_FAILED.errmsg.format(
-                                          detail="node_id is invalid, can not be None"))
+        self._validate_node_id(node_id)
         vertex = self.nodes.get(node_id)
         if vertex:
             vertex.is_end_node = True
@@ -57,17 +81,13 @@ class PregelGraph(Graph):
         return self
 
     def add_node(self, node_id: str, node: Executable, *, wait_for_all: bool = False) -> Self:
-        if node_id is None:
-            raise JiuWenBaseException(StatusCode.GRAPH_ADD_NODE_FAILED.code,
-                                      StatusCode.GRAPH_ADD_NODE_FAILED.errmsg.format(
-                                          detail="node_id is invalid, can not be None"))
+        self._validate_node_id(node_id)
         if node is None:
-            raise JiuWenBaseException(StatusCode.GRAPH_ADD_NODE_FAILED.code,
-                                      StatusCode.GRAPH_ADD_NODE_FAILED.errmsg.format(detail="node is None"))
+            raise build_error(StatusCode.PREGEL_GRAPH_NODE_INVALID, node_id=node_id, reason="node is None")
+
         if node_id in self.nodes:
-            raise JiuWenBaseException(StatusCode.GRAPH_ADD_NODE_FAILED.code,
-                                      StatusCode.GRAPH_ADD_NODE_FAILED.errmsg.format(
-                                          detail=f"already has node {node_id}, can not add again"))
+            raise build_error(StatusCode.PREGEL_GRAPH_NODE_ID_INVALID, node_id=node_id,
+                              reason="already exist, can not add again")
         vertex_node = Vertex(node_id, node)
         self.nodes[node_id] = vertex_node
         if wait_for_all:
@@ -78,32 +98,32 @@ class PregelGraph(Graph):
         return {key: vertex for key, vertex in self.nodes.items()}
 
     def add_edge(self, source_node_id: Union[str, list[str]], target_node_id: str) -> Self:
-        if source_node_id is None:
-            raise JiuWenBaseException(StatusCode.GRAPH_ADD_EDGE_FAILED.code,
-                                      StatusCode.GRAPH_ADD_EDGE_FAILED.errmsg.format(
-                                          detail="source_node_id is invalid, can not be None"))
+        if not source_node_id:
+            raise build_error(StatusCode.PREGEL_GRAPH_EDGE_INVALID, source_id=source_node_id,
+                              target_node_id=target_node_id,
+                              reason="source_node_id is None or empty")
         if isinstance(source_node_id, list):
-            for node_id in source_node_id:
-                if node_id is None:
-                    raise JiuWenBaseException(StatusCode.GRAPH_ADD_EDGE_FAILED.code,
-                                              StatusCode.GRAPH_ADD_EDGE_FAILED.errmsg.format(
-                                                  detail="source_node_id list is invalid, can not has None"))
-        if target_node_id is None:
-            raise JiuWenBaseException(StatusCode.GRAPH_ADD_EDGE_FAILED.code,
-                                      StatusCode.GRAPH_ADD_EDGE_FAILED.errmsg.format(
-                                          detail="target_node_id is invalid, can not be None"))
+            for item in source_node_id:
+                if not item:
+                    raise build_error(StatusCode.PREGEL_GRAPH_EDGE_INVALID, source_id=source_node_id,
+                                      target_node_id=target_node_id,
+                                      reason="source_node_id list has None or empty")
+
+        if not target_node_id:
+            raise build_error(StatusCode.PREGEL_GRAPH_EDGE_INVALID, source_id=source_node_id,
+                              target_node_id=target_node_id,
+                              reason="target_node_id is None or empty")
         self.edges.append((source_node_id, target_node_id))
         return self
 
     def add_conditional_edges(self, source_node_id: str, router: Router) -> Self:
-        if source_node_id is None:
-            raise JiuWenBaseException(StatusCode.GRAPH_ADD_CONDITION_EDGE_FAILED.code,
-                                      StatusCode.GRAPH_ADD_CONDITION_EDGE_FAILED.errmsg.format(
-                                          detail="source_node_id is invalid, can not be None"))
+        if not source_node_id:
+            raise build_error(StatusCode.PREGEL_GRAPH_CONDITION_EDGE_INVALID, source_id=source_node_id,
+                              reason="source_node_is is None or empty")
         if router is None:
-            raise JiuWenBaseException(StatusCode.GRAPH_ADD_CONDITION_EDGE_FAILED.code,
-                                      StatusCode.GRAPH_ADD_CONDITION_EDGE_FAILED.errmsg.format(
-                                          detail="router is None"))
+            raise build_error(StatusCode.PREGEL_GRAPH_CONDITION_EDGE_INVALID, source_id=source_node_id,
+                              reason="router is None")
+
         name = _get_callable_name(router)
         self.branches[source_node_id][name] = Branch(router)
         return self
@@ -118,7 +138,7 @@ class PregelGraph(Graph):
             logger.debug(f"ns: {loop.config['ns']}, step: {loop.step}, active_nodes: {list(loop.active_nodes)}")
 
         if self.pregel is None:
-            self.checkpointer = get_default_inmemory_checkpointer()
+            self.checkpointer = session.checkpointer()
             store = GraphStore(self.checkpointer.graph_store())
             self.pregel = self._compile(graph_store=store, step_callback=after_step)
             self._session = session

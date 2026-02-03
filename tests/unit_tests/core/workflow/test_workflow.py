@@ -2,8 +2,8 @@ from typing import AsyncIterator
 
 import pytest
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.workflow import Input, Output, WorkflowCard
 from openjiuwen.core.workflow import BranchComponent
@@ -954,24 +954,25 @@ async def test_five_transform_workflow():
 
 
 async def test_auto_complete_abilities_detects_unregistered_edge_nodes():
-    """Test that _auto_complete_abilities raises exception when edges reference unregistered components."""
+    """Test that auto_complete_abilities raises exception when edges reference unregistered components."""
     flow = Workflow()
     flow.set_start_comp("start", MockStartNode("start"))
     flow.add_workflow_comp("a", Node1("a"))
     flow.set_end_comp("end", MockEndNode("end"))
 
     # Use mock to inject an edge with an unregistered target node to simulate configuration error
-    # This bypasses add_connection validation to test _auto_complete_abilities defensive check
-    workflow_spec = flow._internal._workflow_config.spec
+    # This bypasses add_connection validation to test auto_complete_abilities defensive check
+    workflow_internal = getattr(flow, "_internal", None)
+    workflow_spec = workflow_internal.config().spec
     original_edges = workflow_spec.edges.copy()
     workflow_spec.edges["a"] = ["unregistered_node"]
 
     try:
-        # _auto_complete_abilities is called during invoke/stream, which should detect the issue
-        with pytest.raises(JiuWenBaseException) as context:
+        # auto_complete_abilities is called during invoke/stream, which should detect the issue
+        with pytest.raises(BaseError) as context:
             await flow.invoke({"a": 1}, create_workflow_session())
 
-        error_msg = str(context.value.message)
+        error_msg = str(context.value)
         # Verify error message contains useful debug info
         assert "unregistered_node" in error_msg
         assert "start" in error_msg  # Should show registered components
@@ -991,9 +992,9 @@ async def test_invoke_validates_unregistered_edge_nodes():
     flow1.add_connection("start", "a")
     flow1.add_connection("a", "unknown_target")  # No validation at add_connection time
 
-    with pytest.raises(JiuWenBaseException) as context:
+    with pytest.raises(BaseError) as context:
         await flow1.invoke({"a": 1}, create_workflow_session())
-    error_msg = str(context.value.message)
+    error_msg = str(context.value)
     assert ("unknown_target" in error_msg)
     assert ("start" in error_msg)  # Should show registered components
 
@@ -1005,9 +1006,9 @@ async def test_invoke_validates_unregistered_edge_nodes():
     flow2.add_connection("unknown_source", "a")  # No validation at add_connection time
     flow2.add_connection("a", "end")
 
-    with pytest.raises(JiuWenBaseException) as context:
+    with pytest.raises(BaseError) as context:
         await flow2.invoke({"a": 1}, create_workflow_session())
-    error_msg = str(context.value.message)
+    error_msg = str(context.value)
     assert "unknown_source" in error_msg
 
     # Test that valid connections still work by actually executing the workflow
@@ -1204,11 +1205,10 @@ async def test_illegal_nested_workflow():
     workflow.add_connection("nested_flow", "interaction_node")
     workflow.add_connection("interaction_node", "end")
 
-    with pytest.raises(JiuWenBaseException) as cm:
+    with pytest.raises(BaseError) as cm:
         await workflow.invoke({"inputs": "hi"}, create_workflow_session())
 
-    assert cm.value.error_code == StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code
-    assert cm.value.message == StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg
+    assert cm.value.code == StatusCode.CHECKPOINTER_POST_WORKFLOW_EXECUTION_ERROR.code
 
 
 async def test_workflow_with_loop_component_multi_abilities():

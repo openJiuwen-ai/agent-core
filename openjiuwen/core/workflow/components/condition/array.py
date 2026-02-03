@@ -6,8 +6,6 @@ from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.session import BaseSession
 from openjiuwen.core.graph.executable import Input, Output
 from openjiuwen.core.common.constants.constant import INDEX
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
 
 DEFAULT_MAX_LOOP_NUMBER = 1000
 
@@ -33,7 +31,6 @@ class ArrayCondition(Condition):
 
 
 class ArrayConditionInSession(Condition):
-
     def __init__(self, arrays: dict[str, Union[list[Any], tuple[Any]]]):
         super().__init__()
         self._arrays = arrays
@@ -48,17 +45,12 @@ class ArrayConditionInSession(Condition):
         for key, array_info in self._arrays.items():
             try:
                 if not isinstance(array_info, (list, tuple)):
-                    raise JiuWenBaseException(
-                        StatusCode.ARRAY_CONDITION_ERROR.code,
-                        f"Expected list/tuple for '{key}' in loop_array, got {type(array_info).__name__}"
-                    )
+                    raise ValueError(
+                        f"Expected list/tuple for '{key}' in loop_array, got {type(array_info).__name__}")
 
                 updates[key] = array_info[current_idx]
             except (TypeError, IndexError, KeyError) as e:
-                raise JiuWenBaseException(
-                    StatusCode.ARRAY_CONDITION_ERROR.code,
-                    f"Array loop error in '{key}': <error_details>"
-                ) from e
+                raise ValueError(f"Array loop error in '{key}': <error_details>") from e
         session.state().update(updates)
         io_updates = updates.copy()
         return True, io_updates
@@ -67,13 +59,8 @@ class ArrayConditionInSession(Condition):
         min_length = DEFAULT_MAX_LOOP_NUMBER
         for key, array_info in arrays.items():
             if array_info is None:
-                raise JiuWenBaseException(
-                    StatusCode.ARRAY_CONDITION_ERROR.code, f"Value for key '{key}' in loop_array cannot be None"
-                )
+                raise ValueError(f"Value for key '{key}' in loop_array cannot be None")
             if not isinstance(array_info, (list, tuple)):
-                raise JiuWenBaseException(
-                    StatusCode.ARRAY_CONDITION_ERROR.code,
-                    f"Expected list/tuple for '{key}' in loop_array, got {type(array_info).__name__}",
-                )
+                raise ValueError(f"Expected list/tuple for '{key}' in loop_array, got {type(array_info).__name__}")
             min_length = min(len(array_info), min_length)
         return min_length

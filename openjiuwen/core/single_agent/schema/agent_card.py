@@ -6,15 +6,22 @@ Main classes included:
 Created on: 2025-11-25
 Author: huenrui1@huawei.com
 """
-from dataclasses import field
-from typing import List
+from typing import Optional, Any, Type
+from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.schema import Param
 from openjiuwen.core.common.schema.card import BaseCard
+from openjiuwen.core.foundation.tool import ToolInfo
 
 
 class AgentCard(BaseCard):
     """Agent Card Data Class
     """
-    input_params: List[Param] = field(default_factory=list)
-    output_params: List[Param] = field(default_factory=list)
+    input_params: Optional[dict[str, Any] | Type[BaseModel]] = Field(default=None)
+    output_params: Optional[dict[str, Any] | Type[BaseModel]] = Field(default=None)
+
+    def tool_info(self):
+        return ToolInfo(
+            name=self.name,
+            description=self.description,
+            parameters=self.input_params if self.input_params else {}
+        )

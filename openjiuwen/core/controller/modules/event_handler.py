@@ -1,68 +1,64 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""Event handler module
 
+This module defines classes related to event handlers, including:
+- EventHandlerInput: input data model for event handlers
+- EventHandler: abstract base class for event handlers
 
-"""Event handler module.
-
-This module defines classes related to event handling:
-
-- EventHandlerInput: data model for event handler inputs.
-- EventHandler: abstract base class for concrete event handlers.
-
-Event handlers are responsible for processing different event types:
-- INPUT: user input events.
-- TASK_INTERACTION: task interaction events (when execution requires user
-  interaction).
-- TASK_COMPLETION: task completion events.
-- TASK_FAILED: task failure events.
+Event handlers are responsible for handling different types of events:
+- INPUT: user input events
+- TASK_INTERACTION: task interaction events (when user interaction is needed during task execution)
+- TASK_COMPLETION: task completion events
+- TASK_FAILED: task failure events
 """
-from abc import abstractmethod, ABC
-from typing import TYPE_CHECKING
 
+from abc import abstractmethod, ABC
+from typing import TYPE_CHECKING, Optional, Dict
 from pydantic import BaseModel
 
 from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.controller.base import ControllerConfig
-from openjiuwen.core.controller.schema.event import Event
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.schema import Event
 from openjiuwen.core.session import Session
-from openjiuwen.core.single_agent.base import AbilityManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.task_manager import TaskManager
     from openjiuwen.core.controller.modules.task_scheduler import TaskScheduler
+    from openjiuwen.core.single_agent.base import AbilityManager
 
 
 class EventHandlerInput(BaseModel):
-    """Input payload for event handlers.
+    """Input data model for event handlers
 
-    Encapsulates both the event and the associated session so they can be
-    passed together to handler methods.
+    Contains event and session information that is passed to event handlers.
 
     Attributes:
-        event: Event object.
-        session: Session object.
+        event: event object
+        session: session object
     """
+    model_config = {"arbitrary_types_allowed": True}
+
     event: Event
     session: Session
 
 
 class EventHandler(ABC):
-    """Abstract base class for event handlers.
+    """Abstract base class for event handlers
 
-    Defines the interface for handling different types of events. Concrete
-    controllers should implement their own event handlers.
+    Defines the event handling interface. Different types of controllers need
+    to implement different event handlers.
 
-    Responsibilities:
-        - Handle input events (``handle_input``).
-        - Handle task interaction events (``handle_task_interaction``).
-        - Handle task completion events (``handle_task_completion``).
-        - Handle task failure events (``handle_task_failed``).
+    Main responsibilities:
+    - handle input events (handle_input)
+    - handle task interaction events (handle_task_interaction)
+    - handle task completion events (handle_task_completion)
+    - handle task failure events (handle_task_failed)
     """
     def __init__(self):
-        """Initialize the event handler.
+        """init EventHandler
 
-        All dependencies are initialized as ``None`` and should be injected
-        later via property setters.
+        All dependencies are initialized to None and must be injected via property setters.
         """
         self._config = None
         self._context_engine = None
@@ -83,7 +79,7 @@ class EventHandler(ABC):
         return self._task_manager
 
     @property
-    def ability_manager(self) -> AbilityManager:
+    def ability_manager(self) -> "AbilityManager":
         return self._ability_manager
 
     @property
@@ -103,7 +99,7 @@ class EventHandler(ABC):
         self._task_manager = task_manager
 
     @ability_manager.setter
-    def ability_manager(self, ability_manager: AbilityManager):
+    def ability_manager(self, ability_manager: "AbilityManager"):
         self._ability_manager = ability_manager
 
     @task_scheduler.setter
@@ -111,43 +107,55 @@ class EventHandler(ABC):
         self._task_scheduler = task_scheduler
 
     @abstractmethod
-    async def handle_input(self, inputs: EventHandlerInput):
-        """Handle user input events.
+    async def handle_input(self, inputs: EventHandlerInput) -> Optional[Dict]:
+        """Handle input events
 
         Args:
-            inputs: Event handler input containing event and session.
+            inputs: event handler input containing event and session information
+
+        Returns:
+            Optional[Dict]: Response data
         """
         ...
 
     @abstractmethod
-    async def handle_task_interaction(self, inputs: EventHandlerInput):
-        """Handle task interaction events.
+    async def handle_task_interaction(self, inputs: EventHandlerInput) -> Optional[Dict]:
+        """Handle task interaction events
 
-        Triggered when a running task requires user interaction.
+        Triggered when user interaction is required during task execution.
 
         Args:
-            inputs: Event handler input containing event and session.
+            inputs: event handler input containing event and session information
+
+        Returns:
+            Optional[Dict]: Response data
         """
         ...
 
     @abstractmethod
-    async def handle_task_completion(self, inputs: EventHandlerInput):
-        """Handle task completion events.
+    async def handle_task_completion(self, inputs: EventHandlerInput) -> Optional[Dict]:
+        """Handle task completion events
 
-        Triggered when a task finishes successfully.
+        Triggered when task execution is completed.
 
         Args:
-            inputs: Event handler input containing event and session.
+            inputs: event handler input containing event and session information
+
+        Returns:
+            Optional[Dict]: Response data
         """
         ...
 
     @abstractmethod
-    async def handle_task_failed(self, inputs: EventHandlerInput):
-        """Handle task failure events.
+    async def handle_task_failed(self, inputs: EventHandlerInput) -> Optional[Dict]:
+        """Handle task failure events
 
-        Triggered when a task fails during execution.
+        Triggered when task execution fails.
 
         Args:
-            inputs: Event handler input containing event and session.
+            inputs: event handler input containing event and session information
+
+        Returns:
+            Optional[Dict]: Response data
         """
         ...

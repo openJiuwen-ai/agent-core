@@ -2,10 +2,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
 from typing import List, Tuple
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.prompt.conflict_resolution import CONFLICT_RESOLUTION_PROMPT
 from openjiuwen.core.foundation.llm import Model, JsonOutputParser
 from openjiuwen.core.memory.manage.mem_model.memory_unit import ConflictType
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 def _get_message(old_messages: List[str], new_message: str) -> list[dict]:
@@ -61,7 +62,11 @@ class ConflictResolution:
             list[dict]: A list of dictionaries representing the conflict resolution results.
         """
         if len(old_messages) == 0 or not base_chat_model:
-            logger.debug(f"No need to check conflict, msg len {len(old_messages)}, ADD new message.")
+            memory_logger.debug(
+                "No need to check conflict",
+                event_type=LogEventType.MEMORY_PROCESS,
+                metadata={"msg_len": len(old_messages)}
+            )
             return [
                 {
                     "id": "0",
@@ -70,7 +75,11 @@ class ConflictResolution:
                 }
             ]
         if new_message in old_messages:
-            logger.debug(f"New message {new_message} found in old messages {old_messages}")
+            memory_logger.debug(
+                "New message found in old messages",
+                event_type=LogEventType.MEMORY_PROCESS,
+                metadata={"new_message": new_message, "old_messages": old_messages}
+            )
             return [
                 {
                     "id": "0",
@@ -80,13 +89,21 @@ class ConflictResolution:
             ]
         model_name, model_client = base_chat_model
         messages = _get_message(old_messages, new_message)
-        logger.debug(f"Start checking conflict, input messages: {messages}")
+        memory_logger.debug(
+            "Start checking conflict",
+            event_type=LogEventType.MEMORY_PROCESS,
+            metadata={"input_messages": messages}
+        )
         parser = JsonOutputParser()
         for attempt in range(retries):
             try:
                 response = await model_client.invoke(model=model_name, messages=messages)
                 result = await parser.parse(str(response.content).strip().replace("'", '"'))
-                logger.debug(f"Succeed to check conflict, result: {result}")
+                memory_logger.debug(
+                    "Succeed to check conflict",
+                    event_type=LogEventType.MEMORY_PROCESS,
+                    metadata={"result": result}
+                )
                 if not isinstance(result, dict):
                     continue
                 output = []
@@ -99,5 +116,9 @@ class ConflictResolution:
             except json.JSONDecodeError as e:
                 if attempt <= retries - 1:
                     continue
-                logger.error(f"categories model output format error: {e.msg}")
+                memory_logger.error(
+                    "Categories model output format error",
+                    event_type=LogEventType.MEMORY_PROCESS,
+                    exception=str(e)
+                )
         return []

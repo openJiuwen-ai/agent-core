@@ -1,128 +1,107 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+from abc import (
+    ABC,
+    abstractmethod,
+)
+from typing import (
+    Dict,
+    Optional,
+    Type,
+)
 
-from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.graph.store import Store
-from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
+from pydantic import (
+    BaseModel,
+    Field,
+)
+
 from openjiuwen.core.session.checkpointer.base import Checkpointer
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.session import BaseSession
+from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 
 
-class InMemoryCheckpointer(Checkpointer):
-    def __init__(self):
-        self._agent_stores = {}
-        self._workflow_stores = {}
-        from openjiuwen.core.graph import InMemoryStore
-        self._graph_store = InMemoryStore()
-        self._session_to_workflow_ids = {}
-
-    async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
-        logger.info(f"workflow: {session.workflow_id()} create or restore checkpoint from "
-                    f"session: {session.session_id()}")
-        from openjiuwen.core.session.checkpointer.workflow_storage import WorkflowStorage
-        workflow_store = self._workflow_stores.setdefault(session.session_id(), WorkflowStorage())
-        self._session_to_workflow_ids.setdefault(session.session_id(), set())
-        if isinstance(inputs, InteractiveInput):
-            workflow_store.recover(session, inputs)
-        else:
-            if not workflow_store.exists(session):
-                return
-            if session.config().get_env(FORCE_DEL_WORKFLOW_STATE_KEY, False):
-                await self._graph_store.delete(session.session_id(), session.workflow_id())
-                workflow_store.clear(session.workflow_id())
-            else:
-                raise JiuWenBaseException(StatusCode.WORKFLOW_STATE_INVALID.code,
-                    StatusCode.WORKFLOW_STATE_INVALID.errmsg.format
-                        (error_msg="workflow state exists but non-interactive input and cleanup is disabled"))
-
-    async def post_workflow_execute(self, session: BaseSession, result, exception):
-        workflow_store = self._workflow_stores.get(session.session_id())
-        workflow_ids = self._session_to_workflow_ids.get(session.session_id())
-        if exception is not None:
-            logger.info(f"exception in workflow, save checkpoint for "
-                        f"workflow: {session.workflow_id()} in session: {session.session_id()}")
-            if workflow_store is None:
-                raise JiuWenBaseException(StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code,
-                                          StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg)
-            workflow_store.save(session)
-            workflow_ids.add(session.workflow_id())
-            raise exception
-        from openjiuwen.core.graph.pregel import TASK_STATUS_INTERRUPT
-        if result.get(TASK_STATUS_INTERRUPT) is None:
-            logger.info(f"clear checkpoint for workflow: {session.workflow_id()} in session: {session.session_id()}")
-            await self._graph_store.delete(session.session_id(), session.workflow_id())
-            if workflow_store is not None:
-                workflow_store.clear(session.workflow_id())
-                workflow_ids.discard(session.workflow_id())
-            else:
-                logger.warning(f"workflow_store of workflow: {session.workflow_id()} dose not exist in "
-                            f"session: {session.session_id()}")
-
-            from openjiuwen.core.session.internal.agent import AgentSession
-            if not isinstance(session.parent(), AgentSession):
-                logger.info(f"clear session: {session.session_id()}")
-                self._workflow_stores.pop(session.session_id(), None)
-                self._session_to_workflow_ids.pop(session.session_id(), None)
-        else:
-            logger.info(f"interaction required, save checkpoint for "
-                        f"workflow: {session.workflow_id()} in session: {session.session_id()}")
-            if workflow_store is None:
-                raise JiuWenBaseException(StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.code,
-                                          StatusCode.SESSION_CHECKPOINTER_NONE_WORKFLOW_STORE_ERROR.errmsg)
-            workflow_store.save(session)
-            workflow_ids.add(session.workflow_id())
-
-    async def pre_agent_execute(self, session: BaseSession, inputs):
-        logger.info(f"agent: {session.agent_id()} create or restore checkpoint from session: {session.session_id()}")
-        from openjiuwen.core.session.checkpointer.agent_storage import AgentStorage
-        agent_store = self._agent_stores.setdefault(session.session_id(), AgentStorage())
-        agent_store.recover(session)
-        if inputs is not None:
-            session.state().set_state({INTERACTIVE_INPUT: [inputs]})
-
-    async def interrupt_agent_execute(self, session: BaseSession):
-        logger.info(f"interaction required, save checkpoint for "
-                    f"agent: {session.agent_id()} in session: {session.session_id()}")
-        agent_store = self._agent_stores.get(session.session_id())
-        if agent_store is None:
-            raise JiuWenBaseException(StatusCode.SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR.code,
-                                      StatusCode.SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR.errmsg)
-        agent_store.save(session)
-
-    async def post_agent_execute(self, session: BaseSession):
-        logger.info(f"agent finished, save checkpoint for "
-                    f"agent: {session.agent_id()} in session: {session.session_id()}")
-        agent_store = self._agent_stores.get(session.session_id())
-        if agent_store is None:
-            raise JiuWenBaseException(StatusCode.SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR.code,
-                                      StatusCode.SESSION_CHECKPOINTER_NONE_AGENT_STORE_ERROR.errmsg)
-        agent_store.save(session)
-
-    async def release(self, session_id: str, agent_id: str = None):
-        if agent_id is not None:
-            logger.info(f"clear checkpoint for agent: {agent_id} in session: {session_id}")
-            agent_store = self._agent_stores.get(session_id)
-            if agent_store is None:
-                logger.warning(f"agent_store of agent: {agent_id} does not exist in session: {session_id}")
-                return
-            agent_store.clear(agent_id)
-        else:
-            logger.info(f"clear session: {session_id}")
-            workflow_ids = self._session_to_workflow_ids.get(session_id)
-            if workflow_ids:
-                for workflow_id in workflow_ids:
-                    await self._graph_store.delete(session_id, workflow_id)
-            self._session_to_workflow_ids.pop(session_id, None)
-            self._workflow_stores.pop(session_id, None)
-            self._agent_stores.pop(session_id, None)
-
-    def graph_store(self) -> Store:
-        return self._graph_store
+class CheckpointerConfig(BaseModel):
+    type: str = Field(default="in_memory")
+    conf: dict = Field(default_factory=dict)
 
 
+class CheckpointerProvider(ABC):
+    @abstractmethod
+    async def create(self, conf: dict) -> Checkpointer:
+        ...
 
+
+class CheckpointerFactory:
+    _registry: Dict[str, CheckpointerProvider] = dict()
+    _default_checkpointer: Checkpointer = None
+    _type_checkpointers: Dict[str, Checkpointer] = dict()
+
+    @classmethod
+    def register(cls, name: str):
+        def wrapper(provider_class: Type[CheckpointerProvider]):
+            cls._registry[name] = provider_class()
+            return provider_class
+
+        return wrapper
+
+    @classmethod
+    async def create(cls, checkpointer_conf: CheckpointerConfig) -> Checkpointer:
+        provider = cls._registry.get(checkpointer_conf.type)
+        if provider is None:
+            raise Exception()
+        return await cls._registry[checkpointer_conf.type].create(checkpointer_conf.conf)
+
+    @classmethod
+    def set_default_checkpointer(cls, checkpointer: Checkpointer):
+        """Set the default checkpointer instance."""
+        cls._default_checkpointer = checkpointer
+
+    @classmethod
+    def set_checkpointer(cls, store_type: str, checkpointer: Checkpointer):
+        """
+        Set a checkpointer instance for a specific type.
+        
+        Args:
+            store_type: Checkpointer type (e.g., "in_memory", "redis").
+            checkpointer: Checkpointer instance to set for the type.
+        """
+        cls._type_checkpointers[store_type] = checkpointer
+
+    @classmethod
+    def get_checkpointer(cls, store_type: Optional[str] = None) -> Checkpointer:
+        """
+        Get checkpointer instance.
+        
+        Args:
+            store_type: Optional checkpointer type. If provided:
+                  - First checks if a checkpointer instance was set for this type via set_checkpointer.
+                  - If type is "in_memory" and no instance was set, returns the default in-memory checkpointer.
+                  - Otherwise, returns the default checkpointer set via set_default_checkpointer.
+                  If not provided, returns the default checkpointer.
+        
+        Returns:
+            Checkpointer instance.
+        """
+        # If type is specified, try to get the checkpointer for that type
+        if store_type is not None:
+            # First check if a checkpointer instance was set for this type
+            if store_type in cls._type_checkpointers:
+                return cls._type_checkpointers[store_type]
+
+            # If type is "in_memory" and no instance was set, return default in-memory checkpointer
+            if store_type == "in_memory":
+                return default_inmemory_checkpointer
+
+        # Otherwise, return the default checkpointer (if set) or default in-memory checkpointer
+        if cls._default_checkpointer is None:
+            return default_inmemory_checkpointer
+        return cls._default_checkpointer
+
+
+@CheckpointerFactory.register("in_memory")
+class InMemoryCheckpointerProvider(CheckpointerProvider):
+    async def create(self, conf: dict) -> Checkpointer:
+        return default_inmemory_checkpointer
+
+
+default_inmemory_checkpointer = InMemoryCheckpointer()

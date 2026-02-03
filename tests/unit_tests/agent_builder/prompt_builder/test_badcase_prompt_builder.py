@@ -14,7 +14,7 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
 from openjiuwen.core.foundation.tool import ToolInfo
-import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
+import openjiuwen.dev_tools.prompt_builder.builder.prompt_zh as TEMPLATE_ZH
 
 
 class MockModelClient(BaseModelClient):
@@ -89,8 +89,8 @@ async def test_bad_case_prompt_builder():
     response = await builder.build(prompt, cases=information_extraction_cases)
     parse_str = re.findall(
         r"<summary>((?:(?!</summary>).)*?)</summary>",
-        TEMPLATE.PROMPT_BAD_CASE_ANALYZE_TEMPLATE.content[0].content,
+        TEMPLATE_ZH.PROMPT_BAD_CASE_ANALYZE_TEMPLATE.content[0].content,
         re.DOTALL
     )
-    assert response == TEMPLATE.PROMPT_BAD_CASE_OPTIMIZE_TEMPLATE.format(
+    assert response == TEMPLATE_ZH.PROMPT_BAD_CASE_OPTIMIZE_TEMPLATE.format(
         dict(original_prompt=prompt, feedback=parse_str[0])).content[0].content

@@ -19,6 +19,7 @@ import os
 import unittest
 from unittest.mock import patch
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.workflow import BranchComponent
 from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
@@ -354,4 +355,4 @@ class RealWorkflowTest(unittest.TestCase):
         self.loop.run_until_complete(
             self._async_stream_workflow_for_stream_writer(flow, inputs, context.create_workflow_session(),
                                                           writer_chunks))
-        print(writer_chunks)
+        logger.info(writer_chunks)

@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import re
-from typing import Optional, List, AsyncGenerator
+from typing import Optional, List, AsyncGenerator, Literal
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -10,8 +10,8 @@ from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, AssistantMessage
 
 from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
-from openjiuwen.dev_tools.tune.base import EvaluatedCase
-import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
+from openjiuwen.dev_tools.prompt_builder.builder.utils import template_map, get_string_prompt, select_template
+from openjiuwen.dev_tools.tune.base import EvaluatedCase, Case
 
 MAX_CASES_LIMIT = 10
 
@@ -19,12 +19,15 @@ MAX_CASES_LIMIT = 10
 class BadCasePromptBuilder(BasePromptBuilder):
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
+        self.template = select_template()
 
     async def build(self,
                     prompt: str | PromptTemplate,
                     cases: List[EvaluatedCase],
+                    language: Literal["zh-CN", "en-US"] = "zh-CN",
                     ) -> Optional[str]:
-        prompt = TEMPLATE.get_string_prompt(prompt)
+        self.template = select_template(language)
+        prompt = get_string_prompt(prompt)
         messages = await self._format_bad_case_template(prompt, cases)
         response = await self._model.invoke(messages)
         return response.content
@@ -32,11 +35,12 @@ class BadCasePromptBuilder(BasePromptBuilder):
     async def stream_build(self,
                            prompt: str | PromptTemplate,
                            cases: List[EvaluatedCase],
+                           language: Literal["zh-CN", "en-US"] = "zh-CN",
                            ) -> AsyncGenerator:
-        prompt = TEMPLATE.get_string_prompt(prompt)
+        self.template = select_template(language)
+        prompt = get_string_prompt(prompt)
         messages = await self._format_bad_case_template(prompt, cases)
-        chunks = await self._model.stream(messages)
-        for chunk in chunks:
+        async for chunk in self._model.stream(messages):
             yield chunk.content
 
     async def _format_bad_case_template(self,
@@ -44,7 +48,7 @@ class BadCasePromptBuilder(BasePromptBuilder):
                                         cases: List[EvaluatedCase],
                                         ) -> str:
         feedback = await self._get_feedback_from_bad_case(prompt, cases)
-        bad_case_optimize_template = TEMPLATE.PROMPT_BAD_CASE_OPTIMIZE_TEMPLATE
+        bad_case_optimize_template = self.template.PROMPT_BAD_CASE_OPTIMIZE_TEMPLATE
         messages = bad_case_optimize_template.format(
             dict(original_prompt=prompt,
                  feedback=feedback
@@ -55,7 +59,7 @@ class BadCasePromptBuilder(BasePromptBuilder):
     async def _get_feedback_from_bad_case(self, prompt: str, cases: List[EvaluatedCase]) -> Optional[str]:
         self._validate_input(prompt, cases)
         bad_case_string = self._build_bad_case_string(cases)
-        analyze_template = TEMPLATE.PROMPT_BAD_CASE_ANALYZE_TEMPLATE
+        analyze_template = self.template.PROMPT_BAD_CASE_ANALYZE_TEMPLATE
         messages = analyze_template.format(
             dict(original_prompt=prompt,
                  bad_cases=bad_case_string
@@ -79,7 +83,7 @@ class BadCasePromptBuilder(BasePromptBuilder):
         return parse_summary
 
     def _build_bad_case_string(self, cases: List[EvaluatedCase]) -> Optional[str]:
-        bad_case_template = TEMPLATE.FORMAT_BAD_CASE_TEMPLATE
+        bad_case_template = self.template.FORMAT_BAD_CASE_TEMPLATE
         bad_case_string = "\n".join(
             bad_case_template.format(
                 dict(question=str(case.case.inputs),

@@ -17,6 +17,7 @@ from openjiuwen.core.graph.pregel.constants import END, TASK_STATUS_INTERRUPT, S
 from openjiuwen.core.graph.pregel.task import TaskExecutorPool
 from openjiuwen.core.graph.store import GraphState, PendingNode, Store, create_state
 
+
 class PregelLoop:
     def __init__(self, graph: Pregel, config: PregelConfig):
         self.graph = graph

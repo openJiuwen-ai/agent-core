@@ -40,6 +40,7 @@ from openjiuwen.core.single_agent.agents.react_agent import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.foundation.tool.base import ToolCard
+from openjiuwen.core.context_engine import ContextEngineConfig
 
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
@@ -61,7 +62,9 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.api_base, "")
         self.assertEqual(config.prompt_template_name, "")
         self.assertEqual(config.prompt_template, [])
-        self.assertEqual(config.context_window_limit, 20)
+        self.assertEqual(config.context_engine_config, ContextEngineConfig(
+            max_context_message_num=200, default_window_round_num=10
+        ))
         self.assertEqual(config.max_iterations, 5)
 
     def test_config_chained_configuration(self):
@@ -77,7 +80,11 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
             .configure_prompt_template([
                 {"role": "system", "content": "你是一个助手"}
             ])
-            .configure_context_limit(30)
+            .configure_context_engine(
+                max_context_message_num=100,
+                default_window_round_num=20,
+                enable_reload=True
+            )
             .configure_max_iterations(10)
         )
 
@@ -86,7 +93,11 @@ class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.api_key, "test_key")
         self.assertEqual(config.api_base, "https://api.test.com")
         self.assertEqual(len(config.prompt_template), 1)
-        self.assertEqual(config.context_window_limit, 30)
+        self.assertEqual(config.context_engine_config, ContextEngineConfig(
+            max_context_message_num=100,
+            default_window_round_num=20,
+            enable_reload=True
+        ))
         self.assertEqual(config.max_iterations, 10)
 
     def test_configure_mem_scope(self):
@@ -204,12 +215,9 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             agent = ReActAgent(card=self.card)
             tool_card = self._create_add_tool_card()
 
-            result = agent.add_ability(tool_card)
+            agent.ability_manager.add(tool_card)
 
-        # 验证返回 self（支持链式调用）
-        self.assertIs(result, agent)
-        # 验证能力已添加
-        abilities = agent.list_abilities()
+        abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 1)
         self.assertEqual(abilities[0].name, "add")
 
@@ -224,9 +232,9 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             add_card = self._create_add_tool_card()
             multiply_card = self._create_multiply_tool_card()
 
-            agent.add_ability([add_card, multiply_card])
+            agent.ability_manager.add([add_card, multiply_card])
 
-        abilities = agent.list_abilities()
+        abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 2)
         names = [a.name for a in abilities]
         self.assertIn("add", names)
@@ -240,14 +248,12 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             return_value=None
         ):
             agent = ReActAgent(card=self.card)
-            agent.add_ability(self._create_add_tool_card())
-            agent.add_ability(self._create_multiply_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_multiply_tool_card())
 
-            result = agent.remove_ability("add")
+            result = agent.ability_manager.remove("add")
 
-        # 验证返回 self（支持链式调用）
-        self.assertIs(result, agent)
-        abilities = agent.list_abilities()
+        abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 1)
         self.assertEqual(abilities[0].name, "multiply")
 
@@ -259,14 +265,13 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             return_value=None
         ):
             agent = ReActAgent(card=self.card)
-            agent.add_ability(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
 
-        ability = agent.get_ability("add")
+        ability = agent.ability_manager.get("add")
         self.assertIsNotNone(ability)
         self.assertEqual(ability.name, "add")
 
-        # 获取不存在的能力
-        not_exist = agent.get_ability("not_exist")
+        not_exist = agent.ability_manager.get("not_exist")
         self.assertIsNone(not_exist)
 
     async def test_list_tool_info(self):
@@ -277,10 +282,10 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
             return_value=None
         ):
             agent = ReActAgent(card=self.card)
-            agent.add_ability(self._create_add_tool_card())
-            agent.add_ability(self._create_multiply_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_multiply_tool_card())
 
-        tool_infos = await agent.list_tool_info()
+        tool_infos = await agent.ability_manager.list_tool_info()
         self.assertEqual(len(tool_infos), 2)
 
         names = [t.name for t in tool_infos]
@@ -365,6 +370,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -377,7 +383,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=self.card)
             agent.configure(self.config)
-            agent.add_ability(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
             agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
@@ -410,6 +416,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -424,7 +431,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=self.card)
             agent.configure(self.config)
-            agent.add_ability(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
             agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
@@ -459,6 +466,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -481,8 +489,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=self.card)
             agent.configure(self.config)
-            agent.add_ability(self._create_add_tool_card())
-            agent.add_ability(self._create_multiply_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_multiply_tool_card())
             agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
@@ -518,6 +526,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -540,7 +549,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=self.card)
             agent.configure(config)
-            agent.add_ability(self._create_add_tool_card())
+            agent.ability_manager.add(self._create_add_tool_card())
             agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
@@ -571,6 +580,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -644,7 +654,7 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
     def _create_mock_session(self):
         """创建 mock session，模拟真实 Session 的 write_stream/stream_iterator 行为"""
         import asyncio
-        mock_session = MagicMock()
+        mock_session = AsyncMock()
         data_queue = asyncio.Queue()
 
         async def mock_write_stream(data):
@@ -683,6 +693,7 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock context_engine
         mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
         mock_context_engine.create_context = AsyncMock(return_value=mock_context)
 
         # 创建 mock session
@@ -724,18 +735,19 @@ class TestNewReActAgentGetToolInfo(unittest.IsolatedAsyncioTestCase):
 
     def test_get_tool_info_returns_agent_as_tool(self):
         """测试将 Agent 转换为 ToolInfo（作为子 Agent 使用）"""
-        from openjiuwen.core.common.schema import Param, ParamType
-
         card = AgentCard(
             name="sub_agent",
             description="子 Agent 描述",
-            input_params=[
-                Param.string(
-                    name="query",
-                    description="查询内容",
-                    required=True
-                )
-            ]
+            input_params={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "用户输入信息",
+                    }
+                },
+                "required": ["query"]
+            }
         )
 
         with patch.object(
@@ -745,7 +757,7 @@ class TestNewReActAgentGetToolInfo(unittest.IsolatedAsyncioTestCase):
         ):
             agent = ReActAgent(card=card)
 
-        tool_info = agent.get_tool_info()
+        tool_info = agent.card.tool_info()
 
         self.assertEqual(tool_info.name, "sub_agent")
         self.assertEqual(tool_info.description, "子 Agent 描述")
@@ -796,7 +808,7 @@ class TestNewReActAgentConfigUpdate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.config.api_base, "base2")
 
     def test_configure_updates_context_engine_on_limit_change(self):
-        """测试更改 context_window_limit 时更新 context_engine"""
+        """测试更改 上下文窗口对话轮次 时更新 context_engine"""
         with patch.object(
             ReActAgent,
             '_init_memory_scope',
@@ -805,8 +817,8 @@ class TestNewReActAgentConfigUpdate(unittest.IsolatedAsyncioTestCase):
             agent = ReActAgent(card=self.card)
             old_context_engine = agent.context_engine
 
-            # 更改 context_window_limit
-            new_config = ReActAgentConfig().configure_context_limit(50)
+            # 更改 上下文窗口对话轮次
+            new_config = ReActAgentConfig().configure_context_engine(default_window_round_num=20)
             agent.configure(new_config)
 
         # context_engine 应该被更新

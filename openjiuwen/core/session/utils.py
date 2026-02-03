@@ -141,7 +141,8 @@ def split_nested_path(nested_key: str) -> list:
     :return: e.g. a_1.b.c[1].d -> ["a_1", "b", "c", 1, "d"]
              a.b[0]['key'] -> ["a", "b", 0, "key"]
     '''
-
+    if not isinstance(nested_key, str):
+        return []
     if ((NESTED_PATH_SPLIT not in nested_key) and (NESTED_PATH_LIST_SPLIT not in nested_key)
             and ("['" not in nested_key)):
         return []

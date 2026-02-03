@@ -15,7 +15,7 @@ from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
 from openjiuwen.core.foundation.tool import ToolInfo
 
 from openjiuwen.dev_tools.prompt_builder import FeedbackPromptBuilder
-import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
+import openjiuwen.dev_tools.prompt_builder.builder.prompt_zh as TEMPLATE_ZH
 
 MOCK_INTENT = '''```json{"intent": "true",
 "optimized_feedback": "[优化后的反馈信息]",
@@ -82,7 +82,7 @@ async def test_feedback_prompt_builder_general():
     feedback = "丰富一下"
     response = await builder.build(prompt=prompt, feedback=feedback, mode="general")
     # 构建预期的消息内容
-    expected_messages = TEMPLATE.PROMPT_FEEDBACK_GENERAL_TEMPLATE.format(
+    expected_messages = TEMPLATE_ZH.PROMPT_FEEDBACK_GENERAL_TEMPLATE.format(
         dict(original_prompt=prompt, suggestion=feedback)
     ).to_messages()
     expected_content = "".join(MOCK_INTENT + msg.content for msg in expected_messages)
@@ -99,7 +99,7 @@ async def test_feedback_prompt_builder_insert():
     feedback = "丰富一下"
     response = await builder.build(prompt=prompt, feedback=feedback, mode="insert", start_pos=3)
     # 构建预期的消息内容
-    expected_messages = TEMPLATE.PROMPT_FEEDBACK_INSERT_TEMPLATE.format(
+    expected_messages = TEMPLATE_ZH.PROMPT_FEEDBACK_INSERT_TEMPLATE.format(
         dict(original_prompt=prompt[:3] + insert_tag + prompt[3:],
              suggestion="[优化后的反馈信息]"
         )
@@ -119,7 +119,7 @@ async def test_feedback_prompt_builder_select():
     response = await builder.build(prompt=prompt + MOCK_INTENT, feedback=feedback,
                                    mode="select", start_pos=0, end_pos=3)
     # 构建预期的消息内容
-    expected_messages = TEMPLATE.PROMPT_FEEDBACK_SELECT_TEMPLATE.format(
+    expected_messages = TEMPLATE_ZH.PROMPT_FEEDBACK_SELECT_TEMPLATE.format(
         dict(original_prompt=prompt + MOCK_INTENT,
              suggestion="[优化后的反馈信息]",
              pending_optimized_prompt=prompt[0:3]

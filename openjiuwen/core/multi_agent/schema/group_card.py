@@ -11,7 +11,7 @@ from typing import List, Dict
 from pydantic import Field
 
 from openjiuwen.core.common import BaseCard
-from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
 class GroupCard(BaseCard):

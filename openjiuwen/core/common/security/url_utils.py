@@ -9,8 +9,8 @@ from socket import inet_aton
 from typing import Optional, List
 from urllib.parse import urlparse
 
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 
 class UrlUtils:
@@ -18,17 +18,17 @@ class UrlUtils:
     def check_url_is_valid(url):
         """check url is valid"""
         if not url:
-            ExceptionUtils.raise_exception(StatusCode.COMMON_URL_INPUT_INVALID, 'url is empty')
+            raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg='url is empty')
         parsed_url = urlparse(url)
         hostname = parsed_url.hostname
         if not re.match(r"^https?://.*$", url):
-            ExceptionUtils.raise_exception(StatusCode.COMMON_URL_INPUT_INVALID, 'illegal url protocol')
+            raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg='illegal url protocol')
         try:
             ip_address = socket.gethostbyname(hostname)
-        except socket.error:
-            ExceptionUtils.raise_exception(StatusCode.COMMON_URL_INPUT_INVALID, f"resolving IP address failed")
+        except socket.error as e:
+            raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="resolving IP address failed") from e
         if UrlUtils._is_inner_ipaddress(ip_address):
-            ExceptionUtils.raise_exception(StatusCode.COMMON_URL_INPUT_INVALID, f"illegal ip address")
+            raise build_error(StatusCode.COMMON_URL_INPUT_INVALID, error_msg="illegal ip address")
 
     @staticmethod
     def get_global_proxy_url(url: str) -> Optional[str]:

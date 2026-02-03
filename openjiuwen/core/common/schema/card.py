@@ -1,8 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from pydantic import BaseModel, Field
 import uuid
+
+from pydantic import BaseModel, Field
 
 
 class BaseCard(BaseModel):

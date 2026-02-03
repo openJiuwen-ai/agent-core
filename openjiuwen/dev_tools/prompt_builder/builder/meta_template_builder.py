@@ -11,8 +11,7 @@ from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
 
 from openjiuwen.dev_tools.prompt_builder.base import BasePromptBuilder
-import openjiuwen.dev_tools.prompt_builder.builder.utils as TEMPLATE
-
+from openjiuwen.dev_tools.prompt_builder.builder.utils import get_string_prompt, template_map, select_template
 
 META_TEMPLATE_NAME_PREFIX: str = "META_TEMPLATE_"
 
@@ -21,6 +20,7 @@ class MetaTemplateBuilder(BasePromptBuilder):
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
         self._meta_template_manager = dict()
+        self.template = select_template()
 
     def get_meta_template(self, template_name: str) -> Optional[any]:
         return self._meta_template_manager.get(template_name)
@@ -45,9 +45,11 @@ class MetaTemplateBuilder(BasePromptBuilder):
                     prompt: str | PromptTemplate,
                     tools: Optional[List[ToolInfo]] = None,
                     template_type: Literal["general", "plan", "other"] = "general",
-                    custom_template_name: Optional[str] = None
+                    custom_template_name: Optional[str] = None,
+                    language: Literal["zh-CN", "en-US"] = "zh-CN",
                     ) -> Optional[str]:
-        prompt = TEMPLATE.get_string_prompt(prompt)
+        self.template = select_template(language)
+        prompt = get_string_prompt(prompt)
         self._is_valid_prompt(prompt, tools)
         messages = self._format_meta_template(prompt, tools, template_type, custom_template_name)
         response = await self._model.invoke(messages)
@@ -59,13 +61,14 @@ class MetaTemplateBuilder(BasePromptBuilder):
                            prompt: str | PromptTemplate,
                            tools: Optional[List[ToolInfo]] = None,
                            template_type: Literal["general", "plan", "other"] = "general",
-                           custom_template_name: Optional[str] = None
+                           custom_template_name: Optional[str] = None,
+                           language: Literal["zh-CN", "en-US"] = "zh-CN",
                            ) -> AsyncGenerator:
-        prompt = TEMPLATE.get_string_prompt(prompt)
+        self.template = select_template(language)
+        prompt = get_string_prompt(prompt)
         self._is_valid_prompt(prompt, tools)
         messages = self._format_meta_template(prompt, tools, template_type, custom_template_name)
-        chunks = await self._model.stream(messages)
-        async for chunk in chunks:
+        async for chunk in self._model.stream(messages):
             yield chunk.content
 
     def _format_meta_template(self,
@@ -79,14 +82,14 @@ class MetaTemplateBuilder(BasePromptBuilder):
         else:
             return self._format_predefined_meta_template(template_type, prompt, tools)
 
-    @staticmethod
-    def _format_predefined_meta_template(template_type: str,
+    def _format_predefined_meta_template(self,
+                                         template_type: str,
                                          prompt: str,
-                                         tools: Optional[List[ToolInfo]] = None
+                                         tools: Optional[List[ToolInfo]] = None,
                                          ):
         if template_type == "plan":
-            meta_system_template = TEMPLATE.PROMPT_BUILD_PLAN_META_SYSTEM_TEMPLATE
-            meta_user_template = TEMPLATE.PROMPT_BUILD_PLAN_META_USER_TEMPLATE
+            meta_system_template = self.template.PROMPT_BUILD_PLAN_META_SYSTEM_TEMPLATE
+            meta_user_template = self.template.PROMPT_BUILD_PLAN_META_USER_TEMPLATE
         else:
             if template_type != "general":
                 prompt_builder_logger.warning(
@@ -95,8 +98,8 @@ class MetaTemplateBuilder(BasePromptBuilder):
                     input_data=prompt,
                     metadata={"template_type": template_type}
                 )
-            meta_system_template = TEMPLATE.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE
-            meta_user_template = TEMPLATE.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE
+            meta_system_template = self.template.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE
+            meta_user_template = self.template.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE
 
         messages = meta_system_template.to_messages()
         messages.extend(meta_user_template.format(

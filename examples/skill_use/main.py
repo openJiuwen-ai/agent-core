@@ -2,114 +2,79 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import os
-import sys
-import shutil
 import asyncio
 from pathlib import Path
 
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import logger
-
-
-def _create_session(session_id: str):
-    """
-    Create a Session
-    """
-    try:
-        from openjiuwen.core.single_agent import create_agent_session
-        return create_agent_session(session_id=session_id)
-    except Exception:
-        from openjiuwen.core.session.session import Session
-        return Session(session_id=session_id)
-
-
-async def _invoke_agent(agent, session, query: str):
-    await agent.context_engine.create_context(session=session)
-    res = await agent.invoke(inputs={"query": query}, session=session)
-    logger.info(res.get("output", res))
+from openjiuwen.core.runner.runner import Runner
+from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
+from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
 
 
 async def main():
-    project_root = Path(__file__).resolve().parent
-
+    # 获取配置项
     load_dotenv()
 
-    query = (
-        "Analyze SuperStoreUS-2015.xlsx file. Write the analysis results in different worksheets "
-        "of the same Excel file. Do not create new Excel file,\n"
-        "and ensure all numbers are dynamically generated (no hard-coded values): "
-        "What is the store's total revenue?\n"
-        "Which product category contributes the most to sales?\n"
-        "What is the sales trend over the past year?\n"
-        "Which region has the highest sales and which region has the lowest?\n"
-        "What is the store's average profit margin?"
-    )
-    skills_dir = Path(os.getenv("SKILLS_DIR")).expanduser().resolve()
-    files_base_dir = os.getenv("FILES_BASE_DIR")
+    skills_dir = Path(os.getenv("SKILLS_DIR", "")).expanduser().resolve()
+    files_base_dir = os.getenv("FILES_BASE_DIR", str(Path(__file__).resolve().parent))
+    out_put_dir = os.getenv("OUTPUT_DIR", "")
+    max_iterations = int(os.getenv("MAX_ITERATIONS", ""))
 
-    session_id = "skill_session"
-    sys_operation_id = "default_sysop"
-    max_iterations = int(os.getenv("MAX_ITERATIONS", "40"))
-
-    api_base = os.getenv("API_BASE", "https://api.openai.com/v1")
+    api_base = os.getenv("API_BASE", "")
     api_key = os.getenv("API_KEY", "")
     model_name = os.getenv("MODEL_NAME", "")
-    model_provider = (os.getenv("MODEL_PROVIDER", "OpenAI") or "OpenAI").strip()
+    model_provider = os.getenv("MODEL_PROVIDER", "")
+    verify_ssl = os.getenv("LLM_SSL_VERIFY", "False")
 
+    # 构建agent对象
+    agent = ReActAgent(card=AgentCard(name="skill_agent", description="Skill Agent"))
+
+    # 创建并设置agent配置项
     system_prompt = (
-        "You are an agent equipped with various skills to solve problems.\n"
-        "Before attempting any task, read the relevant skill document (SKILL.md) "
-        "using view_file and follow its workflow.\n"
+        "You are an intelligent assistant.\n"
         f"All user-provided files are located at '{files_base_dir}'\n"
+        f"Put all generated files into {out_put_dir}\n"
     )
 
-    from openjiuwen.core.runner.runner import Runner
-    runner = Runner
-
-    from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
-
     sysop_card = SysOperationCard(
-        id=sys_operation_id,
         mode=OperationMode.LOCAL,
         work_config=LocalWorkConfig(work_dir=None),
     )
+    Runner.resource_mgr.add_sys_operation(sysop_card)
 
-    runner.resource_mgr.add_sys_operation(sysop_card)
-
-    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-    from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
-
-    agent = ReActAgent(card=AgentCard(name="skill_agent", description="Skill Agent"))
-
-    cfg = ReActAgentConfig()
-    cfg.sys_operation_id = sys_operation_id
-    cfg = (
-        cfg.configure_model_client(
-            provider=model_provider,
-            api_key=api_key,
-            api_base=api_base,
-            model_name=model_name,
-            verify_ssl=(os.getenv("LLM_SSL_VERIFY", "true").lower() != "false"),
+    cfg = (ReActAgentConfig()
+           .configure_model_client(
+                provider=model_provider,
+                api_key=api_key,
+                api_base=api_base,
+                model_name=model_name,
+                verify_ssl=verify_ssl,
+            )
+           .configure_prompt_template([{"role": "system", "content": system_prompt}])
+           .configure_max_iterations(max_iterations)
+           .configure_context_engine(
+                max_context_message_num=None,
+                default_window_round_num=None
+           )
         )
-        .configure_prompt_template([{"role": "system", "content": system_prompt}])
-        .configure_max_iterations(max_iterations)
-        .configure_context_limit(None)
-    )
+    cfg.sys_operation_id = sysop_card.id
     agent.configure(cfg)
 
-    from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
+    # 为agent添加skills
+    if skills_dir.exists():
+        await agent.register_skill(str(skills_dir))
 
-    toolkit = SkillToolKit(sys_operation_id)
+    # 运行agent
+    query = "处理用户提供的所有的pdf发票，并生成一份详细的xlsx报表"
 
-    if hasattr(toolkit, "set_runner"):
-        toolkit.set_runner(runner)
-
-    toolkit.add_skill_tools(agent)
-
-    session = _create_session(session_id)
-
-    await agent.register_skill(str(skills_dir))
-    await _invoke_agent(agent, session, query)
+    res = await Runner.run_agent(
+        agent=agent,
+        inputs={"query": query, "conversation_id": "013"},
+    )
+    logger.info(res.get("output", res))
 
 
 if __name__ == "__main__":

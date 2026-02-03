@@ -6,7 +6,7 @@ from openjiuwen.core.common.exception.code_template import (
     generate_status_code_spec,
     render_enum_member,
 )
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from tests.unit_tests.core.common.status_code_docgen import generate_markdown
 
 
@@ -80,26 +80,26 @@ def test_status_doc():
 
 def test_status_message():
     tpl = generate_error_message_template(
-        scope="TOOL",
-        subject="EXECUTION",
-        failure_type="EXECUTION_ERROR",
-    )
-
-    print(tpl.template)
-
-    tpl = generate_error_message_template(
-        scope="WORKFLOW",
-        subject="EXECUTION",
-        failure_type="TIMEOUT",
-        with_reason=False,
-    )
-
-    print(tpl.template)
-
-    tpl = generate_error_message_template(
         scope="AGENT",
-        subject="TASK_TYPE",
-        failure_type="NOT_SUPPORTED",
+        subject="GROUP_ADD",
+        failure_type="RUNTIME_ERROR",
     )
 
     print(tpl.template)
+
+    # tpl = generate_error_message_template(
+    #     scope="WORKFLOW",
+    #     subject="EXECUTION",
+    #     failure_type="TIMEOUT",
+    #     with_reason=False,
+    # )
+    #
+    # print(tpl.template)
+    #
+    # tpl = generate_error_message_template(
+    #     scope="AGENT",
+    #     subject="TASK_TYPE",
+    #     failure_type="NOT_SUPPORTED",
+    # )
+    #
+    # print(tpl.template)

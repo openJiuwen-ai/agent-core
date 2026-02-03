@@ -13,6 +13,7 @@ from openjiuwen.core.session.tracer.data import InvokeType
 def _should_decorate(obj, session):
     return (obj and
             session and
+            hasattr(session, "tracer") and
             session.tracer() and
             hasattr(session, "span"))
 

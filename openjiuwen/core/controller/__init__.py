@@ -5,31 +5,40 @@
 This module re-exports from legacy submodule for backward compatibility.
 """
 
-from openjiuwen.core.controller.legacy import (
-    BaseController,
-    IntentDetectionController,
+from openjiuwen.core.controller.schema import (
+    TextDataFrame,
+    FileDataFrame,
+    JsonDataFrame,
+    DataFrame,
+    EventType,
+    Event,
+    InputEvent,
+    TaskInteractionEvent,
+    TaskCompletionEvent,
+    TaskFailedEvent,
+    ControllerOutputPayload,
+    ControllerOutputChunk,
+    ControllerOutput,
     IntentType,
     Intent,
-    TaskQueue,
-    Task,
-    TaskInput,
     TaskStatus,
-    TaskResult,
-    IntentDetector,
-    Planner,
-    Event,
-    EventType,
-    EventPriority,
-    EventSource,
-    EventContent,
-    EventContext,
-    SourceType,
-    IntentDetectionConfig,
-    PlannerConfig,
-    ProactiveIdentifierConfig,
-    ReflectorConfig,
-    ReasonerConfig,
+    Task,
 )
+from openjiuwen.core.controller.modules import (
+    EventHandlerInput,
+    EventHandler,
+    EventQueue,
+    TaskManagerState,
+    TaskManager,
+    TaskFilter,
+    TaskExecutor,
+    TaskExecutorRegistry,
+    TaskScheduler,
+    IntentRecognizer,
+    EventHandlerWithIntentRecognition
+)
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.base import Controller
 
 _CONTROLLER_CLASSES = [
     "BaseController",
@@ -72,11 +81,58 @@ _CONFIG_CLASSES = [
     "ReasonerConfig",
 ]
 
+
+_NEW_CLASS = [
+    # ========================= DataStructure Definition =============================
+    # Units
+    "TextDataFrame",
+    "FileDataFrame",
+    "JsonDataFrame",
+    "DataFrame",
+    # Event (Controller Inputs)
+    "EventType",
+    "Event",
+    "InputEvent",
+    "TaskInteractionEvent",
+    "TaskCompletionEvent",
+    "TaskFailedEvent",
+    # Controller outputs
+    "ControllerOutputPayload",
+    "ControllerOutputChunk",
+    "ControllerOutput",
+    # Intent
+    "IntentType",
+    "Intent",
+    # Task
+    "TaskStatus",
+    "Task",
+    # ========================= Controller Inner Modules =============================
+    # Event Queue
+    "EventHandlerInput",
+    "EventHandler",
+    "EventQueue",
+    # Task Manager
+    "TaskManagerState",
+    "TaskManager",
+    "TaskFilter",
+    # Task Execution
+    "TaskExecutor",
+    "TaskExecutorRegistry",
+    "TaskScheduler",
+    # =========================    Controller   =============================
+    "ControllerConfig",
+    "Controller",
+    "IntentRecognizer",
+    "EventHandlerWithIntentRecognition"
+]
+
+
 __all__ = (
         _CONTROLLER_CLASSES +
         _INTENT_CLASSES +
         _TASK_CLASSES +
         _REASONER_CLASSES +
         _EVENT_CLASSES +
-        _CONFIG_CLASSES
+        _CONFIG_CLASSES +
+        _NEW_CLASS
 )

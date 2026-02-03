@@ -4,11 +4,13 @@
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
 from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation.tool_adapter import SysOperationToolAdapter
 
 __all__ = [
     "OperationMode",
     "LocalWorkConfig",
     "SandboxGatewayConfig",
     "SysOperationCard",
-    "SysOperation"
+    "SysOperation",
+    "SysOperationToolAdapter"
 ]

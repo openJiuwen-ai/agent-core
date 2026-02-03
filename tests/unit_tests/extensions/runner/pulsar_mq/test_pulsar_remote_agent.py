@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, ExecutionError, RunnerTermination, Termination
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.drunner.server_adapter.agent_adapter import AgentAdapter
@@ -91,7 +91,7 @@ class TestRunnerIntegration:
             Runner.resource_mgr.remove_agent(id="weather-single_agent")
 
             # 4. Verify exception is thrown after deletion
-            with pytest.raises(JiuWenBaseException) as e:
+            with pytest.raises(BaseError) as e:
                 await Runner.run_agent("weather-single_agent", {"city": "London"})
             assert e.value.error_code == StatusCode.AGENT_NOT_FOUND.code
 
@@ -125,7 +125,7 @@ class TestRunnerIntegration:
             task.cancel()
 
             # Verify task is cancelled
-            with pytest.raises(JiuWenBaseException) as e:
+            with pytest.raises(BaseError) as e:
                 await task
             assert e.value.error_code == StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.code
         finally:
@@ -138,7 +138,7 @@ class TestRunnerIntegration:
         try:
             client = RemoteAgent(agent_id="slow-single_agent")
 
-            with pytest.raises(JiuWenBaseException) as e:
+            with pytest.raises(BaseError) as e:
                 await client.invoke({"test": "data"}, 0.1)
             assert e.value.error_code == StatusCode.REMOTE_AGENT_REQUEST_TIMEOUT.code
 
@@ -165,11 +165,9 @@ class TestRunnerIntegration:
             await Runner.stop()
 
             # Verify: client side receives CancelledError
-            with pytest.raises(JiuWenBaseException) as e:
+            with pytest.raises(RunnerTermination) as e:
                 await task
             # 如果关闭太快，请求发的时候reply已经是close则会收到cancel异常，如果collector已经创建被取消则报错runner stop
-            assert (e.value.error_code == StatusCode.RUNNER_STOPPED.code or
-                    e.value.error_code == StatusCode.REMOTE_AGENT_REQUEST_CANCELLED.code)
 
             logger.info("Client received CancelledError as expected when Runner stopped")
         finally:
@@ -185,7 +183,7 @@ class TestRunnerIntegration:
 
         # Simulate adapter throwing exception
         async def error_handler(self, inputs):
-            raise JiuWenBaseException(
+            raise ExecutionError(
                 error_code=111,
                 message="ADAPTER_ERROR")
 
@@ -198,7 +196,7 @@ class TestRunnerIntegration:
             Runner.resource_mgr.add_agent(AgentCard(id="weather-single_agent"), agent=client)
 
             # Verify client receives exception containing error code and message
-            with pytest.raises(JiuWenBaseException) as e:
+            with pytest.raises(BaseError) as e:
                 await Runner.run_agent("weather-single_agent", {"city": "London"})
 
             assert e.value.error_code == StatusCode.REMOTE_AGENT_PROCESS_ERROR.code
@@ -220,7 +218,7 @@ class TestRunnerIntegration:
                 return await Runner.run_agent("slow-single_agent", {"city": "Berlin"})
 
             task = asyncio.create_task(long_running_request())
-            with pytest.raises(JiuWenBaseException) as e:
+            with pytest.raises(BaseError) as e:
                 await task
             assert e.value.error_code == StatusCode.RUNNER_DISTRIBUTED_MODE_REQUIRED.code
         finally:

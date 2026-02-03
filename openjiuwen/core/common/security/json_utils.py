@@ -2,9 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
 
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 
 
 class JsonUtils:
@@ -14,13 +14,13 @@ class JsonUtils:
             try:
                 return json.loads(json_string, **kwargs)
             except json.JSONDecodeError as e:
-                ExceptionUtils.raise_exception(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, f"JSON decode error", e)
+                raise build_error(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, error_msg="JSON decode error") from e
             except TypeError as e:
-                ExceptionUtils.raise_exception(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, f"JSON type error", e)
+                raise build_error(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, error_msg="JSON type error") from e
             except ValueError as e:
-                ExceptionUtils.raise_exception(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, f"JSON value error", e)
+                raise build_error(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, error_msg="JSON value error") from e
             except Exception as e:
-                ExceptionUtils.raise_exception(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, f"JSON operation error", e)
+                raise build_error(StatusCode.COMMON_JSON_INPUT_PROCESS_ERROR, error_msg="JSON operation error") from e
         else:
             result = default
             try:
@@ -42,31 +42,28 @@ class JsonUtils:
             try:
                 return json.dumps(obj, **kwargs)
             except TypeError as e:
-                ExceptionUtils.raise_exception(
+                raise build_error(
                     StatusCode.COMMON_JSON_EXECUTION_PROCESS_ERROR,
-                    f"JSON serialization type error",
-                    e
-                )
+                    error_msg="JSON serialization type error"
+                ) from e
             except ValueError as e:
-                ExceptionUtils.raise_exception(
+                raise build_error(
                     StatusCode.COMMON_JSON_EXECUTION_PROCESS_ERROR,
-                    f"JSON serialization value error",
-                    e
-                )
+                    error_msg="JSON serialization value error",
+                ) from e
             except Exception as e:
-                ExceptionUtils.raise_exception(
+                raise build_error(
                     StatusCode.COMMON_JSON_EXECUTION_PROCESS_ERROR,
-                    f"JSON serialization error",
-                    e
-                )
+                    error_msg="JSON serialization error",
+                ) from e
         else:
             result = default
             try:
                 result = json.dumps(obj, **kwargs)
             except TypeError:
-                logger.error(f"JSON serialization type error")
+                logger.error("JSON serialization type error")
             except ValueError:
-                logger.error(f"JSON serialization value error")
+                logger.error("JSON serialization value error")
             except Exception:
-                logger.error(f"JSON serialization error")
+                logger.error("JSON serialization error")
             return result

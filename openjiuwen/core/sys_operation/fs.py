@@ -1,16 +1,44 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+import re
 from abc import ABC, abstractmethod
 from typing import Literal, Optional, Tuple, Dict, Any, AsyncIterator, List
 
 from openjiuwen.core.sys_operation.base import BaseOperation
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.sys_operation.result import ReadFileResult, ReadFileStreamResult, WriteFileResult, \
     UploadFileResult, UploadFileStreamResult, DownloadFileResult, DownloadFileStreamResult, ListFilesResult, \
     ListDirsResult, SearchFilesResult
 
+SAFE_PATH_PATTERN = re.compile(r'[^\w.-]')
+
+# Default chunk sizes
+DEFAULT_READ_CHUNK_SIZE = 0
+DEFAULT_UPLOAD_CHUNK_SIZE = 0
+DEFAULT_DOWNLOAD_CHUNK_SIZE = 0
+DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE = 1024 * 1024
+DEFAULT_UPLOAD_STREAM_CHUNK_SIZE = 1024 * 1024
+DEFAULT_READ_STREAM_CHUNK_SIZE = 8192  # 8KB
+TAIL_CHUNK_SIZE = 1024
+
 
 class BaseFsOperation(BaseOperation, ABC):
     """Base file system operation"""
+
+    def list_tools(self) -> List[ToolCard]:
+        method_names = [
+            "read_file",
+            "read_file_stream",
+            "write_file",
+            "upload_file",
+            "upload_file_stream",
+            "download_file",
+            "download_file_stream",
+            "list_files",
+            "list_directories",
+            "search_files"
+        ]
+        return self._generate_tool_cards(method_names)
 
     @abstractmethod
     async def read_file(
@@ -22,20 +50,22 @@ class BaseFsOperation(BaseOperation, ABC):
             tail: Optional[int] = None,
             line_range: Optional[Tuple[int, int]] = None,
             encoding: str = "utf-8",
-            chunk_size: int = 8192,
+            chunk_size: int = DEFAULT_READ_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> ReadFileResult:
         """
         Asynchronously read file with specified mode and parameters.
+        Mutually exclusive parameters: Only one of head, tail, or line_range can be specified.
 
         Args:
             path: Full or relative path to the file to read (required).
             mode: Reading mode - "text" (line-based, default) or "bytes" (raw bytes).
-            head: Number of lines to read from the start (text mode only).
-            tail: Number of lines to read from the end (text mode only).
+            head: Number of lines to read from the start (text mode only).0 is equivalent to None.
+            tail: Number of lines to read from the end (text mode only).0 is equivalent to None.
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
+                  If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
-            chunk_size: Buffer size for bytes mode reading (default: 8192 bytes).
+            chunk_size: Maximum number of bytes to read at once (default: 0, unlimited)
             options: Extended configuration options (dict, optional).
 
         Returns:
@@ -53,18 +83,20 @@ class BaseFsOperation(BaseOperation, ABC):
             tail: Optional[int] = None,
             line_range: Optional[Tuple[int, int]] = None,
             encoding: str = "utf-8",
-            chunk_size: int = 8192,
+            chunk_size: int = DEFAULT_READ_STREAM_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ReadFileStreamResult]:
         """
         Asynchronously read file streaming with specified mode and parameters.
+        Mutually exclusive parameters: Only one of head, tail, or line_range can be specified.
 
         Args:
             path: Full or relative path to the file to read (required).
             mode: Reading mode - "text" (line-based, default) or "bytes" (raw bytes).
-            head: Number of lines to read from the start (text mode only).
-            tail: Number of lines to read from the end (text mode only).
+            head: Number of lines to read from the start (text mode only).0 is equivalent to None.
+            tail: Number of lines to read from the end (text mode only).0 is equivalent to None.
             line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
+                  If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
             chunk_size: Buffer size for bytes mode reading (default: 8192 bytes).
             options: Extended configuration options (dict, optional).
@@ -116,7 +148,7 @@ class BaseFsOperation(BaseOperation, ABC):
             overwrite: bool = False,
             create_parent_dirs: bool = True,
             preserve_permissions: bool = True,
-            chunk_size: int = 1024 * 1024,
+            chunk_size: int = DEFAULT_UPLOAD_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> UploadFileResult:
         """
@@ -128,7 +160,7 @@ class BaseFsOperation(BaseOperation, ABC):
             overwrite: Whether to overwrite existing target file (default: False).
             create_parent_dirs: Whether to auto-create target parent directories (default: True).
             preserve_permissions: Whether to preserve file permissions (default: True, Unix/Linux only).
-            chunk_size: Chunk size for cross-filesystem transfers (default: 1MB, bytes).
+            chunk_size: Maximum number of bytes to upload at once (default: 0, unlimited)
             options: Extended configuration options (dict, optional).
 
         Returns:
@@ -145,7 +177,7 @@ class BaseFsOperation(BaseOperation, ABC):
             overwrite: bool = False,
             create_parent_dirs: bool = True,
             preserve_permissions: bool = True,
-            chunk_size: int = 1024 * 1024,
+            chunk_size: int = DEFAULT_UPLOAD_STREAM_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[UploadFileStreamResult]:
         """
@@ -174,7 +206,7 @@ class BaseFsOperation(BaseOperation, ABC):
             overwrite: bool = False,
             create_parent_dirs: bool = True,
             preserve_permissions: bool = True,
-            chunk_size: int = 1024 * 1024,
+            chunk_size: int = DEFAULT_DOWNLOAD_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> DownloadFileResult:
         """
@@ -186,7 +218,7 @@ class BaseFsOperation(BaseOperation, ABC):
             overwrite: Whether to overwrite existing target file (default: False).
             create_parent_dirs: Whether to auto-create target parent directories (default: True).
             preserve_permissions: Whether to preserve file permissions (default: True, Unix/Linux only).
-            chunk_size: Chunk size for cross-filesystem transfers (default: 1MB, bytes).
+            chunk_size: Maximum number of bytes to download at once (default: 0, unlimited)
             options: Extended configuration options (dict, optional).
 
         Returns:
@@ -203,7 +235,7 @@ class BaseFsOperation(BaseOperation, ABC):
             overwrite: bool = False,
             create_parent_dirs: bool = True,
             preserve_permissions: bool = True,
-            chunk_size: int = 1024 * 1024,
+            chunk_size: int = DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[DownloadFileStreamResult]:
         """

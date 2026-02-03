@@ -55,6 +55,12 @@ class KnowledgeBase(ABC):
         special_attrs = {"vector_store", "index_manager"}
         if name in special_attrs and all(getattr(self, attr, None) for attr in special_attrs):
             self.validate_index()
+            if any(type(getattr(self, attr)).__name__.casefold().startswith("chroma") for attr in special_attrs):
+                if self.strict_validation and self.config.index_type != "vector":
+                    raise build_error(
+                        StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
+                        error_msg="Chroma database does not support sparse embedding & hybrid search in local mode yet",
+                    )
 
     def validate_index(self):
         """Validate vector store and index manager"""

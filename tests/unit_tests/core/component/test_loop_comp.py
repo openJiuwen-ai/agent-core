@@ -2,8 +2,8 @@ from typing import AsyncIterator
 
 import pytest
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import LoopGroup, LoopComponent
@@ -37,11 +37,11 @@ async def test_loop_number_exceeds_max_limit():
     flow.add_connection("start", "loop")
     flow.add_connection("loop", "end")
 
-    with pytest.raises(JiuWenBaseException) as exc_info:
+    with pytest.raises(BaseError) as exc_info:
         await flow.invoke(inputs={"num": 0}, session=create_workflow_session())
 
-    assert exc_info.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-    assert "exceeds maximum limit" in exc_info.value.message
+    assert exc_info.value.code == StatusCode.COMPONENT_LOOP_EXECUTION_ERROR.code
+    assert "exceeds maximum limit" in str(exc_info.value)
 
 class CustomStream(WorkflowComponent):
     def __init__(self):

@@ -26,8 +26,8 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging.events import (
     BaseLogEvent,
     LogEventType,
@@ -90,11 +90,9 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         try:
             os.chmod(self.baseFilename, 0o640)
         except OSError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR.code,
-                message=StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                    error_msg=f"failed to set file permissions: {e}"
-                )
+            raise build_error(
+                StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR,
+                error_msg=f"failed to set file permissions: {e}"
             ) from e
 
     def _format_filename(self, base_filename: str, pattern: str) -> str:
@@ -168,22 +166,18 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                 try:
                     os.chmod(sfn, 0o440)  # Read-only permission
                 except OSError as e:
-                    raise JiuWenBaseException(
-                        error_code=StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR.code,
-                        message=StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                            error_msg=f"failed to set backup file permissions: {e}"
-                        )
+                    raise build_error(
+                        StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR,
+                        error_msg=f"failed to set backup file permissions: {e}"
                     ) from e
 
         # Set new log file permissions
         try:
             os.chmod(self.baseFilename, 0o640)
         except OSError as e:
-            raise JiuWenBaseException(
-                error_code=StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR.code,
-                message=StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR.errmsg.format(
-                    error_msg=f"failed to set log file permissions: {e}"
-                )
+            raise build_error(
+                StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR,
+                error_msg=f"failed to set log file permissions: {e}"
             ) from e
 
 
@@ -309,11 +303,9 @@ class DefaultLogger(LoggerProtocol):
                 try:
                     os.makedirs(log_dir, mode=0o750, exist_ok=True)
                 except OSError as e:
-                    raise JiuWenBaseException(
-                        error_code=StatusCode.COMMON_LOG_PATH_INIT_FAILED.code,
-                        message=StatusCode.COMMON_LOG_PATH_INIT_FAILED.errmsg.format(
-                            error_msg=f"the log_dir is `{log_dir}`, error detail: {e}"
-                        )
+                    raise build_error(
+                        StatusCode.COMMON_LOG_PATH_INIT_FAILED,
+                        error_msg=f"the log_dir is `{log_dir}`, error detail: {e}"
                     ) from e
 
             # Get configuration parameters

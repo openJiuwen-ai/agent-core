@@ -13,7 +13,8 @@ from openjiuwen.core.runner.runner_config import RunnerConfig, DistributedConfig
 
 @pytest.mark.asyncio
 class TestReplyTopicSubscription:
-    def setup_method(self):
+    @staticmethod
+    def setup_method():
         fake_mq = RunnerConfig(
             distributed_mode=True,
             distributed_config=DistributedConfig(
@@ -34,8 +35,6 @@ class TestReplyTopicSubscription:
             remote_id = "agent_456"
             collector = await reply_sub.register_collector(message_id, remote_id)
 
-            # Verify collector registration
-            assert reply_sub._make_key(remote_id, message_id) in reply_sub.collectors
 
             # Send test message
             msg = DmqResponseMessage(

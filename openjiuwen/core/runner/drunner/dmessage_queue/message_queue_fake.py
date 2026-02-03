@@ -4,8 +4,8 @@
 import asyncio
 from typing import Dict, List, Optional
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.dmessage_queue.message_serializer import serialize_message, deserialize_message
 from openjiuwen.core.runner.message_queue_base import SubscriptionBase, AsyncMessageHandler, QueueMessage, \
@@ -94,8 +94,7 @@ class FakeMQ(MessageQueueBase):
 
     def subscribe(self, topic: str) -> FakeSubscription:
         if not self._is_running:
-            raise JiuWenBaseException(StatusCode.MESSAGE_QUEUE_NOT_RUNNING.code,
-                                      StatusCode.MESSAGE_QUEUE_NOT_RUNNING.errmsg.format("FakeMQ"))
+            raise build_error(StatusCode.MESSAGE_QUEUE_TOPIC_SUBSCRIPTION_ERROR, reason="message queue is not running")
         sub = FakeSubscription(topic)
         self._topics.setdefault(topic, []).append(sub)
         logger.info(f"[FakeMQ] new subscription for topic={topic}")

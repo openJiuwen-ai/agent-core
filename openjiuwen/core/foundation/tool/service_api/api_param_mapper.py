@@ -67,7 +67,8 @@ class APIParamMapper:
                 if param_name in inputs:
                     location_str = param_schema.get(self._LOCATION, default_location)
                     if location_str:
-                        location = APIParamLocation(location_str)
+                        location = APIParamLocation(location_str.lower()) if isinstance(location_str,
+                                                                                        str) else location_str
                         result.get(location, {}).update({param_name: inputs.get(param_name)})
         for location in [APIParamLocation.PATH, APIParamLocation.QUERY, APIParamLocation.HEADER]:
             # Input values override default values (dictionary unpacking order matters)

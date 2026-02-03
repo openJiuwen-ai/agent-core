@@ -1,17 +1,21 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Dict, Optional
-import datetime
-from datetime import timezone
+from typing import List, Dict, Optional, Tuple, Any
+import functools
 
-from openjiuwen.core.common.logging import logger
+from pydantic import BaseModel
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import context_engine_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.processor.base import ContextProcessor
 
 
 class ContextEngine:
@@ -30,20 +34,23 @@ class ContextEngine:
         If omitted, a default configuration is used.
     """
 
+    _PROCESSOR_MAP: Dict[str, type[ContextProcessor]] = dict()
+
     def __init__(self,
                  config: ContextEngineConfig = None,
                  ):
         self._config = config or ContextEngineConfig()
         self._context_pool: Dict[str, ModelContext] = dict()
 
-    async def create_context(self,
-                             context_id: str = "default_context_id",
-                             session: Session = None,
-                             *,
-                             history_messages: List[BaseMessage] = None,
-                             token_counter: TokenCounter = None,
-                             mem_scope_id: str = None,
-                             ) -> ModelContext:
+    async def create_context(
+            self,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            *,
+            processors: List[Tuple[str, BaseModel]] = None,
+            history_messages: List[BaseMessage] = None,
+            token_counter: TokenCounter = None,
+    ) -> ModelContext:
         """
         Create or retrieve a ModelContext for the given session & context ID.
 
@@ -59,44 +66,43 @@ class ContextEngine:
             context_id: Unique identifier for this context within the session.
             session: Session object supplying session_id; if None, a default
                      session ID is used.
-            history_messages: Initial message list; when omitted, behaviour
-                              depends on `mem_scope_id`.
+            history_messages: Initial message list.
             token_counter: Strategy for counting tokens; defaults to
                            TiktokenCounter if not provided.
-            mem_scope_id: Optional memory scope key; when given, messages
-                          are loaded from long-term memory if `history_messages`
-                          is None.
 
         Returns:
             ModelContext: The newly created or cached context instance.
         """
+        context_id = self._process_context_id(context_id)
         session_id = session.get_session_id() if session else "default_session_id"
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id in self._context_pool:
-            return self._context_pool.get(full_context_id)
+            context = self._context_pool.get(full_context_id)
+            self._load_state_from_session(context, session)
+            return context
 
-        if not history_messages and mem_scope_id:
-            history_messages = await self._load_context_from_memory(
-                session_id=session_id,
-                mem_scope_id=mem_scope_id,
-                message_num=self._config.memory_message_num
-            )
+        processor_instances = [
+            self._create_processor(processor_type, processor_config)
+            for processor_type, processor_config in (processors or [])
+        ]
 
         context = SessionModelContext(
-            context_id=context_id,
-            session_id=session_id,
+            context_id,
+            session_id,
+            self._config,
             history_messages=history_messages or [],
-            window_size_limit=self._config.default_window_message_num,
+            processors=processor_instances,
             token_counter=token_counter,
         )
-
+        self._load_state_from_session(context, session, is_load_messages=(not history_messages))
         self._context_pool[full_context_id] = context
         return context
 
-    def get_context(self,
-                    context_id: str = "default_context_id",
-                    session_id: str = "default_session_id"
-                    ) -> Optional[ModelContext]:
+    def get_context(
+            self,
+            context_id: str = "default_context_id",
+            session_id: str = "default_session_id"
+    ) -> Optional[ModelContext]:
         """
         Retrieve an existing ModelContext from the pool.
 
@@ -107,13 +113,15 @@ class ContextEngine:
         Returns:
             ModelContext instance if found, otherwise None.
         """
+        context_id = self._process_context_id(context_id)
         full_context_id = f"{session_id}_{context_id}"
         return self._context_pool.get(full_context_id, None)
 
-    def clear_context(self,
-                      context_id: str = None,
-                      session_id: str = None
-                      ):
+    def clear_context(
+            self,
+            context_id: str = None,
+            session_id: str = None
+    ):
         """
         Remove contexts from the internal pool.
 
@@ -141,80 +149,169 @@ class ContextEngine:
 
         if context_id is None:
             delete_context_list = [
-                context_id for context_id, context in self._context_pool.items()
+                context.context_id() for _, context in self._context_pool.items()
                 if context.session_id() == session_id
             ]
 
             if not delete_context_list:
-                logger.warning(f"Delete context failed, session {session_id} does not exist")
+                context_engine_logger.warning(
+                    "Delete context failed, session does not exist",
+                    event_type=LogEventType.CONTEXT_CLEAR,
+                    metadata={"session_id": session_id}
+                )
                 return
 
             for context_id in delete_context_list:
-                del self._context_pool[context_id]
+                full_context_id = f"{session_id}_{context_id}"
+                del self._context_pool[full_context_id]
             return
 
+        context_id = self._process_context_id(context_id)
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id not in self._context_pool:
-            logger.warning(f"Delete context failed, context {session_id} does not exist")
+            context_engine_logger.warning(
+                "Delete context failed, context does not exist",
+                event_type=LogEventType.CONTEXT_CLEAR,
+                metadata={"session_id": session_id}
+            )
+            return
 
         del self._context_pool[full_context_id]
 
     async def save_contexts(self,
-                            context_ids: List[str],
-                            session: Session = None,
-                            *,
-                            mem_scope_id: str = None,
+                            session: Session,
+                            context_ids: List[str] = None
                             ):
         """
         Batch-persist multiple contexts and their runtime states.
 
         Each context's messages, sliding-window position, token count and statistics
-        are saved locally. If `mem_scope_id` is provided, the same snapshots are
-        also written to long-term memory under that scope for later cross-session
-        restoration.
+        are saved locally.
 
         Args:
             context_ids: List of target context identifiers to save.
-            session: Session object; if None, "default_session_id" is used.
-            mem_scope_id: Optional memory scope key; when given, all listed
-                          contexts are additionally saved to long-term memory
-                          with this ID.
+            session: Session object;
         """
+        if not session:
+            context_engine_logger.warning(
+                "Save context failed, session cannot be None",
+                event_type=LogEventType.CONTEXT_SAVE,
+            )
+            return
+        session_id = session.get_session_id()
+        states = dict()
+        if context_ids is None:
+            context_ids = [
+                context.context_id() for context_id, context in self._context_pool.items()
+                if context.session_id() == session_id
+            ]
+
         for context_id in context_ids:
-            session_id = session.get_session_id() if session else "default_session_id"
+            context_id = self._process_context_id(context_id)
             full_context_id = f"{session_id}_{context_id}"
-            context: SessionModelContext = self._context_pool.get(full_context_id)
-            if not context:
+            context = self._context_pool.get(full_context_id)
+            if context is None or not hasattr(context, "save_state"):
                 continue
-            if mem_scope_id:
-                new_messages = context.get_messages(with_history=False)
-                await self._save_context_to_memory(
-                    session_id=session_id,
-                    mem_scope_id=mem_scope_id,
-                    messages=new_messages
-                )
-            context.on_save()
+            context_state = context.save_state()
+            states[context_id] = context_state
+        self._save_state_to_session(session, states)
+
+    @classmethod
+    def register_processor(cls, processor_class=None):
+        """
+        Class-method decorator for plugging a new ContextProcessor into the engine.
+
+        Usage
+        -----
+        @register_processor(MyProcessorConfig)
+        class MyProcessor(ContextProcessor):
+            ...
+
+        The decorator performs two book-keeping actions:
+        1. Maps `processor_class.processor_type()` -> `processor_class`
+           so the engine can instantiate the processor at runtime.
+        2. Maps `processor_class.processor_type()` -> `config`
+           so the engine can validate/convert the user-supplied config dict.
+
+        Parameters
+        ----------
+        config : subclass of ContextProcessorConfig
+            Configuration schema that belongs to the processor being decorated.
+        processor_class : subclass of ContextProcessor, optional
+            When used as a **parameter-less** decorator this argument is None;
+            the inner function receives the real class object.
+
+        Returns
+        -------
+        callable
+            A decorator that accepts the processor class and returns it unchanged
+            after registration (allowing normal class-definition syntax).
+        """
+        @functools.wraps(processor_class)
+        def register_processor_class(processor_class: type[ContextProcessor]):
+            cls._PROCESSOR_MAP[processor_class.processor_type()] = processor_class
+            return processor_class
+        return register_processor_class
+
+    def _create_processor(self, processor_type: str, config: BaseModel):
+        processor_class = self._PROCESSOR_MAP.get(processor_type)
+        if not processor_class:
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"cannot find processor type '{processor_type}'"
+            )
+
+        try:
+            processor = processor_class(config)
+        except Exception as e:
+            raise build_error(
+                StatusCode.CONTEXT_EXECUTION_ERROR,
+                error_msg=f"init processor type '{processor_type}' failed",
+                cause=e
+            ) from e
+
+        return processor
 
     @staticmethod
-    async def _load_context_from_memory(session_id: str, mem_scope_id: str, message_num: int) -> List[BaseMessage]:
-        from openjiuwen.core.memory import LongTermMemory
-        messages = await LongTermMemory().get_recent_messages(
-            scope_id=mem_scope_id,
-            session_id=session_id,
-            num=message_num
-        )
-        return messages
+    def _load_state_from_session(
+            context: ModelContext,
+            session: Session,
+            *,
+            is_load_messages: bool = True
+    ):
+        if not session:
+            return
+        states = None
+        if hasattr(session, "get_state"):
+            states = session.get_state("context")
+        elif hasattr(session, "_inner"):
+            states = getattr(session, "_inner").get_state("context") if session else None
 
-    @staticmethod
-    async def _save_context_to_memory(session_id: str, mem_scope_id: str, messages: List[BaseMessage]):
-        if not messages:
+        if states is None:
             return
 
-        from openjiuwen.core.memory import LongTermMemory, AgentMemoryConfig
-        await LongTermMemory().add_messages(
-            messages,
-            AgentMemoryConfig(),
-            timestamp=datetime.datetime.now(tz=timezone.utc),
-            scope_id=mem_scope_id,
-            session_id=session_id
-        )
+        if not hasattr(context, "load_state"):
+            return
+
+        if not is_load_messages:
+            states.pop("messages")
+
+        context.load_state(states)
+
+    @staticmethod
+    def _save_state_to_session(
+            session,
+            states: dict
+    ):
+        if not session:
+            return
+        if hasattr(session, "update_state"):
+            session.update_state({"context": None})
+            session.update_state({"context": states})
+        elif hasattr(session, "_inner"):
+            getattr(session, "_inner").update_state({"context": None})
+            getattr(session, "_inner").update_state({"context": states})
+
+    @staticmethod
+    def _process_context_id(context_id: str) -> str:
+        return context_id.replace(".", "_")

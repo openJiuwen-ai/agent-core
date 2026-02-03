@@ -3,9 +3,9 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, AsyncIterator, Union, Dict, Any
 
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -45,24 +45,20 @@ class BaseModelClient(ABC):
         client_name = self._get_client_name()
         
         if not self.model_client_config.api_key:
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          error_msg=f"model client config api_key is required for {client_name}."))
+            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                              error_msg=f"model client config api_key is required for {client_name}.")
         if not self.model_client_config.api_base:
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          error_msg=f"model client config api_base is required for {client_name}."))
+            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                              rror_msg=f"model client config api_base is required for {client_name}.")
 
         if self.model_client_config.verify_ssl is not None and not isinstance(self.model_client_config.verify_ssl,
                                                                               bool):
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          error_msg="model client config verify_ssl must be a boolean type."))
+            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                              error_msg="model client config verify_ssl must be a boolean type.")
 
         if self.model_client_config.verify_ssl is True and self.model_client_config.ssl_cert is None:
-            raise JiuWenBaseException(StatusCode.MODEL_SERVICE_CONFIG_ERROR.code,
-                                      StatusCode.MODEL_SERVICE_CONFIG_ERROR.errmsg.format(
-                                          error_msg="model client config ssl_cert is required when verify_ssl is True."))
+            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                              error_msg="model client config ssl_cert is required when verify_ssl is True.")
 
     def _convert_messages_to_dict(self, messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
         """Convert messages to specific API format
@@ -84,9 +80,8 @@ class BaseModelClient(ABC):
         """
         # If it's a string, convert to user message
         if not messages:
-            raise JiuWenBaseException(StatusCode.MODEL_INVOKE_PARAM_ERROR.code,
-                                      StatusCode.MODEL_INVOKE_PARAM_ERROR.errmsg.format(
-                                          error_msg="The message sent to the llm cannot be empty."))
+            raise build_error(StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                              error_msg="The message sent to the llm cannot be empty.")
         if isinstance(messages, str):
             return [{"role": "user", "content": messages}]
 
@@ -177,7 +172,7 @@ class BaseModelClient(ABC):
             this method and then apply provider-specific adjustments (e.g. additional fields).
         """
         if model is None and self.model_config.model_name is None:
-            raise JiuWenBaseException(
+            raise build_error(
                 StatusCode.MODEL_CONFIG_ERROR.code,
                 StatusCode.MODEL_CONFIG_ERROR.errmsg.format(error_msg="The model cannot be None.")
             )
@@ -245,6 +240,7 @@ class BaseModelClient(ABC):
                 top_p=final_top_p,
                 max_tokens=final_max_tokens,
                 is_stream=stream,
+                stop=final_stop,
                 metadata={"client_name": client_name},
                 extra_params=extra_params
             )

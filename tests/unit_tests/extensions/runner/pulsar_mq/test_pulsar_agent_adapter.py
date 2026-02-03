@@ -35,7 +35,8 @@ os.environ.setdefault("LLM_SSL_VERIFY", "false")
 @pytest.mark.asyncio
 @pytest.mark.skip(reason="Requires real uv sync --extra pulsar and llm")
 class TestAdapterTest:
-    def setup_method(self):
+    @staticmethod
+    def setup_method():
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
         os.environ.setdefault("RESTFUL_SSL_VERIFY", "false")
 
@@ -54,7 +55,8 @@ class TestAdapterTest:
         )
         Runner.set_config(pulsar_mq)
 
-    def teardown_method(self):
+    @staticmethod
+    def teardown_method():
         """Clean up test environment"""
         # Reset Runner configuration
         from openjiuwen.core.runner.runner_config import DEFAULT_RUNNER_CONFIG
@@ -123,9 +125,9 @@ class TestAdapterTest:
             await Runner.stop()
 
     @staticmethod
-    def _build_workflow(name, id, version):
+    def _build_workflow(name, workflow_id, version):
         workflow_card = WorkflowCard(
-                id=id,
+                id=workflow_id,
                 version=version,
                 name=name,
         )
@@ -146,13 +148,13 @@ class TestAdapterTest:
     async def test_react_agent_invoke_with_adapter(self):
         try:
             await Runner.start()
-            id = "test_workflow"
+            workflow_id = "test_workflow"
             name = "test_workflow"
             version = "1"
             description = "test_workflow"
-            workflow1 = self._build_workflow(name, id, version)
+            workflow1 = self._build_workflow(name, workflow_id, version)
             test_workflow_schema = WorkflowSchema(
-                id=id,
+                id=workflow_id,
                 version=version,
                 name=name,
                 description=description,
@@ -166,7 +168,7 @@ class TestAdapterTest:
             )
             agent = WorkflowAgent(workflow_config)
             agent.bind_workflows([workflow1])
-            Runner.resource_mgr.add_workflow(WorkflowCard(id=id + "_" + version), workflow1)
+            Runner.resource_mgr.add_workflow(WorkflowCard(id=workflow_id + "_" + version), workflow1)
             Runner.resource_mgr.add_agent(AgentCard(id="workflow-single_agent"), agent)
             # Simulate client sending request
             client = RemoteAgent(agent_id="workflow-single_agent")

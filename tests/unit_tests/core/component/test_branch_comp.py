@@ -2,7 +2,6 @@ import pytest
 
 from openjiuwen.core.common.constants.constant import CONFIG_KEY
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow import Input, Output
 from openjiuwen.core.workflow import BranchComponent
@@ -19,6 +18,7 @@ from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, Node1
 pytestmark = pytest.mark.asyncio
 
 SUB_WORKFLOW_COMPONENT = "sub_workflow"
+
 
 class MockSubWorkflowComponent(WorkflowComponent):
     def __init__(self):
@@ -111,12 +111,12 @@ class TestBranchComponent:
         await self.run_with_expression("is_empty(${start.input})", '')
         await self.run_with_expression("is_empty(${start.input})", {})
         with pytest.raises(BaseError) as error:
-           await self.run_with_expression("is_empty(${start.input})", 0)
+            await self.run_with_expression("is_empty(${start.input})", 0)
         assert str(StatusCode.EXPRESSION_EVAL_ERROR.code) in str(error.value)
         print(error.value)
 
         with pytest.raises(BaseError) as error:
-           await self.run_with_expression("is_not_empty(${start.input})", 1.2)
+            await self.run_with_expression("is_not_empty(${start.input})", 1.2)
         assert str(StatusCode.EXPRESSION_EVAL_ERROR.code) in str(error.value)
         print(error.value)
 
@@ -126,7 +126,7 @@ class TestBranchComponent:
 
     async def test_expression_is_not_empty(self):
         await self.run_with_expression("is_not_empty(${start.input})", 'x')
-        await self.run_with_expression("is_not_empty(${start.input})", {'a':'a'})
+        await self.run_with_expression("is_not_empty(${start.input})", {'a': 'a'})
         await self.run_with_expression("is_not_empty(${start.input})", ['a'])
         await self.run_with_expression("is_not_empty(${start.input})", (1,2))
         with pytest.raises(BaseError) as error:

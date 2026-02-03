@@ -41,7 +41,8 @@ class SkillToolKit:
             name="view_file",
             description=(
                 "Given a file_path, reads and returns the file content stored at file_path. "
-                "Only reads text files (e.g. .md and .txt files), and does NOT read binary files "
+                "Used only for reading the skills this agent is equipped with(e.g. .md and .txt files),"
+                "and does NOT read binary files "
                 "(e.g. .pdf, .xlsx, .ppt etc.)"
             ),
             input_params={
@@ -159,6 +160,6 @@ class SkillToolKit:
         rm = Runner.resource_mgr
         rm.add_tool([execute_python_code_tool, execute_command_tool, view_file_tool])
 
-        agent.ability_kit.add(execute_python_code_tool.card)
-        agent.ability_kit.add(execute_command_tool.card)
-        agent.ability_kit.add(view_file_tool.card)
+        agent.ability_manager.add(execute_python_code_tool.card)
+        agent.ability_manager.add(execute_command_tool.card)
+        agent.ability_manager.add(view_file_tool.card)

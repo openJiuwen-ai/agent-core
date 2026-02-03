@@ -12,7 +12,7 @@ class ExecuteCmdData(BaseModel):
 
     command: str = Field(..., description="Original shell command executed")
     cwd: str = Field(default=".", description="Current working directory")
-    exit_code: int = Field(default=0, description="Command exit code")
+    exit_code: Optional[int] = Field(default=None, description="Command exit code")
     stdout: str = Field(default="", description="The command's standard output (stdout) stream")
     stderr: str = Field(default="", description="The command's standard error (stderr) stream")
 
@@ -24,9 +24,9 @@ class ExecuteCmdChunkData(BaseModel):
     """Data structure for chunked execute cmd"""
 
     text: str = Field(default="", description="Raw content of the output chunk")
-    type: Literal["stdout", "stderr"] = Field(..., description="Type of the output chunk")
+    type: Optional[Literal["stdout", "stderr"]] = Field(default=None, description="Type of the output chunk")
     chunk_index: int = Field(..., description="Index of current chunk (starting from 0)")
-    exit_code: int = Field(default=0, description="Command exit code")
+    exit_code: Optional[int] = Field(default=None, description="Command exit code")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Data for command")
 
     class Config:

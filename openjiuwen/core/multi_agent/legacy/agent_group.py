@@ -7,10 +7,10 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Dict, AsyncIterator
 
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.single_agent.legacy import AgentSession, LegacyBaseAgent as BaseAgent
 from openjiuwen.core.multi_agent.legacy.config import AgentGroupConfig
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import Config
 from openjiuwen.core.session.agent_group import Session
@@ -83,16 +83,15 @@ class BaseGroup(ABC):
             ValueError: Agent ID already exists
         """
         if agent_id in self.agents:
-            raise JiuWenBaseException(
-                StatusCode.AGENT_GROUP_ADD_FAILED.code,
-                StatusCode.AGENT_GROUP_ADD_FAILED.errmsg.format(reason="Agent ID already exists")
+            raise build_error(
+                StatusCode.AGENT_GROUP_ADD_RUNTIME_ERROR,
+                error_msg="Agent ID already exists"
             )
         else:
             if self.get_agent_count() == self.config.max_agents:
-                raise JiuWenBaseException(
-                    StatusCode.AGENT_GROUP_ADD_FAILED.code,
-                    StatusCode.AGENT_GROUP_ADD_FAILED.errmsg.format(
-                        reason="Agent count exceeds max agents")
+                raise build_error(
+                    StatusCode.AGENT_GROUP_ADD_RUNTIME_ERROR,
+                    error_msg="Agent count exceeds max agents"
                 )
             self.agents[agent_id] = agent
 
@@ -196,7 +195,7 @@ class ControllerGroup(BaseGroup):
 
     def _convert_message(self, message):
         """Convert dict to Message if needed (backward compatibility)"""
-        from openjiuwen.core.controller import Event
+        from openjiuwen.core.controller.legacy import Event
         if isinstance(message, dict):
             return Event.create_user_event(
                 content=message.get("content") or message.get("query", ""),

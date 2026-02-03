@@ -9,7 +9,7 @@ from openjiuwen.core.common.constants.enums import TaskType
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.legacy import AgentConfig, WorkflowSchema
 from openjiuwen.core.common.utils.message_utils import MessageUtils
-from openjiuwen.core.controller import (
+from openjiuwen.core.controller.legacy import (
     TaskStatus,
     IntentDetectionConfig,
     Intent,
@@ -317,14 +317,14 @@ class WorkflowController(IntentDetectionController):
                     for chunk in chunks:
                         if isinstance(chunk, OutputSchema):
                             if isinstance(chunk.payload, dict):
-                                answer = chunk.payload.get("answer", "")
-                                if answer is not None:
-                                    content_parts.append(str(answer))
+                                response = chunk.payload.get("response", "")
+                                if response is not None:
+                                    content_parts.append(str(response))
                             elif isinstance(chunk.payload, InteractionOutput):
                                 # Keep interaction interrupt output content
                                 content_parts.append(str(chunk.payload.value) if chunk.payload.value else "")
                     workflow_content = "".join(content_parts)
-                    MessageUtils.add_ai_message(AssistantMessage(content=workflow_content),
+                    await MessageUtils.add_ai_message(AssistantMessage(content=workflow_content),
                                                 self._context_engine, session)
 
                 # Construct WorkflowOutput
@@ -1077,9 +1077,6 @@ class WorkflowController(IntentDetectionController):
                         f"Skipping additional interrupt: component_id="
                         f"{chunk.payload.id if hasattr(chunk.payload, 'id') else 'unknown'}"
                     )
-            else:
-                if not isinstance(chunk, CustomSchema):  # filter custom stream data, avoid repeat output
-                    result.append(chunk)
         
         return result
 

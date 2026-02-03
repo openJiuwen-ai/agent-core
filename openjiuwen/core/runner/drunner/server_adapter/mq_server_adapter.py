@@ -6,8 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Any, Callable, AsyncIterator, Optional
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, RunnerTermination, build_error
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.dmessage_queue.message import DmqRequestMessage, DMessageType
 from openjiuwen.core.runner.drunner.server_adapter.mq_message_utils import (build_stream_response,
@@ -109,12 +109,11 @@ class MqServerAdapter:
             logger.info(f"[{self.adapter_id}] Task {message.message_id} cancelled")
             raise
 
-        except JiuWenBaseException as e:
+        except RunnerTermination as e:
             # runner and mq both close before adapter
-            if (e.error_code == StatusCode.RUNNER_STOPPED.code
-                    or e.error_code == StatusCode.MESSAGE_QUEUE_NOT_RUNNING.code):
-                logger.info(f"[{self.adapter_id}] Task {message.message_id} cancelled")
-                raise
+            logger.info(f"[{self.adapter_id}] Task {message.message_id} cancelled")
+            raise e
+        except BaseError as e:
             # Runner.run execution exception needs to be returned to client
             logger.warning(f"[{self.adapter_id}] adapter run error msg: {message.message_id}: {e}")
             resp = build_error_response(message, self.adapter_id, e)
@@ -123,7 +122,7 @@ class MqServerAdapter:
         except Exception as e:
             # Runner.run returned unexpected exception, needs to be returned to client
             logger.exception(f"[{self.adapter_id}] Unexpected error: {e}")
-            err = JiuWenBaseException(StatusCode.ERROR.code, str(e))
+            err = build_error(StatusCode.MESSAGE_QUEUE_MESSAGE_PROCESS_EXECUTION_ERROR, reason=str(e))
             resp = build_error_response(message, self.adapter_id, err)
             await self.mq.produce_message(message.reply_topic, resp)
 
@@ -156,10 +155,7 @@ class MqServerAdapter:
             if inner_cancel:
                 logger.info(f"[{self.adapter_id}] Sending cancellation error response for task {msg_id}")
                 try:
-                    err = JiuWenBaseException(
-                        StatusCode.RUNNER_STOPPED.code,
-                        f"Task cancelled by adapter stop ({self.adapter_id})"
-                    )
+                    err = RunnerTermination(reason=f"Task cancelled by adapter stop ({self.adapter_id})")
                     resp = build_error_response(message, self.adapter_id, err)
                     await self.mq.produce_message(message.reply_topic, resp)
                     logger.info(f"[{self.adapter_id}] Sent cancellation error response for task {msg_id}")
@@ -171,7 +167,8 @@ class MqServerAdapter:
         self._running_tasks.pop(msg_id, None)
         if task.cancelled():
             logger.info(f"[{self.adapter_id}] Task {msg_id} cancelled (cleanup)")
-        elif exc := task.exception():
+        exc = task.exception()
+        if exc:
             logger.error(f"[{self.adapter_id}] Task {msg_id} failed: {exc}")
 
     async def stop(self):

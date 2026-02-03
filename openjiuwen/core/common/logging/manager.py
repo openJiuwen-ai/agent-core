@@ -18,7 +18,7 @@ from typing import (
     Type,
 )
 
-from .protocol import LoggerProtocol
+from openjiuwen.core.common.logging.protocol import LoggerProtocol
 
 
 class LogManager:

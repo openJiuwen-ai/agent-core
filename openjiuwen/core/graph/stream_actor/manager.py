@@ -3,11 +3,11 @@
 
 from typing import Dict, Any, Callable, Awaitable
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.workflow.components.base import ComponentAbility
-from openjiuwen.core.common.schema.workflow_spec import WorkflowSpec
+from openjiuwen.core.workflow.workflow_config import WorkflowSpec
 from openjiuwen.core.session import Transformer, get_by_schema, STREAM_INPUT_GEN_TIMEOUT_KEY
 from openjiuwen.core.session.stream import AsyncStreamQueue
 from openjiuwen.core.graph.stream_actor.base import StreamActor, StreamGraph
@@ -49,9 +49,8 @@ class ActorManager:
 
     def sub_workflow_stream(self) -> AsyncStreamQueue:
         if not self._sub_graph:
-            raise JiuWenBaseException(
-                error_code=StatusCode.WORKFLOW_MESSAGE_QUEUE_MANAGER_ERROR.code,
-                message=f"only sub graph has sub_workflow_stream")
+            raise build_error(StatusCode.GRAPH_STREAM_ACTOR_EXECUTION_ERROR,
+                              reason=f"only sub graph has sub_workflow_stream")
         return self._sub_workflow_stream
 
     def _get_actor(self, consumer_id: str) -> StreamActor:

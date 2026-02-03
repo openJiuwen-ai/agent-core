@@ -1,13 +1,13 @@
 import json
 import sys
 import types
-from typing import AsyncIterator
+from typing import Any, AsyncGenerator, AsyncIterator
 from unittest.mock import Mock
 
 import pytest
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.workflow import Input, Output, WorkflowCard
 from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow import End
@@ -28,7 +28,7 @@ fake_base = types.ModuleType("base")
 fake_base.logger = Mock()
 
 fake_exception_module = types.ModuleType("base")
-fake_exception_module.JiuWenBaseException = Mock()
+fake_exception_module.BaseError = Mock()
 
 sys.modules["openjiuwen.core.common.logging.base"] = fake_base
 sys.modules["openjiuwen.core.common.exception.base"] = fake_exception_module
@@ -570,8 +570,8 @@ class TestTraceWorkflow:
                     loop_index += 1
         record_tracer_info(tracer_chunks, "test_workflow_stream_with_loop_with_tracer.json")
 
-    async def test_workflow_strean_with_node_exception_with_tracer(self):
-        flow = Workflow()
+    async def test_workflow_stream_with_node_exception_with_tracer(self):
+        flow = Workflow(card=WorkflowCard(id="test"))
         start = Start()
         flow.set_start_comp("start", start,
                             inputs_schema={
@@ -584,9 +584,9 @@ class TestTraceWorkflow:
 
         end = End({"responseTemplate": "hello:{{end_input}}"})
 
-        async def failing_stream(*args, **kwargs):
-            raise RuntimeError("mocked stream error")
+        async def failing_stream(*args, **kwargs) -> AsyncIterator[Output]:
             yield
+            raise RuntimeError("mocked stream error")
 
         end.stream = failing_stream
 
@@ -596,27 +596,20 @@ class TestTraceWorkflow:
         flow.add_stream_connection("a", "end")
 
         results = []
-        with pytest.raises(JiuWenBaseException) as e:
+        with pytest.raises(BaseError) as e:
             async for chunk in flow.stream({"a": 1, "b": "haha"}, create_workflow_session(),
                                            stream_modes=[BaseStreamMode.TRACE]):
                 logger.info("stream chunk: {%s}", chunk)
                 results.append(chunk)
-        assert e.value.error_code == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code
-        assert e.value.message == StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-            error_msg="node_id: end, ability: stream, error: mocked stream error"
-        )
+        assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
+        assert "component 'end' execute 'stream' error, reason='mocked stream error', workflow=" in str(e.value)
 
         assert len(results) == 8
         # for 'a' node with stream output, tracer finish frame with empty output
         a_finish_chunk = results[4]
         assert a_finish_chunk.payload["invokeId"] == 'a' and a_finish_chunk.payload["status"] == 'finish' and \
-               a_finish_chunk.payload.get("outputs") == None
+               a_finish_chunk.payload.get("outputs") is None
         # for 'end' node, tracer frame with error info
         end_error_chunk = results[6]
-        assert end_error_chunk.payload["invokeId"] == 'end' and end_error_chunk.payload["status"] == 'error' and \
-               end_error_chunk.payload["error"] == {
-                   'error_code': StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.code,
-                   "message": StatusCode.WORKFLOW_COMPONENT_RUNTIME_ERROR.errmsg.format(
-                       error_msg="node_id: end, ability: stream, error: mocked stream error"
-                   )
-               }
+        assert end_error_chunk.payload["invokeId"] == 'end' and end_error_chunk.payload["status"] == 'error'
+        assert end_error_chunk.payload["error"]["error_code"] == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code

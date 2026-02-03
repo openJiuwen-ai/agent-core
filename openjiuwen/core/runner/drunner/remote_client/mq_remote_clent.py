@@ -6,8 +6,8 @@ import time
 import uuid
 from typing import Optional, Dict, AsyncGenerator
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.drunner.dmessage_queue.dsubscription.reply_topic_subscription import ReplyTopicSubscription
 from openjiuwen.core.runner.drunner.dmessage_queue.message import DmqRequestMessage, DMessageType
@@ -38,9 +38,7 @@ class MqRemoteClient(RemoteClient):
         self.mq = Runner.dist_pubsub
         self.system_reply_sub = Runner.system_reply_sub
         if self.system_reply_sub is None:
-            raise JiuWenBaseException(StatusCode.RUNNER_DISTRIBUTED_MODE_REQUIRED.code,
-                                      StatusCode.RUNNER_DISTRIBUTED_MODE_REQUIRED.errmsg.format(
-                                          "reply topic not initialized"))
+            raise build_error(StatusCode.DIST_MESSAGE_QUEUE_CLIENT_START_ERROR, reason="reply topic not initialized")
         self.reply_topic = self.system_reply_sub.topic
         self._started = True
         logger.debug(f"[MqRemoteClient] init success topic: {self.topic}, reply_topic: {self.reply_topic}")
@@ -50,8 +48,8 @@ class MqRemoteClient(RemoteClient):
         self._started = False
         logger.info(f"[MqRemoteClient] Stopped client for {self.remote_id}")
 
-    async def invoke(self, input: Dict, timeout: float = None) -> Dict:
-        session_id = input.get("conversation_id", "default_session")
+    async def invoke(self, inputs: Dict, timeout: float = None) -> Dict:
+        session_id = inputs.get("conversation_id", "default_session")
         message_id = "_".join((filter(None, [session_id, str(uuid.uuid4())])))
         if timeout is None:
             timeout = get_runner_config().distributed_config.request_timeout
@@ -72,7 +70,7 @@ class MqRemoteClient(RemoteClient):
             sender_id=self.reply_topic,
             receiver_id=self.remote_id,
             enable_stream=False,
-            payload=input,
+            payload=inputs,
             expire_at=time.time() + timeout if timeout else None,
         )
         # Send message
@@ -90,7 +88,7 @@ class MqRemoteClient(RemoteClient):
             raise
         except TimeoutError:
             raise
-        except JiuWenBaseException:
+        except BaseError:
             raise
         except Exception as e:
             raise
@@ -130,7 +128,7 @@ class MqRemoteClient(RemoteClient):
             raise
         except TimeoutError:
             raise
-        except JiuWenBaseException:
+        except BaseError:
             raise
         except Exception as e:
             raise

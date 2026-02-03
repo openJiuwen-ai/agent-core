@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any
 class ProtocolEnum(str, Enum):
     MQ = "MQ"
 
+
 @dataclass
 class RemoteClientConfig:
     id: Optional[str] = None

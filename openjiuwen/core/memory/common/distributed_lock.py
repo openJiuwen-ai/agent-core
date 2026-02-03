@@ -2,8 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 import uuid
-import json
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import memory_logger
+from openjiuwen.core.common.logging.events import LogEventType
 
 
 class DistributedLock:
@@ -27,14 +27,15 @@ class DistributedLock:
 
     async def release(self):
         try:
-            existing = await self.store.get(self.lock_key)
-            if not existing:
-                return
-            data = json.loads(existing)
-            if data.get("value") == self.lock_value:
+            lock_key = await self.store.get(self.lock_key)
+            if lock_key == self.lock_value:
                 await self.store.delete(self.lock_key)
         except Exception as e:
-            logger.error(f"Error releasing lock: {e}")
+            memory_logger.error(
+                "Error releasing lock",
+                exception=str(e),
+                event_type=LogEventType.MEMORY_STORE,
+            )
 
     async def __aenter__(self):
         await self.acquire()

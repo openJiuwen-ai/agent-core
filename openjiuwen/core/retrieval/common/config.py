@@ -10,6 +10,8 @@ from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo
+
 
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration"""
@@ -55,3 +57,12 @@ class EmbeddingConfig(BaseModel):
     model_name: str = Field(..., description="Model name")
     base_url: str = Field(..., description="API Base URL")
     api_key: Optional[str] = Field(None, description="API Key")
+
+
+class RerankerConfig(BaseModelInfo):
+    """Reranker model configuration"""
+
+    streaming: Literal[False] = Field(default=False, init=False, repr=False)
+    timeout: float = Field(default=10, gt=0)
+    yes_no_ids: tuple[int, int] = Field(default=None, description='Token ids for "yes" and "no"')
+    extra_body: dict = Field(default_factory=dict, description="special keyword arguments to pass in")

@@ -99,9 +99,9 @@ class LegacyReActAgentConfig(AgentConfig):
         default_factory=list,
         description="List of plugin schemas"
     )
-    memory_config: MemoryScopeConfig = Field(
-        default_factory=MemoryScopeConfig,
-        description="Memory configuration"
+    memory_scope_id: str = Field(
+        default="",
+        description="scope id for long term memory"
     )
     agent_memory_config: AgentMemoryConfig = Field(
         default_factory=AgentMemoryConfig,

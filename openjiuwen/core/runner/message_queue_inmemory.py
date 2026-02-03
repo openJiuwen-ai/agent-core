@@ -5,9 +5,8 @@ import asyncio
 import uuid
 from typing import Awaitable, AsyncIterator
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.runner.resources_manager.thread_safe_dict import ThreadSafeDict
 from openjiuwen.core.runner.message_queue_base import (
     MessageQueueBase,
@@ -67,16 +66,16 @@ class SubscriptionInMemory(SubscriptionBase):
     async def _handle_response(self, message, response):
         if isinstance(message, InvokeQueueMessage):
             if not response:
-                raise JiuWenBaseException(StatusCode.ERROR.code, "Reponse is empty")
+                raise ValueError("response is empty")
             if isinstance(response, AsyncIterator):
-                raise JiuWenBaseException(StatusCode.ERROR.code, "InvokeQueueMessage need not AsyncIterator response")
+                raise ValueError("InvokeQueueMessage need not AsyncIterator response")
             message.response.set_result(response)
 
         if isinstance(message, StreamQueueMessage):
             if not response:
-                raise JiuWenBaseException(StatusCode.ERROR.code, "Reponse is empty")
+                raise response("response is empty")
             if not isinstance(response, AsyncIterator):
-                raise JiuWenBaseException(StatusCode.ERROR.code, "StreamQueueMessage need AsyncIterator response")
+                raise response("StreamQueueMessage need AsyncIterator response")
             message.response.set_result(response)
 
     async def _consume_message(self):
@@ -87,16 +86,16 @@ class SubscriptionInMemory(SubscriptionBase):
                 if isinstance(response, Awaitable):
                     response = await asyncio.wait_for(response, timeout=self._timeout)
                 await self._handle_response(message, response)
-            except JiuWenBaseException as e:
-                message.error_code = e.error_code
+            except BaseError as e:
+                message.error_code = e.code
                 message.error_msg = e.message
                 # Set Future exception so caller knows about failure immediately
                 if isinstance(message, (InvokeQueueMessage, StreamQueueMessage)):
                     if not message.response.done():
                         message.response.set_exception(e)
             except Exception as e:
-                message.error_code = StatusCode.ERROR.code
-                message.error_msg = str(e)
+                message.error_code = StatusCode.MESSAGE_QUEUE_MESSAGE_CONSUME_ERROR.code
+                message.error_msg = build_error(StatusCode.MESSAGE_QUEUE_MESSAGE_CONSUME_ERROR, reason=str(e))
                 # Set Future exception so caller knows about failure immediately
                 if isinstance(message, (InvokeQueueMessage, StreamQueueMessage)):
                     if not message.response.done():

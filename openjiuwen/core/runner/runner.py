@@ -1,31 +1,47 @@
-# coding: utf-8
+# -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Optional, Union, Any
+from typing import (
+    Any,
+    Optional,
+    Union,
+)
 
-from openjiuwen.core.multi_agent import BaseGroup
-from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
-from openjiuwen.core.single_agent import BaseAgent, LegacyBaseAgent
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.common.exception.status_code import StatusCode
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
+from openjiuwen.core.multi_agent import BaseGroup
 from openjiuwen.core.runner.drunner.dmessage_queue.dsubscription.reply_topic_subscription import ReplyTopicSubscription
 from openjiuwen.core.runner.drunner.dmessage_queue.message_queue_factory import MessageQueueFactory
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
-from openjiuwen.core.runner.runner_config import RunnerConfig, DEFAULT_RUNNER_CONFIG, set_runner_config, \
-    get_runner_config
-
-from openjiuwen.core.session import get_default_inmemory_checkpointer
+from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
-from openjiuwen.core.session import Session
-from openjiuwen.core.workflow import Session as WorkflowSession
-from openjiuwen.core.workflow import create_workflow_session
-from openjiuwen.core.single_agent import Session as AgentSession, AgentCard
-from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.runner.runner_config import (
+    DEFAULT_RUNNER_CONFIG,
+    get_runner_config,
+    RunnerConfig,
+    set_runner_config,
+)
+from openjiuwen.core.session import (
+    Config,
+    Session,
+)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.stream import BaseStreamMode
-from openjiuwen.core.workflow import generate_workflow_key
-from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.single_agent import (
+    BaseAgent,
+    create_agent_session,
+    LegacyBaseAgent,
+    Session as AgentSession,
+)
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.workflow import (
+    create_workflow_session,
+    generate_workflow_key,
+    Session as WorkflowSession,
+    Workflow,
+)
 
 
 class Runner:
@@ -78,6 +94,7 @@ class Runner:
         Args:
             config: The RunnerConfig object containing configuration settings
         """
+        logger.info(f"set runner {self._runner_id} config {config}")
         set_runner_config(config)
 
     def get_config(self):
@@ -92,6 +109,29 @@ class Runner:
         """Start the runner and its associated components, such as message queue."""
         result = True
         logger.info("[Runner] Starting...")
+
+        # Initialize checkpointer if configured
+        checkpointer_config = get_runner_config().checkpointer_config
+        if checkpointer_config is not None:
+            logger.info(f"[Runner] Initializing checkpointer with type: {checkpointer_config.type}")
+            try:
+                # Lazy import checkpointer providers based on type
+                if checkpointer_config.type == "redis":
+                    try:
+                        # Import Redis checkpointer provider to ensure it's registered
+                        from openjiuwen.extensions.checkpointer.redis import checkpointer as _  # noqa: F401
+                    except ImportError as e:
+                        logger.error(f"[Runner] Redis checkpointer not available. "
+                                     f"Please install redis dependencies: {e}")
+                        raise
+
+                checkpointer = await CheckpointerFactory.create(checkpointer_config)
+                CheckpointerFactory.set_default_checkpointer(checkpointer)
+                logger.info(f"[Runner] Checkpointer initialized successfully: {type(checkpointer).__name__}")
+            except Exception as e:
+                logger.error(f"[Runner] Failed to initialize checkpointer: {e}")
+                raise
+
         if get_runner_config().distributed_mode:
             # start dmq
             self._distribute_message_queue = MessageQueueFactory.create(
@@ -235,7 +275,7 @@ class Runner:
             await getattr(agent_session, "_inner").post_run()
 
     async def run_agent_group(self,
-                              agent_group: str | BaseGroup,
+                              agent_group: Union[str, 'BaseGroup'],
                               inputs: Any,
                               *,
                               session: Optional[str | Session] = None,
@@ -256,7 +296,7 @@ class Runner:
         return await agent_group_instance.invoke(inputs)
 
     async def run_agent_group_streaming(self,
-                                        agent_group: str | BaseGroup,
+                                        agent_group: Union[str, 'BaseGroup'],
                                         inputs: Any,
                                         *,
                                         session: Optional[str | Session] = None,
@@ -286,7 +326,7 @@ class Runner:
         Args:
             session_id: ID of the session to clean up
         """
-        await get_default_inmemory_checkpointer().release(session_id)
+        await CheckpointerFactory.get_checkpointer().release(session_id)
 
     @classmethod
     def _is_called_by_agent(cls, session: Session) -> bool:
@@ -311,39 +351,19 @@ class Runner:
         if isinstance(agent, str):
             agent_instance = await self._resource_manager.get_agent(agent_id=agent)
             if agent_instance is None:
-                raise JiuWenBaseException(StatusCode.AGENT_NOT_FOUND.code,
-                                          StatusCode.AGENT_NOT_FOUND.errmsg.format(agent))
+                raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent_id=agent, reason="agent not exist")
             if isinstance(agent_instance, RemoteAgent):
                 # Remote single_agent does not add session, keep sessionId in input
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
                 return agent_instance, None
-            if hasattr(agent_instance, "card"):
-                card = agent_instance.card
-            else:
-                # LegacyBaseAgent does not have card attribute
-                card = AgentCard(id=agent_instance.config().get_agent_config().id)
-            task_session = create_agent_session(session_id=session_id,
-                                                envs=getattr(agent_instance.config(), "_env"), card=card)
-            await get_default_inmemory_checkpointer().pre_agent_execute(
-                getattr(getattr(task_session, "_inner"), "_inner"), inputs)
+
+            task_session = self._create_task_session(agent_instance, session_id)
+            await task_session.pre_run(inputs=inputs)
             return agent_instance, task_session
 
-        if hasattr(agent, "card"):
-            card = agent.card
-        else:
-            # LegacyBaseAgent does not have card attribute
-            card = AgentCard(id=agent.config().get_agent_config().id)
-
-        if callable(getattr(agent, "config", None)):
-            config_obj = agent.config()
-        else:
-            config_obj = agent.config
-
-        task_session = create_agent_session(session_id=session_id,
-                                            envs=getattr(config_obj, "_env", None), card=card)
-        await get_default_inmemory_checkpointer().pre_agent_execute(getattr(getattr(task_session, "_inner"), "_inner"),
-                                                                    inputs)
+        task_session = self._create_task_session(agent, session_id)
+        await task_session.pre_run(inputs=inputs)
         return agent, task_session
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],
@@ -367,6 +387,21 @@ class Runner:
                 group_id=agent_group
             )
         return agent_group
+
+    @staticmethod
+    def _create_task_session(agent, session_id):
+        envs = None
+        if hasattr(agent, "card"):
+            config = agent.config
+            card = agent.card
+        else:
+            # LegacyBaseAgent does not have card attribute
+            config = agent.config()
+            card = AgentCard(id=config.get_agent_config().id)
+        if isinstance(config, Config):
+            envs = getattr(config, "_env", None)
+        task_session = create_agent_session(session_id=session_id, envs=envs, card=card)
+        return task_session
 
 
 Runner = Runner(config=DEFAULT_RUNNER_CONFIG)
