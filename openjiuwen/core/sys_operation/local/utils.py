@@ -1,14 +1,25 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 import asyncio
 import os
 import tempfile
+from datetime import (
+    datetime,
+    timezone,
+)
 from enum import Enum
-from typing import Optional, Dict, Union, AsyncGenerator
-from datetime import datetime, timezone
+from typing import (
+    AsyncGenerator,
+    Dict,
+    Optional,
+    Union,
+)
 
-from pydantic import BaseModel, Field
-from pypika.enums import Boolean
+from pydantic import (
+    BaseModel,
+    Field,
+)
 
 
 class StreamEventType(str, Enum):

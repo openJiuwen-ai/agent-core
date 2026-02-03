@@ -1,9 +1,15 @@
-# coding: utf-8
+# -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import (
+    dataclass,
+    field,
+)
 from enum import Enum
 from typing import Optional
+
+from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
 
 class MessageQueueType(str, Enum):
@@ -53,6 +59,7 @@ class RunnerConfig:
     distributed_config: Optional[DistributedConfig] = field(default_factory=DistributedConfig)
     env_prefix: str = ""
     instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    checkpointer_config: Optional[CheckpointerConfig] = None
 
     def agent_topic_template(self) -> str:
         """Get single_agent topic template with environment prefix"""

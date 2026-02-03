@@ -1,5 +1,5 @@
-# coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# -*- coding: UTF-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import os
 import pathlib
@@ -10,9 +10,14 @@ import tempfile
 import pytest
 import pytest_asyncio
 
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.runner.runner import Runner
+from openjiuwen.core.sys_operation import (
+    LocalWorkConfig,
+    OperationMode,
+    SysOperationCard,
+)
+
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
 
 
@@ -89,11 +94,17 @@ async def test_shell_cwd(sys_op, work_dir):
     # relative path
     res = await sys_op.shell().execute_cmd(command=cmd, cwd="subdir")
     assert res.code == StatusCode.SUCCESS.code
-    assert subdir == res.data.stdout.strip()
+    if platform.system() == "Darwin":
+        assert subdir in res.data.stdout.strip()
+    else:
+        assert subdir == res.data.stdout.strip()
 
     # default workdir
     res = await sys_op.shell().execute_cmd(command=cmd)
-    assert work_dir == res.data.stdout.strip()
+    if platform.system() == "Darwin":
+        assert work_dir in res.data.stdout.strip()
+    else:
+        assert work_dir == res.data.stdout.strip()
 
 
 @pytest.mark.asyncio

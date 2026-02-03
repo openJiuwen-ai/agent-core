@@ -3,12 +3,23 @@
 ChromaDB index manager test cases
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
 
+chromadb = pytest.importorskip("chromadb", reason="chromadb not installed")
+
+from unittest.mock import (
+    AsyncMock,
+    MagicMock,
+    patch,
+)
+
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.retrieval import ChromaIndexer, IndexConfig, TextChunk, VectorStoreConfig
+from openjiuwen.core.retrieval import (
+    ChromaIndexer,
+    IndexConfig,
+    TextChunk,
+    VectorStoreConfig,
+)
 
 
 @pytest.fixture

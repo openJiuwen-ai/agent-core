@@ -1,9 +1,18 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import uuid
-from typing import Any, TYPE_CHECKING, Union, AsyncIterator
 
-from openjiuwen.core.session import Config, get_default_inmemory_checkpointer
+import uuid
+from typing import (
+    Any,
+    AsyncIterator,
+    TYPE_CHECKING,
+    Union,
+)
+
+from openjiuwen.core.session import (
+    Config,
+)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.internal.wrapper import TaskSession
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.workflow import Session as WorkflowSession
@@ -53,7 +62,7 @@ class Session:
         if self._pre_run_done:
             return
         inputs = kwargs.get("inputs")
-        await get_default_inmemory_checkpointer().pre_agent_execute(getattr(self._inner, "_inner"), inputs)
+        await CheckpointerFactory.get_checkpointer().pre_agent_execute(getattr(self._inner, "_inner"), inputs)
         self._pre_run_done = True
 
     async def post_run(self):

@@ -1,3 +1,6 @@
+# -*- coding: UTF-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
 import asyncio
 import sys
 import types
@@ -5,38 +8,51 @@ import uuid
 from unittest.mock import Mock
 
 import pytest
+import pytest_asyncio
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.workflow import BranchComponent, WorkflowCard
-from openjiuwen.core.workflow import ArrayCondition
+from openjiuwen.core.session import (
+    FORCE_DEL_WORKFLOW_STATE_KEY,
+    InteractionOutput,
+    InteractiveInput,
+)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.stream import (
+    BaseStreamMode,
+    OutputSchema,
+    TraceSchema,
+)
+from openjiuwen.core.workflow import (
+    ArrayCondition,
+    BranchComponent,
+    ComponentAbility,
+    create_workflow_session,
+    LoopComponent,
+    LoopGroup,
+    LoopSetVariableComponent,
+    Workflow,
+    WorkflowCard,
+    WorkflowExecutionState,
+    WorkflowOutput,
+)
 from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
 from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
-from openjiuwen.core.workflow import LoopGroup, LoopComponent
-from openjiuwen.core.workflow import LoopSetVariableComponent
-from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
-from openjiuwen.core.session import FORCE_DEL_WORKFLOW_STATE_KEY
-from openjiuwen.core.session import get_default_inmemory_checkpointer
-from openjiuwen.core.session import InteractionOutput
-from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.workflow import create_workflow_session
-from openjiuwen.core.session.stream import BaseStreamMode, TraceSchema, OutputSchema
-from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
-from openjiuwen.core.workflow import ComponentAbility
 from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
+from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from tests.unit_tests.core.workflow.mock_nodes import (
-    InteractiveNode4StreamCp,
-    MockStartNode,
-    MockEndNode,
-    Node4Cp,
-    MockStartNode4Cp,
-    InteractiveNode4Cp,
+    AddTenNode,
     AddTenNode4Cp,
     CommonNode,
-    AddTenNode,
-    MockStreamNode,
     InteractiveNode4Collect,
+    InteractiveNode4Cp,
+    InteractiveNode4StreamCp,
+    MockEndNode,
+    MockStartNode,
+    MockStartNode4Cp,
+    MockStreamNode,
+    Node4Cp,
 )
 
 fake_base = types.ModuleType("base")
@@ -48,6 +64,25 @@ fake_exception_module.BaseError = Mock()
 sys.modules["openjiuwen.core.common.logging.base"] = fake_base
 sys.modules["openjiuwen.core.common.exception.base"] = fake_exception_module
 pytestmark = pytest.mark.asyncio
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def setup_and_teardown():
+    """Setup and teardown Redis checkpointer for each test."""
+    # setup
+    # RedisCheckpointerProvider()
+    # checkpointer = await CheckpointerFactory.create(
+    #     CheckpointerConfig(type="redis", conf={"connection": {"url": "redis://localhost:6379"}}))
+    # checkpointer = await CheckpointerFactory.create(
+    #     CheckpointerConfig(
+    #         type="persistence",
+    #         conf={
+    #             "db_type": "shelve",
+    #             "db_path": "s-checkpointer.db"}  # 可选，默认为 "checkpointer.db"
+    #     ))
+    # CheckpointerFactory.set_default_checkpointer(checkpointer)
+    yield
+    # teardown
 
 
 async def test_simple_workflow():
@@ -196,14 +231,14 @@ async def test_workflow_with_loop():
         e.value)
 
     with pytest.raises(BaseError) as e:
-        result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
+        await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
 
     assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
     assert "component '2' execute 'invoke' error, reason='inner error: 11', workflow='" in str(
         e.value)
 
     with pytest.raises(BaseError) as e:
-        result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
+        await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
     assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
     assert "component '2' execute 'invoke' error, reason='inner error: 21', workflow='" in str(
         e.value)
@@ -213,15 +248,14 @@ async def test_workflow_with_loop():
                                     state=WorkflowExecutionState.COMPLETED)
 
     with pytest.raises(BaseError) as e:
-        expect_e = Exception()
-        result = await flow.invoke({"input_array": [4, 5], "input_number": 2},
-                                   create_workflow_session(session_id=session_id))
+        await flow.invoke({"input_array": [4, 5], "input_number": 2},
+                          create_workflow_session(session_id=session_id))
     assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
     assert "component '2' execute 'invoke' error, reason='inner error: 2', workflow=" in str(
         e.value)
 
     with pytest.raises(BaseError) as e:
-        result = await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
+        await flow.invoke(InteractiveInput(), create_workflow_session(session_id=session_id))
     assert e.value.code == StatusCode.WORKFLOW_COMPONENT_EXECUTION_ERROR.code
     assert "component '2' execute 'invoke' error, reason='inner error: 12', workflow=" in str(
         e.value)
@@ -646,7 +680,7 @@ async def test_collect_node_interactive_workflow():
     flow.add_connection("b", "end")
     session_id = uuid.uuid4().hex
     with pytest.raises(BaseError) as e:
-        res = await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
+        await flow.invoke({"inputs": {"a": 1, "b": "haha"}}, create_workflow_session(session_id=session_id))
     assert e.value.code == StatusCode.COMP_SESSION_INTERACT_ERROR.code
 
 
@@ -788,7 +822,9 @@ async def test_simple_interactive_workflow_raw_input():
 
 
 async def test_simple_interactive_workflow_both_raw_input_update():
-    """ graph : start->a->end """
+    """
+    graph : start->a->end
+    """
     start_node = MockStartNode4Cp("start")
     flow = Workflow(card=WorkflowCard(id="test_simple_interactive_workflow_both_raw_input_update"))
     flow.set_start_comp("start", start_node,
@@ -1010,11 +1046,10 @@ async def test_simple_interactive_workflow_checkpointer():
                                              'payload': InteractionOutput.model_validate(
                                                  {'id': 'a', 'value': 'Please enter any key'})})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
-    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
+    state = await CheckpointerFactory.get_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is not None
-    stores = getattr(get_default_inmemory_checkpointer(), "_workflow_stores", None)
-    first_time_workflow_store = stores.get(session_id)
-    assert first_time_workflow_store is not None
+    first_time_workflow_store = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
+    assert first_time_workflow_store is True
 
     user_input = InteractiveInput()
     interaction_id = res.result[0].payload.id
@@ -1026,25 +1061,20 @@ async def test_simple_interactive_workflow_checkpointer():
              'type': INTERACTION})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
     assert start_node.runtime == 1
-    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
+    state = await CheckpointerFactory.get_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is not None
-
-    stores = getattr(get_default_inmemory_checkpointer(), "_workflow_stores", None)
-    workflow_store = stores.get(session_id)
-
-    assert workflow_store is not None
-    assert workflow_store is first_time_workflow_store
+    workflow_store = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
+    assert workflow_store is True
 
     res = await flow.invoke(user_input, create_workflow_session(session_id=session_id))
     assert res == WorkflowOutput(
         result={'result': "any key"},
         state=WorkflowExecutionState.COMPLETED)
     # checkpoint will be deleted when completed
-    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
+    state = await CheckpointerFactory.get_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is None
-    stores = getattr(get_default_inmemory_checkpointer(), "_workflow_stores", None)
-    workflow_store = stores.get(session_id)
-    assert workflow_store is None
+    workflow_store = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
+    assert workflow_store is False
 
 
 async def test_simple_interactive_workflow_checkpointer_manual_release():
@@ -1078,17 +1108,17 @@ async def test_simple_interactive_workflow_checkpointer_manual_release():
                                              'payload': InteractionOutput.model_validate(
                                                  {'id': 'a', 'value': 'Please enter any key'})})],
         state=WorkflowExecutionState.INPUT_REQUIRED)
-    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
+    state = await CheckpointerFactory.get_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is not None
-    first_time_workflow_store = getattr(get_default_inmemory_checkpointer(), "_workflow_stores").get(session_id)
-    assert first_time_workflow_store is not None
+    first_time_workflow_store = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
+    assert first_time_workflow_store is True
 
     # manually clear the checkpointer
-    await get_default_inmemory_checkpointer().release(session_id)
-    state = await get_default_inmemory_checkpointer().graph_store().get(session_id, workflow_id)
+    await CheckpointerFactory.get_checkpointer().release(session_id)
+    state = await CheckpointerFactory.get_checkpointer().graph_store().get(session_id, workflow_id)
     assert state is None
-    first_time_workflow_store = getattr(get_default_inmemory_checkpointer(), "_workflow_stores").get(session_id)
-    assert first_time_workflow_store is None
+    first_time_workflow_store = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
+    assert first_time_workflow_store is False
 
 
 async def test_simple_interactive_workflow_clear_checkpointer():

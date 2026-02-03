@@ -1,7 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import tempfile
+
+
 import pytest
+
+chromadb = pytest.importorskip("chromadb", reason="chromadb not installed")
+
+import tempfile
 
 from openjiuwen.core.memory.store.impl.memory_chroma_vector_store import MemoryChromaVectorStore
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult

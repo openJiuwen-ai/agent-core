@@ -1,21 +1,34 @@
-#!/usr/bin/env python
 # -*- coding: UTF-8 -*-
-# Copyright c) Huawei Technologies Co. Ltd. 2025-2025
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
 
 import pytest
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session import get_default_inmemory_checkpointer
-from openjiuwen.core.graph.pregel import Interrupt, GraphInterrupt
+from openjiuwen.core.graph.pregel import (
+    GraphInterrupt,
+    Interrupt,
+    Pregel,
+    PregelBuilder,
+    PregelConfig,
+)
 from openjiuwen.core.graph.pregel.base import PregelNode
-from openjiuwen.core.graph.pregel import PregelBuilder
-from openjiuwen.core.graph.pregel.channels import TriggerChannel, BarrierChannel
-from openjiuwen.core.graph.pregel import PregelConfig
-from openjiuwen.core.graph.pregel.constants import START, END, NS
-from openjiuwen.core.graph.pregel import Pregel
-from openjiuwen.core.graph.pregel.router import StaticRouter, BarrierRouter, ConditionalRouter
+from openjiuwen.core.graph.pregel.channels import (
+    BarrierChannel,
+    TriggerChannel,
+)
+from openjiuwen.core.graph.pregel.constants import (
+    END,
+    NS,
+    START,
+)
+from openjiuwen.core.graph.pregel.router import (
+    BarrierRouter,
+    ConditionalRouter,
+    StaticRouter,
+)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 
 
 @pytest.fixture
@@ -381,7 +394,7 @@ def nested_subgraph_builder():
         logger.debug(f"[{loop.config.get(NS)}] Inner Step {loop.step}, Active: {list(loop.active_nodes)}")
 
     inner_app = Pregel(inner_nodes, inner_channels, initial="start1",
-                       store=get_default_inmemory_checkpointer().graph_store(),
+                       store=CheckpointerFactory.get_checkpointer().graph_store(),
                        after_step=inner_logger)
 
     class RunInner:
@@ -468,7 +481,7 @@ def nested_subgraph_interrupt_with_outer_parallel_builder():
         inner_nodes,
         inner_channels,
         initial="start1",
-        store=get_default_inmemory_checkpointer().graph_store(),
+        store=CheckpointerFactory.get_checkpointer().graph_store(),
         after_step=inner_logger
     )
 
@@ -516,7 +529,7 @@ def nested_subgraph_interrupt_with_outer_parallel_builder():
         nodes=builder.nodes,
         channels=builder.channels,
         initial="start",
-        store=get_default_inmemory_checkpointer().graph_store(),
+        store=CheckpointerFactory.get_checkpointer().graph_store(),
         after_step=outer_logger
     )
     return graph, execution_trace
@@ -600,7 +613,7 @@ def nested_loop_with_inner_parallel_builder():
         builder.add_edge(START, "start3")
         builder.add_edge("end3", END)
         return builder.build(
-            store=get_default_inmemory_checkpointer().graph_store(),
+            store=CheckpointerFactory.get_checkpointer().graph_store(),
             after_step_callback=outer_logger
         )
 
@@ -640,7 +653,7 @@ def nested_loop_with_inner_parallel_builder():
         builder.add_edge("end1", END)
 
         return builder.build(
-            store=get_default_inmemory_checkpointer().graph_store(),
+            store=CheckpointerFactory.get_checkpointer().graph_store(),
             after_step_callback=outer_logger
         )
 
@@ -665,7 +678,7 @@ def nested_loop_with_inner_parallel_builder():
     builder.add_edge("end", END)
 
     graph = builder.build(
-        store=get_default_inmemory_checkpointer().graph_store(),
+        store=CheckpointerFactory.get_checkpointer().graph_store(),
         after_step_callback=outer_logger
     )
     return graph, execution_trace
@@ -706,7 +719,7 @@ def linear_nested_subgraph_setup():
     inner_app = Pregel(
         nodes=inner_builder.nodes,
         channels=inner_builder.channels,
-        store=get_default_inmemory_checkpointer().graph_store(),
+        store=CheckpointerFactory.get_checkpointer().graph_store(),
         after_step=inner_logger
     )
 
@@ -737,7 +750,7 @@ def linear_nested_subgraph_setup():
     outer_builder.add_edge("end", END)
 
     # Checkpointer 实例
-    checkpointer = get_default_inmemory_checkpointer().graph_store()
+    checkpointer = CheckpointerFactory.get_checkpointer().graph_store()
 
     execution_trace = []
 
@@ -890,7 +903,7 @@ class TestPregelV2:
             nodes=nodes,
             channels=channels,
             initial="start",
-            store=get_default_inmemory_checkpointer().graph_store(),
+            store=CheckpointerFactory.get_checkpointer().graph_store(),
             after_step=log_loop
         )
         config = PregelConfig(session_id="test_parallel_fail", ns="start-a-end")

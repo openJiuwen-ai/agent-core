@@ -18,36 +18,26 @@ dependencies = [
     # HTTP clients
     "aiohttp>=3.11.12",
     "requests>=2.32.3",
-
     # Date & time
     "python-dateutil>=2.9.0.post0",
-
     # File & locking
     "filelock>=3.20.1",
     "portalocker>=3.2.0",
     "aiofiles>=25.1.0",
-
     # Database ORM
     "sqlalchemy>=2.0.41",
-
     # AI/LLM
     "openai>=1.108.0",
     "transformers>=4.52.4",
     "tiktoken>=0.12.0",
-
     # Vector database
     "pymilvus>=2.6.2",
-    "pgvector>=0.2.0",
-    "chromadb>=1.3.7",
-
     # MCP server
     "fastmcp>=2.14.2,<3.0",
-
     # Document processing
     "docx2txt>=0.8",
     "python-docx>=1.2.0",
     "pdfplumber>=0.11.8",
-
     # Utilities
     "numpy!=2.4.0",
     "cacheout>=0.16.0",
@@ -57,6 +47,45 @@ dependencies = [
     "pysbd>=0.3.4",
     "oauthlib>=3.3.1",
 ]
+
+[project.optional-dependencies]
+pulsar = ["pulsar-client>=3.5.0"]
+redis = ["redis>=7.1.0"]
+sqlite = ["aiosqlite>=0.22.1", "greenlet>=3.1.1"]
+mysql = ["aiomysql>=0.3.2"]
+pgvector = ["pgvector>=0.2.0"]
+chromadb = ["chromadb>=1.3.7"]
+
+all-mq = ["openjiuwen[pulsar]"]
+all-storage = ["openjiuwen[sqlite,mysql,redis]"]
+all-vector = ["openjiuwen[pgvector,chromadb]"]
+
+default = []
+all = ["openjiuwen[all-mq,all-storage-sql,all-storage-vector]"]
+
+[dependency-groups]
+# Testing
+test = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=1.0.0",
+    "pytest-html>=4.1.1",
+    "pytest-mock>=3.14.0",
+    "pytest-cov>=7.0.0",
+    "coverage>=7.7.1",
+]
+# Linting & formatting
+lint = [
+    "ruff>=0.11.2",
+    "pylint>=3.0.0",
+    "mypy>=1.12.0",
+    "codespell>=2.2.4",
+]
+# Documentation
+docs = [
+    "autodoc-pydantic>=2.2.0",
+]
+
+dev = [{ include-group = "test" }, { include-group = "lint" }, { include-group = "docs" }]
 
 [project.urls]
 Homepage = "https://openjiuwen.com"
@@ -71,29 +100,6 @@ default-groups = ['dev']
 name = "aliyun"
 url = "https://mirrors.aliyun.com/pypi/simple"
 default = true
-
-[dependency-groups]
-dev = [
-    # Testing
-    "pytest>=8.3.5",
-    "pytest-asyncio>=1.0.0",
-    "pytest-html>=4.1.1",
-    "pytest-mock>=3.14.0",
-    "pytest-cov>=7.0.0",
-    "coverage>=7.7.1",
-
-    # Documentation
-    "autodoc-pydantic>=2.2.0",
-
-    # Linting & formatting
-    "ruff>=0.11.2",
-    "pylint>=3.0.0",
-    "mypy>=1.12.0",
-    "codespell>=2.2.4",
-
-    # Chroma database
-    "openjiuwen[chroma]",
-]
 
 [tool.coverage.run]
 omit = ["tests/*"]

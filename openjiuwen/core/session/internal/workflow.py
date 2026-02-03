@@ -4,8 +4,8 @@
 import uuid
 from typing import Any
 
-from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.callback.callback_manager import CallbackManager
+from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.session import BaseSession
 from openjiuwen.core.session.state.base import State
 from openjiuwen.core.session.state.workflow_state import InMemoryState
@@ -43,7 +43,6 @@ class WorkflowSession(BaseSession):
     def set_tracer(self, tracer: Tracer) -> None:
         self._tracer = tracer
 
-
     def set_actor_manager(self, queue_manager: "ActorManager"):
         if self._actor_manager is not None:
             return
@@ -74,7 +73,11 @@ class WorkflowSession(BaseSession):
         return self._session_id
 
     def checkpointer(self):
-        return self._parent.checkpointer()
+        if self._parent is not None:
+            return self._parent.checkpointer()
+        # Lazy import to avoid circular import
+        from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerFactory
+        return CheckpointerFactory.get_checkpointer()
 
     def workflow_id(self):
         return self._workflow_id
@@ -161,9 +164,9 @@ class NodeSession(BaseSession):
     def session_id(self) -> str:
         return self._session.session_id()
 
-
     def checkpointer(self):
-        pass
+        # NodeSession delegates to parent session's checkpointer
+        return self._session.checkpointer()
 
     def node_config(self):
         workflow_config = self.config().get_workflow_config(self.workflow_id())

@@ -1,5 +1,5 @@
-# coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025.
+# -*- coding: UTF-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from enum import Enum
 
@@ -290,6 +290,9 @@ class StatusCode(Enum):
     CHECKPOINTER_POST_AGENT_EXECUTION_ERROR = (
         111123,
         "post agent execute error, session_id={session_id}, agent={agent}, error='{reason}'")
+    CHECKPOINTER_CONFIG_ERROR = (
+        111124,
+        "checkpointer config error, session_id={session_id}, error='{reason}'")
 
     # =======================================
     # 13 stream writer     111130 - 111139

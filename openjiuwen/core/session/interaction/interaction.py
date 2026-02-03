@@ -7,13 +7,21 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from openjiuwen.core.common.constants.constant import INTERACTION
-from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
+from openjiuwen.core.common.constants.constant import (
+    INTERACTION,
+    INTERACTIVE_INPUT,
+)
+from openjiuwen.core.graph.pregel import (
+    GraphInterrupt,
+    Interrupt,
+)
+from openjiuwen.core.session.interaction.base import (
+    AgentInterrupt,
+    BaseInteraction,
+)
 from openjiuwen.core.session.internal.agent import AgentSession
-from openjiuwen.core.session.interaction.base import BaseInteraction, AgentInterrupt
 from openjiuwen.core.session.session import BaseSession
 from openjiuwen.core.session.stream.base import OutputSchema
-from openjiuwen.core.graph.pregel import Interrupt, GraphInterrupt
 
 
 class InteractionOutput(BaseModel):

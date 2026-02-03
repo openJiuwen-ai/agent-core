@@ -1,18 +1,33 @@
-# coding: utf-8
+# -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import (
+    MagicMock,
+    patch,
+)
+
 import pytest
 
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import (
+    BaseError,
+    build_error,
+)
+from openjiuwen.core.context_engine import (
+    ContextEngine,
+    ContextEngineConfig,
+)
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.messages import OffloadUserMessage
-from openjiuwen.core.foundation.llm import UserMessage, SystemMessage, AssistantMessage, ToolMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
 from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.single_agent import AgentCard
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
 
 
 class TestContextEngine:
@@ -90,8 +105,7 @@ class TestContextEngine:
 
     @pytest.mark.asyncio
     async def test_context_save_and_load(self, session, same_session):
-        from openjiuwen.core.session import get_default_inmemory_checkpointer
-        check_pointer = get_default_inmemory_checkpointer()
+        check_pointer = CheckpointerFactory.get_checkpointer()
         await check_pointer.pre_agent_execute(
             session=getattr(session, "_inner").get_inner_session(), inputs=None
         )
@@ -125,8 +139,7 @@ class TestContextEngine:
 
     @pytest.mark.asyncio
     async def test_context_save_and_load_with_invalid_context_id(self, session, same_session):
-        from openjiuwen.core.session import get_default_inmemory_checkpointer
-        check_pointer = get_default_inmemory_checkpointer()
+        check_pointer = CheckpointerFactory.get_checkpointer()
         await check_pointer.pre_agent_execute(
             session=getattr(session, "_inner").get_inner_session(), inputs=None
         )

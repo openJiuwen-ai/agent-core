@@ -1,31 +1,47 @@
-# coding: utf-8
+# -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Optional, Union, Any, TYPE_CHECKING
+from typing import (
+    Any,
+    Optional,
+    Union,
+)
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.multi_agent import BaseGroup
-from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
-from openjiuwen.core.single_agent import BaseAgent, LegacyBaseAgent
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
+from openjiuwen.core.multi_agent import BaseGroup
 from openjiuwen.core.runner.drunner.dmessage_queue.dsubscription.reply_topic_subscription import ReplyTopicSubscription
 from openjiuwen.core.runner.drunner.dmessage_queue.message_queue_factory import MessageQueueFactory
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
-from openjiuwen.core.runner.runner_config import RunnerConfig, DEFAULT_RUNNER_CONFIG, set_runner_config, \
-    get_runner_config
-
-from openjiuwen.core.session import get_default_inmemory_checkpointer
+from openjiuwen.core.runner.message_queue_base import LocalMessageQueue
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
-from openjiuwen.core.session import Session, Config
-from openjiuwen.core.workflow import Session as WorkflowSession
-from openjiuwen.core.workflow import create_workflow_session
-from openjiuwen.core.single_agent import Session as AgentSession, create_agent_session
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.runner.runner_config import (
+    DEFAULT_RUNNER_CONFIG,
+    get_runner_config,
+    RunnerConfig,
+    set_runner_config,
+)
+from openjiuwen.core.session import (
+    Config,
+    Session,
+)
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.stream import BaseStreamMode
-from openjiuwen.core.workflow import generate_workflow_key
-from openjiuwen.core.workflow import Workflow
+from openjiuwen.core.single_agent import (
+    BaseAgent,
+    create_agent_session,
+    LegacyBaseAgent,
+    Session as AgentSession,
+)
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.workflow import (
+    create_workflow_session,
+    generate_workflow_key,
+    Session as WorkflowSession,
+    Workflow,
+)
 
 
 class Runner:
@@ -93,6 +109,29 @@ class Runner:
         """Start the runner and its associated components, such as message queue."""
         result = True
         logger.info("[Runner] Starting...")
+
+        # Initialize checkpointer if configured
+        checkpointer_config = get_runner_config().checkpointer_config
+        if checkpointer_config is not None:
+            logger.info(f"[Runner] Initializing checkpointer with type: {checkpointer_config.type}")
+            try:
+                # Lazy import checkpointer providers based on type
+                if checkpointer_config.type == "redis":
+                    try:
+                        # Import Redis checkpointer provider to ensure it's registered
+                        from openjiuwen.extensions.checkpointer.redis import checkpointer as _  # noqa: F401
+                    except ImportError as e:
+                        logger.error(f"[Runner] Redis checkpointer not available. "
+                                     f"Please install redis dependencies: {e}")
+                        raise
+
+                checkpointer = await CheckpointerFactory.create(checkpointer_config)
+                CheckpointerFactory.set_default_checkpointer(checkpointer)
+                logger.info(f"[Runner] Checkpointer initialized successfully: {type(checkpointer).__name__}")
+            except Exception as e:
+                logger.error(f"[Runner] Failed to initialize checkpointer: {e}")
+                raise
+
         if get_runner_config().distributed_mode:
             # start dmq
             self._distribute_message_queue = MessageQueueFactory.create(
@@ -287,7 +326,7 @@ class Runner:
         Args:
             session_id: ID of the session to clean up
         """
-        await get_default_inmemory_checkpointer().release(session_id)
+        await CheckpointerFactory.get_checkpointer().release(session_id)
 
     @classmethod
     def _is_called_by_agent(cls, session: Session) -> bool:

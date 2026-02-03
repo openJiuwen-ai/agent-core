@@ -5,21 +5,46 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Union, Self, AsyncIterator, Any, Callable, Hashable, Sequence, Tuple
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Hashable,
+    Self,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.graph.base import Graph, Router, ExecutableGraph
-from openjiuwen.core.graph.executable import Executable, Input, Output
-from openjiuwen.core.graph.vertex import Vertex
-from openjiuwen.core.session import Checkpointer
-from openjiuwen.core.session import get_default_inmemory_checkpointer
-from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.session import BaseSession
-from openjiuwen.core.session.workflow import Session
-from openjiuwen.core.graph.pregel import Pregel, PregelBuilder, PregelConfig, MAX_RECURSIVE_LIMIT, START, END
+from openjiuwen.core.graph.base import (
+    ExecutableGraph,
+    Graph,
+    Router,
+)
+from openjiuwen.core.graph.executable import (
+    Executable,
+    Input,
+    Output,
+)
+from openjiuwen.core.graph.pregel import (
+    END,
+    MAX_RECURSIVE_LIMIT,
+    Pregel,
+    PregelBuilder,
+    PregelConfig,
+    START,
+)
 from openjiuwen.core.graph.store import GraphStore
+from openjiuwen.core.graph.vertex import Vertex
+from openjiuwen.core.session import (
+    BaseSession,
+    Checkpointer,
+    InteractiveInput,
+)
+from openjiuwen.core.session.workflow import Session
 
 
 @dataclass(slots=True)
@@ -113,7 +138,7 @@ class PregelGraph(Graph):
             logger.debug(f"ns: {loop.config['ns']}, step: {loop.step}, active_nodes: {list(loop.active_nodes)}")
 
         if self.pregel is None:
-            self.checkpointer = get_default_inmemory_checkpointer()
+            self.checkpointer = session.checkpointer()
             store = GraphStore(self.checkpointer.graph_store())
             self.pregel = self._compile(graph_store=store, step_callback=after_step)
             self._session = session

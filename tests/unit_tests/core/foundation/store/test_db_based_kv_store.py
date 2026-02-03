@@ -1,5 +1,6 @@
-# coding: utf-8
+# -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
 import asyncio
 import os
 import shutil
@@ -46,45 +47,49 @@ def get_mysql_kv_store():
     engine.dispose()
 
 
-class TestDefaultKVStore:
-    @pytest.mark.asyncio
-    @pytest.mark.skip(reason="need aiosqlite lib")
-    async def test_kv_store(self, sqlite_kv_store, mysql_kv_store):
-        async def test_default_kv_store(kv_store):
-            await kv_store.set("key1", "value1")
-            assert await kv_store.get("key1") == "value1"
-            await kv_store.set("key1", "update_value1")
-            assert await kv_store.get("key1") == "update_value1"
-            assert not await kv_store.exclusive_set("key1", "update_value2")
-            assert await kv_store.get("key1") == "update_value1"
+async def run_default_kv_store(kv_store):
+    await kv_store.set("key1", "value1")
+    assert await kv_store.get("key1") == "value1"
+    await kv_store.set("key1", "update_value1")
+    assert await kv_store.get("key1") == "update_value1"
+    assert not await kv_store.exclusive_set("key1", "update_value2")
+    assert await kv_store.get("key1") == "update_value1"
 
-            await kv_store.set("key2", "value2")
-            await kv_store.set("key3", "value3")
-            await kv_store.set("key345", "value345")
-            await kv_store.set("key3456", "value3456")
-            await kv_store.set("key4", "value4")
+    await kv_store.set("key2", "value2")
+    await kv_store.set("key3", "value3")
+    await kv_store.set("key345", "value345")
+    await kv_store.set("key3456", "value3456")
+    await kv_store.set("key4", "value4")
 
-            assert await kv_store.get("key2") == "value2"
-            await kv_store.delete("key2")
-            assert not await kv_store.exists("key2")
-            assert (await kv_store.get_by_prefix("key3") ==
-                    {'key3': 'value3', 'key345': 'value345', 'key3456': 'value3456'})
-            await kv_store.delete_by_prefix("key3")
-            assert await kv_store.get_by_prefix("key3") == {}
-            assert await kv_store.mget(["key4", "key53245", "key1"]) == ['value4', None, 'update_value1']
+    assert await kv_store.get("key2") == "value2"
+    await kv_store.delete("key2")
+    assert not await kv_store.exists("key2")
+    assert (await kv_store.get_by_prefix("key3") ==
+            {'key3': 'value3', 'key345': 'value345', 'key3456': 'value3456'})
+    await kv_store.delete_by_prefix("key3")
+    assert await kv_store.get_by_prefix("key3") == {}
+    assert await kv_store.mget(["key4", "key53245", "key1"]) == ['value4', None, 'update_value1']
 
-            assert await kv_store.exclusive_set("exclusive_key", "exclusive_value", 1)
-            value = await kv_store.get("exclusive_key")
-            assert value == "exclusive_value"
-            assert not await kv_store.exclusive_set("exclusive_key", "update_exclusive_value", 1)
-            await asyncio.sleep(1)
-            assert await kv_store.exclusive_set("exclusive_key", "update_exclusive_value", 1)
-            value = await kv_store.get("exclusive_key")
-            assert value == "update_exclusive_value"
+    assert await kv_store.exclusive_set("exclusive_key", "exclusive_value", 1)
+    value = await kv_store.get("exclusive_key")
+    assert value == "exclusive_value"
+    assert not await kv_store.exclusive_set("exclusive_key", "update_exclusive_value", 1)
+    await asyncio.sleep(1)
+    assert await kv_store.exclusive_set("exclusive_key", "update_exclusive_value", 1)
+    value = await kv_store.get("exclusive_key")
+    assert value == "update_exclusive_value"
 
-            await kv_store.set("key56", "10")
-            value = await kv_store.get("key56")
-            assert value == "10"
+    await kv_store.set("key56", "10")
+    value = await kv_store.get("key56")
+    assert value == "10"
 
-        await test_default_kv_store(sqlite_kv_store)
-        await test_default_kv_store(mysql_kv_store)
+
+@pytest.mark.asyncio
+async def test_sqlite_kv_store(sqlite_kv_store):
+    await run_default_kv_store(sqlite_kv_store)
+
+
+@pytest.mark.skip(reason="no mysql environment")
+@pytest.mark.asyncio
+async def test_mysql_kv_store(mysql_kv_store):
+    await run_default_kv_store(mysql_kv_store)
