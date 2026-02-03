@@ -82,5 +82,9 @@ class TestDefaultKVStore:
             value = await kv_store.get("exclusive_key")
             assert value == "update_exclusive_value"
 
+            await kv_store.set("key56", "10")
+            value = await kv_store.get("key56")
+            assert value == "10"
+
         await test_default_kv_store(sqlite_kv_store)
         await test_default_kv_store(mysql_kv_store)

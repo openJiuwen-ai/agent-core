@@ -105,8 +105,10 @@ class DbBasedKVStore(BaseKVStore):
                 return None
             try:
                 result_dict = json.loads(rec.value)
+                if not isinstance(result_dict, dict):
+                    return rec.value
                 if EXCLUSIVE_EXPIRY_KEY in result_dict:
-                    return result_dict[EXCLUSIVE_VALUE_KEY]
+                    return result_dict.get(EXCLUSIVE_VALUE_KEY, "")
             except json.JSONDecodeError:
                 pass
             return rec.value
