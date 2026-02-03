@@ -654,7 +654,7 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
     def _create_mock_session(self):
         """创建 mock session，模拟真实 Session 的 write_stream/stream_iterator 行为"""
         import asyncio
-        mock_session = MagicMock()
+        mock_session = AsyncMock()
         data_queue = asyncio.Queue()
 
         async def mock_write_stream(data):

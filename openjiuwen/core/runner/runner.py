@@ -320,13 +320,11 @@ class Runner:
                 return agent_instance, None
 
             task_session = self._create_task_session(agent_instance, session_id)
-            await get_default_inmemory_checkpointer().pre_agent_execute(
-                getattr(getattr(task_session, "_inner"), "_inner"), inputs)
+            await task_session.pre_run(inputs=inputs)
             return agent_instance, task_session
 
         task_session = self._create_task_session(agent, session_id)
-        await get_default_inmemory_checkpointer().pre_agent_execute(getattr(getattr(task_session, "_inner"), "_inner"),
-                                                                    inputs)
+        await task_session.pre_run(inputs=inputs)
         return agent, task_session
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],

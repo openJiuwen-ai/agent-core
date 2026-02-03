@@ -31,7 +31,7 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
@@ -535,12 +535,15 @@ class ReActAgent(BaseAgent):
         """
         final_result_holder = {"result": None}
 
+        if session is not None:
+            await session.pre_run()
+
         async def stream_process():
             try:
                 final_result = await self.invoke(inputs, session)
                 final_result_holder["result"] = final_result
                 # Write to session stream if available
-                if session is not None and hasattr(session, 'write_stream'):
+                if session is not None:
                     await session.write_stream(OutputSchema(
                         type="answer",
                         index=0,
@@ -557,14 +560,14 @@ class ReActAgent(BaseAgent):
                 }
             finally:
                 # Close stream
-                if session is not None and hasattr(session, 'post_run'):
+                if session is not None:
                     await self.context_engine.save_contexts(session)
                     await session.post_run()
 
         task = asyncio.create_task(stream_process())
 
         # Read from stream_iterator and yield
-        if session is not None and hasattr(session, 'stream_iterator'):
+        if session is not None:
             async for result in session.stream_iterator():
                 yield result
 

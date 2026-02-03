@@ -3,7 +3,7 @@
 import uuid
 from typing import Any, TYPE_CHECKING, Union, AsyncIterator
 
-from openjiuwen.core.session import Config
+from openjiuwen.core.session import Config, get_default_inmemory_checkpointer
 from openjiuwen.core.session.internal.wrapper import TaskSession
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.workflow import Session as WorkflowSession
@@ -22,6 +22,8 @@ class Session:
             config.set_envs(envs)
         self._inner = TaskSession(session_id=session_id, config=config, card=card)
         self._card = card
+        self._pre_run_done = False
+        self._post_run_done = False
 
     def get_session_id(self) -> str:
         return self._session_id
@@ -47,8 +49,18 @@ class Session:
     def stream_iterator(self) -> AsyncIterator[Any]:
         return self._inner.stream_iterator()
 
+    async def pre_run(self, **kwargs):
+        if self._pre_run_done:
+            return
+        inputs = kwargs.get("inputs")
+        await get_default_inmemory_checkpointer().pre_agent_execute(getattr(self._inner, "_inner"), inputs)
+        self._pre_run_done = True
+
     async def post_run(self):
+        if self._post_run_done:
+            return
         await self._inner.post_run()
+        self._post_run_done = True
 
     def create_workflow_session(self) -> WorkflowSession:
         return WorkflowSession(parent=self, session_id=self.get_session_id())
