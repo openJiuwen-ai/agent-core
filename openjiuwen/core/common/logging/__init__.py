@@ -140,6 +140,9 @@ tool_logger = LazyLogger(lambda: LogManager.get_logger("tool"))
 # Prompt module logger - for prompt processing related logs
 prompt_logger = LazyLogger(lambda: LogManager.get_logger("prompt"))
 
+# Store module logger - for data store related logs
+store_logger = LazyLogger(lambda: LogManager.get_logger("store"))
+
 # ========== Data and Retrieval Module Loggers ==========
 
 # Memory module logger - for memory management related logs
@@ -187,6 +190,7 @@ __all__ = [
     "llm_logger",
     "tool_logger",
     "prompt_logger",
+    "store_logger",
     # Data and retrieval module loggers
     "memory_logger",
     "retrieval_logger",

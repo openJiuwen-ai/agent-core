@@ -602,6 +602,12 @@ class StatusCode(Enum):
         "collection can have at most one primary key field, primary_field={primary_field}, field={field}"
     )
     STORE_VECTOR_FIELD_NAME_DUPLICATED = (186003, "field name already exists, field={field}")
+    STORE_VECTOR_COLLECTION_NOT_EXIST = (186004, "collection does not exist, collection_name={collection_name}")
+    STORE_VECTOR_SCHEMA_MISSING_PRIMARY_KEY = (
+        186005, "schema must contain a primary key field (is_primary=True)")
+    STORE_VECTOR_SCHEMA_MISSING_VECTOR_FIELD = (186006, "schema must contain at least one FLOAT_VECTOR field")
+    STORE_VECTOR_DOC_MISSING_PRIMARY_KEY = (186007, "document must have '{field}' field")
+    STORE_VECTOR_DOC_MISSING_VECTOR_FIELD = (186008, "document must have '{field}' field")
 
     # Foundation - Common Utility 188000 - 188999
     COMMON_SSL_CONTEXT_INIT_FAILED = (188000, "common ssl_context initialization failed, reason: {error_msg}")

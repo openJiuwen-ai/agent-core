@@ -16,13 +16,22 @@ from openjiuwen.core.foundation.store.base_vector_store import (
     VectorDataType,
 )
 
+
+def create_vector_store(store_type: str, **kwargs) -> BaseVectorStore | None:
+    if store_type == "chroma":
+        from openjiuwen.core.foundation.store.vector.chroma_vector_store import ChromaVectorStore
+        return ChromaVectorStore(**kwargs)
+    else:
+        return None
+
+
 __all__ = [
     "BaseDbStore",
     "BaseKVStore",
+    "BaseVectorStore",
     'DbBasedKVStore',
     'InMemoryKVStore',
     'DefaultDbStore',
-    "BaseVectorStore",
     "VectorSearchResult",
     "CollectionSchema",
     "FieldSchema",

@@ -64,6 +64,12 @@ class LogEventType(Enum):
     TOOL_CALL_END = "tool_call_end"  # Tool call ended
     TOOL_CALL_ERROR = "tool_call_error"  # Tool call error
 
+    # Store related events
+    STORE_ADD = "store_add"  # Data store added
+    STORE_DELETE = "store_delete"  # Data store deleted
+    STORE_UPDATE = "store_update"  # Data store updated
+    STORE_RETRIEVE = "store_retrieve"  # Data store retrieved
+
     # Memory related events
     MEMORY_STORE = "memory_store"  # Memory stored
     MEMORY_RETRIEVE = "memory_retrieve"  # Memory retrieved
@@ -118,6 +124,7 @@ class ModuleType(Enum):
     WORKFLOW_COMPONENT = "workflow_component"
     LLM = "llm"
     TOOL = "tool"
+    STORE = "store"
     MEMORY = "memory"
     SESSION = "session"
     CONTEXT = "context"
@@ -307,6 +314,18 @@ class ToolEvent(BaseLogEvent):
     def __post_init__(self):
         super().__post_init__()
         self.module_type = ModuleType.TOOL
+
+
+@dataclass
+class StoreEvent(BaseLogEvent):
+    """Data store related event"""
+
+    table_name: Optional[str] = None # Table name
+    data_num: Optional[int] = None # Data number
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.module_type = ModuleType.STORE
 
 
 @dataclass
