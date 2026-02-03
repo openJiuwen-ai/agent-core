@@ -1062,7 +1062,7 @@ class TestControllerConfig:
             task_id = tasks[0].task_id
             logger.info(f"Manually cancelling task {task_id}")
             
-            success = await agent.controller.task_scheduler.cancel_task(task_id, session)
+            success = await agent.controller.task_scheduler.cancel_task(task_id)
             assert success, "Manual cancellation should succeed"
             
             await asyncio.sleep(0.5)

@@ -532,7 +532,7 @@ class PauseInHandlerEventHandler(EventHandler):
             logger.info(f"PauseInHandlerEventHandler: Task 1 completed, pausing task 2")
 
             # Call TaskScheduler.pause_task from the EventHandler
-            success = await self.task_scheduler.pause_task(target_task_id, inputs.session)
+            success = await self.task_scheduler.pause_task(target_task_id)
 
             if success:
                 logger.info(f"PauseInHandlerEventHandler: Successfully paused task {target_task_id}")
@@ -545,7 +545,7 @@ class PauseInHandlerEventHandler(EventHandler):
         # because task_2 is paused and not in _running_tasks
         if completed_task_id == "pause_test_task_3":
             logger.info("PauseInHandlerEventHandler: Task 3 completed, cancelling paused task 2")
-            await self.task_scheduler.cancel_task("pause_test_task_2", inputs.session)
+            await self.task_scheduler.cancel_task("pause_test_task_2")
 
         return {"status": "success"}
 
@@ -590,7 +590,7 @@ class PauseNonPausableEventHandler(EventHandler):
         if not self.first_task_completed:
             self.first_task_completed = True
             # Try to pause the non-pausable task
-            success = await self.task_scheduler.pause_task("non_pausable_task", inputs.session)
+            success = await self.task_scheduler.pause_task("non_pausable_task")
             logger.info(f"Attempt to pause non-pausable task: {success}")
             return {"status": "success", "paused": success}
         return {"status": "success"}
@@ -629,12 +629,12 @@ class PauseThenCancelEventHandler(EventHandler):
 
         if self.completed_count == 1:
             # When the first task completes, pause the second task
-            await self.task_scheduler.pause_task("multi_op_task_2", inputs.session)
+            await self.task_scheduler.pause_task("multi_op_task_2")
             logger.info("Paused task 2")
         elif self.completed_count == 2:
             # When the third task completes, cancel the paused second task
             # The paused task is not in running_tasks, so cancellation will fail
-            success = await self.task_scheduler.cancel_task("multi_op_task_2", inputs.session)
+            success = await self.task_scheduler.cancel_task("multi_op_task_2")
             logger.info(f"Attempted to cancel paused task 2: {success}")
 
         return {"status": "success"}
@@ -692,7 +692,7 @@ class CancelInHandlerEventHandler(EventHandler):
             target_task_id = "cancel_test_task_2"
 
             # Call TaskScheduler.cancel_task from the EventHandler
-            success = await self.task_scheduler.cancel_task(target_task_id, inputs.session)
+            success = await self.task_scheduler.cancel_task(target_task_id)
 
             if success:
                 logger.info(f"CancelInHandlerEventHandler: Successfully cancelled task {target_task_id}")
@@ -744,7 +744,7 @@ class CancelNonCancellableEventHandler(EventHandler):
         if not self.first_task_completed:
             self.first_task_completed = True
             # Try to cancel the non-cancellable task
-            success = await self.task_scheduler.cancel_task("non_cancellable_task", inputs.session)
+            success = await self.task_scheduler.cancel_task("non_cancellable_task")
             logger.info(f"Attempt to cancel non-cancellable task: {success}")
             return {"status": "success", "cancelled": success}
         return {"status": "success"}
@@ -837,7 +837,7 @@ class PauseExceptionEventHandler(EventHandler):
             self.first_task_completed = True
             # Try to pause task that will throw exception
             try:
-                success = await self.task_scheduler.pause_task("pause_exception_task_2", inputs.session)
+                success = await self.task_scheduler.pause_task("pause_exception_task_2")
                 logger.info(f"Pause attempt result: {success}")
             except Exception as e:
                 logger.error(f"Exception during pause: {e}")
@@ -891,7 +891,7 @@ class CancelExceptionEventHandler(EventHandler):
             self.first_task_completed = True
             # Try to cancel task that will throw exception
             try:
-                success = await self.task_scheduler.cancel_task("cancel_exception_task_2", inputs.session)
+                success = await self.task_scheduler.cancel_task("cancel_exception_task_2")
                 logger.info(f"Cancel attempt result: {success}")
             except Exception as e:
                 logger.error(f"Exception during cancel: {e}")
@@ -966,7 +966,7 @@ class StatePersistenceEventHandler(EventHandler):
 
         if completed_task_id == "persist_task_1":
             # After the first task completes, pause the second task
-            success = await self.task_scheduler.pause_task("persist_task_2", inputs.session)
+            success = await self.task_scheduler.pause_task("persist_task_2")
             logger.info(f"StatePersistenceEventHandler: Paused persist_task_2, result: {success}")
 
         return {"status": "success"}
@@ -1038,8 +1038,8 @@ class MultiTaskStatePersistenceEventHandler(EventHandler):
 
         if completed_task_id == "multi_task_1":
             # After the first task completes, pause task_2 and cancel task_3
-            await self.task_scheduler.pause_task("multi_task_2", inputs.session)
-            await self.task_scheduler.cancel_task("multi_task_3", inputs.session)
+            await self.task_scheduler.pause_task("multi_task_2")
+            await self.task_scheduler.cancel_task("multi_task_3")
             logger.info("MultiTaskStatePersistenceEventHandler: Paused task_2 and cancelled task_3")
 
         return {"status": "success"}
@@ -1372,7 +1372,7 @@ class TestEventHandlerTaskControl:
         session = TaskSession(session_id="test_pause_non_existent")
 
         # Try to pause non-existent task
-        success = await agent.controller.task_scheduler.pause_task("non_existent_task", session)
+        success = await agent.controller.task_scheduler.pause_task("non_existent_task")
 
         assert not success, "Pausing non-existent task should fail"
 
@@ -1405,7 +1405,7 @@ class TestEventHandlerTaskControl:
         await collect_stream_output(agent.stream(input_event, session))
 
         # Try to pause completed task
-        success = await agent.controller.task_scheduler.pause_task("test_task_1", session)
+        success = await agent.controller.task_scheduler.pause_task("test_task_1")
 
         assert not success, "Pausing completed task should fail"
 
@@ -1474,7 +1474,7 @@ class TestEventHandlerTaskControl:
         session = TaskSession(session_id="test_cancel_non_existent")
 
         # Try to cancel non-existent task
-        success = await agent.controller.task_scheduler.cancel_task("non_existent_task", session)
+        success = await agent.controller.task_scheduler.cancel_task("non_existent_task")
 
         assert not success, "Cancelling non-existent task should fail"
 
@@ -1507,7 +1507,7 @@ class TestEventHandlerTaskControl:
         await collect_stream_output(agent.stream(input_event, session))
 
         # Try to cancel completed task
-        success = await agent.controller.task_scheduler.cancel_task("test_task_1", session)
+        success = await agent.controller.task_scheduler.cancel_task("test_task_1")
 
         assert not success, "Cancelling completed task should fail"
 
