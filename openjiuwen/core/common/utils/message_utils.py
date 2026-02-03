@@ -39,9 +39,6 @@ class MessageUtils:
             return True
 
         last_message = last_message[0]
-        if last_message.role == 'tool':
-            logger.info("Skipping user message - post-tool-call request")
-            return False
 
         if last_message.role == 'user' and last_message.content == query:
             logger.info("Skipping duplicate user message")
