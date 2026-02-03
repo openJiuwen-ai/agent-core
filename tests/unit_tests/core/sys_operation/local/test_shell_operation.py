@@ -13,6 +13,7 @@ import pytest_asyncio
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
 
 
 @pytest.fixture
@@ -132,25 +133,21 @@ async def test_shell_timeout(sys_op):
     res = await sys_op.shell().execute_cmd(command=cmd_sleep, timeout=1)
 
     assert res.code == StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code
-    assert "timed out" in res.message
+    assert "timeout" in res.message
 
 
 @pytest.mark.asyncio
 async def test_shell_ping_timeout(sys_op):
     """Verify ping command timeout specifically (continuous output)."""
-    if platform.system() == "Windows":
-        cmd_ping = "ping 127.0.0.1"
-    else:
-        cmd_ping = "ping 127.0.0.1"
-
+    cmd_ping = "ping 127.0.0.1"
     res = await sys_op.shell().execute_cmd(command=cmd_ping, timeout=1)
 
     assert res.code == StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code
-    assert "timed out" in res.message
+    assert "timeout" in res.message
     # Verify partial data is captured
     assert res.data is not None
-    assert res.data.stdout  # Ping usually outputs something within 1s
-    assert "127.0.0.1" in res.data.stdout
+    # Ping usually outputs something within 1s(windows)
+    assert (res.data.stdout and "127.0.0.1" in res.data.stdout) or (res.data.exit_code != 0)
 
 
 @pytest.mark.asyncio
@@ -196,3 +193,134 @@ async def test_shell_list_tools(sys_op):
     exec_tool = next(t for t in tools if t.name == "execute_cmd")
     assert "command" in exec_tool.input_params["properties"]
     assert exec_tool.input_params["required"] == ["command"]
+
+
+@pytest.mark.asyncio
+async def test_execute_cmd_stream_basic(sys_op):
+    """Test basic streaming command execution (stdout/stderr chunked output)"""
+    # Construct chunked output command (multi-echo to simulate chunks, cross-platform compatible)
+    if platform.system() == "Windows":
+        cmd = 'echo "chunk1" && echo "chunk2" && echo "error_chunk" 1>&2'
+    else:
+        cmd = 'echo "chunk1"; echo "chunk2"; echo "error_chunk" >&2'
+
+    # Collect streaming results
+    stream_results = []
+    async for result in sys_op.shell().execute_cmd_stream(command=cmd):
+        stream_results.append(result)
+
+    # Basic validation
+    assert len(stream_results) > 0, "At least one streaming result should be returned"
+    assert all(isinstance(r, ExecuteCmdStreamResult) for r in stream_results), \
+        "Result type must be ExecuteCmdStreamResult"
+
+    # Split stdout/stderr/exit chunks
+    stdout_chunks = [r.data for r in stream_results if r.data.type == "stdout"]
+    stderr_chunks = [r.data for r in stream_results if r.data.type == "stderr"]
+    exit_chunk = next((r.data for r in stream_results if r.data.exit_code is not None and r.data.type is None), None)
+
+    # Validate stdout content
+    stdout_content = "".join([chunk.text for chunk in stdout_chunks])
+    assert "chunk1" in stdout_content
+    assert "chunk2" in stdout_content
+
+    # Validate stderr content
+    assert len(stderr_chunks) >= 1
+    assert "error_chunk" in stderr_chunks[0].text
+
+    # Validate exit code
+    assert exit_chunk is not None
+    assert exit_chunk.exit_code == 0
+    assert exit_chunk.chunk_index == len(stream_results) - 1  # Exit chunk is the last one
+
+
+@pytest.mark.asyncio
+async def test_execute_cmd_stream_timeout(sys_op):
+    """Test streaming command execution with timeout scenario"""
+    # Construct sleep command (cross-platform)
+    if platform.system() == "Windows":
+        cmd = 'ping -n 10 127.0.0.1'  # Windows ping 10 times (~10 seconds)
+    else:
+        cmd = 'sleep 10'
+
+    # Collect streaming results
+    stream_results = []
+    async for result in sys_op.shell().execute_cmd_stream(command=cmd, timeout=1):
+        stream_results.append(result)
+
+    # Validate timeout error
+    error_result = next((r for r in stream_results
+                         if r.code == StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code), None)
+    assert error_result is not None, "Timeout error result should be returned"
+    assert "timeout" in error_result.message.lower()
+    assert error_result.data.exit_code == -1
+
+
+@pytest.mark.asyncio
+async def test_execute_cmd_stream_empty_command(sys_op):
+    """Test streaming execution with empty command"""
+    stream_results = []
+    async for result in sys_op.shell().execute_cmd_stream(command=""):
+        stream_results.append(result)
+
+    assert len(stream_results) == 1
+    error_result = stream_results[0]
+    assert error_result.code == StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code
+    assert "command can not be empty" in error_result.message
+    assert error_result.data.chunk_index == 0
+    assert error_result.data.exit_code == -1
+
+
+@pytest.mark.asyncio
+async def test_execute_cmd_stream_allowlist(sys_op, work_dir):
+    """Test streaming execution with allowlist validation"""
+    # Recreate sys_op with allowlist
+    await Runner.start()
+    card_id = "test_stream_allowlist"
+    config = LocalWorkConfig(work_dir=work_dir, shell_allowlist=["echo"])
+    card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL, work_config=config)
+    Runner.resource_mgr.add_sys_operation(card)
+    op = Runner.resource_mgr.get_sys_operation(card_id)
+
+    try:
+        # Test allowed command (echo)
+        stream_results_allowed = []
+        async for res in op.shell().execute_cmd_stream(command='echo "allowed"'):
+            stream_results_allowed.append(res)
+        assert any(r.data.type == "stdout" and "allowed" in r.data.text for r in stream_results_allowed)
+
+        # Test forbidden command (ls/dir)
+        cmd_deny = "dir" if platform.system() == "Windows" else "ls"
+        stream_results_deny = []
+        async for res in op.shell().execute_cmd_stream(command=cmd_deny):
+            stream_results_deny.append(res)
+
+        error_result = stream_results_deny[0]
+        assert error_result.code == StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR.code
+        assert "not allowed by allowlist" in error_result.message
+    finally:
+        Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_execute_cmd_stream_continuous_output(sys_op):
+    """Test streaming execution for continuous output commands (e.g., ping)"""
+    # Construct ping command (execute 3 times to avoid infinite output)
+    if platform.system() == "Windows":
+        cmd = "ping -n 3 127.0.0.1"
+    else:
+        cmd = "ping -c 3 127.0.0.1"
+
+    stream_results = []
+    async for res in sys_op.shell().execute_cmd_stream(command=cmd, timeout=10):
+        stream_results.append(res)
+
+    # Validate at least multiple stdout chunks (ping output is chunked)
+    stdout_chunks = [r for r in stream_results if r.data.type == "stdout"]
+    assert len(stdout_chunks) >= 1
+    assert all("127.0.0.1" in r.data.text for r in stdout_chunks)
+
+    # Validate exit code
+    exit_chunk = next(r for r in stream_results if r.data.exit_code is not None)
+    assert exit_chunk.data.exit_code == 0

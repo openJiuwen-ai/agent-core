@@ -24,6 +24,7 @@ from openjiuwen.core.sys_operation.result import (
     ReadFileData, ReadFileChunkData, WriteFileData, UploadFileData, DownloadFileData,
     FileSystemItem, FileSystemData, SearchFilesData, DownloadFileChunkData, UploadFileChunkData
 )
+from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 
 
 class _ListItemsSpec(BaseModel):
@@ -880,14 +881,10 @@ class FsOperation(BaseFsOperation):
         Returns:
             An instance of result_class with error information.
         """
-        error_code = StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code
-        error_message = StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.errmsg.format(
-            execution=execution,
-            error_msg=error_msg
-        )
-        return result_class(
-            code=error_code,
-            message=error_message
+        return build_operation_error_result(
+            error_type=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+            msg_format_kwargs={"execution": execution, "error_msg": error_msg},
+            result_cls=result_class
         )
 
     async def _validate_and_resolve_path(

@@ -8,9 +8,8 @@ import pytest_asyncio
 
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
-from openjiuwen.core.sys_operation.base import BaseOperation
-from openjiuwen.core.sys_operation.registry import OperationRegistry, operation
+from openjiuwen.core.sys_operation import SysOperationCard, OperationMode
+from openjiuwen.core.sys_operation.registry import OperationRegistry
 from tests.unit_tests.core.sys_operation.local.custom_operation import LocalCalculatorOperation
 
 

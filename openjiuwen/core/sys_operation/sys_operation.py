@@ -7,8 +7,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.schema import BaseCard
 from openjiuwen.core.sys_operation.base import OperationMode
+from openjiuwen.core.sys_operation.code import BaseCodeOperation
 from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
+from openjiuwen.core.sys_operation.fs import BaseFsOperation
 from openjiuwen.core.sys_operation.registry import OperationRegistry
+from openjiuwen.core.sys_operation.shell import BaseShellOperation
 
 
 class SysOperationCard(BaseCard):
@@ -131,13 +134,13 @@ class SysOperation:
             return lambda: self._get_operation(name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
-    def fs(self):
+    def fs(self) -> BaseFsOperation:
         return self._get_operation("fs")
 
-    def code(self):
+    def code(self) -> BaseCodeOperation:
         return self._get_operation("code")
 
-    def shell(self):
+    def shell(self) -> BaseShellOperation:
         return self._get_operation("shell")
 
     def _get_operation(self, name):

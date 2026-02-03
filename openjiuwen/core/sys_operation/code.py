@@ -24,7 +24,7 @@ class BaseCodeOperation(BaseOperation, ABC):
             code: str,
             *,
             language: Literal['python', 'javascript'] = "python",
-            time_out: int = 300,
+            timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ExecuteCodeResult:
@@ -34,7 +34,7 @@ class BaseCodeOperation(BaseOperation, ABC):
         Args:
             code: Non-empty string containing the source code to execute (required positional argument).
             language: Programming language of the code. Strict type constraint to 'python' or 'javascript'.
-            time_out: Maximum execution time in seconds. Defaults to 300 seconds (5 minutes).
+            timeout: Maximum execution time in seconds. Defaults to 300 seconds (5 minutes).
             environment: Key-value dict of custom environment variables.
             options: Additional execution configuration options.
 
@@ -49,7 +49,7 @@ class BaseCodeOperation(BaseOperation, ABC):
             code: str,
             *,
             language: Literal['python', 'javascript'] = "python",
-            time_out: int = 300,
+            timeout: int = 300,
             environment: Optional[Dict[str, str]] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ExecuteCodeStreamResult]:
@@ -60,7 +60,7 @@ class BaseCodeOperation(BaseOperation, ABC):
             code: Non-empty string containing the source code to execute (required positional argument).
             language: Programming language of the code. Strict type constraint to 'python' or 'javascript'.
                 Defaults to "python".
-            time_out: Maximum execution time in seconds. Terminates the process if exceeded.
+            timeout: Maximum execution time in seconds. Terminates the process if exceeded.
                 Must be a positive integer. Defaults to 300 seconds (5 minutes).
             environment: Key-value dict of custom environment variables.
             options: Additional execution configuration options.
