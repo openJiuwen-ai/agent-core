@@ -17,6 +17,7 @@ from chromadb.config import DEFAULT_DATABASE, Settings
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
@@ -226,7 +227,7 @@ class ChromaVectorStore(VectorStore):
             return
 
         # Re-fetch collection to ensure using the latest collection reference
-        collection = await asyncio.to_thread(
+        collection: chromadb.Collection = await asyncio.to_thread(
             self._client.get_collection,
             name=self.collection_name,
         )
@@ -244,32 +245,35 @@ class ChromaVectorStore(VectorStore):
         self,
         query_vector: List[float],
         top_k: int = 5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """Vector search"""
         # Re-fetch collection to ensure using the latest collection reference
-        collection = await asyncio.to_thread(
+        collection: chromadb.Collection = await asyncio.to_thread(
             self._client.get_collection,
             name=self.collection_name,
         )
 
         # Build where filter conditions
-        where = None
-        if filters:
+        query_args = {}
+        if isinstance(filters, dict):
             where = {}
             for key, value in filters.items():
                 if isinstance(value, str):
                     where[key] = value
                 else:
                     where[key] = value
+            query_args["where"] = where
+        elif isinstance(filters, QueryExpr):
+            query_args.update({k: v for k, v in filters.to_expr("chroma").items() if v})
 
         # Execute search
         results = await asyncio.to_thread(
             collection.query,
             query_embeddings=[query_vector],
             n_results=top_k,
-            where=where,
+            **query_args,
         )
 
         return self._chroma_result_to_search_results(results, mode="vector")
@@ -278,26 +282,29 @@ class ChromaVectorStore(VectorStore):
         self,
         query_text: str,
         top_k: int = 5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """Sparse search (text matching)"""
         # Re-fetch collection to ensure using the latest collection reference
-        collection = await asyncio.to_thread(
+        collection: chromadb.Collection = await asyncio.to_thread(
             self._client.get_collection,
             name=self.collection_name,
         )
 
         # ChromaDB doesn't directly support BM25, use text query as alternative
         # Build where filter conditions
-        where = None
-        if filters:
+        query_args = {}
+        if isinstance(filters, dict):
             where = {}
             for key, value in filters.items():
                 if isinstance(value, str):
                     where[key] = value
                 else:
                     where[key] = value
+            query_args["where"] = where
+        elif isinstance(filters, QueryExpr):
+            query_args.update({k: v for k, v in filters.to_expr("chroma").items() if v})
 
         try:
             # Use text query (ChromaDB's text search is based on TF-IDF)
@@ -305,7 +312,7 @@ class ChromaVectorStore(VectorStore):
                 collection.query,
                 query_texts=[query_text],
                 n_results=top_k,
-                where=where,
+                **query_args,
             )
 
             if results and results.get("ids") and len(results["ids"][0]) > 0:
@@ -321,20 +328,10 @@ class ChromaVectorStore(VectorStore):
         query_vector: Optional[List[float]] = None,
         top_k: int = 5,
         alpha: float = 0.5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """Hybrid search (text retrieval + vector retrieval)"""
-        # Build where filter conditions
-        where = None
-        if filters:
-            where = {}
-            for key, value in filters.items():
-                if isinstance(value, str):
-                    where[key] = value
-                else:
-                    where[key] = value
-
         try:
             # Execute vector search and text search separately
             tasks = []
@@ -411,34 +408,26 @@ class ChromaVectorStore(VectorStore):
     async def delete(
         self,
         ids: Optional[List[str]] = None,
-        filter_expr: Optional[str] = None,
+        filter_expr: Optional[str | QueryExpr] = None,
         **kwargs: Any,
     ) -> bool:
         """Delete vectors"""
         try:
             # Re-fetch collection to ensure using the latest collection reference
-            collection = await asyncio.to_thread(
+            collection: chromadb.Collection = await asyncio.to_thread(
                 self._client.get_collection,
                 name=self.collection_name,
             )
 
-            if ids:
-                # Delete by ID
-                await asyncio.to_thread(
-                    collection.delete,
-                    ids=ids,
-                )
-                return True
-            if filter_expr:
-                # ChromaDB doesn't support complex filter_expr, need to query first then delete
-                # Simplified handling here, only supports simple where conditions
-                logger.warning(
-                    "ChromaDB does not support complex filter expressions for deletion. "
-                    "Please use ids parameter instead."
-                )
-                return False
-            logger.warning("Either ids or filter_expr must be provided")
-            return False
+            query_args = dict(ids=ids)
+            if filter_expr is not None:
+                if isinstance(filter_expr, QueryExpr):
+                    query_args.update({k: v for k, v in filter_expr.to_expr("chroma").items() if v})
+                else:
+                    logger.warning("ChromaDB does not support string filter expressions.")
+                    return False
+            await asyncio.to_thread(collection.delete, **query_args)
+            return True
         except Exception as e:
             logger.error(f"Failed to delete vectors: {e}")
             return False

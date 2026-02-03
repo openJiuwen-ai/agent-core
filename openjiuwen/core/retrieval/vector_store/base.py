@@ -12,6 +12,7 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 
 
@@ -66,7 +67,7 @@ class VectorStore(ABC):
         self,
         query_vector: List[float],
         top_k: int = 5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """
@@ -87,7 +88,7 @@ class VectorStore(ABC):
         self,
         query_text: str,
         top_k: int = 5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """
@@ -110,7 +111,7 @@ class VectorStore(ABC):
         query_vector: Optional[List[float]] = None,
         top_k: int = 5,
         alpha: float = 0.5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """
@@ -132,7 +133,7 @@ class VectorStore(ABC):
     async def delete(
         self,
         ids: Optional[List[str]] = None,
-        filter_expr: Optional[str] = None,
+        filter_expr: str | QueryExpr | None = None,
         **kwargs: Any,
     ) -> bool:
         """Delete vectors"""

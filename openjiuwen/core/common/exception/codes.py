@@ -450,6 +450,7 @@ class StatusCode(Enum):
 
     # KnowledgeBase Retrieval - Vector Store 155400 - 155499
     RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND = (155400, "retrieval vector_store_path not found, reason: {error_msg}")
+    RETRIEVAL_VECTOR_STORE_QUERY_INVALID = (155400, "retrieval vector_store_query not valid, reason: {error_msg}")
 
     # KnowledgeBase Retrieval - Knowledge Base 155500 - 155599
     RETRIEVAL_KB_PARSER_NOT_FOUND = (155500, "retrieval kb_parser not found, reason: {error_msg}")

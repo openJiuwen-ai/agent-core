@@ -209,7 +209,7 @@ class ChromaIndexer(Indexer):
         """Delete index"""
         try:
             # ChromaDB doesn't support complex filter expressions, need to query first then delete
-            collection = await asyncio.to_thread(
+            collection: chromadb.Collection = await asyncio.to_thread(
                 self._client.get_collection,
                 name=index_name,
             )
@@ -262,7 +262,7 @@ class ChromaIndexer(Indexer):
             if not await self.index_exists(index_name):
                 return {"exists": False}
 
-            collection = await asyncio.to_thread(
+            collection: chromadb.Collection = await asyncio.to_thread(
                 self._client.get_collection,
                 name=index_name,
             )

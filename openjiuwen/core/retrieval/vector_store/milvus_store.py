@@ -14,6 +14,7 @@ from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
@@ -190,7 +191,7 @@ class MilvusVectorStore(VectorStore):
         self,
         query_vector: List[float],
         top_k: int = 5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """Vector search"""
@@ -198,16 +199,17 @@ class MilvusVectorStore(VectorStore):
 
         # Build filter expression
         filter_expr = None
-        if filters:
-            # Simple filter expression builder (can be extended as needed)
+        if isinstance(filters, dict):
             filter_parts = []
             for key, value in filters.items():
                 if isinstance(value, str):
-                    filter_parts.append(f'{key} == "{value}"')
+                    filter_parts.append(f"{key} == {QueryExpr.sanitize_str(value)}")
                 else:
                     filter_parts.append(f"{key} == {value}")
             if filter_parts:
                 filter_expr = " && ".join(filter_parts)
+        elif isinstance(filters, QueryExpr):
+            filter_expr = filters.to_expr("milvus")
 
         # Execute search
         results = await asyncio.to_thread(
@@ -229,7 +231,7 @@ class MilvusVectorStore(VectorStore):
         self,
         query_text: str,
         top_k: int = 5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """Sparse search (BM25)"""
@@ -237,15 +239,17 @@ class MilvusVectorStore(VectorStore):
 
         # Build filter expression
         filter_expr = None
-        if filters:
+        if isinstance(filters, dict):
             filter_parts = []
             for key, value in filters.items():
                 if isinstance(value, str):
-                    filter_parts.append(f'{key} == "{value}"')
+                    filter_parts.append(f"{key} == {QueryExpr.sanitize_str(value)}")
                 else:
                     filter_parts.append(f"{key} == {value}")
             if filter_parts:
                 filter_expr = " && ".join(filter_parts)
+        elif isinstance(filters, QueryExpr):
+            filter_expr = filters.to_expr("milvus")
 
         try:
             # Use native BM25 full-text search
@@ -273,7 +277,7 @@ class MilvusVectorStore(VectorStore):
         query_vector: Optional[List[float]] = None,
         top_k: int = 5,
         alpha: float = 0.5,
-        filters: Optional[dict] = None,
+        filters: Optional[dict | QueryExpr] = None,
         **kwargs: Any,
     ) -> List[SearchResult]:
         """Hybrid search (sparse retrieval + vector retrieval)"""
@@ -281,15 +285,17 @@ class MilvusVectorStore(VectorStore):
 
         # Build filter expression
         filter_expr = None
-        if filters:
+        if isinstance(filters, dict):
             filter_parts = []
             for key, value in filters.items():
                 if isinstance(value, str):
-                    filter_parts.append(f'{key} == "{value}"')
+                    filter_parts.append(f"{key} == {QueryExpr.sanitize_str(value)}")
                 else:
                     filter_parts.append(f"{key} == {value}")
             if filter_parts:
                 filter_expr = " && ".join(filter_parts)
+        elif isinstance(filters, QueryExpr):
+            filter_expr = filters.to_expr("milvus")
 
         try:
             # Build search requests
@@ -302,6 +308,7 @@ class MilvusVectorStore(VectorStore):
                     anns_field=self.vector_field.vector_field,
                     param={"metric_type": self._distance_metric, "params": self.get_search_params(top_k)},
                     limit=top_k,
+                    expr=filter_expr,
                 )
                 search_requests.append(dense_req)
 
@@ -311,6 +318,7 @@ class MilvusVectorStore(VectorStore):
                 anns_field=self.sparse_vector_field,
                 param={"metric_type": "BM25"},
                 limit=top_k,
+                expr=filter_expr,
             )
             search_requests.append(sparse_req)
 
@@ -325,7 +333,6 @@ class MilvusVectorStore(VectorStore):
                 ranker=RRFRanker(k=60),  # RRF with k=60
                 limit=top_k,
                 output_fields=output_fields,
-                filter=filter_expr,
             )
 
             if results and len(results) > 0:
@@ -342,7 +349,7 @@ class MilvusVectorStore(VectorStore):
         query_text: str,
         query_vector: Optional[List[float]],
         top_k: int,
-        filters: Optional[dict],
+        filters: Optional[dict | QueryExpr],
     ) -> List[SearchResult]:
         """Fallback hybrid search: execute searches separately then fuse"""
         # Execute two searches concurrently
@@ -362,11 +369,13 @@ class MilvusVectorStore(VectorStore):
     async def delete(
         self,
         ids: Optional[List[str]] = None,
-        filter_expr: Optional[str] = None,
+        filter_expr: Optional[str | QueryExpr] = None,
         **kwargs: Any,
     ) -> bool:
         """Delete vectors"""
         try:
+            if isinstance(filter_expr, QueryExpr):
+                filter_expr = filter_expr.to_expr("milvus")
             result = await asyncio.to_thread(
                 self._client.delete,
                 collection_name=self.collection_name,
