@@ -1351,6 +1351,15 @@ wheels = [
 ]
 
 [[package]]
+name = "json-repair"
+version = "0.55.1"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/c0/de/71d6bb078d167c0d0959776cee6b6bb8d2ad843f512a5222d7151dde4955/json_repair-0.55.1.tar.gz", hash = "sha256:b27aa0f6bf2e5bf58554037468690446ef26f32ca79c8753282adb3df25fb888" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/56/da/289ba9eb550ae420cfc457926f6c49b87cacf8083ee9927e96921888a665/json_repair-0.55.1-py3-none-any.whl", hash = "sha256:a1bcc151982a12bc3ef9e9528198229587b1074999cfe08921ab6333b0c8e206" },
+]
+
+[[package]]
 name = "jsonref"
 version = "1.1.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -2065,6 +2074,7 @@ dependencies = [
     { name = "docx2txt" },
     { name = "fastmcp" },
     { name = "filelock" },
+    { name = "json-repair" },
     { name = "mermaid-py" },
     { name = "numpy" },
     { name = "oauthlib" },
@@ -2164,6 +2174,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=2.14.2,<3.0" },
     { name = "filelock", specifier = ">=3.20.1" },
     { name = "greenlet", marker = "extra == 'sqlite'", specifier = ">=3.1.1" },
+    { name = "json-repair", specifier = ">=0.55.0" },
     { name = "mermaid-py", specifier = ">=0.8.0" },
     { name = "numpy", specifier = "!=2.4.0" },
     { name = "oauthlib", specifier = ">=3.3.1" },

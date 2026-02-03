@@ -18,6 +18,7 @@ from openjiuwen.core.retrieval.common.document import Document, MultimodalDocume
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.common.triple import Triple
 from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
+from openjiuwen.core.retrieval.common.triple_memory import TripleMemory
 
 # Embedding related
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
@@ -98,6 +99,7 @@ from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
 from openjiuwen.core.retrieval.graph_knowledge_base import GraphKnowledgeBase
 
 # Utilities
+from openjiuwen.core.retrieval.utils.common import deduplicate
 from openjiuwen.core.retrieval.utils.config_manager import ConfigManager
 from openjiuwen.core.retrieval.utils.exceptions import (
     DocumentProcessingError,
@@ -138,6 +140,7 @@ _COMMON_CLASSES = [
     "SearchResult",
     "Triple",
     "TripleBeam",
+    "TripleMemory",
     "BaseCallback",
     "TqdmCallback",
 ]
@@ -210,6 +213,7 @@ _UTILS = [
     "DocumentProcessingError",
     "VectorStoreError",
     "rrf_fusion",
+    "deduplicate",
     "parse_base64_embedding",
 ]
 

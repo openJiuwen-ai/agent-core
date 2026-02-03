@@ -167,7 +167,17 @@ class TripleBeamSearch:
         if len(beam) < 1:
             raise RuntimeError("unexpected empty beam")
 
-        triple = json.loads(beam[-1].metadata.get("triple"))
+        triple_data = beam[-1].metadata.get("triple")
+        if not triple_data:
+            logger.warning("beam has no triple metadata")
+            return []
+
+        try:
+            triple = json.loads(triple_data)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("[graph] Failed to parse triple metadata: %s", e)
+            return []
+
         if not triple or len(triple) < 2:
             return []
 
@@ -277,7 +287,7 @@ class GraphRetriever(Retriever):
             return mode in supported
         return True
 
-    def _get_retriever_for_mode(
+    def get_retriever_for_mode(
         self,
         mode: Literal["vector", "sparse", "hybrid"],
         is_chunk: bool = True,
@@ -382,7 +392,7 @@ class GraphRetriever(Retriever):
         effective_threshold = score_threshold
 
         # Get corresponding retriever based on mode
-        chunk_retriever = self._get_retriever_for_mode(mode, is_chunk=True)
+        chunk_retriever = self.get_retriever_for_mode(mode, is_chunk=True)
 
         # First perform chunk retrieval
         chunk_results = await chunk_retriever.retrieve(
@@ -431,7 +441,7 @@ class GraphRetriever(Retriever):
         if not chunks:
             logger.warning("[graph] chunk_retriever returned empty, no results to expand (mode=%s)", mode)
             if mode == "sparse":
-                sparse_retriever = self._get_retriever_for_mode("sparse", is_chunk=True)
+                sparse_retriever = self.get_retriever_for_mode("sparse", is_chunk=True)
                 fallback = await sparse_retriever.retrieve(
                     query=query,
                     top_k=topk or 5,
@@ -458,7 +468,7 @@ class GraphRetriever(Retriever):
 
         # Perform beam search on triples
         try:
-            triple_retriever = self._get_retriever_for_mode(mode, is_chunk=False)
+            triple_retriever = self.get_retriever_for_mode(mode, is_chunk=False)
             triple_beam_search = TripleBeamSearch(retriever=triple_retriever, **kwargs)
             beams = await triple_beam_search.beam_search(query, triples)
         except Exception as e:
@@ -585,7 +595,7 @@ class GraphRetriever(Retriever):
             return []
 
         # Get triple retriever
-        triple_retriever = self._get_retriever_for_mode(mode, is_chunk=False)
+        triple_retriever = self.get_retriever_for_mode(mode, is_chunk=False)
 
         # Check if the triple retriever has vector store
         if not hasattr(triple_retriever, "vector_store"):
@@ -672,7 +682,7 @@ class GraphRetriever(Retriever):
             return []
 
         # Get chunk retriever attributes
-        chunk_retriever = self._get_retriever_for_mode(mode, is_chunk=True)
+        chunk_retriever = self.get_retriever_for_mode(mode, is_chunk=True)
 
         # Check if the chunk retriever has vector store
         if not hasattr(chunk_retriever, "vector_store"):

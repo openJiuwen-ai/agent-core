@@ -1,5 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""
+Triple Beam Data Model
+"""
+
 from typing import Iterator, List
 
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult

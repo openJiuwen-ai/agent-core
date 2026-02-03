@@ -159,22 +159,21 @@ class OllamaEmbedding(Embedding):
                 StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="All texts are empty after filtering"
             )
 
-        # Process in batches if batch_size is specified
-        if batch_size is not None and batch_size > 0:
-            all_embeddings = []
-            indices = list(range(0, len(non_empty_texts), batch_size))
-            callback_obj = callback_cls(seq=indices)
-            for i in indices:
-                j = i + batch_size
-                batch_texts = non_empty_texts[i:j]
-                batch_embeddings = await self._get_ollama_embedding(batch_texts, **kwargs)
-                all_embeddings.extend(batch_embeddings)
-                callback_obj(start_idx=i, end_idx=j, batch=batch_texts)
-            embeddings = all_embeddings
-        else:
-            callback_obj = callback_cls(seq=[None])
-            embeddings = await self._get_ollama_embedding(non_empty_texts, **kwargs)
-            callback_obj(batch=non_empty_texts)
+        # Respect caller batch_size but never exceed configured max_batch_size
+        bsz = batch_size or self.max_batch_size or 1
+        if self.max_batch_size:
+            bsz = min(bsz, self.max_batch_size)
+
+        all_embeddings = []
+        indices = list(range(0, len(non_empty_texts), bsz))
+        callback_obj = callback_cls(seq=indices)
+        for i in indices:
+            j = i + bsz
+            batch_texts = non_empty_texts[i:j]
+            batch_embeddings = await self._get_ollama_embedding(batch_texts, **kwargs)
+            all_embeddings.extend(batch_embeddings)
+            callback_obj(start_idx=i, end_idx=j, batch=batch_texts)
+        embeddings = all_embeddings
 
         return embeddings
 
