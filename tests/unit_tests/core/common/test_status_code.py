@@ -87,19 +87,19 @@ def test_status_message():
 
     print(tpl.template)
 
-    # tpl = generate_error_message_template(
-    #     scope="WORKFLOW",
-    #     subject="EXECUTION",
-    #     failure_type="TIMEOUT",
-    #     with_reason=False,
-    # )
-    #
-    # print(tpl.template)
-    #
-    # tpl = generate_error_message_template(
-    #     scope="AGENT",
-    #     subject="TASK_TYPE",
-    #     failure_type="NOT_SUPPORTED",
-    # )
-    #
-    # print(tpl.template)
+    tpl = generate_error_message_template(
+        scope="WORKFLOW",
+        subject="EXECUTION",
+        failure_type="TIMEOUT",
+        with_reason=False,
+    )
+
+    print(tpl.template)
+
+    tpl = generate_error_message_template(
+        scope="AGENT",
+        subject="TASK_TYPE",
+        failure_type="NOT_SUPPORTED",
+    )
+
+    print(tpl.template)
