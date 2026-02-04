@@ -631,7 +631,7 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_enable_kv_cache_release_calls_release_on_get_window(self):
         context = await self.create_context(enable_kv_cache_release=True)
-        with patch.object(getattr(context, "_kv_cache_manager"), "release", MagicMock()) as mock_release:
+        with patch.object(getattr(context, "_kv_cache_manager"), "release", new_callable=AsyncMock) as mock_release:
             await context.get_context_window()
             await context.get_context_window()
             assert mock_release.call_count >= 1

@@ -187,7 +187,7 @@ class SessionModelContext(ModelContext):
 
         self._validate_and_fix_context_window(window)
         if self._kv_cache_manager:
-            self._kv_cache_manager.release(window, **kwargs)
+            await self._kv_cache_manager.release(window, **kwargs)
         window.statistic = self._stat_context_window(window)
         return window
 

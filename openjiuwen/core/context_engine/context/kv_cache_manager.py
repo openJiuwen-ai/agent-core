@@ -12,7 +12,7 @@ class KVCacheManager:
         self._session_id = session_id
         self._last_context_window: Optional[ContextWindow] = None
 
-    def release(self, context_window: ContextWindow, **kwargs):
+    async def release(self, context_window: ContextWindow, **kwargs):
         model = kwargs.get("model")
         if model is None or not isinstance(model, InferenceAffinityModel):
             return
@@ -30,7 +30,7 @@ class KVCacheManager:
                 kwargs["tools"] = self._last_context_window.get_tools()
                 kwargs["tools_released_index"] = tools_released_index
 
-            result = model.release(
+            result = await model.release(
                 model=model.model_config.model_name,
                 session_id=self._session_id,
                 messages=self._last_context_window.get_messages(),
