@@ -428,8 +428,8 @@ class MilvusVectorStore(VectorStore):
             if mode == "vector":
                 if raw_score_val is not None:
                     if self._distance_metric == "L2":
-                        # Milvus L2 returns squared L2 distance
-                        raw_score_scaled = (4.0 - raw_score_val) / 4.0
+                        # Milvus L2 returns squared L2 distance (max distance is 4 for unit vectors)
+                        raw_score_scaled = max(0.0, (4.0 - raw_score_val)) / 4.0
                     elif self._distance_metric == "COSINE":
                         # Milvus COSINE returns similarity in [-1, 1]
                         raw_score_scaled = (raw_score_val + 1.0) / 2.0

@@ -477,7 +477,7 @@ class ChromaVectorStore(VectorStore):
                 # ChromaDB returns distance, need to convert to similarity score
                 if raw_score_val is not None:
                     if self._distance_metric == "l2":
-                        # L2 distance, simple normalization (max distance is 4)
+                        # L2 distance, simple normalization (max distance is 4 for unit vectors)
                         raw_score_scaled = max(0.0, (4.0 - raw_score_val) / 4.0)
                     elif self._distance_metric == "cosine":
                         # For cosine distance, similarity = 1 - distance
