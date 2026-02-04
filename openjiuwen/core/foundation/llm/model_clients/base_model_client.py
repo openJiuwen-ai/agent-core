@@ -10,9 +10,14 @@ from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, ToolMessage
+from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema.generation_response import (
+    ImageGenerationResponse,
+    AudioGenerationResponse,
+    VideoGenerationResponse
+)
 
 
 class BaseModelClient(ABC):
@@ -327,6 +332,102 @@ class BaseModelClient(ABC):
 
         Yields:
             AssistantMessageChunk: Streaming response chunk
+        """
+        pass
+
+    @abstractmethod
+    async def generate_image(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            size: Optional[str] = "1664*928",
+            negative_prompt: Optional[str] = None,
+            n: Optional[int] = 1,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            seed: int = 0,
+            **kwargs
+    ) -> ImageGenerationResponse:
+        """Generate image from text prompt (text-to-image or text+image-to-image)
+
+        Args:
+            prompt: Text description of the image to generate or edit
+            image_url: Optional base image URL for image-to-image generation (editing/variations)
+            model: Model to use for generation
+            size: Size of the generated image (e.g., "1024x1024", "512x512")
+            quality: Quality of the generated image ("standard" or "hd")
+            n: Number of images to generate
+            timeout: Request timeout in seconds
+            **kwargs: Additional parameters
+
+        Returns:
+            ImageGenerationResponse: Generated image response
+        """
+        pass
+
+    @abstractmethod
+    async def generate_speech(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            voice: Optional[str] = "Cherry",
+            language_type: Optional[str] = "Auto",
+            **kwargs
+    ) -> AudioGenerationResponse:
+        """Generate speech audio from text
+
+        Args:
+            prompt: Text to convert to speech
+            model: Model to use for generation
+            voice: Voice to use (e.g., "alloy", "echo", "fable", "onyx", "nova", "shimmer")
+            speed: Speed of the generated audio (0.25 to 4.0)
+            response_format: Audio format ("mp3", "opus", "aac", "flac")
+            timeout: Request timeout in seconds
+            **kwargs: Additional parameters
+
+        Returns:
+            AudioGenerationResponse: Generated audio response
+        """
+        pass
+
+    @abstractmethod
+    async def generate_video(
+            self,
+            messages: List[UserMessage],
+            *,
+            img_url: Optional[str] = None,
+            audio_url: Optional[str] = None,
+            model: Optional[str] = None,
+            size: Optional[str] = None,
+            resolution: Optional[str] = None,
+            duration: Optional[int] = 5,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            negative_prompt: Optional[str] = None,
+            seed: Optional[int] = None,
+            **kwargs
+    ) -> VideoGenerationResponse:
+        """Generate video from text prompt (text-to-video or image-to-video)
+
+        Args:
+            messages: List of UserMessage containing text description of the video to generate
+            img_url: Optional URL/path of the first frame image for image-to-video generation.
+                     Supports: public URL, local file path (file:// prefix), or base64 encoded image
+            audio_url: Optional URL of audio to add to the video
+            model: Model to use for generation
+            size: Video size (e.g., "1280*720"). Use '*' as separator.
+            resolution: Video resolution (e.g., "720P", "1080P")
+            duration: Duration of the video in seconds (default: 5)
+            prompt_extend: Whether to automatically extend/enhance the prompt (default: True)
+            watermark: Whether to add watermark to generated video (default: False)
+            negative_prompt: Negative prompt to guide what not to generate
+            seed: Random seed for reproducible generation
+            **kwargs: Additional parameters
+
+        Returns:
+            VideoGenerationResponse: Generated video response
         """
         pass
 

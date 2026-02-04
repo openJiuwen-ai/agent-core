@@ -15,6 +15,7 @@ class ProviderType(str, Enum):
     """ModelClientProvider type"""
     OpenAI = "OpenAI"
     SiliconFlow = "SiliconFlow"
+    DashScope = "DashScope"
 
 
 class ModelClientConfig(BaseModel):
@@ -23,7 +24,7 @@ class ModelClientConfig(BaseModel):
         description="The ModelClient client ID is a unique identifier used for registration in the Runner")
     client_provider: Union[ProviderType, str] = Field(
         ...,
-        description="Service provider identification, Enumeration value: OpenAI or SiliconFlow"
+        description="Service provider identification, Enumeration value: OpenAI, SiliconFlow or ICBC"
     )
     api_key: str = Field(..., description="API key")
     api_base: str = Field(..., description="API base URL")
@@ -31,6 +32,7 @@ class ModelClientConfig(BaseModel):
     max_retries: int = Field(default=3, description="Maximum number of retries")
     verify_ssl: bool = Field(default=True, description="Whether to verify SSL certificates")
     ssl_cert: Optional[str] = Field(default=None, description="Path to SSL certificate file")
+    model_config = {"extra": "allow"}  # Allow extra fields like user_id for ICBC
 
     @classmethod
     def model_validate(

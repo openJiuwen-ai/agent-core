@@ -37,10 +37,15 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
     UsageMetadata,
 )
-from openjiuwen.core.foundation.llm.schema.message import BaseMessage
+from openjiuwen.core.foundation.llm.schema.message import BaseMessage, UserMessage
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema.generation_response import (
+    ImageGenerationResponse,
+    AudioGenerationResponse,
+    VideoGenerationResponse,
+)
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
@@ -182,6 +187,72 @@ class MockLLMModel(BaseModelClient):
             usage_metadata=result.usage_metadata
         )
         yield chunk
+
+    async def generate_image(
+        self,
+        messages: List[UserMessage],
+        *,
+        model: Optional[str] = None,
+        size: Optional[str] = "1664*928",
+        negative_prompt: Optional[str] = None,
+        n: Optional[int] = 1,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        seed: int = 0,
+        **kwargs
+    ) -> ImageGenerationResponse:
+        """Mock image generation; returns dummy ImageGenerationResponse.
+
+        For unit tests that don't care about image content, this method simply
+        returns placeholder data to satisfy the BaseModelClient interface.
+        """
+        return ImageGenerationResponse(
+            model=model or self.model_config.model_name,
+            images=[f"mock://image/{i}" for i in range(n or 1)],
+            images_base64=[],
+        )
+
+    async def generate_speech(
+        self,
+        messages: List[UserMessage],
+        *,
+        model: Optional[str] = None,
+        voice: Optional[str] = "Cherry",
+        language_type: Optional[str] = "Auto",
+        **kwargs
+    ) -> AudioGenerationResponse:
+        """Mock speech generation; returns dummy AudioGenerationResponse."""
+        return AudioGenerationResponse(
+            model=model or self.model_config.model_name,
+            audio_url="mock://audio/0",
+            audio_data=b"",
+            duration=0.0,
+        )
+
+    async def generate_video(
+        self,
+        messages: List[UserMessage],
+        *,
+        img_url: Optional[str] = None,
+        audio_url: Optional[str] = None,
+        model: Optional[str] = None,
+        size: Optional[str] = None,
+        resolution: Optional[str] = None,
+        duration: Optional[int] = 5,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        negative_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
+        **kwargs
+    ) -> VideoGenerationResponse:
+        """Mock video generation; returns dummy VideoGenerationResponse."""
+        return VideoGenerationResponse(
+            model=model or self.model_config.model_name,
+            video_url="mock://video/0",
+            video_data=b"",
+            duration=float(duration or 0),
+            resolution=resolution,
+        )
 
 
 def create_text_response(

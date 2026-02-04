@@ -11,10 +11,13 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
+    AudioGenerationResponse
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage,
     AssistantMessage,
-    UsageMetadata
+    UsageMetadata,
+    UserMessage
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -254,6 +257,50 @@ class OpenAIModelClient(BaseModelClient):
             if async_client is not None:
                 await async_client.close()
 
+    async def generate_image(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            size: Optional[str] = "1664*928",
+            negative_prompt: Optional[str] = None,
+            n: Optional[int] = 1,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            seed: int = 0,
+            **kwargs
+    ) -> ImageGenerationResponse:
+        pass
+
+    async def generate_video(
+            self,
+            messages: List[UserMessage],
+            *,
+            img_url: Optional[str] = None,
+            audio_url: Optional[str] = None,
+            model: Optional[str] = None,
+            size: Optional[str] = None,
+            resolution: Optional[str] = None,
+            duration: Optional[int] = 5,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            negative_prompt: Optional[str] = None,
+            seed: Optional[int] = None,
+            **kwargs
+    ) -> VideoGenerationResponse:
+        pass
+
+    async def generate_speech(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            voice: Optional[str] = "Cherry",
+            language_type: Optional[str] = "Auto",
+            **kwargs
+    ) -> AudioGenerationResponse:
+        pass
+
     async def _astream_with_parser(
             self,
             response_stream,
@@ -269,14 +316,14 @@ class OpenAIModelClient(BaseModelClient):
         5. When parsing fails, parser_content is None, continue accumulating
         """
         accumulated_content = ""
-        
+
         async for chunk_item in response_stream:
             parsed_chunk = self._parse_stream_chunk(chunk_item)
             if parsed_chunk:
                 # Accumulate content
                 if parsed_chunk.content:
                     accumulated_content += parsed_chunk.content
-                
+
                 # Attempt to parse accumulated content every time
                 parser_content = None
                 if accumulated_content and output_parser:
@@ -296,7 +343,7 @@ class OpenAIModelClient(BaseModelClient):
                             exception=str(e)
                         )
                         parser_content = None
-                
+
                 chunk_with_parser = AssistantMessageChunk(
                     content=parsed_chunk.content,  # Keep original content increment unchanged
                     reasoning_content=parsed_chunk.reasoning_content,
@@ -305,7 +352,7 @@ class OpenAIModelClient(BaseModelClient):
                     finish_reason=parsed_chunk.finish_reason,
                     parser_content=parser_content  # Has value when parsing succeeds, otherwise None
                 )
-                
+
                 yield chunk_with_parser
 
     async def _parse_response(
