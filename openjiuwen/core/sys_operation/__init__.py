@@ -12,5 +12,4 @@ __all__ = [
     "SandboxGatewayConfig",
     "SysOperationCard",
     "SysOperation",
-    "SysOperationToolAdapter"
 ]

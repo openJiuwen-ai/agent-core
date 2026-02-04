@@ -284,7 +284,6 @@ async def test_execute_cmd_stream_empty_command(sys_op):
 
 
 @pytest.mark.asyncio
-@unittest.skip("skip system test")
 async def test_execute_cmd_stream_allowlist(sys_op, work_dir):
     """Test streaming execution with allowlist validation"""
     # Recreate sys_op with allowlist
@@ -298,7 +297,7 @@ async def test_execute_cmd_stream_allowlist(sys_op, work_dir):
     try:
         # Test allowed command (echo)
         stream_results_allowed = []
-        async for res in op.shell().execute_cmd_stream(command='echo "allowed"'):
+        async for res in op.shell().execute_cmd_stream(command='echo allowed'):
             stream_results_allowed.append(res)
         assert any(r.data.type == "stdout" and "allowed" in r.data.text for r in stream_results_allowed)
 
