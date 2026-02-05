@@ -36,6 +36,7 @@ from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.skills.remote_skill_util import GitHubTree
 
 
 class ReActAgentConfig(BaseModel):
@@ -364,6 +365,9 @@ class ReActAgent(BaseAgent):
     async def register_skill(self, skill_path: Union[str, List[str]]):
         """Register a skill"""
         await self._skill_util.register_skills(skill_path, self)
+
+    async def register_remote_skills(self, skills_dir: str, github_tree: GitHubTree, token: str = ""):
+        await self._skill_util.register_remote_skills(skills_dir, github_tree, token=token)
 
     async def _call_llm(
         self,

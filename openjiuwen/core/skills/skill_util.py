@@ -4,6 +4,7 @@ from pathlib import Path
 
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.single_agent import BaseAgent
+from openjiuwen.core.skills.remote_skill_util import GitHubTree, RemoteSkillUtil
 from openjiuwen.core.skills.skill_manager import SkillManager
 from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
 
@@ -19,7 +20,7 @@ class SkillUtil:
     """Utility class for managing and working with skills.
 
     This class provides a high-level interface for skill registration, tool management,
-    and prompt generation. It combines SkillManager and SkillToolKit functionality.
+    and prompt generation. It combines SkillManager, SkillToolKit, and RemoteSkillUtil functionalities.
     """
 
     def __init__(self, sys_operation_id: str):
@@ -30,10 +31,12 @@ class SkillUtil:
         """
         self._skill_manager = SkillManager(sys_operation_id)
         self._skill_tool_kit = SkillToolKit(sys_operation_id)
+        self._remote_skill_util = RemoteSkillUtil(sys_operation_id)
 
     def set_sys_operation_id(self, sys_operation_id: str) -> None:
         self.skill_manager.set_sys_operation_id(sys_operation_id)
         self.skill_tool_kit.sys_operation_id = sys_operation_id
+        self.remote_skill_util.set_sys_operation_id(sys_operation_id)
 
     @property
     def skill_manager(self):
@@ -52,6 +55,15 @@ class SkillUtil:
             SkillToolKit: The skill tool kit instance.
         """
         return self._skill_tool_kit
+    
+    @property
+    def remote_skill_util(self):
+        """Get the remote skill util instance.
+
+        Returns:
+            RemoteSkillUtil: The remote skill util instance.
+        """
+        return self._remote_skill_util
 
     async def register_skills(self, skill_path: str, agent: "BaseAgent", session_id: str = None) -> bool:
         """Register skills and add skill tools to an agent.
@@ -69,6 +81,13 @@ class SkillUtil:
         """
         self._skill_tool_kit.add_skill_tools(agent)
         await self._skill_manager.register(Path(skill_path), session_id)
+
+    async def register_remote_skills(self, skills_dir: str, github_tree: GitHubTree, token: str = "") -> None:
+        skill_paths = await self._remote_skill_util.upload_skill_from_github(
+            tree=github_tree,
+            skills_dir=skills_dir, 
+            token=token
+        )
 
     def has_skill(self):
         """Check if any skills are registered.
