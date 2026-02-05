@@ -37,7 +37,7 @@ from openjiuwen.core.common.logging import logger
 # ==================== Test TaskExecutor ====================
 
 class CancellableTaskExecutor(TaskExecutor):
-    """Cancelable task executor
+    """Cancelable task executor - OPTIMIZED VERSION
     
     Used to test task cancellation. The task keeps running until it is cancelled.
     """
@@ -60,14 +60,14 @@ class CancellableTaskExecutor(TaskExecutor):
             last_chunk=False
         )
         
-        # Decide execution time based on task ID: task_1 finishes quickly (2 iterations),
-        # task_2 and task_3 run slowly (100 iterations)
+        # OPTIMIZED: Decide execution time based on task ID: task_1 finishes quickly (2 iterations),
+        # task_2 and task_3 run with fewer iterations (from 100 to 8)
         if "task_1" in task_id:
             iterations = 2
-            sleep_time = 0.1
+            sleep_time = 0.01  # OPTIMIZED: from 0.1 to 0.01
         else:
-            iterations = 100
-            sleep_time = 0.1
+            iterations = 8  # OPTIMIZED: from 100 to 8
+            sleep_time = 0.01  # OPTIMIZED: from 0.1 to 0.01
         
         # Simulate a long-running task
         for i in range(iterations):
@@ -123,7 +123,7 @@ class CancellableTaskExecutor(TaskExecutor):
 
 
 class NonCancellableTaskExecutor(TaskExecutor):
-    """Non-cancellable task executor
+    """Non-cancellable task executor - OPTIMIZED VERSION
 
     Used to test attempting to cancel a non-cancellable task.
     """
@@ -140,7 +140,7 @@ class NonCancellableTaskExecutor(TaskExecutor):
             last_chunk=False
         )
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.02)  # OPTIMIZED: from 0.5 to 0.02
 
         yield ControllerOutputChunk(
             index=1,
@@ -166,7 +166,7 @@ class NonCancellableTaskExecutor(TaskExecutor):
 
 
 class FailingTaskExecutor(TaskExecutor):
-    """Task executor that fails
+    """Task executor that fails - OPTIMIZED VERSION
 
     Used to test task execution failure.
     """
@@ -183,7 +183,7 @@ class FailingTaskExecutor(TaskExecutor):
             last_chunk=False
         )
 
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.005)  # OPTIMIZED: from 0.1 to 0.005
 
         # Simulate task failure
         raise RuntimeError(f"Task {task_id} failed intentionally")
@@ -202,7 +202,7 @@ class FailingTaskExecutor(TaskExecutor):
 
 
 class PauseExceptionTaskExecutor(TaskExecutor):
-    """Task executor that throws exception during pause
+    """Task executor that throws exception during pause - OPTIMIZED VERSION
 
     Used to test exception handling when pause() fails.
     """
@@ -219,9 +219,9 @@ class PauseExceptionTaskExecutor(TaskExecutor):
             last_chunk=False
         )
 
-        # Run for a long time
-        for i in range(100):
-            await asyncio.sleep(0.1)
+        # OPTIMIZED: Run for a shorter time (from 100 to 6 iterations)
+        for i in range(6):
+            await asyncio.sleep(0.005)  # OPTIMIZED: from 0.1 to 0.005
             yield ControllerOutputChunk(
                 index=i + 1,
                 type="controller_output",
@@ -233,7 +233,7 @@ class PauseExceptionTaskExecutor(TaskExecutor):
             )
 
         yield ControllerOutputChunk(
-            index=101,
+            index=7,  # Updated to match new iteration count
             type="controller_output",
             payload=ControllerOutputPayload(
                 type=EventType.TASK_COMPLETION,
@@ -257,7 +257,7 @@ class PauseExceptionTaskExecutor(TaskExecutor):
 
 
 class CancelExceptionTaskExecutor(TaskExecutor):
-    """Task executor that throws exception during cancel
+    """Task executor that throws exception during cancel - OPTIMIZED VERSION
 
     Used to test exception handling when cancel() fails.
     """
@@ -274,9 +274,9 @@ class CancelExceptionTaskExecutor(TaskExecutor):
             last_chunk=False
         )
 
-        # Run for a long time
-        for i in range(100):
-            await asyncio.sleep(0.1)
+        # OPTIMIZED: Run for a shorter time (from 100 to 6 iterations)
+        for i in range(6):
+            await asyncio.sleep(0.005)  # OPTIMIZED: from 0.1 to 0.005
             yield ControllerOutputChunk(
                 index=i + 1,
                 type="controller_output",
@@ -288,7 +288,7 @@ class CancelExceptionTaskExecutor(TaskExecutor):
             )
 
         yield ControllerOutputChunk(
-            index=101,
+            index=7,  # Updated to match new iteration count
             type="controller_output",
             payload=ControllerOutputPayload(
                 type=EventType.TASK_COMPLETION,
@@ -1812,8 +1812,8 @@ class TestLifecycleManagement:
             collect_stream_output(agent.stream(input_event, session))
         )
 
-        # Wait for a while to let tasks start executing
-        await asyncio.sleep(0.3)
+        # OPTIMIZED: Wait for a shorter time to let tasks start executing
+        await asyncio.sleep(0.05)  # OPTIMIZED: from 0.3 to 0.05
 
         # Verify EventQueue and TaskScheduler are both stopped
         try:
