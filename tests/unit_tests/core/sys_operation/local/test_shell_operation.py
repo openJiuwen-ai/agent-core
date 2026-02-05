@@ -6,7 +6,6 @@ import pathlib
 import platform
 import shutil
 import tempfile
-import unittest
 
 import pytest
 import pytest_asyncio
@@ -212,9 +211,9 @@ async def test_execute_cmd_stream_basic(sys_op):
     """Test basic streaming command execution (stdout/stderr chunked output)"""
     # Construct chunked output command (multi-echo to simulate chunks, cross-platform compatible)
     if platform.system() == "Windows":
-        cmd = 'echo "chunk1" && echo "chunk2" && echo "error_chunk" 1>&2'
+        cmd = 'echo chunk1 && echo chunk2 && echo error_chunk 1>&2'
     else:
-        cmd = 'echo "chunk1"; echo "chunk2"; echo "error_chunk" >&2'
+        cmd = 'echo chunk1 >&1 && echo chunk2 >&1 && echo error_chunk 1>&2'
 
     # Collect streaming results
     stream_results = []
