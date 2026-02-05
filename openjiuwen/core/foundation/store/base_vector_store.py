@@ -48,10 +48,16 @@ class FieldSchema(BaseModel):
     @classmethod
     def validate_dim(cls, v: Optional[int], info) -> Optional[int]:
         if v is not None and v <= 0:
-            raise build_error(StatusCode.STORE_VECTOR_FIELD_DIM_INVALID, field=info.data.get("name"), dim=v)
+            raise build_error(
+                StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                error_msg=f"dim of vector field is invalid, field={info.data.get('name')}, dim={v}"
+            )
         dtype = info.data.get("dtype")
         if dtype == VectorDataType.FLOAT_VECTOR and v is None:
-            raise build_error(StatusCode.STORE_VECTOR_FIELD_DIM_MISSING, field=info.data.get("name"), dim=v)
+            raise build_error(
+                StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                error_msg=f"dim of vector field is missing, field={info.data.get('name')}, dim={v}"
+            )
         return v
 
     def to_dict(self) -> Dict[str, Any]:
@@ -115,9 +121,9 @@ class CollectionSchema(BaseModel):
         primary_fields = [f for f in self.fields if f.is_primary]
         if len(primary_fields) > 1:
             raise build_error(
-                StatusCode.STORE_VECTOR_PRIMARY_KEY_FIELD_DUPLICATED,
-                primary_field=primary_fields[0].name,
-                field=primary_fields[1].name
+                StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                error_msg=f"collection can have at most one primary key field,"
+                          f" primary_field={primary_fields[0].name}, field={primary_fields[1].name}"
             )
 
     def add_field(self, field: Union[FieldSchema, Dict[str, Any]]) -> "CollectionSchema":
@@ -136,8 +142,8 @@ class CollectionSchema(BaseModel):
         # Check for duplicate field names
         if any(f.name == field.name for f in self.fields):
             raise build_error(
-                StatusCode.STORE_VECTOR_FIELD_NAME_DUPLICATED,
-                field=field.name
+                StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                error_msg=f"field name already exists, field={field.name}"
             )
 
         # Check for duplicate primary key
@@ -145,9 +151,9 @@ class CollectionSchema(BaseModel):
             primary_fields = [f for f in self.fields if f.is_primary]
             if primary_fields:
                 raise build_error(
-                    StatusCode.STORE_VECTOR_PRIMARY_KEY_FIELD_DUPLICATED,
-                    primary_field=primary_fields[0].name,
-                    field=field.name
+                    StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                    error_msg=f"collection can have at most one primary key field,"
+                              f" primary_field={primary_fields[0].name}, field={field.name}"
                 )
 
         self.fields.append(field)

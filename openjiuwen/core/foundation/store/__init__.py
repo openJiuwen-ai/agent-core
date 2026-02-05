@@ -21,6 +21,9 @@ def create_vector_store(store_type: str, **kwargs) -> BaseVectorStore | None:
     if store_type == "chroma":
         from openjiuwen.core.foundation.store.vector.chroma_vector_store import ChromaVectorStore
         return ChromaVectorStore(**kwargs)
+    elif store_type == "milvus":
+        from openjiuwen.core.foundation.store.vector.milvus_vector_store import MilvusVectorStore
+        return MilvusVectorStore(**kwargs)
     else:
         return None
 
@@ -36,4 +39,5 @@ __all__ = [
     "CollectionSchema",
     "FieldSchema",
     "VectorDataType",
+    "create_vector_store",
 ]

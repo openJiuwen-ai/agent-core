@@ -1,0 +1,734 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+import asyncio
+import json
+from typing import Any, Dict, List, Optional, Union
+
+from pymilvus import DataType as MilvusDataType, MilvusClient, MilvusException
+
+from openjiuwen.core.common.logging import store_logger, LogEventType
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.store.base_vector_store import (
+    BaseVectorStore,
+    VectorSearchResult,
+    CollectionSchema,
+    VectorDataType,
+    FieldSchema,
+)
+
+
+class MilvusVectorStore(BaseVectorStore):
+    """
+    Milvus vector store implementation.
+
+    This class implements BaseVectorStore interface using Milvus as the backend.
+    """
+
+    def __init__(
+        self,
+        milvus_uri: str,
+        milvus_token: Optional[str] = None,
+        database_name: str = "default",
+        **kwargs: Any,
+    ):
+        """
+        Initialize MilvusVectorStore.
+
+        The Milvus client is created lazily when first needed, not during initialization.
+        This allows the store to be instantiated even when Milvus is temporarily unavailable.
+
+        Args:
+            milvus_uri: Milvus URI (e.g., "http://localhost:19530")
+            milvus_token: Milvus token for authentication (optional)
+            database_name: Name of the database. Defaults to "default".
+            **kwargs: Additional parameters for Milvus client initialization.
+        """
+        self.milvus_uri = milvus_uri
+        self.milvus_token = milvus_token
+        self.database_name = database_name
+        self._kwargs = kwargs
+
+        # Client will be created lazily on first access
+        self._client: Optional[MilvusClient] = None
+
+        # Cache for collections metadata (distance metrics, etc.)
+        self._collection_metadata: Dict[str, Dict[str, Any]] = {}
+
+    @property
+    def client(self) -> MilvusClient:
+        """
+        Get or create the Milvus client lazily.
+
+        The client is created on first access and reused for subsequent operations.
+
+        Returns:
+            MilvusClient: The Milvus client instance.
+
+        Raises:
+            MilvusException: If connection to Milvus fails.
+        """
+        if self._client is None:
+            self._client = self._create_client(
+                database_name=self.database_name,
+                path_or_uri=self.milvus_uri,
+                token=self.milvus_token or "",
+                **self._kwargs,
+            )
+            store_logger.info(
+                "Successfully connected to Milvus",
+                event_type=LogEventType.STORE_RETRIEVE,
+                table_name=self.database_name
+            )
+        return self._client
+
+    @staticmethod
+    def _create_client(
+        database_name: str,
+        path_or_uri: str,
+        token: str = "",
+        **kwargs: Any,
+    ) -> MilvusClient:
+        """Create Milvus client and ensure database exists."""
+        client = MilvusClient(uri=path_or_uri, token=token, **kwargs)
+        if database_name and database_name != "default":
+            if database_name not in client.list_databases():
+                client.create_database(database_name)
+            client.use_database(database_name)
+        return client
+
+    def close(self):
+        """
+        Close the Milvus client connection.
+
+        This method releases the client resource. After calling close(),
+        the client will be recreated on the next operation.
+        """
+        if self._client is not None:
+            self._client = None
+            store_logger.info(
+                "Milvus client connection closed",
+                event_type=LogEventType.STORE_DELETE,
+            )
+
+    def _map_field_type(self, field_type: "VectorDataType") -> MilvusDataType:
+        """Map our VectorDataType to Milvus DataType"""
+        type_mapping = {
+            VectorDataType.VARCHAR: MilvusDataType.VARCHAR,
+            VectorDataType.FLOAT_VECTOR: MilvusDataType.FLOAT_VECTOR,
+            VectorDataType.INT64: MilvusDataType.INT64,
+            VectorDataType.INT32: MilvusDataType.INT32,
+            VectorDataType.FLOAT: MilvusDataType.FLOAT,
+            VectorDataType.DOUBLE: MilvusDataType.DOUBLE,
+            VectorDataType.BOOL: MilvusDataType.BOOL,
+            VectorDataType.JSON: MilvusDataType.JSON,
+        }
+        if field_type not in type_mapping:
+            raise build_error(
+                StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                error_msg=f"unsupported field type, field_type={field_type}"
+            )
+        return type_mapping[field_type]
+
+    def _build_filter_expr(self, filters: Dict[str, Any]) -> Optional[str]:
+        """Build Milvus filter expression from filters dictionary (equality only)"""
+        if not filters:
+            return None
+
+        filter_parts = []
+        for key, value in filters.items():
+            if isinstance(value, str):
+                filter_parts.append(f'{key} == "{value}"')
+            else:
+                filter_parts.append(f"{key} == {value}")
+
+        return " && ".join(filter_parts) if filter_parts else None
+
+    async def create_collection(
+        self,
+        collection_name: str,
+        schema: Union[CollectionSchema, Dict[str, Any]],
+        **kwargs: Any,
+    ) -> None:
+        """
+        Create a new collection with specified schema.
+
+        If the collection already exists, this method does nothing.
+
+        Args:
+            collection_name: Name of the collection to create
+            schema: CollectionSchema instance or schema dictionary
+            **kwargs: Additional parameters for collection creation
+                - distance_metric (str): Distance metric for vector search (default: "COSINE")
+                  Options: "COSINE", "L2", "IP"
+                - index_type (str): Index type for vector field (default: "AUTOINDEX")
+        """
+        # Check if collection already exists
+        has_collection = await asyncio.to_thread(
+            self.client.has_collection, collection_name
+        )
+        if has_collection:
+            store_logger.info(
+                "Collection already exists, skipping creation",
+                event_type=LogEventType.STORE_ADD,
+                table_name=collection_name
+            )
+            return
+
+        distance_metric = kwargs.get("distance_metric", "COSINE").upper()
+        index_type = kwargs.get("index_type", "AUTOINDEX")
+
+        # Convert dict to CollectionSchema if needed
+        if isinstance(schema, dict):
+            schema = CollectionSchema.from_dict(schema)
+
+        def _create():
+            # Build Milvus schema
+            milvus_schema = self.client.create_schema(
+                enable_dynamic_field=schema.enable_dynamic_field,
+                description=schema.description or "",
+            )
+
+            index_params = self.client.prepare_index_params()
+
+            vector_field_name = None
+            vector_dim = None
+
+            # Process fields from schema
+            for field in schema.fields:
+                field_name = field.name
+                is_primary = field.is_primary
+                auto_id = field.auto_id
+
+                # Map our VectorDataType to Milvus DataType
+                milvus_type = self._map_field_type(field.dtype)
+
+                # Handle vector field
+                if milvus_type == MilvusDataType.FLOAT_VECTOR:
+                    vector_dim = field.dim
+                    if not vector_dim:
+                        raise build_error(
+                            StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                            error_msg=f"dim of vector field is missing, field={field_name}, dim={vector_dim}"
+                        )
+                    vector_field_name = field_name
+
+                    milvus_schema.add_field(
+                        field_name=field_name,
+                        datatype=milvus_type,
+                        dim=vector_dim,
+                    )
+
+                    # Add vector index
+                    index_params.add_index(
+                        field_name=field_name,
+                        index_type=index_type,
+                        metric_type=distance_metric,
+                    )
+                elif milvus_type == MilvusDataType.VARCHAR:
+                    max_length = field.max_length or 65535
+                    milvus_schema.add_field(
+                        field_name=field_name,
+                        datatype=milvus_type,
+                        max_length=max_length,
+                        is_primary=is_primary,
+                        auto_id=auto_id,
+                    )
+
+                    # Add inverted index for VARCHAR fields (for filtering)
+                    if not is_primary:
+                        index_params.add_index(
+                            field_name=field_name,
+                            index_type="INVERTED",
+                        )
+                elif milvus_type == MilvusDataType.JSON:
+                    milvus_schema.add_field(
+                        field_name=field_name,
+                        datatype=milvus_type,
+                    )
+                else:
+                    # Other scalar types
+                    milvus_schema.add_field(
+                        field_name=field_name,
+                        datatype=milvus_type,
+                        is_primary=is_primary,
+                        auto_id=auto_id,
+                    )
+
+                    # Add inverted index for scalar fields (for filtering)
+                    if not is_primary and milvus_type in (MilvusDataType.INT64, MilvusDataType.INT32):
+                        index_params.add_index(
+                            field_name=field_name,
+                            index_type="INVERTED",
+                        )
+
+            if not vector_field_name:
+                raise build_error(
+                    StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                    error_msg="schema must contain at least one FLOAT_VECTOR field"
+                )
+
+            # Create collection
+            self.client.create_collection(
+                collection_name=collection_name,
+                schema=milvus_schema,
+                index_params=index_params,
+            )
+
+            # Store collection metadata
+            self._collection_metadata[collection_name] = {
+                "distance_metric": distance_metric,
+                "vector_field": vector_field_name,
+                "vector_dim": vector_dim,
+            }
+
+            store_logger.info(
+                f"Created collection with {len(schema.fields)} fields",
+                event_type=LogEventType.STORE_ADD,
+                table_name=collection_name
+            )
+
+        await asyncio.to_thread(_create)
+
+    async def delete_collection(
+        self,
+        collection_name: str,
+        **kwargs: Any,
+    ) -> None:
+        """
+        Delete a collection by name.
+
+        Args:
+            collection_name: Name of the collection to delete
+            **kwargs: Additional parameters for collection deletion
+        """
+        def _delete():
+            try:
+                if not self.client.has_collection(collection_name=collection_name):
+                    store_logger.warning(
+                        "Collection does not exist",
+                        event_type=LogEventType.STORE_DELETE,
+                        table_name=collection_name
+                    )
+                    return
+                self.client.drop_collection(collection_name=collection_name)
+                if collection_name in self._collection_metadata:
+                    del self._collection_metadata[collection_name]
+                store_logger.info(
+                    "Deleted collection",
+                    event_type=LogEventType.STORE_DELETE,
+                    table_name=collection_name
+                )
+            except MilvusException as e:
+                store_logger.error(
+                    "Failed to delete collection",
+                    event_type=LogEventType.STORE_DELETE,
+                    table_name=collection_name,
+                    exception=str(e)
+                )
+                raise
+
+        await asyncio.to_thread(_delete)
+
+    async def collection_exists(
+        self,
+        collection_name: str,
+        **kwargs: Any,
+    ) -> bool:
+        """
+        Check if a collection exists.
+
+        Args:
+            collection_name: Name of the collection to check
+            **kwargs: Additional parameters for collection existence check
+
+        Returns:
+            bool: True if the collection exists, False otherwise
+        """
+        return await asyncio.to_thread(self.client.has_collection, collection_name)
+
+    def _map_milvus_type_to_our_type(self, milvus_type: MilvusDataType) -> VectorDataType:
+        """Map Milvus DataType to our VectorDataType."""
+        type_mapping = {
+            MilvusDataType.VARCHAR: VectorDataType.VARCHAR,
+            MilvusDataType.FLOAT_VECTOR: VectorDataType.FLOAT_VECTOR,
+            MilvusDataType.INT64: VectorDataType.INT64,
+            MilvusDataType.INT32: VectorDataType.INT32,
+            MilvusDataType.FLOAT: VectorDataType.FLOAT,
+            MilvusDataType.DOUBLE: VectorDataType.DOUBLE,
+            MilvusDataType.BOOL: VectorDataType.BOOL,
+            MilvusDataType.JSON: VectorDataType.JSON,
+        }
+        if milvus_type not in type_mapping:
+            # For unsupported types, return a default or raise
+            store_logger.warning(
+                f"Unsupported Milvus type: {milvus_type}, defaulting to VARCHAR",
+                event_type=LogEventType.STORE_RETRIEVE
+            )
+            return VectorDataType.VARCHAR
+        return type_mapping[milvus_type]
+
+    async def get_schema(
+        self,
+        collection_name: str,
+        **kwargs: Any,
+    ) -> CollectionSchema:
+        """
+        Get the schema of a collection.
+
+        Args:
+            collection_name: Name of the collection
+            **kwargs: Additional parameters for getting schema
+
+        Returns:
+            CollectionSchema: The schema of the collection
+
+        Raises:
+            ValueError: If the collection does not exist
+            MilvusException: If getting schema fails
+        """
+        def _get_schema():
+            # Check if collection exists
+            if not self.client.has_collection(collection_name):
+                raise build_error(StatusCode.STORE_VECTOR_COLLECTION_NOT_FOUND, collection_name=collection_name)
+
+            # Get collection description from Milvus
+            collection_info = self.client.describe_collection(collection_name=collection_name)
+
+            # Extract schema information
+            schema = CollectionSchema(
+                description=collection_info.get("description", ""),
+                enable_dynamic_field=collection_info.get("enable_dynamic_field", False),
+            )
+
+            # Process fields
+            for field_info in collection_info.get("fields", []):
+                field_name = field_info.get("name")
+                field_type = field_info.get("type")
+
+                # Map Milvus type to our type
+                # field_type might be a DataType enum or string
+                if isinstance(field_type, str):
+                    try:
+                        our_type = VectorDataType(field_type.upper())
+                    except ValueError:
+                        # If not in our enum, try to map from known Milvus types
+                        our_type = VectorDataType.VARCHAR  # Default
+                else:
+                    # It's a MilvusDataType enum
+                    our_type = self._map_milvus_type_to_our_type(field_type)
+
+                # Create field schema
+                # Handle both direct fields and nested params (different Milvus versions)
+                max_length = field_info.get("max_length") or field_info.get("params", {}).get("max_length")
+                dim = field_info.get("dim") or field_info.get("params", {}).get("dim")
+
+                field = FieldSchema(
+                    name=field_name,
+                    dtype=our_type,
+                    is_primary=field_info.get("is_primary", False),
+                    auto_id=field_info.get("auto_id", False),
+                    max_length=max_length,
+                    dim=dim,
+                    description=field_info.get("description"),
+                )
+                schema.add_field(field)
+
+            return schema
+
+        return await asyncio.to_thread(_get_schema)
+
+    async def add_docs(
+        self,
+        collection_name: str,
+        docs: List[Dict[str, Any]],
+        **kwargs: Any,
+    ) -> None:
+        """
+        Add documents to a collection.
+
+        Args:
+            collection_name: Name of the target collection
+            docs: List of documents to add
+            **kwargs: Additional parameters for document insertion
+                - batch_size (int, optional): Batch size for bulk insertion (default: 128)
+        """
+        batch_size = kwargs.get("batch_size", 128)
+        if batch_size <= 0:
+            batch_size = 128
+
+        # Get collection metadata to know vector field name
+        if collection_name not in self._collection_metadata:
+            # Try to get from existing collection
+            try:
+                collection_info = await asyncio.to_thread(
+                    self.client.describe_collection,
+                    collection_name=collection_name,
+                )
+                # Extract vector field from schema
+                vector_field = None
+                for field in collection_info.get("fields", []):
+                    if field.get("type") == "FLOAT_VECTOR":
+                        vector_field = field.get("name")
+                        break
+                if vector_field:
+                    self._collection_metadata[collection_name] = {
+                        "vector_field": vector_field,
+                    }
+            except Exception as e:
+                store_logger.warning(
+                    "Could not get collection metadata",
+                    event_type=LogEventType.STORE_ADD,
+                    table_name=collection_name,
+                    exception=str(e)
+                )
+
+        def _add_batch(batch: List[Dict[str, Any]]):
+            self.client.insert(
+                collection_name=collection_name,
+                data=batch,
+            )
+
+        # Process in batches
+        total = len(docs)
+        processed = 0
+        for i in range(0, total, batch_size):
+            batch = docs[i: i + batch_size]
+            await asyncio.to_thread(_add_batch, batch)
+            processed += len(batch)
+            if processed % 100 == 0:
+                store_logger.info(
+                    f"Added {processed}/{total} documents to collection",
+                    event_type=LogEventType.STORE_ADD,
+                    table_name=collection_name,
+                    data_num=processed
+                )
+
+        # Flush to ensure data is persisted
+        await asyncio.to_thread(self.client.flush, collection_name=collection_name)
+        store_logger.info(
+            "Successfully added documents collection",
+            event_type=LogEventType.STORE_ADD,
+            table_name=collection_name,
+            data_num=total
+        )
+
+    async def search(
+        self,
+        collection_name: str,
+        query_vector: List[float],
+        vector_field: str,
+        top_k: int = 5,
+        filters: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> List[VectorSearchResult]:
+        """
+        Search for the most relevant documents by vector similarity.
+
+        Args:
+            collection_name: Name of the collection to search
+            query_vector: Query vector for similarity search
+            vector_field: Name of the vector field to search against (e.g., "embedding")
+            top_k: Number of most relevant documents to return
+            filters: Optional dictionary of scalar field filters for filtering results
+            **kwargs: Additional search parameters
+                - metric_type (str, optional): Distance metric override
+                - output_fields (List[str], optional): Fields to return in results
+
+        Returns:
+            List of VectorSearchResult objects
+        """
+        # Get collection metadata
+        collection_meta = self._collection_metadata.get(collection_name, {})
+        distance_metric = kwargs.get("metric_type") or collection_meta.get("distance_metric", "COSINE")
+        output_fields = kwargs.get("output_fields")
+
+        # Build filter expression
+        filter_expr = self._build_filter_expr(filters) if filters else None
+
+        def _search():
+            # Determine output fields
+            search_output_fields = output_fields
+            if not search_output_fields:
+                # Try to get collection schema to determine output fields
+                try:
+                    collection_info = self.client.describe_collection(collection_name=collection_name)
+                    search_output_fields = [field.get("name") for field in collection_info.get("fields", [])]
+                except Exception:
+                    # Fallback: use common field names
+                    search_output_fields = ["id", "text", "metadata"]
+
+            # Execute search
+            results = self.client.search(
+                collection_name=collection_name,
+                data=[query_vector],
+                anns_field=vector_field,
+                limit=top_k,
+                output_fields=search_output_fields or [],
+                search_params={"metric_type": distance_metric},
+                filter=filter_expr,
+            )
+
+            return results
+
+        results = await asyncio.to_thread(_search)
+
+        # Convert results to VectorSearchResult
+        search_results = []
+        if results and len(results) > 0:
+            # Milvus returns results as a list of hits per query
+            hits = results[0] if isinstance(results[0], list) else results
+
+            for hit in hits:
+                # Extract score/distance
+                distance = hit.get("distance")
+                score = hit.get("score")
+
+                # Convert distance to similarity score if needed
+                if score is not None:
+                    final_score = float(score)
+                elif distance is not None:
+                    # Convert distance to similarity score based on metric
+                    distance_val = float(distance)
+                    if distance_metric == "COSINE":
+                        # Milvus COSINE returns similarity in [-1, 1] (larger = more similar)
+                        # Convert to [0, 1]: (distance + 1) / 2
+                        final_score = max(0.0, min(1.0, (distance_val + 1.0) / 2.0))
+                    elif distance_metric == "L2":
+                        # L2 distance: smaller = more similar, range [0, ∞)
+                        # Convert to [0, 1]: 1 / (1 + distance)
+                        final_score = 1.0 / (1.0 + distance_val)
+                    else:  # IP (Inner Product)
+                        # Milvus IP returns similarity in [-1, 1] (larger = more similar)
+                        # Convert to [0, 1]: (distance + 1) / 2
+                        final_score = max(0.0, min(1.0, (distance_val + 1.0) / 2.0))
+                else:
+                    final_score = 0.0
+
+                # Extract all fields from hit
+                fields = {}
+                # Get entity fields
+                entity = hit.get("entity", {})
+                for key, value in entity.items():
+                    # Handle JSON fields
+                    if isinstance(value, str):
+                        try:
+                            value = json.loads(value)
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    fields[key] = value
+
+                # Also include id if present in hit
+                if "id" in hit:
+                    fields["id"] = hit["id"]
+                elif "pk" in hit:
+                    fields["id"] = str(hit["pk"])
+
+                search_results.append(
+                    VectorSearchResult(
+                        score=final_score,
+                        fields=fields,
+                    )
+                )
+
+        return search_results
+
+    async def delete_docs_by_ids(
+        self,
+        collection_name: str,
+        ids: List[str],
+        **kwargs: Any,
+    ) -> None:
+        """
+        Delete documents by their IDs.
+
+        Args:
+            collection_name: Name of the collection
+            ids: List of document IDs to delete
+            **kwargs: Additional parameters for deletion
+        """
+        if not ids:
+            store_logger.warning(
+                "No IDs provided for deletion",
+                event_type=LogEventType.STORE_DELETE,
+                table_name=collection_name
+            )
+            return
+
+        def _delete():
+            try:
+                result = self.client.delete(
+                    collection_name=collection_name,
+                    ids=ids,
+                )
+                # Flush to ensure deletion is persisted
+                self.client.flush(collection_name=collection_name)
+                deleted_count = result.get("delete_count", 0) if isinstance(result, dict) else len(ids)
+                store_logger.info(
+                    "Deleted documents from collection",
+                    event_type=LogEventType.STORE_DELETE,
+                    table_name=collection_name,
+                    data_num=deleted_count
+                )
+            except MilvusException as e:
+                store_logger.error(
+                    "Failed to delete documents from collection",
+                    event_type=LogEventType.STORE_DELETE,
+                    table_name=collection_name,
+                    exception=str(e)
+                )
+                raise
+
+        await asyncio.to_thread(_delete)
+
+    async def delete_docs_by_filters(
+        self,
+        collection_name: str,
+        filters: Dict[str, Any],
+        **kwargs: Any,
+    ) -> None:
+        """
+        Delete documents by scalar field filters.
+
+        Args:
+            collection_name: Name of the collection
+            filters: Dictionary of scalar field filters for matching documents to delete
+            **kwargs: Additional parameters for deletion
+        """
+        if not filters:
+            store_logger.warning(
+                "No filters provided for deletion",
+                event_type=LogEventType.STORE_DELETE,
+                table_name=collection_name
+            )
+            return
+
+        # Build filter expression
+        filter_expr = self._build_filter_expr(filters)
+
+        def _delete():
+            try:
+                result = self.client.delete(
+                    collection_name=collection_name,
+                    filter=filter_expr,
+                )
+                # Flush to ensure deletion is persisted
+                self.client.flush(collection_name=collection_name)
+                deleted_count = result.get("delete_count", 0) if isinstance(result, dict) else 0
+                store_logger.info(
+                    "Deleted documents matching filters from collection",
+                    event_type=LogEventType.STORE_DELETE,
+                    table_name=collection_name,
+                    data_num=deleted_count
+                )
+            except MilvusException as e:
+                store_logger.error(
+                    "Failed to delete documents by filters from collection",
+                    event_type=LogEventType.STORE_DELETE,
+                    table_name=collection_name,
+                    exception=str(e)
+                )
+                raise
+
+        await asyncio.to_thread(_delete)
