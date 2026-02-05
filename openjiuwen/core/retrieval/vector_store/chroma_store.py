@@ -18,6 +18,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.query import QueryExpr
+from openjiuwen.core.foundation.store.vector.utils import (
+    convert_cosine_distance,
+    convert_ip_distance,
+    convert_l2_squared,
+)
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
@@ -477,14 +482,15 @@ class ChromaVectorStore(VectorStore):
                 # ChromaDB returns distance, need to convert to similarity score
                 if raw_score_val is not None:
                     if self._distance_metric == "l2":
-                        # L2 distance, simple normalization (max distance is 4 for unit vectors)
-                        raw_score_scaled = max(0.0, (4.0 - raw_score_val) / 4.0)
+                        # L2 distance, convert to similarity: (max_dist - distance) / max_dist
+                        raw_score_scaled = convert_l2_squared(raw_score_val)
                     elif self._distance_metric == "cosine":
-                        # For cosine distance, similarity = 1 - distance
-                        raw_score_scaled = (2.0 - raw_score_val) / 2.0
+                        # Cosine distance ranges from 0 to 2, convert to similarity: (2.0 - distance) / 2.0
+                        raw_score_scaled = convert_cosine_distance(raw_score_val)
                     else:
-                        # Chroma ip is a distance: d = 1 - dot
-                        raw_score_scaled = 1.0 - raw_score_val
+                        # Chroma IP is a distance: d = 1 - dot (range [0, 2])
+                        # Convert to similarity: max(0, min(1, (2.0 - distance) / 2.0))
+                        raw_score_scaled = convert_ip_distance(raw_score_val)
                     final_score = raw_score_scaled
             elif mode == "sparse":
                 # Text search score (ChromaDB may return similarity score or distance)

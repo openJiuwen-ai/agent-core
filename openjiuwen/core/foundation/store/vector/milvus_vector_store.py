@@ -17,6 +17,11 @@ from openjiuwen.core.foundation.store.base_vector_store import (
     VectorDataType,
     FieldSchema,
 )
+from openjiuwen.core.foundation.store.vector.utils import (
+    convert_cosine_similarity,
+    convert_l2_squared,
+    convert_ip_similarity,
+)
 
 
 class MilvusVectorStore(BaseVectorStore):
@@ -592,17 +597,17 @@ class MilvusVectorStore(BaseVectorStore):
                     # Convert distance to similarity score based on metric
                     distance_val = float(distance)
                     if distance_metric == "COSINE":
-                        # Milvus COSINE returns similarity in [-1, 1] (larger = more similar)
+                        # Milvus COSINE returns similarity in [-1, 1]
                         # Convert to [0, 1]: (distance + 1) / 2
-                        final_score = max(0.0, min(1.0, (distance_val + 1.0) / 2.0))
+                        final_score = convert_cosine_similarity(distance_val)
                     elif distance_metric == "L2":
-                        # L2 distance: smaller = more similar, range [0, ∞)
-                        # Convert to [0, 1]: 1 / (1 + distance)
-                        final_score = 1.0 / (1.0 + distance_val)
+                        # Milvus L2 returns squared L2 distance
+                        # Convert to [0, 1]: (max_dist - distance) / max_dist
+                        final_score = convert_l2_squared(distance_val)
                     else:  # IP (Inner Product)
-                        # Milvus IP returns similarity in [-1, 1] (larger = more similar)
-                        # Convert to [0, 1]: (distance + 1) / 2
-                        final_score = max(0.0, min(1.0, (distance_val + 1.0) / 2.0))
+                        # Milvus IP returns raw inner product (unbounded)
+                        # Convert to [0, 1]: max(0, min(1, (distance + 1) / 2))
+                        final_score = convert_ip_similarity(distance_val)
                 else:
                     final_score = 0.0
 

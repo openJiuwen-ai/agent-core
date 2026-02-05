@@ -17,6 +17,11 @@ from openjiuwen.core.foundation.store.base_vector_store import (
     FieldSchema,
     VectorDataType,
 )
+from openjiuwen.core.foundation.store.vector.utils import (
+    convert_cosine_distance,
+    convert_l2_squared,
+    convert_ip_distance,
+)
 
 
 class ChromaVectorStore(BaseVectorStore):
@@ -477,23 +482,21 @@ class ChromaVectorStore(BaseVectorStore):
                     # Get distance and convert to similarity score
                     distance = distances_list[idx] if idx < len(distances_list) else None
                     if distance is not None:
-                        # Convert distance to similarity score
                         # Get metric from collection metadata (saved during creation)
                         metric = metadata.get("distance_metric", "cosine")
 
                         # Convert distance to similarity score based on metric
                         if metric == "cosine":
                             # ChromaDB cosine distance ranges from 0 to 2
-                            # Convert to similarity: similarity = 1 - (distance / 2)
-                            score = max(0.0, 1.0 - (distance / 2.0))
+                            # Convert to similarity: (2.0 - distance) / 2.0
+                            score = convert_cosine_distance(distance)
                         elif metric == "l2":
-                            # L2 distance, convert to similarity: similarity = 1 / (1 + distance)
-                            score = 1.0 / (1.0 + distance)
+                            # L2 distance, convert to similarity: (max_dist - distance) / max_dist
+                            score = convert_l2_squared(distance)
                         else:  # ip (inner product)
                             # ChromaDB IP distance = 1 - inner_product, range [0, 2]
-                            # For normalized vectors: IP = cosine_similarity, so this is same as cosine
-                            # Convert to similarity: similarity = 1 - (distance / 2)
-                            score = max(0.0, 1.0 - (distance / 2.0))
+                            # Convert to similarity: max(0, min(1, (2.0 - distance) / 2.0))
+                            score = convert_ip_distance(distance)
                     else:
                         score = 0.0
 

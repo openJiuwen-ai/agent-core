@@ -15,6 +15,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.query import QueryExpr
+from openjiuwen.core.foundation.store.vector.utils import (
+    convert_cosine_similarity,
+    convert_ip_similarity,
+    convert_l2_squared,
+)
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
@@ -428,14 +433,17 @@ class MilvusVectorStore(VectorStore):
             if mode == "vector":
                 if raw_score_val is not None:
                     if self._distance_metric == "L2":
-                        # Milvus L2 returns squared L2 distance (max distance is 4 for unit vectors)
-                        raw_score_scaled = max(0.0, (4.0 - raw_score_val)) / 4.0
+                        # Milvus L2 returns squared L2 distance
+                        # Convert to [0, 1]: (max_dist - distance) / max_dist
+                        raw_score_scaled = convert_l2_squared(raw_score_val)
                     elif self._distance_metric == "COSINE":
                         # Milvus COSINE returns similarity in [-1, 1]
-                        raw_score_scaled = (raw_score_val + 1.0) / 2.0
+                        # Convert to [0, 1]: (distance + 1) / 2
+                        raw_score_scaled = convert_cosine_similarity(raw_score_val)
                     else:
                         # Milvus IP returns raw inner product (unbounded)
-                        raw_score_scaled = raw_score_val
+                        # Convert to [0, 1]: max(0, min(1, (distance + 1) / 2))
+                        raw_score_scaled = convert_ip_similarity(raw_score_val)
                     final_score = raw_score_scaled
             elif mode == "sparse":
                 if raw_score_val is not None:
