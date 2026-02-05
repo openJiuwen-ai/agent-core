@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
+import copy
 import inspect
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Tuple, Union
@@ -390,8 +391,9 @@ class BaseAgent(ABC):
                 logger.info(f"Adding workflow {'provider' if is_provider else 'instance'} "
                             f"{workflow_key} to global resource_mgr")
                 from openjiuwen.core.runner import Runner
-                workflow_card.id = workflow_key
-                Runner.resource_mgr.add_workflow(workflow_card, to_register)
+                workflow_card_copy = copy.deepcopy(workflow_card)
+                workflow_card_copy.id = workflow_key
+                Runner.resource_mgr.add_workflow(workflow_card_copy, to_register)
                 logger.info(f"Successfully added workflow {'provider' if is_provider else 'instance'} {workflow_key}")
             except Exception as e:
                 logger.error(f"Failed to add workflow to global resource_mgr: {e}")
