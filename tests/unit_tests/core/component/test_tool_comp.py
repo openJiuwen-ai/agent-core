@@ -100,7 +100,15 @@ async def test_tool_comp_invoke(mock_async_request, mock_request, mock_tool_inpu
     mock_response.text = "{}"
     mock_response.content = b"{}"
     mock_request.return_value = mock_response
-    mock_async_request.return_value = mock_response
+    
+    mock_async_request.return_value = {
+        'code': 200,
+        'data': {},
+        'url': 'http://127.0.0.1:8000',
+        'headers': {},
+        'reason': 'OK',
+        'message': 'success'
+    }
     res = await tool_executable.invoke(mock_tool_input, fake_ctx, context=Mock())
 
     assert res.get('error_code') == 0
@@ -185,3 +193,95 @@ class TestToolComponent:
         workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
         invoke_result = await flow.invoke({"query": "你好"}, workflow_session, workflow_context)
         assert invoke_result.result["response"] == "{'res': '你好', 'info': 789}"
+
+    @patch('requests.request')
+    @patch('openjiuwen.core.foundation.tool.service_api.restful_api.RestfulApi._async_request')
+    @pytest.mark.asyncio
+    async def test_invoke_workflow_with_start_tool_end_with_restful_api(self, mock_async_request, mock_request):
+        os.environ["SSRF_PROTECT_ENABLED"] = "false"
+        os.environ["RESTFUL_SSL_VERIFY"] = "false"
+        flow = Workflow(card=WorkflowCard(name="tool", id="mock", version="1.0"))
+
+        # Mock the expected weather API response
+        expected_weather_data = {
+            'city': 'Hangzhou', 
+            'country': 'CN', 
+            'weather': 'rainy',
+            'temperature': 12.95, 
+            'feels_like': 12.42, 
+            'humidity': 81, 
+            'wind_speed': 1.62
+        }
+        
+        # Mock the RestfulApi._format_response return structure
+        expected_tool_response = {
+            'code': 200,
+            'data': expected_weather_data,
+            'url': 'http://127.0.0.1:9000/weather',
+            'headers': {'content-type': 'application/json'},
+            'reason': 'OK',
+            'message': 'success'
+        }
+        
+        mock_request.return_value = None  # Not used when _async_request is mocked
+        mock_async_request.return_value = expected_tool_response
+
+        weather_plugin = RestfulApi(
+            card=RestfulApiCard(
+                id="weather_123",
+                name="WeatherReporter",
+                description="天气查询插件",
+                input_params={
+                    "type": "object",
+                    "properties": {
+                        "location": {"description": "天气查询的地点，必须为英文", "type": "string"},
+                    },
+                    "required": ["location"],
+                },
+                url="http://127.0.0.1:9000/weather",
+                headers={},
+                method="GET",
+            ),
+        )
+
+        start_component = Start()
+        end_component = End({"responseTemplate": "{{output}}"})
+
+        tool_component = ToolComponent(ToolComponentConfig())
+        tool_component.bind_tool(weather_plugin)
+
+        flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}", "name": "${name}"})
+        flow.set_end_comp("e", end_component,
+                          inputs_schema={"output": "${tool.data}"})
+        flow.add_workflow_comp("tool", tool_component, inputs_schema={"location": "${s.query}"})
+
+        flow.add_connection("s", "tool")
+        flow.add_connection("tool", "e")
+
+        session_id = "test_tool_restful"
+        config = ContextEngineConfig()
+        ce_engine = ContextEngine(config)
+        workflow_context = await ce_engine.create_context(context_id="tool_workflow")
+        workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
+        invoke_result = await flow.invoke({"query": "hangzhou"}, workflow_session, workflow_context)
+        
+        # Verify the mock was called correctly
+        mock_async_request.assert_called_once()
+        
+        # Verify the workflow executed successfully  
+        assert invoke_result is not None
+        assert invoke_result.result is not None
+        
+        # Verify the result contains expected weather data
+        response = invoke_result.result.get("response")
+        assert response is not None
+        
+        # The response should contain the mocked weather data
+        assert "Hangzhou" in str(response) or "hangzhou" in str(response).lower()
+        
+        # Verify the workflow completed successfully (no error_code attribute on WorkflowOutput)
+        assert invoke_result.state.value == "COMPLETED"
+        
+        # Additional validation: ensure the weather data is complete
+        assert "temperature" in str(response)
+        assert "rainy" in str(response)

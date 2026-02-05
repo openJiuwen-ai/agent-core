@@ -89,7 +89,23 @@ class ToolExecutable(ComponentExecutable):
 
     def _post_process_tool_result(self, tool_result):
         result = dict()
-        result[RESTFUL_DATA] = tool_result
+        if isinstance(self._tool, RestfulApi):
+            result[RESTFUL_DATA] = tool_result.get("data", "")
+            code = tool_result.get("code", -1)
+            try:
+                code = int(code)
+            except (ValueError, TypeError):
+                code = -1
+            result[ERR_CODE] = StatusCode.SUCCESS.code if 200 <= code < 300 \
+                else StatusCode.TOOL_EXECUTION_ERROR.code
+            result[ERR_MESSAGE] = tool_result.get("message", "")
+        else:
+            if isinstance(tool_result, dict) and all(key in tool_result for key in ("code", "data", "message")):
+                result[RESTFUL_DATA] = tool_result.get("data", "")
+                result[ERR_CODE] = tool_result.get("code", StatusCode.TOOL_EXECUTION_ERROR.code)
+                result[ERR_MESSAGE] = tool_result.get("message", "")
+                return result
+            result[RESTFUL_DATA] = tool_result
         return result
 
 
