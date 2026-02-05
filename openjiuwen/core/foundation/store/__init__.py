@@ -3,9 +3,9 @@
 
 from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
-from openjiuwen.core.foundation.store.db_based_kv_store import DbBasedKVStore
-from openjiuwen.core.foundation.store.in_memory_kv_store import InMemoryKVStore
-from openjiuwen.core.foundation.store.default_db_store import DefaultDbStore
+from openjiuwen.core.foundation.store.kv.db_based_kv_store import DbBasedKVStore
+from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
+from openjiuwen.core.foundation.store.db.default_db_store import DefaultDbStore
 
 # Vector store exports
 from openjiuwen.core.foundation.store.base_vector_store import (

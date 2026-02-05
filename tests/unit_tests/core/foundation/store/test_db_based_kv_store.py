@@ -8,7 +8,7 @@ import shutil
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from openjiuwen.core.foundation.store.db_based_kv_store import DbBasedKVStore
+from openjiuwen.core.foundation.store.kv.db_based_kv_store import DbBasedKVStore
 
 
 @pytest.fixture(name="sqlite_kv_store")

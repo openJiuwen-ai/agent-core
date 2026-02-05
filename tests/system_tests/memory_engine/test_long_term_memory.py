@@ -8,11 +8,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
-from openjiuwen.core.memory.store.impl.memory_chroma_vector_store import MemoryChromaVectorStore
-from openjiuwen.core.foundation.store.in_memory_kv_store import InMemoryKVStore
-# from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore
+from openjiuwen.core.foundation.store import create_vector_store
+from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.foundation.store.default_db_store import DefaultDbStore
+from openjiuwen.core.foundation.store.db.default_db_store import DefaultDbStore
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, AgentMemoryConfig, MemoryScopeConfig
 from openjiuwen.core.common.schema.param import Param
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
@@ -33,14 +32,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         # ---------- KV Store ----------
         kv_store = InMemoryKVStore
 
-        # ---------- vector_store ----------
-        # vector_store = MemoryMilvusVectorStore(
-        #     milvus_host=os.getenv("MILVUS_HOST", "xxxx"),
-        #     milvus_port=os.getenv("MILVUS_PORT", "xxxx"),
-        #     embedding_dims=int(os.getenv("EMBEDDING_MODEL_DIMENTION", 1024)),
-        #     token=os.getenv("MILVUS_TOKEN", None)
-        # )
-        vector_store = MemoryChromaVectorStore(persist_directory="./resource_dir")
+        vector_store = create_vector_store("chroma", persist_directory="./resource_dir")
 
         # ---------- db_store ----------
         db_user = os.getenv("DB_USER", "xxxx")

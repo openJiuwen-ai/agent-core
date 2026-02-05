@@ -21,14 +21,14 @@ from openjiuwen.core.memory.manage.search.search_manager import SearchManager, S
 from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
-from openjiuwen.core.memory.manage.mem_model.message import create_tables
+from openjiuwen.core.memory.manage.mem_model.db_model import create_tables
 from openjiuwen.core.memory.manage.mem_model.sql_db_store import SqlDbStore
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.foundation.llm import UserMessage, BaseMessage, Model
 from openjiuwen.core.common.utils.singleton import Singleton
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
+from openjiuwen.core.foundation.store.base_vector_store import BaseVectorStore
 from openjiuwen.core.memory.manage.mem_model.scope_user_mapping_manager import ScopeUserMappingManager
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -87,7 +87,7 @@ class LongTermMemory(metaclass=Singleton):
         self._scope_embedding: dict[str, Embedding] = {}
 
     async def register_store(self, kv_store: BaseKVStore,
-                             vector_store: VectorStore | None = None,
+                             vector_store: BaseVectorStore | None = None,
                              db_store: BaseDbStore | None = None,
                              embedding_model: Embedding | None = None):
         """
@@ -106,11 +106,11 @@ class LongTermMemory(metaclass=Singleton):
                 error_msg="kv store is required, cannot be None",
             )
 
-        if vector_store is not None and not isinstance(vector_store, VectorStore):
+        if vector_store is not None and not isinstance(vector_store, BaseVectorStore):
             raise build_error(
                 StatusCode.MEMORY_REGISTER_STORE_EXECUTION_ERROR,
                 store_type="vector store",
-                error_msg="vector store must be instance of VectorStore",
+                error_msg="vector store must be instance of BaseVectorStore",
             )
 
         if db_store is not None and not isinstance(db_store, BaseDbStore):
