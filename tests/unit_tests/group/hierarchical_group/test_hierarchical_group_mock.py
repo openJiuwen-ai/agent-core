@@ -82,7 +82,7 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _create_model_config() -> ModelConfig:
         return ModelConfig(
-            model_provider="openai",
+            model_provider="OpenAI",
             model_info=BaseModelInfo(
                 model="gpt-3.5-turbo",
                 api_base="mock_url",
