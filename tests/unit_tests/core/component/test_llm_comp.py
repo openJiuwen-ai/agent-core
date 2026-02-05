@@ -710,3 +710,129 @@ class TestLLMModelInputs:
         assert isinstance(model_inputs[1], BaseMessage)
         assert model_inputs[1].content == "Hello {query}"
 
+    @pytest.mark.asyncio
+    async def test_template_empty_system_exists_user_missing_adds_empty_user(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[],
+            system_prompt_template=SystemMessage(content="system prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 2
+        assert isinstance(model_inputs[0], SystemMessage)
+        assert model_inputs[0].content == "system prompt template"
+        assert isinstance(model_inputs[1], UserMessage)
+        assert model_inputs[1].content == ""
+
+    @pytest.mark.asyncio
+    async def test_template_empty_system_missing_user_exists_keeps_user(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[],
+            user_prompt_template=UserMessage(content="user prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 1
+        assert isinstance(model_inputs[0], UserMessage)
+        assert model_inputs[0].content == "user prompt template"
+
+    @pytest.mark.asyncio
+    async def test_template_empty_system_and_user_exists_keeps_both(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[],
+            system_prompt_template=SystemMessage(content="system prompt template"),
+            user_prompt_template=UserMessage(content="user prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 2
+        assert isinstance(model_inputs[0], SystemMessage)
+        assert model_inputs[0].content == "system prompt template"
+        assert isinstance(model_inputs[1], UserMessage)
+        assert model_inputs[1].content == "user prompt template"
+
+    @pytest.mark.asyncio
+    async def test_template_missing_system_missing_user_missing(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 1
+        assert isinstance(model_inputs[0], UserMessage)
+
+
+    @pytest.mark.asyncio
+    async def test_template_empty_system_missing_user_missing(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            response_format={"type": "text"},
+            template_content=[],
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 1
+        assert isinstance(model_inputs[0], UserMessage)
+

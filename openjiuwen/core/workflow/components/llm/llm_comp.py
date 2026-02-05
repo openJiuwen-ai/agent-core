@@ -417,39 +417,35 @@ class LLMExecutable(ComponentExecutable):
         return self._config
 
     @staticmethod
-    def _validate_template_content(template_content):
-        if len(template_content) >= 1:
-            try:
-                for element in template_content:
-                    if element.get(_ROLE, "") == "system":
-                        SystemMessage.model_validate(element)
-            except ValidationError as e:
-                raise build_error(
-                    StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
-                    error_msg="system message is invalid",
-                    cause=e
-                ) from e
-
-            if_contain_user_message = False
+    def _validate_template(template_content, system_prompt_template, user_prompt_template):
+        if system_prompt_template or user_prompt_template or not template_content:
+            return
+        try:
             for element in template_content:
-                if element.get(_ROLE, "") == "user":
-                    UserMessage.model_validate(element)
-                    if_contain_user_message = True
-                if if_contain_user_message and element.get(_ROLE, "") == "system":
+                if element.get(_ROLE, "") == "system":
                     SystemMessage.model_validate(element)
-                    raise build_error(
-                        StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
-                        error_msg="system message must be before user message"
-                    )
-            if not if_contain_user_message:
-                raise build_error(
-                    StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
-                    error_msg="user message is required"
-                )
-        else:
+        except ValidationError as e:
             raise build_error(
                 StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
-                error_msg="template content is empty"
+                error_msg="system message is invalid",
+                cause=e
+            ) from e
+
+        if_contain_user_message = False
+        for element in template_content:
+            if element.get(_ROLE, "") == "user":
+                UserMessage.model_validate(element)
+                if_contain_user_message = True
+            if if_contain_user_message and element.get(_ROLE, "") == "system":
+                SystemMessage.model_validate(element)
+                raise build_error(
+                    StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
+                    error_msg="system message must be before user message"
+                )
+        if not if_contain_user_message:
+            raise build_error(
+                StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
+                error_msg="user message is required"
             )
 
     @staticmethod
@@ -592,12 +588,12 @@ class LLMExecutable(ComponentExecutable):
                 return [UserMessage(content="")]
             return PromptTemplate(content=[user_prompt_template]).format(inputs).to_messages()
 
-        template_content_list = self._config.template_content
-        if not template_content_list:
-            return []
+        template_content = self._config.template_content
+        if not template_content:
+            return [UserMessage(content="")]
 
         user_prompt = [
-            element for element in template_content_list
+            element for element in template_content
             if element.get(_ROLE, "") == MessageRole.USER.value
         ]
 
@@ -693,7 +689,7 @@ class LLMExecutable(ComponentExecutable):
         return PromptTemplate(content=system_prompt).format(inputs).to_messages()
 
     def _validate_config(self, config: LLMCompConfig):
-        self._validate_template_content(config.template_content)
+        self._validate_template(config.template_content, config.system_prompt_template, config.user_prompt_template)
         self._validate_response_format(config.response_format, config.output_config)
         self._validate_output_config(config.output_config)
 
