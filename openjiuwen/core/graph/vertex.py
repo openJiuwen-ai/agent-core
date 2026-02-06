@@ -169,7 +169,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             outputs = results.get("output")
             if outputs and not isinstance(outputs, list):
                 results["output"] = [outputs]
-            old_outputs = self._session.state().get_outputs()
+            old_outputs = self._session.state().get_outputs(self._node_id)
             if isinstance(old_outputs, dict) and isinstance(old_outputs.get("output"), list) and isinstance(
                     results.get("output"), list):
                 results["output"].extend(old_outputs.get("output"))

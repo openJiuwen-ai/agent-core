@@ -238,7 +238,9 @@ async def test_stream_component_in_sub_workflow_with_invoke():
     chunks = []
     expect_chunks = [
         OutputSchema(type='end node stream', index=0, payload={'response': 'sub_workflow: '}),
-        OutputSchema(type='end node stream', index=1, payload={'response': [{'batch': [1, 2, 3]}]})]
+        OutputSchema(type='end node stream', index=1, payload={
+            'response': [{'batch': [1, 2, 3]}, {'a': 1}, {'a': 2}, {'a': 3}, {'b': 1}, {'b': 2}, {'b': 3}, {'c': 1},
+                         {'c': 2}, {'c': 3}]})]
 
     async for chunk in wf.stream({"inputs": [1, 2, 3]}, create_workflow_session(),
                                  stream_modes=[BaseStreamMode.OUTPUT]):
