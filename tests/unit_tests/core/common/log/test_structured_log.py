@@ -19,13 +19,17 @@ from openjiuwen.core.common.logging import (
 from openjiuwen.core.common.logging.default import DefaultLogger
 from openjiuwen.core.common.logging.events import (
     AgentEvent,
+    BaseLogEvent,
     LLMEvent,
     LogEventType,
     ModuleType,
     ToolEvent,
     WorkflowEvent,
     create_log_event,
+    get_event_class,
+    register_event_class,
     sanitize_event_for_logging,
+    unregister_event_class,
     validate_event,
 )
 
@@ -430,3 +434,272 @@ def test_event_metadata_serialization():
     event_dict = event.to_dict()
     assert "metadata" in event_dict
     assert event_dict["metadata"]["nested"]["key"] == "value"
+
+
+# ==================== Dynamic Event Registration Tests ====================
+
+
+def test_register_custom_event_class():
+    """Test registering a custom event class with string key"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class CustomEvent(BaseLogEvent):
+        """Custom event type for testing"""
+
+        custom_field: str = "default"
+
+        def __post_init__(self):
+            super().__post_init__()
+            self.module_type = ModuleType.SYSTEM
+
+    # Use a string key for custom event type (not in the LogEventType enum)
+    custom_event_type = "custom_test_event"
+
+    # Register the custom event class
+    register_event_class(custom_event_type, CustomEvent)
+
+    # Verify we can create an event with this type using string
+    event = create_log_event(custom_event_type, custom_field="test_value", module_id="test_123")
+
+    assert isinstance(event, CustomEvent)
+    assert event.custom_field == "test_value"
+    assert event.module_id == "test_123"
+
+    # Cleanup
+    unregister_event_class(custom_event_type)
+
+
+def test_register_with_custom_string_identifier():
+    """Test that dynamic registration works with custom string identifiers"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class CustomAgentEvent(AgentEvent):
+        """Custom agent event that adds a field"""
+
+        custom_agent_field: str = "default"
+
+        def __post_init__(self):
+            super().__post_init__()
+
+    # Register custom class with unique string identifier
+    custom_type = "my_custom_agent_event"
+    register_event_class(custom_type, CustomAgentEvent)
+
+    # Create event with custom type - should use custom class
+    event = create_log_event(custom_type, custom_agent_field="custom_value", module_id="agent_123")
+
+    assert isinstance(event, CustomAgentEvent)
+    assert event.custom_agent_field == "custom_value"
+    assert event.module_id == "agent_123"
+
+    # Standard enum types should still use static mapping
+    event2 = create_log_event(LogEventType.AGENT_START, module_id="agent_456")
+    assert isinstance(event2, AgentEvent)
+    assert not isinstance(event2, CustomAgentEvent)
+
+    # Cleanup
+    unregister_event_class(custom_type)
+
+
+def test_unregister_event_class():
+    """Test unregistering a custom event class"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class TempEvent(BaseLogEvent):
+        pass
+
+    # Use a string key for custom event type
+    temp_type = "temp_event_type"
+
+    # Register and verify
+    register_event_class(temp_type, TempEvent)
+    assert get_event_class(temp_type) == TempEvent
+
+    # Unregister
+    result = unregister_event_class(temp_type)
+    assert result is True
+
+    # Should return BaseLogEvent now (no static mapping for string keys)
+    assert get_event_class(temp_type) == BaseLogEvent
+
+    # Unregister again should return False
+    result = unregister_event_class(temp_type)
+    assert result is False
+
+
+def test_get_event_class_priority():
+    """Test that get_event_class follows correct priority"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class CustomLLMEvent(BaseLogEvent):
+        pass
+
+    # Test 1: Static mapping for LogEventType enums
+    assert get_event_class(LogEventType.LLM_CALL_START) == LLMEvent
+
+    # Test 2: String key with no registration returns BaseLogEvent
+    unregistered_str = "unregistered_custom_type"
+    assert get_event_class(unregistered_str) == BaseLogEvent
+
+    # Test 3: Register with string and verify it overrides default
+    registered_str = "registered_custom_llm_type"
+    register_event_class(registered_str, CustomLLMEvent)
+    assert get_event_class(registered_str) == CustomLLMEvent
+
+    # Test 4: Unregister and restore default
+    unregister_event_class(registered_str)
+    assert get_event_class(registered_str) == BaseLogEvent
+
+    # Test 5: Static mapping is always used for LogEventType enums
+    assert get_event_class(LogEventType.LLM_CALL_START) == LLMEvent
+
+
+def test_register_invalid_class_raises_error():
+    """Test that registering a non-BaseLogEvent class raises TypeError"""
+
+    class NotAnEvent:
+        """Not a BaseLogEvent subclass"""
+
+        pass
+
+    # Use string key
+    custom_type = "invalid_event_type"
+
+    with pytest.raises(TypeError) as exc_info:
+        register_event_class(custom_type, NotAnEvent)  # type: ignore
+
+    assert "must be a subclass of BaseLogEvent" in str(exc_info.value)
+
+
+def test_cannot_register_enum_conflicting_string():
+    """Test that string values conflicting with enum values are rejected"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class CustomEvent(BaseLogEvent):
+        pass
+
+    # Try to register using a string that matches an existing enum value
+    with pytest.raises(ValueError) as exc_info:
+        register_event_class("agent_start", CustomEvent)  # This matches LogEventType.AGENT_START.value
+
+    assert "conflicts with predefined enum value" in str(exc_info.value)
+
+
+def test_static_event_class_map_unchanged():
+    """Test that static EVENT_CLASS_MAP is not modified by dynamic registration"""
+    from dataclasses import dataclass
+
+    from openjiuwen.core.common.logging.events import EVENT_CLASS_MAP
+
+    # Get original values
+    original_agent_class = EVENT_CLASS_MAP.get(LogEventType.AGENT_START)
+    original_size = len(EVENT_CLASS_MAP)
+
+    @dataclass
+    class CustomEvent(BaseLogEvent):
+        pass
+
+    # Register using a string key
+    new_type = "new_dynamic_event_type"
+    register_event_class(new_type, CustomEvent)
+
+    # EVENT_CLASS_MAP should be unchanged
+    assert EVENT_CLASS_MAP.get(LogEventType.AGENT_START) == original_agent_class
+    assert len(EVENT_CLASS_MAP) == original_size
+    # The new type should NOT be in EVENT_CLASS_MAP
+    assert new_type not in EVENT_CLASS_MAP
+
+    # Cleanup
+    unregister_event_class(new_type)
+
+
+def test_custom_event_with_create_log_event():
+    """Test creating custom events through create_log_event with various kwargs"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class DetailedEvent(BaseLogEvent):
+        detail_field: str = ""
+        detail_count: int = 0
+
+        def __post_init__(self):
+            super().__post_init__()
+            self.module_type = ModuleType.SYSTEM
+
+    # Use string key
+    detailed_type = "detailed_event_type"
+    register_event_class(detailed_type, DetailedEvent)
+
+    # Create with multiple fields
+    event = create_log_event(
+        detailed_type,
+        module_id="detail_123",
+        detail_field="important_detail",
+        detail_count=42,
+        message="Detailed event message",
+    )
+
+    assert isinstance(event, DetailedEvent)
+    assert event.detail_field == "important_detail"
+    assert event.detail_count == 42
+    assert event.module_id == "detail_123"
+    assert event.message == "Detailed event message"
+
+    # Cleanup
+    unregister_event_class(detailed_type)
+
+
+def test_custom_event_serialization():
+    """Test that custom events can be properly serialized"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class SerializableEvent(BaseLogEvent):
+        extra_data: str = ""
+
+        def __post_init__(self):
+            super().__post_init__()
+            self.module_type = ModuleType.SYSTEM
+
+    custom_type = "serializable_event"
+    register_event_class(custom_type, SerializableEvent)
+
+    event = create_log_event(custom_type, extra_data="test_data", module_id="ser_123")
+
+    # Test serialization
+    event_dict = event.to_dict()
+    assert event_dict["extra_data"] == "test_data"
+    assert event_dict["module_id"] == "ser_123"
+
+    # Test JSON serialization
+    json_str = json.dumps(event_dict, ensure_ascii=False)
+    parsed = json.loads(json_str)
+    assert parsed["extra_data"] == "test_data"
+
+    # Cleanup
+    unregister_event_class(custom_type)
+
+
+def test_custom_event_validation():
+    """Test validation of custom events"""
+    from dataclasses import dataclass
+
+    @dataclass
+    class ValidatedEvent(BaseLogEvent):
+        pass
+
+    custom_type = "validated_event"
+    register_event_class(custom_type, ValidatedEvent)
+
+    event = create_log_event(custom_type, module_id="valid_123")
+
+    # Should be valid
+    assert validate_event(event) is True
+
+    # Cleanup
+    unregister_event_class(custom_type)

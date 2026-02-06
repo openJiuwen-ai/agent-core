@@ -149,7 +149,7 @@ class BaseLogEvent:
 
     # Basic event information
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    event_type: LogEventType = LogEventType.SYSTEM_START
+    event_type: LogEventType | str = LogEventType.SYSTEM_START
     log_level: LogLevel = LogLevel.INFO
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -509,6 +509,9 @@ def _get_event_field_names(event_class: type) -> set[str]:
     return _EVENT_FIELD_CACHE[event_class]
 
 
+# Independent dynamic event class registry using string keys (does not modify static EVENT_CLASS_MAP)
+_CUSTOM_EVENT_CLASS_MAP: Dict[str, type] = {}
+
 # Cache for logger to avoid repeated lookups
 _common_logger: Optional[Any] = None
 
@@ -534,12 +537,81 @@ def _get_common_logger() -> Any:
     return _common_logger
 
 
-def create_log_event(event_type: LogEventType, **kwargs: Any) -> BaseLogEvent:
+def register_event_class(event_type: str, event_class: type) -> None:
+    """
+    Dynamically register a custom event class (does not modify static EVENT_CLASS_MAP)
+
+    Args:
+        event_type: String identifier for the custom event type
+        event_class: Event class (should inherit from BaseLogEvent)
+
+    Raises:
+        TypeError: If event_class is not a subclass of BaseLogEvent
+        ValueError: If event_type conflicts with existing LogEventType enum values
+    """
+    if not issubclass(event_class, BaseLogEvent):
+        raise TypeError(f"Event class must be a subclass of BaseLogEvent, got {event_class}")
+
+    # Ensure string value doesn't conflict with existing LogEventType enum values
+    type_key = event_type
+    existing_enum_values = {e.value for e in LogEventType}
+    if type_key in existing_enum_values:
+        raise ValueError(
+            f"Event type '{type_key}' conflicts with predefined enum value. "
+            "Use a different string identifier for custom event types."
+        )
+
+    _CUSTOM_EVENT_CLASS_MAP[type_key] = event_class
+    # Clear field cache for this class to ensure fresh field discovery
+    _EVENT_FIELD_CACHE.pop(event_class, None)
+
+
+def unregister_event_class(event_type: str) -> bool:
+    """
+    Unregister a custom event class
+
+    Args:
+        event_type: String identifier of the custom event type to unregister
+
+    Returns:
+        True if unregistered, False if not found
+    """
+    return _CUSTOM_EVENT_CLASS_MAP.pop(event_type, None) is not None
+
+
+def get_event_class(event_type: LogEventType | str) -> type:
+    """
+    Get event class: checks dynamic registry first, then static EVENT_CLASS_MAP
+
+    Priority: dynamic registry (str key) > static EVENT_CLASS_MAP (LogEventType key) > BaseLogEvent
+
+    Args:
+        event_type: LogEventType enum or string identifier to query
+
+    Returns:
+        Event class, or BaseLogEvent if not found
+    """
+    # Convert to string key for dynamic registry lookup
+    type_key = event_type.value if isinstance(event_type, LogEventType) else str(event_type)
+
+    # Check dynamic registry first (using string key)
+    if type_key in _CUSTOM_EVENT_CLASS_MAP:
+        return _CUSTOM_EVENT_CLASS_MAP[type_key]
+
+    # Then check static mapping (using LogEventType if it's an enum)
+    if isinstance(event_type, LogEventType):
+        return EVENT_CLASS_MAP.get(event_type, BaseLogEvent)
+
+    # For string input with no static mapping, return BaseLogEvent
+    return BaseLogEvent
+
+
+def create_log_event(event_type: LogEventType | str, **kwargs: Any) -> BaseLogEvent:
     """
     Create corresponding event object based on event type
 
     Args:
-        event_type: Event type
+        event_type: Event type (LogEventType enum or string identifier)
         **kwargs: Event field parameters (undefined fields will be ignored with warning)
 
     Returns:
@@ -548,10 +620,8 @@ def create_log_event(event_type: LogEventType, **kwargs: Any) -> BaseLogEvent:
     Raises:
         ValueError: If event type is not supported
     """
-    event_class = EVENT_CLASS_MAP.get(event_type)
-    if event_class is None:
-        # If no corresponding class found, use base event class
-        event_class = BaseLogEvent
+    # Get event class from dynamic registry first, then static mapping, then base class
+    event_class = get_event_class(event_type)
 
     # Early return if no kwargs to filter
     if not kwargs:
@@ -590,10 +660,11 @@ def validate_event(event: BaseLogEvent) -> bool:
     if not event.event_id:
         return False
 
-    # Check if enum types are valid (by checking if they have value attribute)
-    if not hasattr(event.event_type, "value"):
+    # Check if event_type is valid (can be LogEventType enum or string for custom events)
+    if not isinstance(event.event_type, (LogEventType, str)) or not event.event_type:
         return False
 
+    # Check if other enum types are valid (by checking if they have value attribute)
     if not hasattr(event.log_level, "value"):
         return False
 
