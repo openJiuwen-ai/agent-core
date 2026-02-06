@@ -345,7 +345,9 @@ class BaseAgent(ABC):
                 workflow_card = WorkflowCard(id=getattr(item, 'id'),
                                              name=getattr(item, 'name', None),
                                              description=getattr(item, 'description', None),
-                                             version=getattr(item, 'version'))
+                                             version=getattr(item, 'version'),
+                                             input_params=getattr(item, "input_params", None) or
+                                                          getattr(item, "inputs", None))
             elif callable(item):
                 # Bare callable without id/version: error
                 raise ValueError(
