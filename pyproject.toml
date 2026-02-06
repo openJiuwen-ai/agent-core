@@ -58,9 +58,10 @@ sqlite = ["aiosqlite>=0.22.1", "greenlet>=3.1.1"]
 mysql = ["aiomysql>=0.3.2"]
 pgvector = ["pgvector>=0.2.0"]
 chromadb = ["chromadb>=1.3.7"]
+obs = ["aioboto3>=11.0.0"]
 
 all-mq = ["openjiuwen[pulsar]"]
-all-storage = ["openjiuwen[sqlite,mysql,redis]"]
+all-storage = ["openjiuwen[sqlite,mysql,redis,obs]"]
 all-vector = ["openjiuwen[pgvector,chromadb]"]
 
 default = []
