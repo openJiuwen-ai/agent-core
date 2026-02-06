@@ -220,12 +220,7 @@ class AsyncProcessHandler:
                 chunk = await stream.read(self._chunk_size)
                 # Terminate loop when stream has no more data
                 if not chunk:
-                    # Terminate reader only when stream is EOF AND subprocess has exited (avoid false exit)
-                    if stream.at_eof() and self._process.returncode is not None:
-                        break
-                    # No data temporarily, sleep to avoid CPU spinning
-                    await asyncio.sleep(0.01)
-                    continue
+                    break
                 data = chunk.decode(self._encoding, errors="replace")
                 event = StreamEvent(type=stream_type, data=data)
                 await self._queue.put(event)
