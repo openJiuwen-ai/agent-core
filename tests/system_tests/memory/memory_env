@@ -1,0 +1,40 @@
+# Memory Environment Configuration for LongTermMemory System Tests
+# This file contains environment variables for testing LongTermMemory with
+# Chroma vector store, SQLite database, and InMemoryKVStore.
+
+# ========== LLM Configuration ==========
+# LLM Provider (SiliconFlow, OpenAI, etc.)
+LLM_PROVIDER=
+
+# LLM API Base URL
+LLM_API_BASE=
+
+# LLM API Key (set your actual API key here)
+LLM_API_KEY=
+
+# LLM Model Name
+LLM_MODEL_NAME=
+
+# ========== Embedding Configuration ==========
+# Embedding Model Name
+EMBED_MODEL_NAME=
+
+# Embedding API Base URL
+EMBED_API_BASE=
+
+# Embedding API Key
+EMBED_API_KEY=
+
+# ========== Memory Engine Configuration ==========
+# Resource directory for Chroma persistence and SQLite database
+MEMORY_RESOURCE_DIR=./resource_dir
+
+# Maximum input message length for memory processing
+MEMORY_INPUT_MSG_MAX_LEN=8192
+
+# Maximum tokens for single-turn history summary
+MEMORY_SUMMARY_MAX_TOKEN=128
+
+# Optional: AES encryption key (32 bytes, base64 encoded)
+# Generate with: python -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
+MEMORY_CRYPTO_KEY=
