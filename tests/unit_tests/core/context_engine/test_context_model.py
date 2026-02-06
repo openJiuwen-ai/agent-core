@@ -463,7 +463,7 @@ class TestModelContext:
         await context.add_messages(message_list)
         window = await context.get_context_window(system_messages=system_messages)
         assert window.context_messages == []
-        assert window.system_messages == system_messages[:1]
+        assert window.system_messages == system_messages[-1:]
         assert window.tools == []
 
     @pytest.mark.asyncio

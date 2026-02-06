@@ -218,7 +218,7 @@ class SessionModelContext(ModelContext):
             )
 
             system_messages_size = min(len(system_messages), window_size)
-            system_messages = system_messages[:system_messages_size]
+            system_messages = system_messages[-system_messages_size:]
 
             context_messages_size = window_size - system_messages_size
             context_messages = (
@@ -339,11 +339,9 @@ class SessionModelContext(ModelContext):
         }
 
     def load_state(self, state: Dict[str, Any]):
-        messages = state.get(self._context_id, {}).get("messages")
-        self._message_buffer.pop_back()
-        if messages:
-            self._validate_and_init_messages(messages)
-            self._message_buffer.add_back(messages)
+        messages = state.get(self._context_id, {}).get("messages", [])
+        self._validate_and_init_messages(messages)
+        self._message_buffer.rebulid(messages)
         offload_messages = state.get(self._context_id, {}).get("offload_messages")
         self._offload_message_buffer = OffloadMessageBuffer()
         if offload_messages:

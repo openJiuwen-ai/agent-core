@@ -23,10 +23,11 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     SystemMessage,
     ToolMessage,
-    UserMessage,
+    UserMessage, BaseMessage,
 )
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.workflow import create_workflow_session
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -171,7 +172,7 @@ class TestContextEngine:
 
         assert context_1.get_messages() == context_2.get_messages()
 
-    # ---------- create_context 补充 ----------
+    # ---------- create_context supplements ----------
     @pytest.mark.asyncio
     async def test_create_context_with_session_none_uses_default_session_id(self, engine):
         context = await engine.create_context(context_id="ctx", session=None)
@@ -259,7 +260,7 @@ class TestContextEngine:
                 )
         assert exc_info.value.code == StatusCode.CONTEXT_EXECUTION_ERROR.code
 
-    # ---------- get_context 补充 ----------
+    # ---------- get_context supplements ----------
     @pytest.mark.asyncio
     async def test_get_context_returns_none_when_not_exists(self, engine, session):
         assert engine.get_context(context_id="nonexistent", session_id=session.get_session_id()) is None
@@ -277,7 +278,7 @@ class TestContextEngine:
         retrieved = engine.get_context()
         assert retrieved is ctx
 
-    # ---------- clear_context 补充 ----------
+    # ---------- clear_context supplements ----------
     @pytest.mark.asyncio
     async def test_clear_context_by_session_when_session_has_no_contexts(self, engine, session):
         engine.clear_context(session_id=session.get_session_id())
@@ -296,7 +297,7 @@ class TestContextEngine:
         assert engine.get_context(context_id="c1", session_id=session.get_session_id()) is None
         assert engine.get_context(context_id="c2", session_id=another_session.get_session_id()) is None
 
-    # ---------- save_contexts 补充 ----------
+    # ---------- save_contexts supplements ----------
     @pytest.mark.asyncio
     async def test_save_contexts_session_none_does_not_raise(self, engine):
         await engine.save_contexts(session=None)
@@ -354,3 +355,88 @@ class TestContextEngine:
         assert engine.get_context("ctx_b", session.get_session_id()) is c2
         assert engine.get_context("ctx_a", another_session.get_session_id()) is c3
 
+    # ---------- save context supplements ----------
+    @pytest.mark.asyncio
+    async def test_save_context_001(self, session, request):
+        check_pointer = CheckpointerFactory.get_checkpointer()
+        await check_pointer.pre_agent_execute(
+            session=getattr(session, "_inner").get_inner_session(), inputs=None
+        )
+        case_id = request.node.name
+
+        session = create_agent_session(session_id=case_id, card=AgentCard(id=case_id))
+
+        # Initialize engine, create a context below, perform message operations;
+        # save the context under this engine for persistence
+        engine = ContextEngine()
+        history = [SystemMessage(content="智能家具助手", name="first")]
+        context = await engine.create_context(context_id="ctx", session=session, history_messages=history)
+
+        messages = [
+            UserMessage(content="小智，明早6点帮我自动拉开窗帘", name="first"),
+            ToolMessage(content="调用智能窗帘，设置定时", tool_call_id=case_id, name="first"),
+            AssistantMessage(content="好的，已为您设置明早6点帮我自动拉开窗帘", name="first"),
+            UserMessage(content="小智，报时", name="second"),
+            AssistantMessage(content="好的，现在是2026年1月1日 18时15分24秒", name="second"),
+        ]
+        await context.add_messages(messages)
+        await engine.save_contexts(context_ids=["ctx"], session=session)
+
+        # Verify saved data: initialize engine1, create a context with the same id below,
+        # load persisted data
+        engine1 = ContextEngine()
+        context1 = await engine1.create_context(context_id="ctx", session=session)
+        assert context.get_messages() == context1.get_messages()
+
+        # 1) The persisted messages obtained when engine1 creates a context should exist in the form of history_message
+
+        assert context1.get_messages() == context1.get_messages()
+
+        # 2) When engine1 creates a context with its own history_messages,
+        # context1.get_messages() should get history_messages, not load persisted data.
+        engine2 = ContextEngine()
+        context2 = await engine2.create_context(context_id="ctx", session=session,
+                                                history_messages=[SystemMessage(content="1", name="first")])
+        assert context2.get_messages() == [SystemMessage(content="1", name="first")]
+
+    @pytest.mark.asyncio
+    async def test_get_context_window(self, request):
+        case_id = request.node.name
+        engine = ContextEngine()
+        history = [
+            UserMessage(content="history_1", name="1"),
+            ToolMessage(content="history_2", tool_call_id=case_id, name="1"),
+            AssistantMessage(content="history_3", name="1"),
+            UserMessage(content="history_4", name="2"),
+            ToolMessage(content="history_5", tool_call_id=case_id, name="2"),
+        ]
+        context = await engine.create_context(context_id="ctx", session=create_workflow_session(session_id=case_id),
+                                              history_messages=history)
+        messages = [
+            UserMessage(content="message 1", name="1"),
+            ToolMessage(content="message 2", tool_call_id=case_id, name="1"),
+            AssistantMessage(content="message 3", name="1")
+        ]
+        await context.add_messages(messages)
+
+        messages1 = [
+            SystemMessage(content="system 1", name="1"),
+            UserMessage(content="system 2", name="1"),
+            ToolMessage(content="system 3", tool_call_id=case_id, name="1"),
+            ToolMessage(content="system 4", tool_call_id=case_id, name="1"),
+            AssistantMessage(content="system 5", name="1"),
+            BaseMessage(role="system", content="system 6", name="2"),
+            UserMessage(content="system 7", name="2"),
+            AssistantMessage(content="system 8", name="2"),
+        ]
+
+        # Scenario 1: get_context_window only receives system_messages
+        # => result: system_messages are the earliest messages in window
+        window = await context.get_context_window(system_messages=messages1)
+        assert window.get_messages() == messages1 + history + messages
+
+        # Scenario 2: get_context_window receives system_messages, combined with window_size and dialogue_round testing
+        # => result: returns the most recent 2 messages of system_messages data
+        window = await context.get_context_window(system_messages=messages1, window_size=2)
+        result = window.get_messages()
+        assert result == messages1[-2:]

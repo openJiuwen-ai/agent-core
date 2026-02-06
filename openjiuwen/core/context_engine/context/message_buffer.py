@@ -8,8 +8,7 @@ from openjiuwen.core.foundation.llm import BaseMessage
 class ContextMessageBuffer:
     def __init__(self, history_messages: List[BaseMessage], max_buffer_size: Optional[int] = None):
         self._max_buffer_size = max_buffer_size
-        self._context_messages: List[BaseMessage] = history_messages[:]
-        self._history_messages_size = len(history_messages)
+        self.rebulid(history_messages)
 
     def size(self) -> int:
         if self._max_buffer_size is not None:
@@ -52,6 +51,14 @@ class ContextMessageBuffer:
             return
         history_messages = self._context_messages[:self._history_messages_size]
         self._context_messages = history_messages + messages
+
+    def rebulid(self, history_messages: List[BaseMessage]):
+        if self._max_buffer_size is not None:
+            self._context_messages = history_messages[-self._max_buffer_size:]
+            self._history_messages_size = min(len(self._context_messages), self._max_buffer_size)
+        else:
+            self._context_messages = history_messages.copy()
+            self._history_messages_size = len(self._context_messages)
 
     def _if_need_resize(self):
         if self._max_buffer_size is None:

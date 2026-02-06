@@ -127,7 +127,7 @@ class ContextUtils:
                 has_tool_calls = (
                     msg.role == "assistant"
                     and hasattr(msg, "tool_calls")
-                    and not msg.tool_calls
+                    and msg.tool_calls
                 )
 
                 if not has_tool_calls:

@@ -78,7 +78,7 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         if full_context_id in self._context_pool:
             context = self._context_pool.get(full_context_id)
-            self._load_state_from_session(context, session)
+            self._load_state_from_session(context, session, history_messages)
             return context
 
         processor_instances = [
@@ -94,7 +94,7 @@ class ContextEngine:
             processors=processor_instances,
             token_counter=token_counter,
         )
-        self._load_state_from_session(context, session, is_load_messages=(not history_messages))
+        self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context
         return context
 
@@ -276,8 +276,7 @@ class ContextEngine:
     def _load_state_from_session(
             context: ModelContext,
             session: Session,
-            *,
-            is_load_messages: bool = True
+            history_messages: List[BaseMessage] = None
     ):
         if not session:
             return
@@ -293,8 +292,9 @@ class ContextEngine:
         if not hasattr(context, "load_state"):
             return
 
-        if not is_load_messages:
-            states.pop("messages")
+        if history_messages is not None:
+            context_id = context.context_id()
+            states[context_id]['messages'] = history_messages
 
         context.load_state(states)
 
