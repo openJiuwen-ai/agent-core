@@ -6,12 +6,16 @@ import datetime
 import os
 import pathlib
 import re
+from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator, Iterator
+
 from pydantic import BaseModel, field_validator
 
 import aiofiles
+
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import LogEventType, sys_operation_logger
 from openjiuwen.core.sys_operation.fs import BaseFsOperation, DEFAULT_READ_STREAM_CHUNK_SIZE, DEFAULT_READ_CHUNK_SIZE, \
     DEFAULT_UPLOAD_CHUNK_SIZE, DEFAULT_UPLOAD_STREAM_CHUNK_SIZE, DEFAULT_DOWNLOAD_CHUNK_SIZE, \
     DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE, TAIL_CHUNK_SIZE
@@ -54,6 +58,7 @@ class _ReadParams(BaseModel):
     mode: Literal['text', 'bytes'] = "text"
     file_path: Optional[pathlib.Path] = None
     chunk_size: int = DEFAULT_READ_CHUNK_SIZE
+    options: Optional[Dict[str, Any]] = None
 
     @field_validator('head', 'tail')
     @classmethod
@@ -113,6 +118,14 @@ class _ReadParams(BaseModel):
                 )
 
 
+@dataclass
+class _ErrorLogParams:
+    """Error log params"""
+    method_name: Optional[str] = None
+    method_params: Optional[Dict[str, Any]] = None
+    start_time: Optional[float] = None
+
+
 @operation(name="fs", mode=OperationMode.LOCAL, description="local fs operation")
 class FsOperation(BaseFsOperation):
     """File system operation"""
@@ -147,6 +160,16 @@ class FsOperation(BaseFsOperation):
         Returns:
             ReadFileResult: Structured result.
         """
+        method_name = self.read_file.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to read file", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             # Create _ReadParams object
             read_params = _ReadParams(
@@ -157,7 +180,8 @@ class FsOperation(BaseFsOperation):
                 is_stream=False,
                 encoding=encoding,
                 mode=mode,
-                chunk_size=chunk_size
+                chunk_size=chunk_size,
+                options=options
             )
 
             # Validate binary mode parameters
@@ -181,13 +205,22 @@ class FsOperation(BaseFsOperation):
                 final_content = "".join(lines)
 
             data = ReadFileData(path=str(file_path), content=final_content, mode=mode)
-            return ReadFileResult(
+            success_result = ReadFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
                 data=data
             )
+            sys_operation_logger.info("End to read file", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
         except Exception as e:
-            return self._create_error_result("read_file", str(e), ReadFileResult)
+            return self._create_error_result("read_file", str(e), ReadFileResult,
+                                             _ErrorLogParams(method_name, method_params, start_time))
 
     async def read_file_stream(
             self,
@@ -219,6 +252,16 @@ class FsOperation(BaseFsOperation):
         Returns:
             AsyncIterator[ReadFileStreamResult]: Streaming structured results, line-by-line or chunk-by-chunk.
         """
+        method_name = self.read_file_stream.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to read file streaming", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             # Create _ReadParams object
             read_params = _ReadParams(
@@ -229,7 +272,8 @@ class FsOperation(BaseFsOperation):
                 is_stream=True,
                 encoding=encoding,
                 mode=mode,
-                chunk_size=chunk_size
+                chunk_size=chunk_size,
+                options=options
             )
 
             # Validate binary mode parameters
@@ -247,14 +291,21 @@ class FsOperation(BaseFsOperation):
             if mode != "text":
                 async for chunk in self._read_bytes_stream(file_path, validated_params.chunk_size):
                     yield chunk
+                    self._log_stream_chunk(chunk, method_name, method_params, start_time,
+                                           stream_log="Receive read file stream",
+                                           end_stream_log="End to read file streaming")
                 return
 
             # text mode
             async for chunk in self._stream_text_file(validated_params):
                 yield chunk
+                self._log_stream_chunk(chunk, method_name, method_params, start_time,
+                                       stream_log="Receive read file stream",
+                                       end_stream_log="End to read file streaming")
 
         except Exception as e:
-            yield self._create_error_result("read_file_stream", str(e), ReadFileStreamResult)
+            yield self._create_error_result("read_file_stream", str(e), ReadFileStreamResult,
+                                            _ErrorLogParams(method_name, method_params, start_time))
 
     async def write_file(
             self,
@@ -286,14 +337,26 @@ class FsOperation(BaseFsOperation):
         Returns:
             WriteFileResult: Structured result.
         """
+        method_name = self.write_file.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to write file", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             file_path = self._resolve_path(path, create_parent=True)
             if file_path.is_dir():
                 return self._create_error_result("write_file", f"Target path is a directory:"
-                                                               f" {file_path}", WriteFileResult)
+                                                               f" {file_path}", WriteFileResult,
+                                                 _ErrorLogParams(method_name, method_params, start_time))
             if not create_if_not_exist and not file_path.exists():
                 return self._create_error_result("write_file", f"File does not exist: {file_path}",
-                                                 WriteFileResult)
+                                                 WriteFileResult,
+                                                 _ErrorLogParams(method_name, method_params, start_time))
 
             if mode == "text":
                 txt = str(content)
@@ -310,13 +373,22 @@ class FsOperation(BaseFsOperation):
                 await f.write(data_bytes)
 
             self._apply_permissions(file_path, permissions)
-            return WriteFileResult(
+            success_result = WriteFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
                 data=WriteFileData(path=str(file_path), size=len(data_bytes), mode=mode)
             )
+            sys_operation_logger.info("End to write file", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
         except Exception as e:
-            return self._create_error_result("write_file", str(e), WriteFileResult)
+            return self._create_error_result("write_file", str(e), WriteFileResult,
+                                             _ErrorLogParams(method_name, method_params, start_time))
 
     async def upload_file(
             self,
@@ -344,24 +416,45 @@ class FsOperation(BaseFsOperation):
         Returns:
             UploadFileResult: Structured result.
         """
+        method_name = self.upload_file.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to upload file", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             src = pathlib.Path(local_path).expanduser().resolve()
             dst = self._resolve_path(target_path, create_parent=create_parent_dirs)
             if not src.is_file():
-                return self._create_error_result("upload_file", f"Source not found: {src}", UploadFileResult)
+                return self._create_error_result("upload_file", f"Source not found: {src}", UploadFileResult,
+                                                 _ErrorLogParams(method_name, method_params, start_time))
             if dst.exists() and not overwrite:
-                return self._create_error_result("upload_file", f"Target exists: {dst}", UploadFileResult)
+                return self._create_error_result("upload_file", f"Target exists: {dst}", UploadFileResult,
+                                                 _ErrorLogParams(method_name, method_params, start_time))
 
             size = await self._transfer_file(src, dst, chunk_size)
             if preserve_permissions:
                 self._copy_permissions(src, dst)
-            return UploadFileResult(
+            success_result = UploadFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
                 data=UploadFileData(local_path=str(src), target_path=str(dst), size=size)
             )
+            sys_operation_logger.info("End to upload file", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
         except Exception as e:
-            return self._create_error_result("upload_file", str(e), UploadFileResult)
+            return self._create_error_result("upload_file", str(e), UploadFileResult,
+                                             _ErrorLogParams(method_name, method_params, start_time))
 
     async def upload_file_stream(
             self,
@@ -389,15 +482,27 @@ class FsOperation(BaseFsOperation):
         Returns:
             AsyncIterator[UploadFileStreamResult]: Streaming structured results, chunk-by-chunk.
         """
+        method_name = self.upload_file_stream.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to upload file streaming", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             src = pathlib.Path(local_path).expanduser().resolve()
             dst = self._resolve_path(target_path, create_parent=create_parent_dirs)
             if not src.is_file():
                 yield self._create_error_result("upload_file_stream", f"Source not found: {src}",
-                                                UploadFileStreamResult)
+                                                UploadFileStreamResult,
+                                                _ErrorLogParams(method_name, method_params, start_time))
                 return
             if dst.exists() and not overwrite:
-                yield self._create_error_result("upload_file_stream", f"Target exists: {dst}", UploadFileStreamResult)
+                yield self._create_error_result("upload_file_stream", f"Target exists: {dst}", UploadFileStreamResult,
+                                                _ErrorLogParams(method_name, method_params, start_time))
                 return
 
             async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
@@ -410,7 +515,7 @@ class FsOperation(BaseFsOperation):
                     is_last = not next_chunk
 
                     await dst_f.write(chunk_bytes)
-                    yield UploadFileStreamResult(
+                    upload_file_res = UploadFileStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message=StatusCode.SUCCESS.errmsg,
                         data=UploadFileChunkData(
@@ -418,6 +523,10 @@ class FsOperation(BaseFsOperation):
                             is_last_chunk=is_last
                         )
                     )
+                    yield upload_file_res
+                    self._log_stream_chunk(upload_file_res, method_name, method_params, start_time,
+                                           stream_log="Receive upload file stream",
+                                           end_stream_log="End to upload file streaming")
                     index += 1
 
                     # Move to next chunk
@@ -426,7 +535,8 @@ class FsOperation(BaseFsOperation):
             if preserve_permissions:
                 self._copy_permissions(src, dst)
         except Exception as e:
-            yield self._create_error_result("upload_file_stream", str(e), UploadFileStreamResult)
+            yield self._create_error_result("upload_file_stream", str(e), UploadFileStreamResult,
+                                            _ErrorLogParams(method_name, method_params, start_time))
 
     async def download_file(
             self,
@@ -454,28 +564,49 @@ class FsOperation(BaseFsOperation):
         Returns:
             DownloadFileResult: Structured result.
         """
+        method_name = self.download_file.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to download file", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             src = self._resolve_path(source_path)
             dst = pathlib.Path(local_path).expanduser().resolve()
             if not src.is_file():
                 return self._create_error_result("download_file", f"Source not found: {src}",
-                                                 DownloadFileResult)
+                                                 DownloadFileResult,
+                                                 _ErrorLogParams(method_name, method_params, start_time))
             if dst.exists() and not overwrite:
                 return self._create_error_result("download_file", f"Destination exists: {dst}",
-                                                 DownloadFileResult)
+                                                 DownloadFileResult,
+                                                 _ErrorLogParams(method_name, method_params, start_time))
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
 
             size = await self._transfer_file(src, dst, chunk_size)
             if preserve_permissions:
                 self._copy_permissions(src, dst)
-            return DownloadFileResult(
+            success_result = DownloadFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
                 data=DownloadFileData(source_path=str(src), local_path=str(dst), size=size)
             )
+            sys_operation_logger.info("End to download file", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
         except Exception as e:
-            return self._create_error_result("download_file", str(e), DownloadFileResult)
+            return self._create_error_result("download_file", str(e), DownloadFileResult,
+                                             _ErrorLogParams(method_name, method_params, start_time))
 
     async def download_file_stream(
             self,
@@ -503,16 +634,28 @@ class FsOperation(BaseFsOperation):
         Returns:
             AsyncIterator[DownloadFileStreamResult]: Streaming structured results, chunk-by-chunk.
         """
+        method_name = self.download_file_stream.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to download file streaming", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             src = self._resolve_path(source_path)
             dst = pathlib.Path(local_path).expanduser().resolve()
             if not src.is_file():
                 yield self._create_error_result("download_file_stream", f"Source not found: {src}",
-                                                DownloadFileStreamResult)
+                                                DownloadFileStreamResult,
+                                                _ErrorLogParams(method_name, method_params, start_time))
                 return
             if dst.exists() and not overwrite:
                 yield self._create_error_result("download_file_stream", f"Destination exists: {dst}",
-                                                DownloadFileStreamResult)
+                                                DownloadFileStreamResult,
+                                                _ErrorLogParams(method_name, method_params, start_time))
                 return
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -527,7 +670,7 @@ class FsOperation(BaseFsOperation):
                     is_last = not next_chunk
 
                     await dst_f.write(chunk_bytes)
-                    yield DownloadFileStreamResult(
+                    download_file_res = DownloadFileStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message=StatusCode.SUCCESS.errmsg,
                         data=DownloadFileChunkData(
@@ -535,6 +678,11 @@ class FsOperation(BaseFsOperation):
                             is_last_chunk=is_last
                         )
                     )
+                    yield download_file_res
+                    self._log_stream_chunk(download_file_res, method_name, method_params, start_time,
+                                           stream_log="Receive download file stream",
+                                           end_stream_log="End to download file streaming")
+
                     index += 1
 
                     # Move to next chunk
@@ -543,7 +691,8 @@ class FsOperation(BaseFsOperation):
             if preserve_permissions:
                 self._copy_permissions(src, dst)
         except Exception as e:
-            yield self._create_error_result("download_file_stream", str(e), DownloadFileStreamResult)
+            yield self._create_error_result("download_file_stream", str(e), DownloadFileStreamResult,
+                                            _ErrorLogParams(method_name, method_params, start_time))
 
     async def list_files(
             self,
@@ -574,6 +723,16 @@ class FsOperation(BaseFsOperation):
         Returns:
             ListFilesResult: Structured result.
         """
+        method_name = self.list_files.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to list files", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             spec = _ListItemsSpec(
                 path=path,
@@ -589,15 +748,24 @@ class FsOperation(BaseFsOperation):
                 self._list_items_internal_sync,
                 spec,
             )
-            return ListFilesResult(
+            success_result = ListFilesResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
                 data=FileSystemData(total_count=len(items), list_items=items,
                                     root_path=str(self._resolve_path(path)), recursive=recursive,
                                     max_depth=max_depth)
             )
+            sys_operation_logger.info("End to list files", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
         except Exception as e:
-            return self._create_error_result("list_files", str(e), ListFilesResult)
+            return self._create_error_result("list_files", str(e), ListFilesResult,
+                                             _ErrorLogParams(method_name, method_params, start_time))
 
     async def list_directories(
             self,
@@ -626,6 +794,16 @@ class FsOperation(BaseFsOperation):
         Returns:
             ListDirsResult: Structured result.
         """
+        method_name = self.list_directories.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to list directories", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             spec = _ListItemsSpec(
                 path=path,
@@ -643,7 +821,7 @@ class FsOperation(BaseFsOperation):
                 spec,
             )
 
-            return ListDirsResult(
+            success_result = ListDirsResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
                 data=FileSystemData(
@@ -654,9 +832,18 @@ class FsOperation(BaseFsOperation):
                     max_depth=max_depth,
                 ),
             )
+            sys_operation_logger.info("End to list directories", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
 
         except Exception as e:
-            return self._create_error_result("list_directories", str(e), ListDirsResult)
+            return self._create_error_result("list_directories", str(e), ListDirsResult,
+                                             _ErrorLogParams(method_name, method_params, start_time))
 
     async def search_files(
             self,
@@ -675,6 +862,16 @@ class FsOperation(BaseFsOperation):
         Returns:
             SearchFilesResult: Structured result.
         """
+        method_name = self.search_files.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to search files", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
         try:
             items = await asyncio.to_thread(
                 self._search_files_internal_sync,
@@ -683,7 +880,7 @@ class FsOperation(BaseFsOperation):
                 exclude_patterns
             )
 
-            return SearchFilesResult(
+            success_result = SearchFilesResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
                 data=SearchFilesData(
@@ -694,8 +891,17 @@ class FsOperation(BaseFsOperation):
                     exclude_patterns=exclude_patterns
                 )
             )
+            sys_operation_logger.info("End to search files", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
         except Exception as e:
-            return self._create_error_result("search_files", str(e), SearchFilesResult)
+            return self._create_error_result("search_files", str(e), SearchFilesResult,
+                                             _ErrorLogParams(method_name, method_params, start_time))
 
     def _search_files_internal_sync(
             self,
@@ -755,9 +961,11 @@ class FsOperation(BaseFsOperation):
             try:
                 perm_int = int(str(permissions), 8) if isinstance(permissions, str) else permissions
                 os.chmod(path, perm_int)
-            except Exception:
+            except Exception as e:
                 # Permission application is best-effort; failures (e.g. on non-Unix) are ignored
-                pass
+                sys_operation_logger.warning("Failed to apply permissions",
+                                             event_type=LogEventType.SYS_OP_ERROR,
+                                             exception=e)
 
     @staticmethod
     def _copy_permissions(src: pathlib.Path, dst: pathlib.Path) -> None:
@@ -766,9 +974,11 @@ class FsOperation(BaseFsOperation):
             try:
                 st = src.stat()
                 os.chmod(dst, st.st_mode)
-            except Exception:
+            except Exception as e:
                 # Permission copy is best-effort; failures (e.g. source stat issues) are ignored
-                pass
+                sys_operation_logger.warning("Failed to copy permissions",
+                                             event_type=LogEventType.SYS_OP_ERROR,
+                                             exception=e)
 
     @staticmethod
     async def _transfer_file(src: pathlib.Path, dst: pathlib.Path, chunk_size: int) -> int:
@@ -828,7 +1038,10 @@ class FsOperation(BaseFsOperation):
                 modified_time=str(datetime.datetime.fromtimestamp(stat.st_mtime)),
                 is_directory=is_dir, type=p.suffix if not is_dir else None,
             )
-        except Exception:
+        except Exception as e:
+            sys_operation_logger.warning("Failed to create fs item",
+                                         event_type=LogEventType.SYS_OP_ERROR,
+                                         exception=e)
             return None
 
     @staticmethod
@@ -868,8 +1081,8 @@ class FsOperation(BaseFsOperation):
         self._sort_items(items, spec.sort_by, spec.sort_descending)
         return items
 
-    @staticmethod
-    def _create_error_result(execution: str, error_msg: str, result_class: Any):
+    def _create_error_result(self, execution: str, error_msg: str, result_class: Any,
+                             error_log_params: Optional[_ErrorLogParams] = None):
         """
         Create error result for file operations.
 
@@ -877,15 +1090,27 @@ class FsOperation(BaseFsOperation):
             execution: The operation being executed.
             error_msg: The error message.
             result_class: The result class to instantiate.
+            error_log_params: The params of the error log.
 
         Returns:
             An instance of result_class with error information.
         """
-        return build_operation_error_result(
+        err_result = build_operation_error_result(
             error_type=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
             msg_format_kwargs={"execution": execution, "error_msg": error_msg},
             result_cls=result_class
         )
+        message = "Failed to execute " + execution
+        sys_operation_logger.error(message, event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_ERROR,
+            method_name=error_log_params.method_name \
+                if error_log_params and error_log_params.method_name else execution,
+            method_params=error_log_params.method_params if error_log_params else None,
+            method_result=self._safe_model_dump(err_result),
+            method_exec_time_ms=(asyncio.get_event_loop().time() - error_log_params.start_time) * 1000 \
+                if error_log_params and error_log_params.start_time else None
+        ))
+        return err_result
 
     async def _validate_and_resolve_path(
             self,
@@ -960,19 +1185,20 @@ class FsOperation(BaseFsOperation):
 
         async with aiofiles.open(file_path, mode="rb") as f:
             index = 0
-            while True:
-                chunk_bytes = await f.read(chunk_size)
-                if not chunk_bytes:
-                    break
+            current_chunk = await f.read(chunk_size)
+            while current_chunk:
+                next_chunk = await f.read(chunk_size)
+                is_last = not bool(next_chunk)
                 yield ReadFileStreamResult(
                     code=StatusCode.SUCCESS.code,
                     message=StatusCode.SUCCESS.errmsg,
                     data=ReadFileChunkData(
-                        path=str(file_path), chunk_content=chunk_bytes, mode="bytes",
-                        chunk_size=len(chunk_bytes), chunk_index=index, is_last_chunk=False
+                        path=str(file_path), chunk_content=current_chunk, mode="bytes",
+                        chunk_size=len(current_chunk), chunk_index=index, is_last_chunk=is_last
                     )
                 )
                 index += 1
+                current_chunk = next_chunk
 
     @staticmethod
     async def _read_head(file_path: pathlib.Path, head: int, encoding: str):
@@ -1065,9 +1291,17 @@ class FsOperation(BaseFsOperation):
                 byte_buffer = (await f.read(read_size)) + byte_buffer
 
                 try:
-                    # Attempt decode. UnicodeDecodeError occurs if a char is split across chunks.
+                    # Attempt to decode. UnicodeDecodeError occurs if a char is split across chunks.
                     text = byte_buffer.decode(encoding)
-                except UnicodeDecodeError:
+                except UnicodeDecodeError as e:
+                    sys_operation_logger.debug(
+                        "Unicode decode error occurred while parsing byte buffer",
+                        event_type=LogEventType.SYS_OP_ERROR,
+                        exception=e,
+                        metadata={"byte_buffer_length": len(byte_buffer) if byte_buffer is not None else 0,
+                                  "encoding": encoding,
+                                  "current_pos": current_pos}
+                    )
                     if current_pos > 0:
                         continue  # Need more data to complete the multi-byte char
                     text = byte_buffer.decode(encoding, errors="replace")
@@ -1282,3 +1516,37 @@ class FsOperation(BaseFsOperation):
 
             current_line = next_line
             index += 1
+
+    def _log_stream_chunk(self, stream_chunk: Any,
+                          method_name: str,
+                          method_params: Dict[str, Any],
+                          start_time: float,
+                          *,
+                          stream_log: str,
+                          end_stream_log: str):
+        """Record the log of stream chunk"""
+
+        def _get_log_event_type():
+            """Get log event type safely"""
+            if stream_chunk is None:
+                return LogEventType.SYS_OP_STREAM
+            if not hasattr(stream_chunk, 'data') or stream_chunk.data is None:
+                return LogEventType.SYS_OP_STREAM
+            if not hasattr(stream_chunk.data, 'is_last_chunk'):
+                return LogEventType.SYS_OP_STREAM
+            return LogEventType.SYS_OP_STREAM if not stream_chunk.data.is_last_chunk else LogEventType.SYS_OP_END
+
+        log_event_type = _get_log_event_type()
+        exec_time_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+        event = self._create_sys_operation_event(
+            event_type=log_event_type,
+            method_name=method_name,
+            method_params=method_params,
+            method_result=self._safe_model_dump(stream_chunk),
+            method_exec_time_ms=exec_time_ms
+        )
+
+        if not stream_chunk.data.is_last_chunk:
+            sys_operation_logger.debug(stream_log, event=event)
+        else:
+            sys_operation_logger.info(end_stream_log, event=event)

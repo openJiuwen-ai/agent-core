@@ -21,6 +21,8 @@ from pydantic import (
     Field,
 )
 
+from openjiuwen.core.common.logging import sys_operation_logger, LogEventType
+
 
 class StreamEventType(str, Enum):
     """Enumeration of stream event types for async process output monitoring."""
@@ -108,6 +110,13 @@ class AsyncProcessHandler:
             )
             exit_code = self._process.returncode
         except asyncio.TimeoutError as ori_ex:
+            error_msg = f"Process communicate timed out after {self._overall_timeout} seconds" \
+                if not str(ori_ex) else None
+            sys_operation_logger.error("Get process result time out",
+                                       event_type=LogEventType.SYS_OP_ERROR,
+                                       error_message=error_msg,
+                                       exception=ori_ex,
+                                       metadata={"timeout": self._overall_timeout})
             try:
                 self._process.kill()
                 timeout_stdout, timeout_stderr = await asyncio.wait_for(
@@ -121,6 +130,10 @@ class AsyncProcessHandler:
                     exception=ori_ex
                 )
             except Exception as ex:
+                sys_operation_logger.error("Kill process error",
+                                           event_type=LogEventType.SYS_OP_ERROR,
+                                           exception=ex,
+                                           metadata={"timeout": 30})
                 return InvokeData(
                     stdout="",
                     stderr="kill process failed, error: " + str(ex),
@@ -157,16 +170,29 @@ class AsyncProcessHandler:
 
         try:
             start_time = asyncio.get_event_loop().time()
+            total_num = 0
             while self._process.returncode is None or not self._queue.empty():
                 if self._overall_timeout > 0:
                     elapsed_time = asyncio.get_event_loop().time() - start_time
                     if elapsed_time >= self._overall_timeout:
+                        sys_operation_logger.error("Stream execution time out",
+                                                   event_type=LogEventType.SYS_OP_ERROR,
+                                                   metadata={"timeout": self._overall_timeout})
                         raise asyncio.TimeoutError
                 try:
                     event = await asyncio.wait_for(self._queue.get(), timeout=0.1)
                     yield event
                     self._queue.task_done()
+                    total_num += 1
+                    sys_operation_logger.debug("Success to get stream queue item",
+                                               event_type=LogEventType.SYS_OP_STREAM,
+                                               metadata={"total_num": total_num,
+                                                         "has_returncode": self._process.returncode is not None,
+                                                         "queue_empty": self._queue.empty()})
                 except asyncio.TimeoutError:
+                    sys_operation_logger.debug("Get stream queue time out",
+                                               event_type=LogEventType.SYS_OP_STREAM,
+                                               metadata={"timeout": 0.1})
                     continue
         except asyncio.TimeoutError:
             self._process.kill()
@@ -176,6 +202,9 @@ class AsyncProcessHandler:
                 data=f"execution timeout after {self._overall_timeout} seconds"
             )
         except Exception as e:
+            sys_operation_logger.error("Stream execution error",
+                                       event_type=LogEventType.SYS_OP_ERROR,
+                                       exception=e)
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 data=f"stream loop error: {str(e)}"
@@ -203,6 +232,9 @@ class AsyncProcessHandler:
                 data=self._process.returncode if self._process.returncode is not None else -1
             )
         except Exception as e:
+            sys_operation_logger.error("Release process error",
+                                       event_type=LogEventType.SYS_OP_ERROR,
+                                       exception=e)
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 data=f"process wait error: {str(e)}"
@@ -216,15 +248,33 @@ class AsyncProcessHandler:
             stream_type: Corresponding StreamEventType (STDOUT/STDERR) for the stream
         """
         try:
+            total_num = 0
             while True:
                 chunk = await stream.read(self._chunk_size)
                 # Terminate loop when stream has no more data
                 if not chunk:
+                    sys_operation_logger.info("Receive stream eof",
+                                              event_type=LogEventType.SYS_OP_STREAM,
+                                              metadata={"total_num": total_num,
+                                                        "has_returncode": self._process.returncode is not None,
+                                                        "queue_empty": self._queue.empty()})
                     break
                 data = chunk.decode(self._encoding, errors="replace")
                 event = StreamEvent(type=stream_type, data=data)
                 await self._queue.put(event)
+                total_num += 1
+                sys_operation_logger.debug("Success to put stream queue item",
+                                           event_type=LogEventType.SYS_OP_STREAM,
+                                           metadata={"total_num": total_num,
+                                                     "has_returncode": self._process.returncode is not None,
+                                                     "queue_empty": self._queue.empty()})
         except Exception as e:
+            sys_operation_logger.error("Stream read error",
+                                       event_type=LogEventType.SYS_OP_ERROR,
+                                       exception=e,
+                                       metadata={"stream_type": stream_type.value,
+                                                 "chunk_size": self._chunk_size,
+                                                 "encoding": self._encoding})
             await self._queue.put(StreamEvent(
                 type=StreamEventType.ERROR,
                 data=f"{stream_type.value} reader error: {str(e)}"
@@ -252,7 +302,10 @@ class OperationUtils:
                                                  mode='w', encoding='utf-8') as tmp_file:
                     tmp_file.write(file_content)
                     return tmp_file.name
-            except Exception:
+            except Exception as e:
+                sys_operation_logger.warning("Failed to create tmp file",
+                                             event_type=LogEventType.SYS_OP_ERROR,
+                                             exception=e)
                 return None
 
         return await asyncio.to_thread(_sync_create_tmp)
@@ -274,7 +327,10 @@ class OperationUtils:
             try:
                 os.remove(file_path)
                 return True
-            except Exception:
+            except Exception as e:
+                sys_operation_logger.warning("Failed to delete tmp file",
+                                             event_type=LogEventType.SYS_OP_ERROR,
+                                             exception=e)
                 return False
 
         return await asyncio.to_thread(_sync_delete_tmp)

@@ -34,6 +34,8 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.core.common.exception.codes import StatusCode
+
 
 class LogEventType(Enum):
     """Log event type enumeration"""
@@ -105,6 +107,12 @@ class LogEventType(Enum):
     SYSTEM_SHUTDOWN = "system_shutdown"  # System shutdown
     SYSTEM_ERROR = "system_error"  # System error
 
+    # SysOperation events
+    SYS_OP_START = "sys_operation_start"  # System Operation started
+    SYS_OP_END = "sys_operation_end"  # System Operation succeeded
+    SYS_OP_ERROR = "sys_operation_error"  # System Operation error occurred
+    SYS_OP_STREAM = "sys_operation_stream"  # System operation streaming scenario
+
 
 class LogLevel(Enum):
     """Log level enumeration"""
@@ -131,6 +139,7 @@ class ModuleType(Enum):
     RETRIEVAL = "retrieval"
     SYSTEM = "system"
     USER = "user"
+    SYS_OPERATION = "sys_operation"
 
 
 class EventStatus(Enum):
@@ -173,7 +182,7 @@ class BaseLogEvent:
     # Message and stack trace
     message: Optional[str] = None  # Log message content
     stacktrace: Optional[str] = None  # Stack trace information (for exceptions)
-    exception: Optional[str] = None  # Exception detail string
+    exception: Optional[Exception] = None  # Exception detail string
 
     # Extended fields
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -186,16 +195,26 @@ class BaseLogEvent:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format for serialization"""
-        result = asdict(self)
-
+        event_data = asdict(self)
         # Handle enum types
-        for key, value in result.items():
+        result: Dict[str, Any] = {}
+        for key, value in event_data.items():
+            if value is None:
+                continue
             if isinstance(value, Enum):
                 result[key] = value.value
             elif isinstance(value, datetime):
                 result[key] = value.isoformat()
             elif isinstance(value, dict):
                 result[key] = self._convert_dict(value)  # type: ignore[arg-type]
+            elif isinstance(value, Exception):
+                result[key] = str(value)
+                if event_data.get("error_code") is None:
+                    result["error_code"] = StatusCode.ERROR.code
+                if event_data.get("error_message") is None:
+                    result["error_message"] = str(value)
+            else:
+                result[key] = value
 
         return result
 
@@ -204,6 +223,8 @@ class BaseLogEvent:
         """Recursively convert enums and datetime in dictionary"""
         result: Dict[str, Any] = {}
         for k, v in d.items():
+            if v is None:
+                continue
             if isinstance(v, Enum):
                 result[k] = v.value
             elif isinstance(v, datetime):
@@ -437,6 +458,26 @@ class SystemEvent(BaseLogEvent):
         self.module_type = ModuleType.SYSTEM
 
 
+@dataclass
+class SysOperationEvent(BaseLogEvent):
+    """SysOperation event"""
+
+    # Basic attributes
+    operation_name: Optional[str] = None  # System operation category, e.g., "fs", "code", "shell"
+    operation_mode: Optional[str] = None  # Execution mode of operation, e.g., "local", "sandbox"
+    operation_desc: Optional[str] = None  # Detailed description of the operation
+    method_name: Optional[str] = None  # Specific method of the operation, e.g., "read_file", "upload_file_stream"
+
+    # Extended attributes
+    method_params: Optional[Dict[str, Any]] = None  # Input parameters of the method (e.g., path, chunk_size)
+    method_result: Optional[Dict[str, Any]] = None  # Method return result
+    method_exec_time_ms: Optional[float] = None  # Execution time (milliseconds)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.module_type = ModuleType.SYS_OPERATION
+
+
 # Event type mapping for creating corresponding event classes based on event type
 EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     # Agent events
@@ -488,6 +529,11 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.SYSTEM_START: SystemEvent,
     LogEventType.SYSTEM_SHUTDOWN: SystemEvent,
     LogEventType.SYSTEM_ERROR: SystemEvent,
+    # SysOperation events
+    LogEventType.SYS_OP_START: SysOperationEvent,
+    LogEventType.SYS_OP_END: SysOperationEvent,
+    LogEventType.SYS_OP_ERROR: SysOperationEvent,
+    LogEventType.SYS_OP_STREAM: SysOperationEvent,
 }
 
 # Cache for event class field names to improve performance

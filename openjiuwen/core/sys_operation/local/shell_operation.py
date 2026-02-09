@@ -3,11 +3,13 @@
 
 import asyncio
 import os
-from typing import Optional, Dict, Any, AsyncIterator
+import platform
+from typing import Optional, Dict, Any, AsyncIterator, Callable
 
 from _pytest import pathlib
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.logging import LogEventType, sys_operation_logger
 from openjiuwen.core.sys_operation.local.utils import OperationUtils, StreamEvent, StreamEventType
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.shell import BaseShellOperation
@@ -21,6 +23,12 @@ from openjiuwen.core.sys_operation.result import (
 @operation(name="shell", mode=OperationMode.LOCAL, description="local shell operation")
 class ShellOperation(BaseShellOperation):
     """Shell operation"""
+
+    _BUFFERING_WRAPPERS: Dict[str, Callable[[str], str]] = {
+        "windows": lambda cmd: cmd,
+        "linux": lambda cmd: f"stdbuf -oL -eL {cmd}",
+        "darwin": lambda cmd: f"script -q /dev/null {cmd}",
+    }
 
     async def execute_cmd(
             self,
@@ -45,16 +53,35 @@ class ShellOperation(BaseShellOperation):
             ExecuteCmdResult: Execution result.
         """
 
+        method_name = self.execute_cmd.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to execute cmd", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
+
         def _create_exec_cmd_err(error_msg: str, data: Optional[ExecuteCmdData] = None) -> ExecuteCmdResult:
             """Create standard error result for cmd execution"""
             if data and hasattr(data, "exit_code") and data.exit_code is None:
                 data.exit_code = -1
-            return build_operation_error_result(
+            err_result = build_operation_error_result(
                 error_type=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
                 msg_format_kwargs={"execution": "execute_cmd", "error_msg": error_msg},
                 result_cls=ExecuteCmdResult,
                 data=data
             )
+            sys_operation_logger.error("Failed to execute cmd", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_ERROR,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(err_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return err_result
 
         if not command or not command.strip():
             return _create_exec_cmd_err(error_msg="command can not be empty")
@@ -69,7 +96,7 @@ class ShellOperation(BaseShellOperation):
 
             exec_env = OperationUtils.prepare_environment(environment)
             proc = await asyncio.create_subprocess_shell(
-                command,
+                self._wrap_command_with_buffering(command),
                 cwd=str(actual_cwd),
                 env=exec_env,
                 stdout=asyncio.subprocess.PIPE,
@@ -89,7 +116,7 @@ class ShellOperation(BaseShellOperation):
                                                 stdout=invoke_data.stdout,
                                                 stderr=invoke_data.stderr
                                             ))
-            return ExecuteCmdResult(
+            success_result = ExecuteCmdResult(
                 code=StatusCode.SUCCESS.code,
                 message="Command executed successfully",
                 data=ExecuteCmdData(
@@ -100,6 +127,15 @@ class ShellOperation(BaseShellOperation):
                     stderr=invoke_data.stderr
                 )
             )
+            sys_operation_logger.info("End to execute cmd", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
+
         except Exception as e:
             return _create_exec_cmd_err(error_msg=f"unexpected error: {str(e)}",
                                         data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
@@ -126,18 +162,36 @@ class ShellOperation(BaseShellOperation):
         Returns:
             AsyncIterator[ExecuteCmdStreamResult]: Streaming structured results.
         """
+        method_name = self.execute_cmd_stream.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to execute cmd streaming", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
 
         def _create_exec_cmd_stream_err(error_msg: str,
                                         data: Optional[ExecuteCmdChunkData] = None) -> ExecuteCmdStreamResult:
             """Create standardized error result for streaming command execution"""
             if data and hasattr(data, "exit_code") and data.exit_code is None:
                 data.exit_code = -1
-            return build_operation_error_result(
+            err_result = build_operation_error_result(
                 error_type=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
                 msg_format_kwargs={"execution": "execute_cmd_stream", "error_msg": error_msg},
                 result_cls=ExecuteCmdStreamResult,
                 data=data
             )
+            sys_operation_logger.error("Failed to execute cmd streaming", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_ERROR,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(err_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return err_result
 
         chunk_index = 0
 
@@ -159,7 +213,7 @@ class ShellOperation(BaseShellOperation):
 
             exec_env = OperationUtils.prepare_environment(environment)
             process = await asyncio.create_subprocess_shell(
-                command,
+                self._wrap_command_with_buffering(command),
                 cwd=str(actual_cwd),
                 env=exec_env,
                 stdout=asyncio.subprocess.PIPE,
@@ -173,14 +227,23 @@ class ShellOperation(BaseShellOperation):
 
             def _stream_event_trans(stream_event_data: StreamEvent, data_idx: int) -> Optional[ExecuteCmdStreamResult]:
                 """Transform raw StreamEvent to structured ExecuteCmdStreamResult"""
+
                 def _handle_std_out_err(event: StreamEvent, idx: int) -> ExecuteCmdStreamResult:
                     """Handle STDOUT/STDERR stream events"""
                     chunk_data = ExecuteCmdChunkData(text=event.data, type=event.type.value, chunk_index=idx)
-                    return ExecuteCmdStreamResult(
+                    stream_result = ExecuteCmdStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message=f"Get {chunk_data.type} stream successfully",
                         data=chunk_data
                     )
+                    sys_operation_logger.debug("Receive execute cmd stream", event=self._create_sys_operation_event(
+                        event_type=LogEventType.SYS_OP_STREAM,
+                        method_name=method_name,
+                        method_params=method_params,
+                        method_result=self._safe_model_dump(stream_result),
+                        method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+                    ))
+                    return stream_result
 
                 def _handle_exec_error(event: StreamEvent, idx: int) -> ExecuteCmdStreamResult:
                     """Handle execution error events"""
@@ -192,11 +255,19 @@ class ShellOperation(BaseShellOperation):
                     """Handle process exit event (final chunk)"""
                     exit_code = event.data
                     chunk_data = ExecuteCmdChunkData(chunk_index=idx, exit_code=exit_code)
-                    return ExecuteCmdStreamResult(
+                    exit_result = ExecuteCmdStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message="Command executed successfully",
                         data=chunk_data
                     )
+                    sys_operation_logger.info("End to execute cmd streaming", event=self._create_sys_operation_event(
+                        event_type=LogEventType.SYS_OP_END,
+                        method_name=method_name,
+                        method_params=method_params,
+                        method_result=self._safe_model_dump(exit_result),
+                        method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+                    ))
+                    return exit_result
 
                 event_handler_map: dict[StreamEventType, Any] = {
                     StreamEventType.STDOUT: _handle_std_out_err,
@@ -205,7 +276,15 @@ class ShellOperation(BaseShellOperation):
                     StreamEventType.EXIT: _handle_process_exit
                 }
                 handler = event_handler_map.get(stream_event_data.type)
-                return handler(stream_event_data, data_idx) if handler else None
+                if handler is None:
+                    sys_operation_logger.warning("Failed to get event handler", event=self._create_sys_operation_event(
+                        event_type=LogEventType.SYS_OP_ERROR,
+                        method_name=method_name,
+                        metadata={"stream_type": stream_event_data.type.value}
+                    ))
+                    return None
+                else:
+                    return handler(stream_event_data, data_idx)
 
             async for chunk in process_handler.stream():
                 modify_data = _stream_event_trans(chunk, chunk_index)
@@ -247,3 +326,9 @@ class ShellOperation(BaseShellOperation):
             target = work_dir / target
 
         return target.resolve()
+
+    def _wrap_command_with_buffering(self, command: str) -> str:
+        """"Wraps a command string with OS-specific buffering wrapper if available."""
+        os_name = platform.system().lower()
+        wrapper = self._BUFFERING_WRAPPERS.get(os_name)
+        return wrapper(command) if wrapper else command
