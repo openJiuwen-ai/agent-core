@@ -1368,3 +1368,36 @@ async def test_sub_flow_stream_output():
         "output": [{"result": "输出:"}, {"result": 1}, {"result": "+"}, {"result": 2}, {"result": "="},
     {"result": 3}, {"result": ";输出1:"}, {"result": 3}]}
     assert result.state == WorkflowExecutionState.COMPLETED
+
+
+async def test_workflow_cancel():
+    import asyncio
+    
+    class CustomComponent(WorkflowComponent):
+        async def invoke(self, inputs: Input, session: Session, context: ModelContext):
+            await asyncio.sleep(0.1)
+            return {}
+
+    flow = Workflow()
+    flow.set_start_comp("start", Start(), inputs_schema={"data": "${inputs}"})
+    flow.set_end_comp("end", End(), inputs_schema={"data": "${start.data}"})
+    flow.add_workflow_comp("custom_comp", CustomComponent(), inputs_schema={"data": "${start.data}"})
+
+    flow.add_connection("start", "custom_comp")
+    flow.add_connection("custom_comp", "end")
+
+    import uuid
+    session_id = str(uuid.uuid4())
+    task = asyncio.create_task(flow.invoke({"inputs": {"a": 1, "b": 2}},
+                                           create_workflow_session(session_id=session_id)))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        assert True
+
+    from openjiuwen.core.session.checkpointer import CheckpointerFactory
+    session_exist = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
+    assert session_exist is False
+

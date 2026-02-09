@@ -112,6 +112,9 @@ class PregelLoop:
 
         try:
             await self.executor.wait_all()
+        except asyncio.CancelledError:
+            await self.executor.cancel_all()
+            raise
         except Exception as e:
             raise e
 

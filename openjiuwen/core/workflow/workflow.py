@@ -387,38 +387,58 @@ class Workflow:
             finally:
                 # workflow end tracer info
                 outputs = session.state().get_outputs(self._end_comp_id)
-                await TracerWorkflowUtils.trace_workflow_done(session, outputs)
-                await session.stream_writer_manager().stream_emitter().close()
+                await asyncio.shield(TracerWorkflowUtils.trace_workflow_done(session, outputs))
+                await asyncio.shield(session.stream_writer_manager().stream_emitter().close())
 
         task = asyncio.create_task(self._execute_with_timeout(stream_process, timeout))
 
-        interaction_chuck_list = []
-        chunks = []
-        async for chunk in session.stream_writer_manager().stream_output(first_frame_timeout=first_frame_timeout,
-                                                                         timeout=frame_timeout,
-                                                                         need_close=True):
-            yield chunk
-            if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
-                interaction_chuck_list.append(chunk)
-            chunks.append(chunk)
         try:
-            await task
-            results = session.state().get_outputs(self._end_comp_id)
-            if results:
-                await self._add_messages_to_context(inputs, results, context)
-                yield OutputSchema(type="workflow_final", index=0, payload=results)
-            elif interaction_chuck_list:
-                await self._add_messages_to_context(inputs, interaction_chuck_list, context)
-            else:
-                await self._add_messages_to_context(inputs, chunks, context)
+            interaction_chuck_list = []
+            chunks = []
+            async for chunk in session.stream_writer_manager().stream_output(first_frame_timeout=first_frame_timeout,
+                                                                             timeout=frame_timeout,
+                                                                             need_close=True):
+                yield chunk
+                if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
+                    interaction_chuck_list.append(chunk)
+                chunks.append(chunk)
+            try:
+                await task
+                results = session.state().get_outputs(self._end_comp_id)
+                if results:
+                    await self._add_messages_to_context(inputs, results, context)
+                    yield OutputSchema(type="workflow_final", index=0, payload=results)
+                elif interaction_chuck_list:
+                    await self._add_messages_to_context(inputs, interaction_chuck_list, context)
+                else:
+                    await self._add_messages_to_context(inputs, chunks, context)
+            except asyncio.CancelledError:
+                logger.debug("task cancelled")
+                raise
+        except asyncio.CancelledError:
+            if not task.done() and not task.cancelled():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.warning("workflow task was cancelled")
+            raise
         except BaseError:
             raise
         except Exception as e:
             raise build_error(
                 StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=str(e) if e else e, card=self._card)
         finally:
-            await session.close()
-            await self._internal.reset()
+            if not task.done() and task.cancelled():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    logger.warning("workflow task was cancelled")
+                except Exception as e:
+                    logger.warning(f"unexpected exception {e}")
+            await asyncio.shield(session.close())
+            await asyncio.shield(self._internal.reset())
 
     async def _sub_invoke(self, inputs: Input, session: Session,
                           context: ModelContext = None, **kwargs) -> Output:
@@ -456,8 +476,8 @@ class Workflow:
             logger.info(f"end to sub_invoke, result: {results}")
             return results
         finally:
-            await sub_workflow_session.close()
-            await self._internal.reset()
+            await asyncio.shield(sub_workflow_session.close())
+            await asyncio.shield(self._internal.reset())
 
     async def _sub_stream(self, inputs: Input, session: Session, context: ModelContext = None, **kwargs) -> \
             AsyncIterator[Output]:
@@ -486,13 +506,16 @@ class Workflow:
                 logger.debug(f"yielding frame {frame_count}: {frame}")
                 yield frame
         finally:
-            await sub_workflow_session.close()
-            await self._internal.reset()
+            await asyncio.shield(sub_workflow_session.close())
+            await asyncio.shield(self._internal.reset())
 
     async def _execute_with_timeout(self, func, timeout):
         task = asyncio.create_task(func())
         try:
             return await asyncio.wait_for(task, timeout=timeout if (timeout and timeout > 0) else None)
+        except asyncio.CancelledError:
+            logger.debug("execute cancelled")
+            raise
         except asyncio.TimeoutError as e:
             raise build_error(StatusCode.WORKFLOW_EXECUTION_TIMEOUT, cause=e, timeout=timeout, card=self._card)
         except BaseError as e:

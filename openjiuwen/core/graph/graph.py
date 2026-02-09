@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import (
@@ -192,23 +193,31 @@ class CompiledGraph(ExecutableGraph):
             is_main = True
             config = PregelConfig(session_id=session_id, ns=workflow_id, recursion_limit=MAX_RECURSIVE_LIMIT)
 
-        if is_main:
-            await self._checkpointer.pre_workflow_execute(session, inputs)
-        if not isinstance(inputs, InteractiveInput):
-            session.state().commit_user_inputs(inputs)
-
-        result = None
-        exception = None
-
         try:
-            result = await self._pregel.run(config=config)
-        except Exception as e:
-            exception = e
+            if is_main:
+                await self._checkpointer.pre_workflow_execute(session, inputs)
+            if not isinstance(inputs, InteractiveInput):
+                session.state().commit_user_inputs(inputs)
 
-        if is_main:
-            await self._checkpointer.post_workflow_execute(session, result, exception)
-        elif exception is not None:
-            raise exception
+            result = None
+            exception = None
+
+            try:
+                result = await self._pregel.run(config=config)
+            except asyncio.CancelledError:
+                logger.debug("pregel cancelled")
+                raise
+            except Exception as e:
+                exception = e
+
+            if is_main:
+                await self._checkpointer.post_workflow_execute(session, result, exception)
+            elif exception is not None:
+                raise exception
+        except asyncio.CancelledError:
+            if is_main:
+                await self._checkpointer.post_workflow_execute(session, {}, None)
+            raise
 
     async def stream(self, inputs: Input, session: Session) -> AsyncIterator[Output]:
         pass

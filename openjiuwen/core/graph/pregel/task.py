@@ -88,6 +88,22 @@ class TaskExecutorPool:
         self.failed.clear()
         self.running_tasks.clear()
 
+    async def cancel_all(self):
+        to_cancel = []
+        for t in list(self.running_tasks.keys()):
+            if not t.done() and not t.cancelled():
+                t.cancel()
+                to_cancel.append(t)
+        results = await asyncio.gather(*to_cancel, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"running task with exception {result}")
+        for t in to_cancel:
+            if t in self.running_tasks:
+                node = self.running_tasks.pop(t)
+                self._commit_failure(node, asyncio.CancelledError())
+        self.running_tasks.clear()
+
 
 class NodeTask:
     def __init__(self, node: PregelNode, config: PregelConfig, version: int):
