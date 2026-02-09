@@ -2,6 +2,11 @@
 
 `openjiuwen.core.retrieval` is the retrieval module of the openJiuwen framework, providing knowledge base management, document indexing, vector retrieval, graph retrieval, and other capabilities.
 
+> **Reference Examples**: For more usage examples, please refer to the example code in the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under the `examples/retrieval/` directory, including:
+> - `showcase_text_embedding.py` - Text embedding examples
+> - `showcase_multimodal_embedding.py` - Multimodal embedding examples
+> - `showcase_reranker.py` - Reranker examples
+
 **Classes**:
 
 | CLASS                                                         | DESCRIPTION     |
@@ -21,6 +26,11 @@
 | [Embedding](./retrieval/embedding/base.md)                     | Embedding model abstract base class.       |
 | [APIEmbedding](./retrieval/embedding/api_embedding.md)        | API embedding model implementation.        |
 | [OllamaEmbedding](./retrieval/embedding/ollama_embedding.md)  | Ollama embedding model implementation.     |
+| [OpenAIEmbedding](./retrieval/embedding/openai_embedding.md) | OpenAI embedding model implementation.     |
+| [VLLMEmbedding](./retrieval/embedding/vllm_embedding.md)      | vLLM embedding model implementation.        |
+| [Reranker](./retrieval/reranker/base.md)                       | Reranker abstract base class.       |
+| [StandardReranker](./retrieval/reranker/standard_reranker.md) | Standard reranker implementation.       |
+| [ChatReranker](./retrieval/reranker/chat_reranker.md)         | Chat reranker implementation.       |
 | [Indexer](./retrieval/indexing/indexer/base.md)               | Index manager abstract base class.     |
 | [ChromaIndexer](./retrieval/indexing/indexer/chroma_indexer.md)| ChromaDB index manager implementation. |
 | [MilvusIndexer](./retrieval/indexing/indexer/milvus_indexer.md)| Milvus index manager implementation.   |

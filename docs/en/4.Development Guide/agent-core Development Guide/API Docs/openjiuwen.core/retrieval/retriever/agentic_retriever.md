@@ -6,7 +6,7 @@ Agentic retriever that adds LLM query rewriting and multi-round fusion capabilit
 
 
 ```python
-__init__(graph_retriever: GraphRetriever, llm_client: Any, llm_model_name: Optional[str] = None, max_iter: int = 2, agent_topk: int = 15)
+AgenticRetriever(graph_retriever: GraphRetriever, llm_client: Any, llm_model_name: Optional[str] = None, max_iter: int = 3, agent_topk: int = 15)
 ```
 
 Initialize agentic retriever.
@@ -16,7 +16,7 @@ Initialize agentic retriever.
 * **graph_retriever**(GraphRetriever): Graph retriever instance.
 * **llm_client**(Any): LLM client instance (for query rewriting).
 * **llm_model_name**(str, optional): LLM model name. Default: None.
-* **max_iter**(int): Maximum number of iterations. Default: 2.
+* **max_iter**(int): Maximum number of iterations. Default: 3.
 * **agent_topk**(int): Number of results to return per round of retrieval. Default: 15.
 
 ### async retrieve
@@ -45,18 +45,18 @@ Retrieve documents (agentic retrieval), optimizing retrieval effectiveness throu
 >>> import asyncio
 >>> from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 >>> from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
->>> from openjiuwen.core.utils.llm.base import BaseModelClient
+>>> from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 >>> 
 >>> async def run():
 ...     # Create graph retriever
 ...     graph_retriever = GraphRetriever(...)
 ...     # Create LLM client
-...     llm_client = BaseModelClient(...)
+...     llm_client = OpenAIModelClient(...)
 ...     # Create agentic retriever
 ...     retriever = AgenticRetriever(
 ...         graph_retriever=graph_retriever,
 ...         llm_client=llm_client,
-...         llm_model_name="gpt-4",
+...         llm_model_name="<model_name>",
 ...         max_iter=3,
 ...         agent_topk=15
 ...     )

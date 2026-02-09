@@ -1,14 +1,14 @@
-# openjiuwen.core.retrieval.embedding.openai_embedding
+# openjiuwen.core.retrieval.embedding.vllm_embedding
 
-## class openjiuwen.core.retrieval.embedding.openai_embedding.OpenAIEmbedding
+## class openjiuwen.core.retrieval.embedding.vllm_embedding.VLLMEmbedding
 
-OpenAI embedding model implementation, supports services following OpenAI standard, supports `encoding_format="base64"` format.
+vLLM embedding model implementation, supports multimodal embedding models for vLLM-like services (e.g., Qwen3-VL-Embedding).
 
 ```python
-OpenAIEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, dimension: Optional[int] = None, verify: bool | str | ssl.SSLContext = True, **kwargs)
+VLLMEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, dimension: Optional[int] = None, verify: bool | str | ssl.SSLContext = True, **kwargs)
 ```
 
-Initialize OpenAI embedding model.
+Initialize vLLM embedding model.
 
 **Parameters**:
 
@@ -18,8 +18,12 @@ Initialize OpenAI embedding model.
 * **extra_headers**(dict, optional): Additional request headers. Default: None.
 * **max_batch_size**(int): Maximum batch size. Default: 8.
 * **dimension**(int, optional): Embedding dimension (for Matryoshka models). Default: None.
-* **verify**(bool | str | ssl.SSLContext): SSL verification settings, bool indicates whether to use default CA certificate, str indicates custom CA certificate path, ssl.SSLContext indicates custom SSL context. Default: True.
+* **verify**(bool | str | ssl.SSLContext): SSL verification settings. Default: True.
 * **kwargs**: Variable arguments for passing additional configuration parameters.
+
+**Note**:
+
+VLLMEmbedding inherits from OpenAIEmbedding and supports multimodal document embedding.
 
 ### property dimension
 
@@ -102,6 +106,40 @@ Get embedding vectors for document list (sync).
 **Returns**:
 
 **List[List[float]]**, returns a list of embedding vectors for each document text.
+
+### async embed_multimodal
+
+```python
+embed_multimodal(doc: MultimodalDocument, **kwargs) -> List[float]
+```
+
+Embed multimodal document (async).
+
+**Parameters**:
+
+* **doc**(MultimodalDocument): Multimodal document.
+* **kwargs**: Variable arguments for passing additional configuration parameters.
+
+**Returns**:
+
+**List[float]**, returns the embedding vector for the multimodal document.
+
+### embed_multimodal_sync
+
+```python
+embed_multimodal_sync(doc: MultimodalDocument, **kwargs) -> List[float]
+```
+
+Embed multimodal document (sync).
+
+**Parameters**:
+
+* **doc**(MultimodalDocument): Multimodal document.
+* **kwargs**: Variable arguments for passing additional configuration parameters.
+
+**Returns**:
+
+**List[float]**, returns the embedding vector for the multimodal document.
 
 > **Reference Examples**: For more usage examples, please refer to the example code in the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under the `examples/retrieval/` directory, including:
 > - `showcase_text_embedding.py` - Text embedding examples

@@ -152,6 +152,12 @@
             - [api_embedding](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/embedding/api_embedding.md)
             - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/embedding/base.md)
             - [ollama_embedding](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/embedding/ollama_embedding.md)
+            - [openai_embedding](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/embedding/openai_embedding.md)
+            - [vllm_embedding](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/embedding/vllm_embedding.md)
+          - reranker
+            - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/reranker/base.md)
+            - [standard_reranker](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/reranker/standard_reranker.md)
+            - [chat_reranker](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/reranker/chat_reranker.md)
           - indexing
             - indexer
               - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/indexing/indexer/base.md)

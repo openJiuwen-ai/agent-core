@@ -2,6 +2,11 @@
 
 `openjiuwen.core.retrieval`是openJiuwen框架的检索模块，提供知识库管理、文档索引构建、向量检索、图检索等能力。
 
+> **参考示例**：更多使用示例请参考 [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) 仓库中 `examples/retrieval/` 目录下的示例代码，包括：
+> - `showcase_text_embedding.py` - 文本嵌入示例
+> - `showcase_multimodal_embedding.py` - 多模态嵌入示例
+> - `showcase_reranker.py` - 重排序器示例
+
 **Classes**：
 
 | CLASS                                                         | DESCRIPTION     |
@@ -21,6 +26,11 @@
 | [Embedding](./retrieval/embedding/base.md)                     | 嵌入模型抽象基类。       |
 | [APIEmbedding](./retrieval/embedding/api_embedding.md)        | API嵌入模型实现。        |
 | [OllamaEmbedding](./retrieval/embedding/ollama_embedding.md)  | Ollama嵌入模型实现。     |
+| [OpenAIEmbedding](./retrieval/embedding/openai_embedding.md) | OpenAI嵌入模型实现。     |
+| [VLLMEmbedding](./retrieval/embedding/vllm_embedding.md)      | vLLM嵌入模型实现。        |
+| [Reranker](./retrieval/reranker/base.md)                       | 重排序器抽象基类。       |
+| [StandardReranker](./retrieval/reranker/standard_reranker.md) | 标准重排序器实现。       |
+| [ChatReranker](./retrieval/reranker/chat_reranker.md)         | 聊天重排序器实现。       |
 | [Indexer](./retrieval/indexing/indexer/base.md)               | 索引管理器抽象基类。     |
 | [ChromaIndexer](./retrieval/indexing/indexer/chroma_indexer.md)| ChromaDB索引管理器实现。 |
 | [MilvusIndexer](./retrieval/indexing/indexer/milvus_indexer.md)| Milvus索引管理器实现。   |

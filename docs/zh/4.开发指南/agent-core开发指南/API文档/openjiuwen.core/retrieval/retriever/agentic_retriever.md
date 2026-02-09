@@ -6,7 +6,7 @@ Agentic 检索器，在图检索的基础上增加LLM查询重写和多轮融合
 
 
 ```python
-__init__(graph_retriever: GraphRetriever, llm_client: Any, llm_model_name: Optional[str] = None, max_iter: int = 2, agent_topk: int = 15)
+AgenticRetriever(graph_retriever: GraphRetriever, llm_client: Any, llm_model_name: Optional[str] = None, max_iter: int = 3, agent_topk: int = 15)
 ```
 
 初始化Agentic 检索器。
@@ -16,7 +16,7 @@ __init__(graph_retriever: GraphRetriever, llm_client: Any, llm_model_name: Optio
 * **graph_retriever**(GraphRetriever)：图检索器实例。
 * **llm_client**(Any)：LLM客户端实例（用于查询重写）。
 * **llm_model_name**(str, 可选)：LLM模型名称。默认值：None。
-* **max_iter**(int)：最大迭代轮数。默认值：2。
+* **max_iter**(int)：最大迭代轮数。默认值：3。
 * **agent_topk**(int)：每轮检索返回的结果数量。默认值：15。
 
 ### async retrieve
@@ -45,13 +45,13 @@ retrieve(query: str, top_k: int = 5, score_threshold: Optional[float] = None, mo
 >>> import asyncio
 >>> from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 >>> from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
->>> from openjiuwen.core.foundation.llm import BaseModelClient
+>>> from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 >>> 
 >>> async def run():
 ...     # 创建图检索器
 ...     graph_retriever = GraphRetriever(...)
 ...     # 创建LLM客户端
-...     llm_client = BaseModelClient(...)
+...     llm_client = OpenAIModelClient(...)
 ...     # 创建Agentic 检索器
 ...     retriever = AgenticRetriever(
 ...         graph_retriever=graph_retriever,
