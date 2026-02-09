@@ -440,3 +440,51 @@ class TestContextEngine:
         window = await context.get_context_window(system_messages=messages1, window_size=2)
         result = window.get_messages()
         assert result == messages1[-2:]
+
+    # # Test for pop operation involving _history_messages_size update
+    @pytest.mark.asyncio
+    async def test_save_context_007(self, request):
+
+        case_id = request.node.name
+
+        session = create_agent_session(session_id=case_id, card=AgentCard(id=case_id))
+        check_pointer = CheckpointerFactory.get_checkpointer()
+        await check_pointer.pre_agent_execute(
+            session=getattr(session, "_inner").get_inner_session(), inputs=None
+        )
+
+        engine = ContextEngine()
+        history = [SystemMessage(content="智能家具助手", name="first")]
+        context = await engine.create_context(context_id="ctx", session=session, history_messages=history)
+
+        messages = [
+            UserMessage(content="小智，明早6点帮我自动拉开窗帘", name="first"),
+            ToolMessage(content="调用智能窗帘，设置定时", tool_call_id=case_id, name="first"),
+            AssistantMessage(content="好的，已为您设置明早6点帮我自动拉开窗帘", name="first"),
+            UserMessage(content="小智，报时", name="second"),
+            AssistantMessage(content="好的，现在是2026年1月1日 18时15分24秒", name="second"),
+        ]
+        await context.add_messages(messages)
+        await engine.save_contexts(context_ids=["ctx"], session=session)
+        await session.post_run()
+
+        engine1 = ContextEngine()
+        context1 = await engine1.create_context(context_id="ctx", session=session)
+        assert context1.get_messages(with_history=False) == []
+        assert context1.get_messages() == history + messages
+
+        result = context1.pop_messages(with_history=True, size=1)
+        assert result == messages[-1:]
+        assert context1.get_messages() == history + messages[:-1]
+
+        result = context1.pop_messages(with_history=False, size=1)
+        assert len(result) == 0
+        assert context1.get_messages() == history + messages[:-1]
+
+        messages1 = [
+            UserMessage(content="message 1", name="1"),
+            AssistantMessage(content="message 2", name="1")
+        ]
+        context1.set_messages(messages=messages1, with_history=False)
+        assert context1.get_messages(with_history=False) == messages1
+        assert context1.get_messages() == history + messages[:-1] + messages1

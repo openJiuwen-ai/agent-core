@@ -41,7 +41,12 @@ class ContextMessageBuffer:
     def pop_back(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
         popped_messages = self.get_back(size, with_history)
         popped_size = len(popped_messages)
-        self._context_messages = self._context_messages[:self.size() - popped_size]
+        context_size = len(self._context_messages) - self._history_messages_size
+
+        if with_history and popped_size > context_size:
+            self._history_messages_size = max(0, self._history_messages_size - (popped_size - context_size))
+
+        self._context_messages = self._context_messages[:len(self._context_messages) - popped_size]
         return popped_messages
 
     def set_messages(self, messages: List[BaseMessage], with_history: bool = True):
