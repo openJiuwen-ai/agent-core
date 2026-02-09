@@ -7,7 +7,7 @@ Training progress and callbacks: Progress records epochs and scores, Callbacks p
 from typing import Generator, List
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.single_agent.agent import BaseAgent
+from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.agent_evolving.dataset import EvaluatedCase
 from openjiuwen.agent_evolving.constant import TuneConstant
 
@@ -20,7 +20,7 @@ class Progress(BaseModel):
 
     start_epoch: int = Field(default=0, ge=0)
     current_epoch: int = Field(default=0, ge=0)
-    max_epoch: int = Field(default=TuneConstant.DEFAULT_ITERATION_NUM, ge=0)
+    max_epoch: int = Field(default=TuneConstant.default_iteration_num, ge=0)
     current_batch_iter: int = Field(default=0, ge=0)
     max_batch_iter: int = Field(default=1, ge=0)
     best_score: float = Field(default=0.0, ge=0.0, le=1.0)

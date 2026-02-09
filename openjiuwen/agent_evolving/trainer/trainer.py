@@ -25,7 +25,7 @@ from openjiuwen.agent_evolving.checkpointing import FileCheckpointStore, Default
 from openjiuwen.core.operator import Operator
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.single_agent.agent import BaseAgent
+from openjiuwen.core.single_agent import BaseAgent
 
 
 class Trainer:
@@ -42,8 +42,8 @@ class Trainer:
         evaluator: BaseEvaluator,
         extractor: Optional[TracerTrajectoryExtractor] = None,
         callbacks: Optional[Callbacks] = None,
-        num_parallel: int = TuneConstant.DEFAULT_PARALLEL_NUM,
-        early_stop_score: float = TuneConstant.DEFAULT_EARLY_STOP_SCORE,
+        num_parallel: int = TuneConstant.default_parallel_num,
+        early_stop_score: float = TuneConstant.default_early_stop_score,
         # checkpoint (disabled by default)
         checkpoint_dir: Optional[str] = None,
         resume_from: Optional[str] = None,
@@ -145,7 +145,7 @@ class Trainer:
         agent: BaseAgent,
         train_cases: Optional[CaseLoader] = None,
         val_cases: Optional[CaseLoader] = None,
-        num_iterations: int = TuneConstant.DEFAULT_ITERATION_NUM,
+        num_iterations: int = TuneConstant.default_iteration_num,
         **kwargs: Any,
     ) -> BaseAgent:
         """

@@ -71,7 +71,7 @@ class BaseEvaluator(ABC):
             )
 
         TuneUtils.validate_digital_parameter(
-            num_parallel, "num_parallel", TuneConstant.MIN_PARALLEL_NUM, TuneConstant.MAX_PARALLEL_NUM
+            num_parallel, "num_parallel", TuneConstant.min_parallel_num, TuneConstant.max_parallel_num
         )
         num_workers = min(num_parallel, len(cases))
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
