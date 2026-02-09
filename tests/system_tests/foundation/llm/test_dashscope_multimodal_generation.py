@@ -152,6 +152,110 @@ class TestDashScopeImageGeneration(unittest.IsolatedAsyncioTestCase):
         
         logger.info(f"Generated images with reference: {response.images}")
 
+    @unittest.skip("require network and API key")
+    async def test_generate_image_batch_generation(self):
+        """Test batch image generation with n parameter
+
+        Note: This test is skipped because qwen-image-max only supports n=1.
+        DashScope API returns error: "num_images_per_prompt must be 1"
+        """
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("qwen-image-max")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = [
+            UserMessage(content="可爱的卡通小动物")
+        ]
+
+        response = await model.generate_image(
+            messages=messages,
+            n=1
+        )
+
+        self.assertIsInstance(response, ImageGenerationResponse)
+        self.assertIsNotNone(response.images)
+        self.assertGreaterEqual(len(response.images), 1)
+
+        logger.info(f"Generated {len(response.images)} images in batch")
+
+    @unittest.skip("require network and API key")
+    async def test_generate_image_multiple_reference_images(self):
+        """Test image generation with multiple reference images (up to 3)"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-image")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        # Content with text and multiple reference images
+        messages = [
+            UserMessage(content=[
+                {"text": "融合这些图片的风格元素"},
+                {"image": "https://cdn.wanx.aliyuncs.com/tmp/pressure/umbrella1.png"},
+                {"image": "https://img.alicdn.com/imgextra/i3/O1CN01SfG4J41UYn9WNt4X1_"
+                          "!!6000000002530-49-tps-1696-960.webp"}
+            ])
+        ]
+
+        response = await model.generate_image(messages=messages)
+
+        self.assertIsInstance(response, ImageGenerationResponse)
+        self.assertIsNotNone(response.images)
+
+        logger.info(f"Generated images with multiple references: {response.images}")
+
+    async def test_generate_image_empty_messages_validation(self):
+        """Test validation error when messages list is empty"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("qwen-image-max")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = []  # Empty messages
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_image(messages=messages)
+
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_image_too_many_images_validation(self):
+        """Test validation error when input images exceed limit (>3)"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-image")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        # Content with 4 images (exceeds limit of 3)
+        messages = [
+            UserMessage(content=[
+                {"text": "融合风格"},
+                {"image": "https://example.com/img1.png"},
+                {"image": "https://example.com/img2.png"},
+                {"image": "https://example.com/img3.png"},
+                {"image": "https://example.com/img4.png"}  # 4th image exceeds limit
+            ])
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_image(messages=messages)
+
+        self.assertIn("at most 3", str(context.exception))
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
 
 class TestDashScopeSpeechGeneration(unittest.IsolatedAsyncioTestCase):
     """Test cases for DashScope generate_speech method"""
@@ -278,6 +382,27 @@ class TestDashScopeSpeechGeneration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.audio_url is not None or response.audio_data is not None)
         
         logger.info(f"Generated English speech: {response.audio_url}")
+
+    async def test_generate_speech_empty_content_validation(self):
+        """Test validation error when text content is empty"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("qwen3-tts-flash")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = [
+            UserMessage(content="")  # Empty content
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_speech(messages=messages)
+
+        self.assertIn("non-empty", str(context.exception))
+        logger.info(f"Validation error caught as expected: {context.exception}")
 
 
 class TestDashScopeVideoGeneration(unittest.IsolatedAsyncioTestCase):
@@ -435,6 +560,73 @@ class TestDashScopeVideoGeneration(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(response.video_url)
         
         logger.info(f"Generated video with audio: {response.video_url}")
+
+    @unittest.skip("require network and API key")
+    async def test_generate_video_image_to_video_with_audio(self):
+        """Test image-to-video generation with audio (i2v + audio combination)"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-i2v-flash")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = [
+            UserMessage(content="让图片中的场景动起来，配合音乐节奏")
+        ]
+
+        response = await model.generate_video(
+            messages=messages,
+            img_url="https://cdn.wanx.aliyuncs.com/tmp/pressure/umbrella1.png",
+            audio_url="https://help-static-aliyun-doc.aliyuncs.com/file-manage-files/zh-CN/20250925/ozwpvi/rap.mp3",
+            resolution="720P",
+            duration=8
+        )
+
+        self.assertIsInstance(response, VideoGenerationResponse)
+        self.assertIsNotNone(response.video_url)
+
+        logger.info(f"Generated i2v video with audio: {response.video_url}")
+
+    async def test_generate_video_empty_messages_validation(self):
+        """Test validation error when messages list is empty"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-t2v")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = []  # Empty messages
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_video(messages=messages)
+
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_video_empty_content_validation(self):
+        """Test validation error when text content is empty"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-t2v")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = [
+            UserMessage(content="")  # Empty content
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_video(messages=messages)
+
+        self.assertIn("non-empty", str(context.exception))
+        logger.info(f"Validation error caught as expected: {context.exception}")
 
 
 if __name__ == "__main__":

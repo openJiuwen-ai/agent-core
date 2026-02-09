@@ -169,6 +169,7 @@ class DashScopeModelClient(OpenAIModelClient):
                 "watermark": watermark,
                 "prompt_extend": prompt_extend,
                 "size": size,
+                "n": n,
             }
 
             # Add optional parameters
