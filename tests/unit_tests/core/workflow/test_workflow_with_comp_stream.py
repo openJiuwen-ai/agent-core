@@ -8,7 +8,7 @@ from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.workflow import Input, Output, WorkflowCard
+from openjiuwen.core.workflow import BranchComponent, Input, Output, WorkflowCard
 from openjiuwen.core.workflow import End, EndConfig
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow import WorkflowComponent
@@ -875,3 +875,40 @@ async def test_stream_trigger_consumer():
 
     async for chunk in flow.stream({"query": "请介绍一下你自己！"}, create_workflow_session()):
         logger.info(chunk)
+
+
+class MockNode(WorkflowComponent):
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        return {'output': 1}
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        yield {'output': 2}
+
+    async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        result2 = inputs.get("result2")
+        if result2:
+            async for item in result2:
+                logger.info(item)
+        return {'output': 3}
+
+
+async def test_auto_ability_with_condition_edge():
+    flow = Workflow()
+    flow.set_start_comp("start", Start())
+    branch_comp = BranchComponent()
+    branch_comp.add_branch("${user_input.x} == 1", "invoke", "branch1")
+    branch_comp.add_branch("${user_input.x} == 2", "stream", "branch2")
+    flow.add_workflow_comp("branch", branch_comp)
+    flow.add_workflow_comp("invoke", MockNode())
+    flow.add_workflow_comp("stream", MockNode())
+    flow.add_workflow_comp("collect", MockNode(), stream_inputs_schema={"result2": "${stream.output}"})
+    flow.set_end_comp("end", End(), inputs_schema={'result': "${collect.output}", 'result2': '${invoke.output}'})
+    flow.add_connection("start", "branch")
+    flow.add_connection("invoke", "end")
+    flow.add_stream_connection("stream", "collect")
+    flow.add_connection("collect", "end")
+
+    result = await flow.invoke(inputs={"user_input": {"x": 1}}, session=create_workflow_session())
+    assert result.result == {'output': {'result2': 1}}
+    result = await flow.invoke(inputs={"user_input": {"x": 2}}, session=create_workflow_session())
+    assert result.result == {'output': {'result': 3}}

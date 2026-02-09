@@ -53,6 +53,7 @@ class End(WorkflowComponent):
         self._mix = True
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        logger.debug(f"end component invoke method inputs: {inputs}")
         if self._template is not None:
             if inputs is None:
                 inputs = {}

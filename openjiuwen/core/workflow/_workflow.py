@@ -318,6 +318,9 @@ class BaseWorkflow:
             # Has streaming input + streaming output -> TRANSFORM
             if node in edge_topology.target_stream_map:
                 self._add_ability_to_node(node, ComponentAbility.TRANSFORM)
+            else:
+                # when branch taget node with stream edge
+                self._add_ability_to_node(node, ComponentAbility.STREAM)
 
         # Nodes that receive stream
         for node in edge_topology.target_stream_map:
