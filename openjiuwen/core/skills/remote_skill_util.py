@@ -138,7 +138,7 @@ class RemoteSkillUtil:
         )
 
     @staticmethod
-    def _download_file_from_github(
+    def download_file_from_github(
         tree: GitHubTree,
         file_path: str,
         token: str = None,
@@ -227,7 +227,7 @@ class RemoteSkillUtil:
             token=token
         )
         for file in files:
-            data = self._download_file_from_github(
+            data = self.download_file_from_github(
                 tree,
                 file_path=file["path"],
                 token=token
