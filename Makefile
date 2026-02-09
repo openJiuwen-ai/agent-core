@@ -1,5 +1,7 @@
-# Cross-platform Makefile (Windows-friendly)
-.PHONY: help dep install update test has-staged-changes format lint pylint spelling fix-format fix-lint type-check check fix
+# Cross-platform Makefile for the openJiuwen project (Windows-friendly)
+# Feel free to submit feature requests at https://gitcode.com/openJiuwen/agent-core/issues
+
+.PHONY: help dep install update flame speedscope test has-staged-changes format lint pylint spelling fix-format fix-lint type-check check fix
 
 # Less noisy
 MAKEFLAGS += --no-print-directory
@@ -7,11 +9,17 @@ TESTFLAGS ?= .
 
 PYTHON ?= python
 DEP ?=
+FLAME ?=
+SPEEDSCOPE ?=
 LINESEP := ------------------------------------------------------------------
-DEPENDENCIES := "ruff>=0.11.2" "pylint>=3.0.0" "mypy>=1.12.0" "types-requests" "codespell>=2.2.4" "pipdeptree"
+DEPENDENCIES := "ruff>=0.11.2" "pylint>=3.0.0" "mypy>=1.12.0" "codespell>=2.2.4" "pipdeptree" "pyinstrument"
 
 ifneq ($(DEP),)
 .DEFAULT_GOAL := dep
+else ifneq ($(FLAME),)
+.DEFAULT_GOAL := flame
+else ifneq ($(SPEEDSCOPE),)
+.DEFAULT_GOAL := speedscope
 else
 .DEFAULT_GOAL := help
 endif
@@ -71,6 +79,12 @@ endef
 # Create a properly quoted list of files (handles spaces and quotes in filenames)
 CHANGED_FILES := $(foreach file,$(CHANGES_RAW),$(call quote-path,$(file)))
 
+# Sanitize output file for flame graph
+FLAME_OUT := $(call quote-path,$(FLAME).html)
+
+# Sanitize output file for speedscope
+SPEEDSCOPE_OUT := $(call quote-path,$(SPEEDSCOPE).json)
+
 # Detect uv
 UV ?= $(strip $(shell uv --version >$(NULL) 2>&1 && echo yes || echo no))
 ifeq ($(UV),yes)
@@ -85,13 +99,20 @@ help:
 	-@echo $(START)Usage: make [target] [COMMITS=N] [UV=yes|no]$(END)$(BLANK)
 	@echo - If COMMITS=N is specified and greater than 0, check Python files changed in last N commits
 	@echo $(START)  Otherwise the currently staged changes are checked$(END)
-	@echo - If UV is set, it must be either yes or no, otherwise make will detect if uv is available
+	@echo - If UV is set, it must be either yes or no, otherwise make will detect if uv is available$(BLANK)
 	@echo - You can also use this Makefile to check what packages depends on a specific package
 	@echo $(START)  Example: make DEP=pydantic-core$(END)
 	@echo $(START)  Syntax:  make DEP=<package-name>$(END)$(BLANK)
+	@echo - This Makefile can be used to create a flame graph for a Python script
+	@echo $(START)  Example: make FLAME=test-openai-emb.py$(END)
+	@echo $(START)  Syntax:  make FLAME=<script-name>$(END)$(BLANK)
+	@echo - This Makefile can be used to create a speedscope flame graph profile for a Python script
+	@echo $(START)  Example: make SPEEDSCOPE=test-openai-emb.py$(END)
+	@echo $(START)  Syntax:  make SPEEDSCOPE=<script-name>$(END)
+	@echo $(START)  View the profile at https://www.speedscope.app$(END)$(BLANK)
 	@echo Available targets:
 	@echo $(START)    help       - Show this help message$(END)
-	@echo $(START)    install    - Install dependencies via uv or pip: ruff, pylint, mypy, codespell, pipdeptree$(END)
+	@echo $(START)    install    - Install dependencies via uv or pip: ruff, pylint, mypy, codespell, pipdeptree, pyinstrument$(END)
 	@echo $(START)    update     - Download latest version of this Makefile from gitcode.com/openJiuwen/agent-core$(END)
 	@echo $(START)    test       - Execute pytest, you can supply arguments via TESTFLAGS=$(DQ)...$(DQ)$(END)
 	@echo $(START)    format     - Check formatting of selected Python files via ruff$(END)
@@ -126,6 +147,17 @@ update:
 	@echo NOTE: If this did not work, try running
 	@echo $(START)  > make update CURL=path/to/your/curl_executable (curl.exe on Windows 10+)$(END)
 	@$(CURL) -fsSL https://raw.gitcode.com/openJiuwen/agent-core/raw/develop/Makefile -o Makefile
+
+flame:
+	@echo Creating flame graph...
+	@$(RUN_CMD) pyinstrument -r html -o $(FLAME_OUT) $(call quote-path,$(FLAME))
+	@echo Flame graph created at $(FLAME_OUT)
+
+speedscope:
+	@echo Creating speedscope profile...
+	@$(RUN_CMD) pyinstrument -r speedscope -o $(SPEEDSCOPE_OUT) $(call quote-path,$(SPEEDSCOPE))
+	@echo Speedscope profile created at $(SPEEDSCOPE_OUT)
+	@echo $(START)View it at https://www.speedscope.app$(END)
 
 test:
 	@echo NOTE: To supply arguments to pytest (for example, to use pytest-xdist), try running
