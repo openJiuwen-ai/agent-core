@@ -3,13 +3,13 @@
 API embedding model implementation test cases
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval import APIEmbedding
-from openjiuwen.core.retrieval import EmbeddingConfig
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.retrieval import APIEmbedding, EmbeddingConfig
 
 
 @pytest.fixture
@@ -53,6 +53,9 @@ class TestAPIEmbedding:
         """Test initialization with extra headers"""
         extra_headers = {"X-Custom-Header": "custom-value"}
         model = APIEmbedding(config=embedding_config, extra_headers=extra_headers)
+        actual_header = getattr(model, "_headers", {})
+        assert "X-Custom-Header" in actual_header
+        assert actual_header.get("X-Custom-Header") == "custom-value"
 
     @classmethod
     def test_init_with_custom_params(cls, embedding_config):
@@ -66,6 +69,64 @@ class TestAPIEmbedding:
         assert model.timeout == 120
         assert model.max_retries == 5
         assert model.max_batch_size == 16
+
+    @classmethod
+    def test_init_semaphore(cls, embedding_config):
+        """Test Semaphore initialization with max_concurrent"""
+        model = APIEmbedding(config=embedding_config, max_concurrent=25)
+        assert model.limiter is not None
+        assert getattr(model.limiter, "_value") == 25
+
+    @classmethod
+    def test_init_semaphore_default(cls, embedding_config):
+        """Test Semaphore initialization with default max_concurrent"""
+        model = APIEmbedding(config=embedding_config)
+        assert model.limiter is not None
+        assert getattr(model.limiter, "_value") == 50
+
+    @classmethod
+    def test_executor_resource_management(cls, embedding_config):
+        """Test ThreadPoolExecutor lazy initialization & cleanup"""
+        model = APIEmbedding(config=embedding_config, max_concurrent=10)
+        # Executor should be None initially
+        assert getattr(model, "_executor") is None
+
+        # Accessing executor property initialize it
+        executor = model.executor
+        assert executor is not None
+        assert isinstance(executor, ThreadPoolExecutor)
+        assert getattr(executor, "_max_workers") == 10
+        assert getattr(executor, "_thread_name_prefix") == "openjiuwen_embed"
+
+        # Subsequent accesses returns same executor
+        assert model.executor is executor
+
+    @pytest.mark.asyncio
+    async def test_semaphore_concurrency_control(self, embedding_config):
+        """Test that Semaphore properly controls concurrency"""
+        import asyncio
+
+        model = APIEmbedding(config=embedding_config, max_concurrent=2)
+
+        # Create a counter to track concurrent operations
+        concurrent_count = 0
+        max_concurrent_seen = 0
+
+        async def test_task():
+            nonlocal concurrent_count, max_concurrent_seen
+            async with model.limiter:
+                concurrent_count += 1
+                max_concurrent_seen = max(max_concurrent_seen, concurrent_count)
+                # Simulate some work
+                await asyncio.sleep(0.01)
+                concurrent_count -= 1
+
+        # Launch more tasks than max_concurrent
+        tasks = [test_task() for _ in range(5)]
+        await asyncio.gather(*tasks)
+
+        # Should never exceed max_concurrent
+        assert max_concurrent_seen <= 2
 
     @pytest.mark.asyncio
     async def test_embed_query_success_embedding_format(self, embedding_config):

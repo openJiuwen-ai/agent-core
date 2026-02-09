@@ -33,6 +33,7 @@ class OpenAIEmbedding(APIEmbedding):
         max_retries: int = 3,
         extra_headers: Optional[dict] = None,
         max_batch_size: int = 8,
+        max_concurrent: int = 50,
         dimension: Optional[int] = None,
         verify: bool | str | ssl.SSLContext = True,
         **kwargs,
@@ -46,6 +47,7 @@ class OpenAIEmbedding(APIEmbedding):
             max_retries: Maximum retry count
             extra_headers: Additional request headers
             max_batch_size: Maximum batch size for each query
+            max_concurrent: Maximum number of concurrent requests
             dimension: Embedding dimension for Matryoshka models
             verify (bool/str/ssl.SSLContext): Decides SSL context to use for the httpx clients,
                 bool: whether to use SSL context with default CA certificate (using EMBEDDING_SSL_CERT from
@@ -55,7 +57,12 @@ class OpenAIEmbedding(APIEmbedding):
             **kwargs: optional keyword arguments to pass into httpx clients
         """
         super().__init__(
-            config, timeout=timeout, max_retries=max_retries, extra_headers=extra_headers, max_batch_size=max_batch_size
+            config,
+            timeout=timeout,
+            max_retries=max_retries,
+            extra_headers=extra_headers,
+            max_batch_size=max_batch_size,
+            max_concurrent=max_concurrent,
         )
         self.matryoshka_dimension = False
         if isinstance(dimension, int):

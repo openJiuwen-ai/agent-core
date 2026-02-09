@@ -6,6 +6,8 @@ Ollama Embedding Model Implementation
 Implementation of Ollama embedding model.
 """
 
+import asyncio
+from itertools import chain
 from typing import Any, List, Optional
 
 import requests
@@ -29,6 +31,7 @@ class OllamaEmbedding(Embedding):
         max_retries: int = 3,
         extra_headers: Optional[dict] = None,
         max_batch_size: int = 8,
+        max_concurrent: int = 50,
         dimension: Optional[int] = None,
     ):
         """
@@ -49,6 +52,7 @@ class OllamaEmbedding(Embedding):
         self.embed_url = f"{self.base_url}/api/embed"
         self._headers = extra_headers or {}
         self.max_batch_size = max_batch_size
+        self.limiter = asyncio.Semaphore(max_concurrent)
         self._dimension: Optional[int] = None
         if dimension is not None:
             self._dimension = dimension
@@ -102,8 +106,6 @@ class OllamaEmbedding(Embedding):
         if self._dimension is None:
             # Get dimension by embedding a test text
             try:
-                import asyncio
-
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     # If event loop is running, use default value
@@ -125,7 +127,7 @@ class OllamaEmbedding(Embedding):
                 StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text provided for embedding"
             )
 
-        embeddings = await self._get_ollama_embedding(text, **kwargs)
+        embeddings = await self._get_embeddings(text, **kwargs)
         return embeddings[0]
 
     async def embed_documents(
@@ -164,27 +166,27 @@ class OllamaEmbedding(Embedding):
         if self.max_batch_size:
             bsz = min(bsz, self.max_batch_size)
 
-        all_embeddings = []
         indices = list(range(0, len(non_empty_texts), bsz))
         callback_obj = callback_cls(seq=indices)
-        for i in indices:
-            j = i + bsz
-            batch_texts = non_empty_texts[i:j]
-            batch_embeddings = await self._get_ollama_embedding(batch_texts, **kwargs)
-            all_embeddings.extend(batch_embeddings)
-            callback_obj(start_idx=i, end_idx=j, batch=batch_texts)
-        embeddings = all_embeddings
 
-        return embeddings
+        async def process_batch(i: int) -> List[List[float]]:
+            """Process a single batch with semaphore for concurrency control."""
+            async with self.limiter:
+                j = i + bsz
+                batch = non_empty_texts[i:j]
+                embeddings = await self._get_embeddings(batch, **kwargs)
+                callback_obj(start_idx=i, end_idx=j, batch=batch)
+                return embeddings
 
-    async def _get_ollama_embedding(self, text: str | List[str], **kwargs) -> List[List[float]]:
-        """Get ollama embedding"""
-        import asyncio
+        # Create and run tasks for all batches concurrently
+        tasks = [process_batch(i) for i in indices]
+        results = await asyncio.gather(*tasks)
+        all_embeddings = list(chain.from_iterable(results))
 
-        if not text:
-            raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text or list provided for embedding"
-            )
+        return all_embeddings
+
+    async def _get_embeddings(self, text: str | List[str], **kwargs) -> List[List[float]]:
+        """Get embedding vectors"""
 
         payload = {
             "model": self.model_name,
@@ -197,6 +199,47 @@ class OllamaEmbedding(Embedding):
             try:
                 response = await asyncio.to_thread(
                     requests.post,
+                    self.embed_url,
+                    json=payload,
+                    headers=self._headers,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                result = response.json()
+                if "embeddings" not in result:
+                    raise build_error(
+                        StatusCode.RETRIEVAL_EMBEDDING_RESPONSE_INVALID,
+                        error_msg=f"No embeddings in response: {result}",
+                    )
+
+                return result["embeddings"]
+
+            except requests.exceptions.RequestException as e:
+                if attempt == self.max_retries - 1:
+                    raise build_error(
+                        StatusCode.RETRIEVAL_EMBEDDING_REQUEST_CALL_FAILED,
+                        error_msg=f"Failed to get embedding after {self.max_retries} attempts",
+                        cause=e,
+                    ) from e
+                logger.warning(f"Attempt {attempt + 1} failed, retrying: {e}")
+
+        raise build_error(
+            StatusCode.RETRIEVAL_EMBEDDING_UNREACHABLE_CALL_FAILED, error_msg="This should never be reached"
+        )
+
+    def _get_embeddings_sync(self, text: str | List[str], **kwargs) -> List[List[float]]:
+        """Get embedding vectors"""
+
+        payload = {
+            "model": self.model_name,
+            "input": text,
+            "truncate": False,
+            **kwargs,
+        }
+
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(
                     self.embed_url,
                     json=payload,
                     headers=self._headers,

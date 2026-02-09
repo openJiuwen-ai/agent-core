@@ -7,8 +7,9 @@ Uses LLM for triple extraction.
 """
 
 import asyncio
-import json
 from typing import Any, List
+
+from json_repair import repair_json
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -161,20 +162,12 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
                 lines = content.split("\n")
                 content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
 
-            # Try to parse JSON directly
+            # Parse JSON
             try:
-                triple_list = json.loads(content)
-            except json.JSONDecodeError:
-                # If not valid JSON, try to extract JSON portion
-                import re
-
-                json_match = re.search(r"\[\[.*?\]\]", content, re.DOTALL)
-                if json_match:
-                    triple_list = json.loads(json_match.group())
-                else:
-                    # JSON parsing failed completely
-                    logger.error(f"Failed to parse triples from content: {content[:100]}")
-                    return [], False
+                triple_list = repair_json(content, return_objects=True)
+            except Exception as e:
+                logger.error("Failed to parse triples from content: %s. Content: %s", e, content[:200])
+                return [], False
 
             # Convert to Triple objects
             # Note: If triple_list is an empty array [], this is valid (no triples found)
@@ -195,5 +188,5 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
 
         except Exception as e:
             # Any other exception during parsing is a failure
-            logger.error(f"Failed to parse triples: {e}")
+            logger.error("Failed to parse triples: %s", e)
             return [], False

@@ -8,6 +8,8 @@ Universal HTTP embedding client implementation.
 
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from itertools import chain
 from typing import Any, List, Optional
 
 import requests
@@ -42,6 +44,7 @@ class APIEmbedding(Embedding):
         max_retries: int = 3,
         extra_headers: Optional[dict] = None,
         max_batch_size: int = 8,
+        max_concurrent: int = 50,
     ):
         self.config = config
         self.model_name = config.model_name
@@ -50,6 +53,7 @@ class APIEmbedding(Embedding):
         self.api_url = config.base_url or ""
         self.timeout = timeout
         self.max_retries = max_retries
+        self.limiter = asyncio.Semaphore(max_concurrent)
         self._headers = {"Content-Type": "application/json"}
         if self.api_key:
             self._headers["Authorization"] = f"Bearer {self.api_key}"
@@ -83,6 +87,18 @@ class APIEmbedding(Embedding):
         # Cache dimension
         self._dimension: Optional[int] = None
 
+        # For synchronized concurrency
+        self._max_concurrent = max_concurrent
+        self._executor: Optional[ThreadPoolExecutor] = None
+
+    def __del__(self):
+        """Custom destructor to shutdown thread pool executor at delete"""
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                self._executor = None
+
     @property
     def dimension(self) -> int:
         """Return embedding dimension.
@@ -97,6 +113,40 @@ class APIEmbedding(Embedding):
         self._dimension = len(embedding)
         logger.debug(f"Determined embedding dimension: {self._dimension}")
         return self._dimension
+
+    @property
+    def executor(self) -> ThreadPoolExecutor:
+        """Return thread pool executor for concurrent sync requests"""
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=self._max_concurrent, thread_name_prefix="openjiuwen_embed")
+        return self._executor
+
+    @staticmethod
+    def validate_embed_docs(texts: List[str], kwargs: dict) -> list[str]:
+        """Validate input for batch embedding request and return a list of non-empty documents"""
+        if not texts:
+            raise build_error(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty texts list provided")
+        callback_cls = kwargs.get("callback_cls", BaseCallback)
+        if not isinstance(callback_cls, type) or not issubclass(callback_cls, BaseCallback):
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID,
+                error_msg=(
+                    f"callback_cls in APIEmbedding.embed_documents must be a subclass of "
+                    f"BaseCallback, got {type(callback_cls)}"
+                ),
+            )
+
+        non_empty = [t for t in texts if t.strip()]
+        if len(non_empty) != len(texts):
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
+                error_msg=f"{len(texts) - len(non_empty)} chunks are empty while embedding",
+            )
+        if not non_empty:
+            raise build_error(
+                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="All texts are empty after filtering"
+            )
+        return non_empty
 
     async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
         if not text.strip():
@@ -121,41 +171,63 @@ class APIEmbedding(Embedding):
         batch_size: Optional[int] = None,
         **kwargs: Any,
     ) -> List[List[float]]:
-        if not texts:
-            raise build_error(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty texts list provided")
-        callback_cls = kwargs.pop("callback_cls", BaseCallback)
-        if not isinstance(callback_cls, type) or not issubclass(callback_cls, BaseCallback):
-            raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_CALLBACK_INVALID,
-                error_msg=(
-                    f"callback_cls in APIEmbedding.embed_documents must be a subclass of "
-                    f"BaseCallback, got {type(callback_cls)}"
-                ),
-            )
+        non_empty = self.validate_embed_docs(texts, kwargs)
 
-        non_empty = [t for t in texts if t.strip()]
-        if len(non_empty) != len(texts):
-            raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID,
-                error_msg=f"{len(texts) - len(non_empty)} chunks are empty while embedding",
-            )
-        if not non_empty:
-            raise build_error(
-                StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="All texts are empty after filtering"
-            )
         # Respect caller batch_size but never exceed configured max_batch_size
         bsz = batch_size or self.max_batch_size or 1
         if self.max_batch_size:
             bsz = min(bsz, self.max_batch_size)
-        all_embeddings: List[List[float]] = []
+
         indices = list(range(0, len(non_empty), bsz))
-        callback_obj = callback_cls(seq=indices)
+        callback_obj = kwargs.get("callback_cls", BaseCallback)(seq=indices)
+
+        async def process_batch(i: int) -> List[List[float]]:
+            """Process a single batch with semaphore for concurrency control."""
+            async with self.limiter:
+                j = i + bsz
+                batch = non_empty[i:j]
+                embeddings = await self._get_embeddings(batch, **kwargs)
+                callback_obj(start_idx=i, end_idx=j, batch=batch)
+                return embeddings
+
+        # Create and run tasks for all batches concurrently
+        tasks = [process_batch(i) for i in indices]
+        results = await asyncio.gather(*tasks)
+        all_embeddings = list(chain.from_iterable(results))
+
+        return all_embeddings
+
+    def embed_documents_sync(
+        self,
+        texts: List[str],
+        batch_size: Optional[int] = None,
+        **kwargs: Any,
+    ) -> List[List[float]]:
+        """Embed document texts"""
+        non_empty = self.validate_embed_docs(texts, kwargs)
+
+        # Respect caller batch_size but never exceed configured max_batch_size
+        bsz = batch_size or self.max_batch_size or 1
+        if self.max_batch_size:
+            bsz = min(bsz, self.max_batch_size)
+
+        indices = list(range(0, len(non_empty), bsz))
+        callback_obj = kwargs.get("callback_cls", BaseCallback)(seq=indices)
+
+        tasks = {}
+        results = [None] * len(non_empty)
+
         for i in indices:
             j = i + bsz
-            batch = non_empty[i:j]
-            all_embeddings.extend(await self._get_embeddings(batch, **kwargs))
+            tasks[self.executor.submit(self._get_embeddings_sync, non_empty[i:j], **kwargs)] = i
+
+        for task in as_completed(tasks):
+            i = tasks.get(task)
+            j = i + bsz
+            results[i:j] = batch = task.result()
             callback_obj(start_idx=i, end_idx=j, batch=batch)
-        return all_embeddings
+
+        return results
 
     async def _get_embeddings(self, text: str | List[str], **kwargs) -> List[List[float]]:
         """Get embedding vectors"""
