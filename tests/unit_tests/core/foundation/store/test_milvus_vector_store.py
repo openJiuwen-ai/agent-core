@@ -33,7 +33,7 @@ class TestMilvusVectorStoreInit:
         # Access client property to trigger lazy initialization
         _ = store.client
 
-        mock_milvus_client.assert_called_once_with(uri="http://testhost:testport", token="")
+        mock_milvus_client.assert_called_once_with(uri="http://testhost:testport", token="", timeout=3)
         assert store.milvus_uri == "http://testhost:testport"
         assert store.milvus_token is None
         assert store.database_name == "default"
@@ -53,7 +53,7 @@ class TestMilvusVectorStoreInit:
         # Access client property to trigger lazy initialization
         _ = store.client
 
-        mock_milvus_client.assert_called_once_with(uri="http://testhost:testport", token="test_token")
+        mock_milvus_client.assert_called_once_with(uri="http://testhost:testport", token="test_token", timeout=3)
         assert store.milvus_token == "test_token"
 
     @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")

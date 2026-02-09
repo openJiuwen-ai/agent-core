@@ -61,6 +61,10 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         # Get resource directory for Chroma persistence
         self.resource_dir = os.getenv("MEMORY_RESOURCE_DIR", "./resource_dir")
 
+        # Create resource directory if it doesn't exist
+        if not os.path.exists(self.resource_dir):
+            os.makedirs(self.resource_dir)
+
         # ---------- Embedding Configuration ----------
         embed_config = EmbeddingConfig(
             model_name=os.getenv("EMBED_MODEL_NAME", "xx"),

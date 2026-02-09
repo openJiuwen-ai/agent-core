@@ -96,7 +96,7 @@ class MilvusVectorStore(BaseVectorStore):
         **kwargs: Any,
     ) -> MilvusClient:
         """Create Milvus client and ensure database exists."""
-        client = MilvusClient(uri=path_or_uri, token=token, **kwargs)
+        client = MilvusClient(uri=path_or_uri, token=token, timeout=3, **kwargs)
         if database_name and database_name != "default":
             if database_name not in client.list_databases():
                 client.create_database(database_name)
