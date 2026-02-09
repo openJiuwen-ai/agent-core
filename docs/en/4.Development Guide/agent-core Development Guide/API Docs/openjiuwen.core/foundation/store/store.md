@@ -1,10 +1,12 @@
 # openjiuwen.core.foundation.store
 
-`openjiuwen.core.foundation.store` provides **abstract base classes and built-in implementations** for KV storage and database storage, for reuse by modules such as memory and session within the framework:
+`openjiuwen.core.foundation.store` provides **abstract base classes and built-in implementations** for KV storage, database storage, and vector storage, for reuse by modules such as memory and session within the framework:
 
 - Defines `BaseKVStore` key-value storage abstract interface (set, get, exists, delete, prefix queries, batch mget, etc.);
 - Defines `BaseDbStore` database storage abstract interface (get async Engine);
-- Provides `InMemoryKVStore` (in-memory implementation), `DbBasedKVStore` (SQLAlchemy-based implementation), `DefaultDbStore` (BaseDbStore default implementation).
+- Defines `BaseVectorStore` vector storage abstract interface (collection management, document insertion, vector search, document deletion);
+- Provides `InMemoryKVStore` (in-memory implementation), `DbBasedKVStore` (SQLAlchemy-based implementation), `DefaultDbStore` (BaseDbStore default implementation);
+- Provides `create_vector_store()` factory function for creating vector store instances.
 
 Corresponding source code: `openjiuwen.core.foundation.store`.
 
@@ -171,7 +173,7 @@ class openjiuwen.core.foundation.store.in_memory_kv_store.InMemoryKVStore(BaseKV
 
 In-memory KV storage implementation, implementing all interfaces of `BaseKVStore`; supports `exclusive_set`'s `expiry` expiration time, expired keys are treated as non-existent during `get` (not automatically deleted).
 
-Corresponding source code: `openjiuwen.core.foundation.store.in_memory_kv_store.InMemoryKVStore`.
+Corresponding source code: `openjiuwen.core.foundation.store.kv.in_memory_kv_store.InMemoryKVStore`.
 
 ```python
 InMemoryKVStore()
@@ -195,7 +197,7 @@ class openjiuwen.core.foundation.store.db_based_kv_store.DbBasedKVStore(BaseKVSt
 
 SQLAlchemy async engine-based KV storage implementation, using table `kv_store` (key, value columns); automatically creates table on first call to any interface.
 
-Corresponding source code: `openjiuwen.core.foundation.store.db_based_kv_store.DbBasedKVStore`.
+Corresponding source code: `openjiuwen.core.foundation.store.kv.db_based_kv_store.DbBasedKVStore`.
 
 ```python
 DbBasedKVStore(engine: AsyncEngine)
@@ -221,7 +223,7 @@ class openjiuwen.core.foundation.store.default_db_store.DefaultDbStore(BaseDbSto
 
 Default implementation of `BaseDbStore`, directly holds and returns the passed `AsyncEngine`.
 
-Corresponding source code: `openjiuwen.core.foundation.store.default_db_store.DefaultDbStore`.
+Corresponding source code: `openjiuwen.core.foundation.store.db.default_db_store.DefaultDbStore`.
 
 ```python
 DefaultDbStore(async_conn: AsyncEngine)
@@ -245,6 +247,202 @@ Return the `async_conn` passed during construction.
 
 ---
 
+## class BaseVectorStore
+
+```python
+class openjiuwen.core.foundation.store.base_vector_store.BaseVectorStore(ABC)
+```
+
+Vector storage abstract base class, defining a unified vector storage interface supporting collection management, document insertion, vector search, and document deletion operations.
+
+Corresponding source code: `openjiuwen.core.foundation.store.base_vector_store.BaseVectorStore`.
+
+### abstractmethod async create_collection
+
+```python
+async def create_collection(
+    self,
+    collection_name: str,
+    schema: Union[CollectionSchema, Dict[str, Any]],
+    **kwargs: Any,
+) -> None
+```
+
+Create a new collection with specified schema.
+
+**Parameters**:
+
+- `collection_name: str`: Name of the collection to create
+- `schema: Union[CollectionSchema, Dict[str, Any]]`: CollectionSchema instance or schema dictionary
+- `**kwargs: Any`: Additional parameters
+    - `distance_metric: str`: Vector search distance metric (e.g., "COSINE", "L2", "IP")
+
+### abstractmethod async delete_collection
+
+```python
+async def delete_collection(self, collection_name: str, **kwargs: Any) -> None
+```
+
+Delete a collection by name.
+
+**Parameters**:
+
+- `collection_name: str`: Name of the collection to delete
+- `**kwargs: Any`: Additional parameters
+
+### abstractmethod async collection_exists
+
+```python
+async def collection_exists(self, collection_name: str, **kwargs: Any) -> bool
+```
+
+Check if a collection exists.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name
+- `**kwargs: Any`: Additional parameters
+
+**Returns**:
+
+- `bool`: `True` if the collection exists, `False` otherwise
+
+### abstractmethod async get_schema
+
+```python
+async def get_schema(self, collection_name: str, **kwargs: Any) -> CollectionSchema
+```
+
+Get the schema of a collection.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name
+- `**kwargs: Any`: Additional parameters
+
+**Returns**:
+
+- `CollectionSchema`: The schema of the collection
+
+### abstractmethod async add_docs
+
+```python
+async def add_docs(
+    self,
+    collection_name: str,
+    docs: List[Dict[str, Any]],
+    **kwargs: Any,
+) -> None
+```
+
+Add documents to a collection.
+
+**Parameters**:
+
+- `collection_name: str`: Name of the target collection
+- `docs: List[Dict[str, Any]]`: List of documents to add, each containing:
+    - `id: str` (optional): Document ID
+    - `embedding: List[float]`: Document vector embedding
+    - `text: str`: Document text content
+    - `metadata: Dict[str, Any]` (optional): Additional metadata
+- `**kwargs: Any`: Additional parameters
+    - `batch_size: int` (optional): Batch size for bulk insertion
+
+### abstractmethod async search
+
+```python
+async def search(
+    self,
+    collection_name: str,
+    query_vector: List[float],
+    vector_field: str,
+    top_k: int = 5,
+    filters: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> List[VectorSearchResult]
+```
+
+Search for the most relevant documents by vector similarity.
+
+**Parameters**:
+
+- `collection_name: str`: Name of the collection to search
+- `query_vector: List[float]`: Query vector for similarity search
+- `vector_field: str`: Name of the vector field to search against (e.g., "embedding")
+- `top_k: int`: Number of most relevant documents to return, default 5
+- `filters: Optional[Dict[str, Any]]`: Scalar field filters for filtering results (equality filter only), default `None`
+- `**kwargs: Any`: Additional search parameters
+    - `metric_type: str` (optional): Distance metric type
+    - `output_fields: List[str]` (optional): Fields to return in results
+
+**Returns**:
+
+- `List[VectorSearchResult]`: List of search results, each containing:
+    - `score: float`: Relevance score (higher is more relevant)
+    - `fields: Dict[str, Any]`: All field values from the matched document
+
+### abstractmethod async delete_docs_by_ids
+
+```python
+async def delete_docs_by_ids(
+    self,
+    collection_name: str,
+    ids: List[str],
+    **kwargs: Any,
+) -> None
+```
+
+Delete documents by their IDs.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name
+- `ids: List[str]`: List of document IDs to delete
+- `**kwargs: Any`: Additional parameters
+
+### abstractmethod async delete_docs_by_filters
+
+```python
+async def delete_docs_by_filters(
+    self,
+    collection_name: str,
+    filters: Dict[str, Any],
+    **kwargs: Any,
+) -> None
+```
+
+Delete documents by scalar field filters.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name
+- `filters: Dict[str, Any]`: Scalar field filters for matching documents to delete (equality filter only)
+- `**kwargs: Any`: Additional parameters
+
+---
+
+## function create_vector_store
+
+```python
+def openjiuwen.core.foundation.store.create_vector_store(
+    store_type: str,
+    **kwargs: Any,
+) -> BaseVectorStore | None
+```
+
+Vector store factory function for creating vector store instances by type.
+
+**Parameters**:
+
+- `store_type: str`: Storage type, supports `"chroma"` or `"milvus"`
+- `**kwargs: Any`: Additional parameters passed to specific storage implementations
+
+**Returns**:
+
+- `BaseVectorStore | None`: Vector store instance; returns `None` for unsupported types
+
+---
+
 ## Typical Usage Flow Example
 
 ```python
@@ -257,6 +455,11 @@ from openjiuwen.core.foundation.store import (
     InMemoryKVStore,
     DbBasedKVStore,
     DefaultDbStore,
+    BaseVectorStore,
+    CollectionSchema,
+    FieldSchema,
+    VectorDataType,
+    create_vector_store,
 )
 
 
@@ -294,9 +497,75 @@ async def demo_default_db_store():
     assert engine is async_engine
 
 
+async def demo_vector_store():
+    # 4. Vector storage (using ChromaDB or Milvus)
+    # Create ChromaDB vector store using factory function
+    store = create_vector_store("chroma", persist_directory="./data/chroma")
+
+    # Define collection schema
+    schema = CollectionSchema(
+        description="Document collection",
+        enable_dynamic_field=False,
+    )
+    schema.add_field(FieldSchema(
+        name="id",
+        dtype=VectorDataType.VARCHAR,
+        max_length=256,
+        is_primary=True,
+    ))
+    schema.add_field(FieldSchema(
+        name="embedding",
+        dtype=VectorDataType.FLOAT_VECTOR,
+        dim=768,
+    ))
+    schema.add_field(FieldSchema(
+        name="text",
+        dtype=VectorDataType.VARCHAR,
+        max_length=65535,
+    ))
+    schema.add_field(FieldSchema(
+        name="metadata",
+        dtype=VectorDataType.JSON,
+    ))
+
+    # Create collection
+    await store.create_collection("documents", schema, distance_metric="cosine")
+
+    # Add documents
+    docs = [
+        {
+            "id": "doc1",
+            "embedding": [0.1] * 768,
+            "text": "This is the first document",
+            "metadata": {"category": "tech"},
+        },
+        {
+            "id": "doc2",
+            "embedding": [0.2] * 768,
+            "text": "This is the second document",
+            "metadata": {"category": "news"},
+        },
+    ]
+    await store.add_docs("documents", docs)
+
+    # Vector search
+    query_vector = [0.15] * 768
+    results = await store.search(
+        collection_name="documents",
+        query_vector=query_vector,
+        vector_field="embedding",
+        top_k=10,
+        filters={"category": "tech"},
+    )
+
+    for result in results:
+        print(f"Score: {result.score:.4f}, Text: {result.fields.get('text')}")
+
+
 asyncio.run(demo_kv_store())
 asyncio.run(demo_db_store())
 asyncio.run(demo_default_db_store())
+asyncio.run(demo_vector_store())
 ```
 
 > **Note**: `InMemoryKVStore` is suitable for single-process, non-persistent scenarios; `DbBasedKVStore` is suitable for scenarios requiring persistence, multi-process sharing, or integration with memory/session modules; `DefaultDbStore` is typically used with `LongTermMemory.register_store(db_store=...)`, etc.

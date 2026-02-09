@@ -1,10 +1,12 @@
 # openjiuwen.core.foundation.store
 
-`openjiuwen.core.foundation.store` 提供 KV 存储与数据库存储的**抽象基类及内置实现**，供框架内记忆、会话等模块复用：
+`openjiuwen.core.foundation.store` 提供 KV 存储、数据库存储与向量存储的**抽象基类及内置实现**，供框架内记忆、会话等模块复用：
 
 - 定义 `BaseKVStore` 键值存储抽象接口（set、get、exists、delete、前缀查询、批量 mget 等）；
 - 定义 `BaseDbStore` 数据库存储抽象接口（获取异步 Engine）；
-- 提供 `InMemoryKVStore`（内存实现）、`DbBasedKVStore`（基于 SQLAlchemy 的实现）、`DefaultDbStore`（BaseDbStore 默认实现）。
+- 定义 `BaseVectorStore` 向量存储抽象接口（集合管理、文档插入、向量搜索、文档删除）；
+- 提供 `InMemoryKVStore`（内存实现）、`DbBasedKVStore`（基于 SQLAlchemy 的实现）、`DefaultDbStore`（BaseDbStore 默认实现）；
+- 提供 `create_vector_store()` 工厂函数用于创建向量存储实例。
 
 对应源码：`openjiuwen.core.foundation.store`。
 
@@ -171,7 +173,7 @@ class openjiuwen.core.foundation.store.in_memory_kv_store.InMemoryKVStore(BaseKV
 
 基于内存的 KV 存储实现，实现 `BaseKVStore` 全部接口；支持 `exclusive_set` 的 `expiry` 过期时间，过期键在 `get` 时视为不存在（不自动删除）。
 
-对应源码：`openjiuwen.core.foundation.store.in_memory_kv_store.InMemoryKVStore`。
+对应源码：`openjiuwen.core.foundation.store.kv.in_memory_kv_store.InMemoryKVStore`。
 
 ```python
 InMemoryKVStore()
@@ -195,7 +197,7 @@ class openjiuwen.core.foundation.store.db_based_kv_store.DbBasedKVStore(BaseKVSt
 
 基于 SQLAlchemy 异步引擎的 KV 存储实现，使用表 `kv_store`（key、value 列）；首次调用任意接口时自动建表。
 
-对应源码：`openjiuwen.core.foundation.store.db_based_kv_store.DbBasedKVStore`。
+对应源码：`openjiuwen.core.foundation.store.kv.db_based_kv_store.DbBasedKVStore`。
 
 ```python
 DbBasedKVStore(engine: AsyncEngine)
@@ -221,7 +223,7 @@ class openjiuwen.core.foundation.store.default_db_store.DefaultDbStore(BaseDbSto
 
 `BaseDbStore` 的默认实现，直接持有并返回传入的 `AsyncEngine`。
 
-对应源码：`openjiuwen.core.foundation.store.default_db_store.DefaultDbStore`。
+对应源码：`openjiuwen.core.foundation.store.db.default_db_store.DefaultDbStore`。
 
 ```python
 DefaultDbStore(async_conn: AsyncEngine)
@@ -245,6 +247,202 @@ def get_async_engine(self) -> AsyncEngine
 
 ---
 
+## class BaseVectorStore
+
+```python
+class openjiuwen.core.foundation.store.base_vector_store.BaseVectorStore(ABC)
+```
+
+向量存储抽象基类，定义统一的向量存储接口，支持集合管理、文档插入、向量搜索和文档删除操作。
+
+对应源码：`openjiuwen.core.foundation.store.base_vector_store.BaseVectorStore`。
+
+### abstractmethod async create_collection
+
+```python
+async def create_collection(
+    self,
+    collection_name: str,
+    schema: Union[CollectionSchema, Dict[str, Any]],
+    **kwargs: Any,
+) -> None
+```
+
+创建指定 schema 的新集合。
+
+**参数**：
+
+- `collection_name: str`：要创建的集合名称
+- `schema: Union[CollectionSchema, Dict[str, Any]]`：CollectionSchema 实例或 schema 字典
+- `**kwargs: Any`：额外参数
+    - `distance_metric: str`：向量搜索距离度量（如 "COSINE"、"L2"、"IP"）
+
+### abstractmethod async delete_collection
+
+```python
+async def delete_collection(self, collection_name: str, **kwargs: Any) -> None
+```
+
+按名称删除集合。
+
+**参数**：
+
+- `collection_name: str`：要删除的集合名称
+- `**kwargs: Any`：额外参数
+
+### abstractmethod async collection_exists
+
+```python
+async def collection_exists(self, collection_name: str, **kwargs: Any) -> bool
+```
+
+检查集合是否存在。
+
+**参数**：
+
+- `collection_name: str`：集合名称
+- `**kwargs: Any`：额外参数
+
+**返回**：
+
+- `bool`：集合存在返回 `True`，否则返回 `False`
+
+### abstractmethod async get_schema
+
+```python
+async def get_schema(self, collection_name: str, **kwargs: Any) -> CollectionSchema
+```
+
+获取集合的 schema。
+
+**参数**：
+
+- `collection_name: str`：集合名称
+- `**kwargs: Any`：额外参数
+
+**返回**：
+
+- `CollectionSchema`：集合的 schema
+
+### abstractmethod async add_docs
+
+```python
+async def add_docs(
+    self,
+    collection_name: str,
+    docs: List[Dict[str, Any]],
+    **kwargs: Any,
+) -> None
+```
+
+向集合添加文档。
+
+**参数**：
+
+- `collection_name: str`：目标集合名称
+- `docs: List[Dict[str, Any]]`：要添加的文档列表，每个文档包含：
+    - `id: str`（可选）：文档 ID
+    - `embedding: List[float]`：文档向量嵌入
+    - `text: str`：文档文本内容
+    - `metadata: Dict[str, Any]`（可选）：额外元数据
+- `**kwargs: Any`：额外参数
+    - `batch_size: int`（可选）：批量插入的批次大小
+
+### abstractmethod async search
+
+```python
+async def search(
+    self,
+    collection_name: str,
+    query_vector: List[float],
+    vector_field: str,
+    top_k: int = 5,
+    filters: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> List[VectorSearchResult]
+```
+
+通过向量相似度搜索最相关的文档。
+
+**参数**：
+
+- `collection_name: str`：要搜索的集合名称
+- `query_vector: List[float]`：用于相似度搜索的查询向量
+- `vector_field: str`：要搜索的向量字段名称（如 "embedding"）
+- `top_k: int`：返回的最相关文档数量，默认 5
+- `filters: Optional[Dict[str, Any]]`：标量字段过滤器（等值过滤），默认 `None`
+- `**kwargs: Any`：额外搜索参数
+    - `metric_type: str`（可选）：距离度量类型
+    - `output_fields: List[str]`（可选）：返回的字段列表
+
+**返回**：
+
+- `List[VectorSearchResult]`：搜索结果列表，每个结果包含：
+    - `score: float`：相关性得分（越高越相关）
+    - `fields: Dict[str, Any]`：文档的所有字段值
+
+### abstractmethod async delete_docs_by_ids
+
+```python
+async def delete_docs_by_ids(
+    self,
+    collection_name: str,
+    ids: List[str],
+    **kwargs: Any,
+) -> None
+```
+
+按文档 ID 删除文档。
+
+**参数**：
+
+- `collection_name: str`：集合名称
+- `ids: List[str]`：要删除的文档 ID 列表
+- `**kwargs: Any`：额外参数
+
+### abstractmethod async delete_docs_by_filters
+
+```python
+async def delete_docs_by_filters(
+    self,
+    collection_name: str,
+    filters: Dict[str, Any],
+    **kwargs: Any,
+) -> None
+```
+
+按标量字段过滤器删除文档。
+
+**参数**：
+
+- `collection_name: str`：集合名称
+- `filters: Dict[str, Any]`：标量字段过滤器（等值过滤）
+- `**kwargs: Any`：额外参数
+
+---
+
+## function create_vector_store
+
+```python
+def openjiuwen.core.foundation.store.create_vector_store(
+    store_type: str,
+    **kwargs: Any,
+) -> BaseVectorStore | None
+```
+
+向量存储工厂函数，根据类型创建相应的向量存储实例。
+
+**参数**：
+
+- `store_type: str`：存储类型，支持 `"chroma"` 或 `"milvus"`
+- `**kwargs: Any`：传递给具体存储实现的额外参数
+
+**返回**：
+
+- `BaseVectorStore | None`：向量存储实例；不支持的类型返回 `None`
+
+---
+
 ## 典型使用流程示例
 
 ```python
@@ -257,6 +455,11 @@ from openjiuwen.core.foundation.store import (
     InMemoryKVStore,
     DbBasedKVStore,
     DefaultDbStore,
+    BaseVectorStore,
+    CollectionSchema,
+    FieldSchema,
+    VectorDataType,
+    create_vector_store,
 )
 
 
@@ -294,9 +497,75 @@ async def demo_default_db_store():
     assert engine is async_engine
 
 
+async def demo_vector_store():
+    # 4. 向量存储（使用 ChromaDB 或 Milvus）
+    # 使用工厂函数创建 ChromaDB 向量存储
+    store = create_vector_store("chroma", persist_directory="./data/chroma")
+
+    # 定义集合 schema
+    schema = CollectionSchema(
+        description="文档集合",
+        enable_dynamic_field=False,
+    )
+    schema.add_field(FieldSchema(
+        name="id",
+        dtype=VectorDataType.VARCHAR,
+        max_length=256,
+        is_primary=True,
+    ))
+    schema.add_field(FieldSchema(
+        name="embedding",
+        dtype=VectorDataType.FLOAT_VECTOR,
+        dim=768,
+    ))
+    schema.add_field(FieldSchema(
+        name="text",
+        dtype=VectorDataType.VARCHAR,
+        max_length=65535,
+    ))
+    schema.add_field(FieldSchema(
+        name="metadata",
+        dtype=VectorDataType.JSON,
+    ))
+
+    # 创建集合
+    await store.create_collection("documents", schema, distance_metric="cosine")
+
+    # 添加文档
+    docs = [
+        {
+            "id": "doc1",
+            "embedding": [0.1] * 768,
+            "text": "这是第一篇文档",
+            "metadata": {"category": "tech"},
+        },
+        {
+            "id": "doc2",
+            "embedding": [0.2] * 768,
+            "text": "这是第二篇文档",
+            "metadata": {"category": "news"},
+        },
+    ]
+    await store.add_docs("documents", docs)
+
+    # 向量搜索
+    query_vector = [0.15] * 768
+    results = await store.search(
+        collection_name="documents",
+        query_vector=query_vector,
+        vector_field="embedding",
+        top_k=10,
+        filters={"category": "tech"},
+    )
+
+    for result in results:
+        print(f"Score: {result.score:.4f}, Text: {result.fields.get('text')}")
+
+
 asyncio.run(demo_kv_store())
 asyncio.run(demo_db_store())
 asyncio.run(demo_default_db_store())
+asyncio.run(demo_vector_store())
 ```
 
 > **说明**：`InMemoryKVStore` 适用于单进程、无需持久化的场景；`DbBasedKVStore` 适用于需要持久化、多进程共享或与记忆/会话模块集成的场景；`DefaultDbStore` 通常与 `LongTermMemory.register_store(db_store=...)` 等配合使用。
