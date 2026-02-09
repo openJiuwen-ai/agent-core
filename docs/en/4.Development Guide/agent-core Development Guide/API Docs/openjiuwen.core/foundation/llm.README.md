@@ -11,6 +11,7 @@
 | **Model** | Large model wrapper class, providing unified invocation interface. |
 | **BaseModelClient** | Large model client abstract base class. |
 | **OpenAIModelClient** | OpenAI-compatible large model client implementation. |
+| **DashScopeModelClient** | DashScope (Tongyi Qianwen) large model client implementation, supporting conversational, image generation, speech synthesis, and video generation multimodal features. |
 | **BaseOutputParser** | Output parser abstract base class. |
 | **JsonOutputParser** | JSON format output parser. |
 | **MarkdownOutputParser** | Markdown format output parser. |
@@ -24,3 +25,6 @@
 | **ToolMessage** | Tool message class. |
 | **AssistantMessageChunk** | Assistant message streaming chunk class. |
 | **ToolCall** | Tool call class. |
+| **ImageGenerationResponse** | Image generation response class, containing generated image URLs or Base64 data. |
+| **AudioGenerationResponse** | Audio generation response class, containing generated audio URLs or binary data. |
+| **VideoGenerationResponse** | Video generation response class, containing generated video URLs or binary data. |

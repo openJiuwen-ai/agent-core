@@ -144,6 +144,24 @@ Asynchronously stream LLM invocation, returning assistant messages chunk by chun
 你好！有什么我可以帮你的吗？
 ```
 
+### async generate_image(...) -> ImageGenerationResponse
+
+Generate images (text-to-image or image-to-image). **Note**: This method is only available when using DashScope client.
+
+For detailed documentation, see [DashScopeModelClient.generate_image()](#class-openjiuwencorefoundationllmmodel_clientsdashscope_model_clientdashscopemodelclient).
+
+### async generate_speech(...) -> AudioGenerationResponse
+
+Generate speech (text-to-speech). **Note**: This method is only available when using DashScope client.
+
+For detailed documentation, see [DashScopeModelClient.generate_speech()](#class-openjiuwencorefoundationllmmodel_clientsdashscope_model_clientdashscopemodelclient).
+
+### async generate_video(...) -> VideoGenerationResponse
+
+Generate videos (text-to-video or image-to-video). **Note**: This method is only available when using DashScope client.
+
+For detailed documentation, see [DashScopeModelClient.generate_video()](#class-openjiuwencorefoundationllmmodel_clientsdashscope_model_clientdashscopemodelclient).
+
 ---
 
 ## class openjiuwen.core.foundation.llm.model_clients.base_model_client.BaseModelClient
@@ -230,6 +248,312 @@ Inherits `BaseModelClient`, interfaces with SiliconFlow vendor format, configura
 
 * **model_config** (ModelRequestConfig): Model request parameters.
 * **model_client_config** (ModelClientConfig): Client configuration.
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.dashscope_model_client.DashScopeModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.dashscope_model_client.DashScopeModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+Inherits `OpenAIModelClient`, interfaces with Alibaba Cloud DashScope (Tongyi Qianwen) service. In addition to supporting standard conversational capabilities, it provides **multimodal generation features**, including image generation, speech synthesis, and video generation.
+
+**Parameters**:
+
+* **model_config** (ModelRequestConfig): Model request parameters.
+* **model_client_config** (ModelClientConfig): Client configuration.
+
+### async generate_image(messages: List[UserMessage], \*, model: Optional[str] = None, size: Optional[str] = "1664*928", negative_prompt: Optional[str] = None, n: Optional[int] = 1, prompt_extend: bool = True, watermark: bool = False, seed: int = 0, **kwargs) -> ImageGenerationResponse
+
+Asynchronously invoke DashScope image generation API, supporting text-to-image (T2I) and image-to-image (I2I) generation.
+
+**Parameters**:
+
+* **messages** (List[UserMessage]): Must contain exactly one `UserMessage`. Content can be:
+  - **String**: Pure text prompt (text-to-image, T2I)
+  - **List**: Mixed content containing text and images (image-to-image, I2I), supports 1-3 reference images
+* **model** (str, optional): Model name to use. Default: `None`, uses model_name from model_config.
+  - `"qwen-image-max"`: High-quality image generation (**does not support n>1 batch generation**)
+  - `"wan2.6-image"`: General-purpose image generation, supports I2I
+* **size** (str, optional): Size of generated image, format: `"width*height"`. Default: `"1664*928"`.
+  - Common sizes: `"1024*1024"`, `"1664*928"`, `"2048*2048"`, etc.
+* **negative_prompt** (str, optional): Negative prompt to exclude unwanted elements. Recommended in English, e.g.:
+  - `"blurry, low quality, watermark, text, cropped, worst quality, jpeg artifacts"`
+  - Default: `None`
+* **n** (int, optional): Number of images to generate. Default: `1`.
+  - **Important**: `qwen-image-max` model only supports `n=1`, otherwise raises `ValidationError`
+* **prompt_extend** (bool, optional): Whether to automatically extend/enhance the prompt for better results. Default: `True`.
+* **watermark** (bool, optional): Whether to add watermark to generated images. Default: `False`.
+* **seed** (int, optional): Random seed for reproducible generation. Set to `0` for random generation. Default: `0`.
+* **kwargs**: Other DashScope-specific parameters.
+
+**Returns**:
+
+**ImageGenerationResponse**, containing the following fields:
+* `model` (str): Model name used.
+* `images` (List[str]): List of generated image URLs.
+* `images_base64` (List[str]): List of Base64-encoded images (optional).
+* `created` (int): Creation timestamp (optional).
+
+**Exceptions**:
+
+* **ValidationError**: Raised when parameter validation fails, including:
+  - messages list length is not 1
+  - Number of reference images exceeds 3
+  - Using `qwen-image-max` with `n > 1`
+* **ModelError**: Raised when API call fails.
+
+**Example**:
+
+```python
+>>> import os
+>>> import asyncio
+>>> from openjiuwen.core.foundation.llm import (
+>>>     Model,
+>>>     ModelRequestConfig,
+>>>     ModelClientConfig,
+>>>     UserMessage,
+>>> )
+>>>
+>>> async def demo_generate_image():
+>>>     # 1. Configure DashScope client
+>>>     model_config = ModelRequestConfig(model_name="qwen-image-max")
+>>>     client_config = ModelClientConfig(
+>>>         client_id="dashscope_img",
+>>>         client_provider="DashScope",
+>>>         api_key=os.getenv("DASHSCOPE_API_KEY"),
+>>>         api_base="https://example.com/api/v1"
+>>>     )
+>>>     model = Model(model_client_config=client_config, model_config=model_config)
+>>>
+>>>     # 2. Text-to-image (T2I)
+>>>     messages = [UserMessage(content="A cute orange cat playing in a garden under sunlight, ultra-high definition")]
+>>>     response = await model.generate_image(
+>>>         messages=messages,
+>>>         size="1024*1024",
+>>>         negative_prompt="blurry, low quality, watermark, text",
+>>>         seed=42
+>>>     )
+>>>     print(f"Generated image URL: {response.images[0]}")
+>>>
+>>>     # 3. Image-to-image (I2I) - Using multiple reference images
+>>>     messages_i2i = [UserMessage(content=[
+>>>         {"text": "Merge these images to create a new scene in watercolor style"},
+>>>         {"image": "https://example.com/input1.jpg"},
+>>>         {"image": "https://example.com/input2.jpg"}
+>>>     ])]
+>>>     response_i2i = await model.generate_image(
+>>>         messages=messages_i2i,
+>>>         model="wan2.6-image",
+>>>         size="1664*928"
+>>>     )
+>>>     print(f"I2I result: {response_i2i.images[0]}")
+>>>
+>>> asyncio.run(demo_generate_image())
+Generated image URL: https://example.com/...
+I2I result: https://example.com/...
+```
+
+### async generate_speech(messages: List[UserMessage], \*, model: Optional[str] = None, voice: Optional[str] = "Cherry", language_type: Optional[str] = "Auto", **kwargs) -> AudioGenerationResponse
+
+Asynchronously invoke DashScope speech synthesis API to convert text into natural, fluent speech.
+
+**Parameters**:
+
+* **messages** (List[UserMessage]): Must contain at least one `UserMessage` with text content to convert to speech.
+* **model** (str, optional): Model name to use. Default: `None`, uses model_name from model_config.
+  - `"qwen3-tts-flash"`: Fast speech synthesis (recommended)
+  - `"qwen3-tts"`: Standard speech synthesis
+* **voice** (str, optional): Voice character selection, supports 47 different voice styles. Default: `"Cherry"`.
+  - **Chinese Female Voices**: Cherry, Serena, Momo, Vivian, Moon, Maia, etc.
+  - **Chinese Male Voices**: Kai, Nofish, Ethan, Ryan, Aiden, etc.
+  - **English Voices**: Jennifer, Bella, Ryan, Ethan, Vincent, etc.
+  - See **Supported Voice List** below for complete list
+* **language_type** (str, optional): Language type. Default: `"Auto"` for automatic detection.
+  - Options: `"Chinese"`, `"English"`, `"German"`, `"Italian"`, `"Portuguese"`, `"Spanish"`, `"Japanese"`, `"Korean"`, `"French"`, `"Russian"`
+* **kwargs**: Other DashScope-specific parameters.
+
+**Returns**:
+
+**AudioGenerationResponse**, containing the following fields:
+* `model` (str): Model name used
+* `audio_url` (str): Generated audio URL (optional)
+* `audio_data` (bytes): Audio binary data (optional)
+* `duration` (float): Audio duration in seconds (optional)
+* `format` (str): Audio format (e.g., `"mp3"`, `"wav"`) (optional)
+
+**Exceptions**:
+
+* **ValidationError**: Raised when text content is empty.
+* **ModelError**: Raised when API call fails.
+
+**Example**:
+
+```python
+>>> import os
+>>> import asyncio
+>>> from openjiuwen.core.foundation.llm import (
+>>>     Model,
+>>>     ModelRequestConfig,
+>>>     ModelClientConfig,
+>>>     UserMessage,
+>>> )
+>>>
+>>> async def demo_generate_speech():
+>>>     # 1. Configure DashScope client
+>>>     model_config = ModelRequestConfig(model_name="qwen3-tts-flash")
+>>>     client_config = ModelClientConfig(
+>>>         client_id="dashscope_tts",
+>>>         client_provider="DashScope",
+>>>         api_key=os.getenv("DASHSCOPE_API_KEY"),
+>>>         api_base="https://example.com/api/v1",
+>>>     )
+>>>     model = Model(model_client_config=client_config, model_config=model_config)
+>>>
+>>>     # 2. Basic speech synthesis (Chinese)
+>>>     messages = [UserMessage(content="Hello, welcome to Tongyi Qianwen speech synthesis service. This is a test audio.")]
+>>>     response = await model.generate_speech(messages=messages)
+>>>     print(f"Audio URL: {response.audio_url}")
+>>>     print(f"Audio format: {response.format}")
+>>>     print(f"Audio duration: {response.duration} seconds")
+>>>
+>>>     # 3. Custom voice and language (English male voice)
+>>>     messages_en = [UserMessage(content="Hello, welcome to our AI voice synthesis service. This is a demo.")]
+>>>     response_en = await model.generate_speech(
+>>>         messages=messages_en,
+>>>         voice="Ethan",
+>>>         language_type="English"
+>>>     )
+>>>     print(f"English audio: {response_en.audio_url}")
+>>>
+>>>     # 4. Long text speech synthesis
+>>>     long_text = "Artificial intelligence technology is developing rapidly." * 50  # Simulate long text
+>>>     messages_long = [UserMessage(content=long_text)]
+>>>     response_long = await model.generate_speech(
+>>>         messages=messages_long,
+>>>         voice="Serena"
+>>>     )
+>>>     print(f"Long text audio duration: {response_long.duration} seconds")
+>>>
+>>> asyncio.run(demo_generate_speech())
+Audio URL: https://example.com/...
+Audio format: mp3
+Audio duration: 3.5 seconds
+English audio: https://example.com/...
+Long text audio duration: 42.8 seconds
+```
+
+**Supported Voice List**:
+Cherry, Serena, Ethan, Chelsie, Momo, Vivian, Moon, Maia, Kai, Nofish, Bella, Jennifer, Ryan, Katerina, Aiden, Eldric Sage, Mia, Mochi, Bellona, Vincent, Bunny, Neil, Elias, Arthur, Nini, Ebona, Seren, Pip, Stella, Bodega, Sonrisa, Alek, Dolce, Sohee, Ono Anna, Lenn, Emilien, Andre, Radio Gol, Jada, Dylan, Li, Marcus, Roy, Peter, Sunny, Eric, Rocky, Kiki
+
+**Supported Language Types**:
+Chinese, English, German, Italian, Portuguese, Spanish, Japanese, Korean, French, Russian
+
+### async generate_video(messages: List[UserMessage], \*, img_url: Optional[str] = None, audio_url: Optional[str] = None, model: Optional[str] = None, size: Optional[str] = None, resolution: Optional[str] = None, duration: Optional[int] = 5, prompt_extend: bool = True, watermark: bool = False, negative_prompt: Optional[str] = None, seed: Optional[int] = None, **kwargs) -> VideoGenerationResponse
+
+Asynchronously invoke DashScope video generation API, supporting text-to-video (T2V) and image-to-video (I2V) generation.
+
+**Parameters**:
+
+* **messages** (List[UserMessage]): Must contain exactly one `UserMessage` with text description of the video to generate.
+* **img_url** (str, optional): Input image URL for image-to-video (I2V) mode. Default: `None` (uses text-to-video T2V mode).
+  - Supported formats: Public URL, local file path (`file://` prefix), base64-encoded image
+* **audio_url** (str, optional): Background audio URL, can be combined with text or image to generate video with audio. Default: `None`.
+* **model** (str, optional): Model name to use. Default: `None`, uses model_name from model_config.
+  - `"wan2.6-t2v"`: Text-to-video (T2V)
+  - `"wan2.6-i2v-flash"`: Image-to-video (I2V, fast)
+  - `"wan2.6-i2v-standard"`: Image-to-video (I2V, standard quality)
+* **size** (str, optional): Video size, **only for text-to-video (T2V)**. Format: `"width*height"`, e.g., `"1280*720"`. Default: `None`.
+* **resolution** (str, optional): Video resolution, **only for image-to-video (I2V)**. Options: `"720P"`, `"1080P"`. Default: `None`.
+* **duration** (int, optional): Video duration in seconds. Default: `5`.
+  - Supported range: typically 5-10 seconds
+* **prompt_extend** (bool, optional): Whether to automatically extend/enhance the prompt for better results. Default: `True`.
+* **watermark** (bool, optional): Whether to add watermark to generated video. Default: `False`.
+* **negative_prompt** (str, optional): Negative prompt to control unwanted video features, e.g., `"blurry, low quality, shaky, distorted"`. Default: `None`.
+* **seed** (int, optional): Random seed for reproducible generation. Default: `None`.
+* **kwargs**: Other DashScope-specific parameters.
+
+**Returns**:
+
+**VideoGenerationResponse**, containing the following fields:
+* `model` (str): Model name used
+* `video_url` (str): Generated video URL
+* `video_data` (bytes): Video binary data (optional)
+* `duration` (float): Video duration in seconds (optional)
+* `resolution` (str): Video resolution (optional)
+* `format` (str): Video format (default `"mp4"`)
+
+**Exceptions**:
+
+* **ValidationError**: Raised when parameter validation fails (e.g., messages count is not 1, content is empty, etc.).
+* **ModelError**: Raised when API call fails.
+
+**Example**:
+
+```python
+>>> import os
+>>> import asyncio
+>>> from openjiuwen.core.foundation.llm import (
+>>>     Model,
+>>>     ModelRequestConfig,
+>>>     ModelClientConfig,
+>>>     UserMessage,
+>>> )
+>>>
+>>> async def demo_generate_video():
+>>>     # 1. Configure DashScope client
+>>>     model_config = ModelRequestConfig(model_name="wan2.6-t2v")
+>>>     client_config = ModelClientConfig(
+>>>         client_id="dashscope_video",
+>>>         client_provider="DashScope",
+>>>         api_key=os.getenv("DASHSCOPE_API_KEY"),
+>>>         api_base="https://example.com/api/v1",
+>>>     )
+>>>     model = Model(model_client_config=client_config, model_config=model_config)
+>>>
+>>>     # 2. Text-to-video (T2V)
+>>>     messages = [UserMessage(content="A cute white rabbit happily running and jumping on a green meadow")]
+>>>     response = await model.generate_video(
+>>>         messages=messages,
+>>>         size="1280*720",
+>>>         duration=5,
+>>>         negative_prompt="blurry, low quality, shaky, distorted"
+>>>     )
+>>>     print(f"Generated video URL: {response.video_url}")
+>>>     print(f"Video duration: {response.duration} seconds")
+>>>     print(f"Video resolution: {response.resolution}")
+>>>
+>>>     # 3. Image-to-video (I2V)
+>>>     messages_i2v = [UserMessage(content="Animate the scene in the image, clouds drifting slowly, leaves swaying gently")]
+>>>     response_i2v = await model.generate_video(
+>>>         messages=messages_i2v,
+>>>         img_url="https://example.com/landscape.jpg",
+>>>         model="wan2.6-i2v-flash",
+>>>         resolution="720P",
+>>>         duration=5
+>>>     )
+>>>     print(f"I2V result: {response_i2v.video_url}")
+>>>
+>>>     # 4. Image-to-video + audio fusion
+>>>     messages_audio = [UserMessage(content="A singer performing on stage")]
+>>>     response_audio = await model.generate_video(
+>>>         messages=messages_audio,
+>>>         img_url="https://example.com/singer.jpg",
+>>>         audio_url="https://example.com/background_music.mp3",
+>>>         model="wan2.6-i2v-standard",
+>>>         resolution="1080P",
+>>>         duration=10
+>>>     )
+>>>     print(f"Video with audio: {response_audio.video_url}")
+>>>
+>>> asyncio.run(demo_generate_video())
+Generated video URL: https://example.com/...
+Video duration: 5.0 seconds
+Video resolution: 1280*720
+I2V result: https://example.com/...
+Video with audio: https://example.com/...
+```
 
 ---
 
@@ -357,6 +681,134 @@ Single tool call data class.
 * **name** (str): Tool name.
 * **arguments** (str): Tool arguments (JSON string).
 * **index** (int, optional): Tool call index, for distinguishing multiple tool calls. Default value: `None`.
+
+---
+
+## class openjiuwen.core.foundation.llm.schema.generation_response.GenerationResponse
+
+```
+class openjiuwen.core.foundation.llm.schema.generation_response.GenerationResponse()
+```
+
+Generation response base class, parent class for all generation response types (image, audio, video).
+
+**Fields**:
+
+* **model** (str, optional): Model name used for generation. Default value: `None`.
+
+---
+
+## class openjiuwen.core.foundation.llm.schema.generation_response.ImageGenerationResponse
+
+```
+class openjiuwen.core.foundation.llm.schema.generation_response.ImageGenerationResponse()
+```
+
+Image generation response class, inherits from `GenerationResponse`. Used to return results from image generation API.
+
+**Fields**:
+
+* **images** (List[str]): List of generated image URLs. Default value: `None`.
+* **images_base64** (List[str]): List of Base64-encoded images. Default value: `None`.
+* **created** (int, optional): Creation timestamp. Default value: `None`.
+
+**Configuration**:
+
+* **model_config**: `ConfigDict(arbitrary_types_allowed=True)`, allows using arbitrary types (such as bytes and other non-standard types).
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.foundation.llm.schema.generation_response import ImageGenerationResponse
+>>>
+>>> response = ImageGenerationResponse(
+>>>     model="qwen-image-max",
+>>>     images=["https://example.com/image1.jpg"],
+>>>     created=1704038400
+>>> )
+>>> print(response.model)
+qwen-image-max
+>>> print(response.images[0])
+https://example.com/image1.jpg
+```
+
+---
+
+## class openjiuwen.core.foundation.llm.schema.generation_response.AudioGenerationResponse
+
+```
+class openjiuwen.core.foundation.llm.schema.generation_response.AudioGenerationResponse()
+```
+
+Audio/speech generation response class, inherits from `GenerationResponse`. Used to return results from speech synthesis API.
+
+**Fields**:
+
+* **audio_url** (str, optional): URL of the generated audio. Default value: `None`.
+* **audio_data** (bytes, optional): Binary audio data. Default value: `None`.
+* **duration** (float, optional): Audio duration in seconds. Default value: `None`.
+* **format** (str, optional): Audio format (e.g., `"mp3"`, `"wav"`, etc.). Default value: `"mp3"`.
+
+**Configuration**:
+
+* **model_config**: `ConfigDict(arbitrary_types_allowed=True)`, allows using arbitrary types (such as bytes and other non-standard types).
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.foundation.llm.schema.generation_response import AudioGenerationResponse
+>>>
+>>> response = AudioGenerationResponse(
+>>>     model="qwen3-tts-flash",
+>>>     audio_url="https://example.com/audio1.mp3",
+>>>     duration=3.5,
+>>>     format="mp3"
+>>> )
+>>> print(response.duration)
+3.5
+>>> print(response.format)
+mp3
+```
+
+---
+
+## class openjiuwen.core.foundation.llm.schema.generation_response.VideoGenerationResponse
+
+```
+class openjiuwen.core.foundation.llm.schema.generation_response.VideoGenerationResponse()
+```
+
+Video generation response class, inherits from `GenerationResponse`. Used to return results from video generation API.
+
+**Fields**:
+
+* **video_url** (str, optional): URL of the generated video. Default value: `None`.
+* **video_data** (bytes, optional): Binary video data. Default value: `None`.
+* **duration** (float, optional): Video duration in seconds. Default value: `None`.
+* **resolution** (str, optional): Video resolution (e.g., `"1920x1080"`). Default value: `None`.
+* **format** (str, optional): Video format (e.g., `"mp4"`, `"avi"`, etc.). Default value: `"mp4"`.
+
+**Configuration**:
+
+* **model_config**: `ConfigDict(arbitrary_types_allowed=True)`, allows using arbitrary types (such as bytes and other non-standard types).
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.foundation.llm.schema.generation_response import VideoGenerationResponse
+>>>
+>>> response = VideoGenerationResponse(
+>>>     model="wan2.6-t2v",
+>>>     video_url="https://example.com/video1.mp4",
+>>>     duration=5.0,
+>>>     resolution="1280*720",
+>>>     format="mp4"
+>>> )
+>>> print(response.duration)
+5.0
+>>> print(response.resolution)
+1280*720
+```
 
 ---
 
