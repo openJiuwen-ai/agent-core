@@ -11,10 +11,13 @@ This module provides functionality for:
 from openjiuwen.core.skills.skill_util import SkillUtil
 from openjiuwen.core.skills.skill_manager import SkillManager
 from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
+from openjiuwen.core.skills.remote_skill_util import GitHubTree, RemoteSkillUtil
 
 
 __all__ = [
     'SkillUtil',
     "SkillManager",
-    "SkillToolKit"
+    "SkillToolKit",
+    "GitHubTree",
+    "RemoteSkillUtil"
 ]
