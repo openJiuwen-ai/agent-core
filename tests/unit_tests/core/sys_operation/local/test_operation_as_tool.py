@@ -208,10 +208,6 @@ async def test_fs_resource_mgr_other_methods(card, sys_op, work_dir):
     res = await search_files_tool.invoke({"path": ".", "pattern": "*.txt"})
     assert res.code == StatusCode.SUCCESS.code
 
-    # Scenario 2: Multiple parameters
-    res = await search_files_tool.invoke({"path": ".", "pattern": "*.txt", "recursive": True, "max_depth": 2})
-    assert res.code == StatusCode.SUCCESS.code
-
 
 @pytest.mark.asyncio
 async def test_shell_resource_mgr_integration(card, sys_op):

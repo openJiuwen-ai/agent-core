@@ -204,11 +204,17 @@ class CallableSchemaExtractor:
         required = []
 
         param_descriptions = cls._extract_docstring_descriptions(callable_obj)
-
+        has_var_keyword = False
         for param_name, param in signature.parameters.items():
             if param_name in ['self', 'cls']:
                 continue
+            if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                has_var_keyword = True
+                continue
 
+            elif param.kind == inspect.Parameter.VAR_KEYWORD:
+                has_var_keyword = True
+                continue
             param_type = type_hints.get(param_name, Any)
             param_schema = cls.get_type_schema(param_type)
 
@@ -232,7 +238,7 @@ class CallableSchemaExtractor:
         schema = {
             "type": "object",
             "properties": properties,
-            "additionalProperties": False,
+            "additionalProperties": has_var_keyword,
             "title": cls._humanize_name(callable_obj.__name__)
         }
 
