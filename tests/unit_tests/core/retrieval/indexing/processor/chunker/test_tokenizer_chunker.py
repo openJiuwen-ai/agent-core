@@ -14,7 +14,7 @@ from openjiuwen.core.retrieval import TextChunk
 @pytest.fixture
 def mock_tokenizer():
     """Create mock tokenizer"""
-    tokenizer = MagicMock()
+    tokenizer = MagicMock(spec=["encode", "decode", "tokenize"])
     return tokenizer
 
 

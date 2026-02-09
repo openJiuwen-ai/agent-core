@@ -38,6 +38,11 @@ class TokenizerChunker(Chunker):
             **kwargs,
         )
         self.tokenizer = tokenizer
+        self.splitter = IndexSentenceSplitter(
+            tokenizer=self.tokenizer,
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+        )
 
     def chunk_text(self, text: str) -> List[str]:
         """
@@ -52,13 +57,8 @@ class TokenizerChunker(Chunker):
         if not text:
             return []
 
-        splitter = IndexSentenceSplitter(
-            tokenizer=self.tokenizer,
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-        )
         doc = Document(text=text, metadata={})
-        text_nodes = splitter.split(doc)
+        text_nodes = self.splitter.split(doc)
         chunks = []
         for node in text_nodes:
             chunks.append(node.text)
