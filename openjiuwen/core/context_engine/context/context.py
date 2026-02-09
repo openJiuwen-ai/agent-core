@@ -241,6 +241,7 @@ class SessionModelContext(ModelContext):
         stat = ContextStats()
         self._stat_messages(stat, messages)
         self._stat_tools(stat, tools)
+        stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
         return stat
 
     def _stat_tools(self, stat: ContextStats, tools: List[ToolInfo]):
@@ -279,6 +280,7 @@ class SessionModelContext(ModelContext):
             stat.system_message_tokens +
             stat.tool_message_tokens
         )
+        stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
 
     @staticmethod
     def _validate_and_init_messages(messages: BaseMessage | List[BaseMessage]):

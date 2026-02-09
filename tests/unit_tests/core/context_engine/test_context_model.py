@@ -499,6 +499,86 @@ class TestModelContext:
         assert stat.user_messages == 25
 
     @pytest.mark.asyncio
+    async def test_statistic_total_dialogues(self):
+        """Assert total_dialogues in ContextStats for various message list shapes."""
+        def make_tool_calls(ids: List[str]):
+            return [ToolCall(id=tc, name="test-tool", type="function", arguments="") for tc in ids]
+
+        # Empty messages -> 0 rounds
+        context = await self.create_context()
+        stat = context.statistic()
+        assert stat.total_dialogues == 0
+
+        # Only user messages -> 0 rounds (no closing assistant)
+        context = await self.create_context()
+        await context.add_messages([UserMessage(content="u1"), UserMessage(content="u2")])
+        stat = context.statistic()
+        assert stat.total_dialogues == 0
+
+        # One complete round: user + assistant (no tool_calls)
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 1
+
+        # One round with tool_calls: user + assistant(tool) + tool + assistant(final)
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="", tool_calls=make_tool_calls(["tc-1"])),
+            ToolMessage(content="result", tool_call_id="tc-1"),
+            AssistantMessage(content="a-final"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 1
+
+        # Two complete rounds
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+            UserMessage(content="u2"),
+            AssistantMessage(content="a2"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 2
+
+        # System + user + assistant: system is not a round, one dialogue round
+        context = await self.create_context()
+        await context.add_messages([
+            SystemMessage(content="sys"),
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 1
+
+        # Three full rounds
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+            UserMessage(content="u2"),
+            AssistantMessage(content="a2"),
+            UserMessage(content="u3"),
+            AssistantMessage(content="a3"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 3
+
+        # Context window statistic also has total_dialogues
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+        ])
+        window = await context.get_context_window()
+        assert window.statistic.total_dialogues == 1
+
+    @pytest.mark.asyncio
     async def test_model_context_window_validation(self):
         # 1. Build a context with 10 human messages
         tool_msgs = [
