@@ -1,6 +1,6 @@
 [project]
 name = "openjiuwen"
-version = "0.1.5"
+version = "0.1.6"
 description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -65,7 +65,7 @@ all-storage = ["openjiuwen[sqlite,mysql,redis,obs]"]
 all-vector = ["openjiuwen[pgvector,chromadb]"]
 
 default = []
-all = ["openjiuwen[all-mq,all-storage-sql,all-storage-vector]"]
+all = ["openjiuwen[all-mq,all-storage,all-vector]"]
 
 [dependency-groups]
 # Testing

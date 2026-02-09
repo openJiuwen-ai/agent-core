@@ -2192,7 +2192,14 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "aioboto3" },
+    { name = "aiomysql" },
+    { name = "aiosqlite" },
+    { name = "chromadb" },
+    { name = "greenlet" },
+    { name = "pgvector" },
     { name = "pulsar-client" },
+    { name = "redis" },
 ]
 all-mq = [
     { name = "pulsar-client" },
@@ -2283,7 +2290,7 @@ requires-dist = [
     { name = "numpy", specifier = "!=2.4.0" },
     { name = "oauthlib", specifier = ">=3.3.1" },
     { name = "openai", specifier = ">=1.108.0" },
-    { name = "openjiuwen", extras = ["all-mq", "all-storage-sql", "all-storage-vector"], marker = "extra == 'all'" },
+    { name = "openjiuwen", extras = ["all-mq", "all-storage", "all-vector"], marker = "extra == 'all'" },
     { name = "openjiuwen", extras = ["pgvector", "chromadb"], marker = "extra == 'all-vector'" },
     { name = "openjiuwen", extras = ["pulsar"], marker = "extra == 'all-mq'" },
     { name = "openjiuwen", extras = ["sqlite", "mysql", "redis", "obs"], marker = "extra == 'all-storage'" },
