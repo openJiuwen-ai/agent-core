@@ -115,7 +115,7 @@ class SkillUtil:
             skills_info.append(
                 f"{index}.Skill name: {skill.name}; "
                 f"Skill description: {skill.description}; "
-                f"Skill file path: {skill.directory}"
+                f"Skill directory file path: {skill.directory}"
             )
         skill_text = skill_prompt.format({"skills": "\n".join(skills_info)}).content
         return system_prompt + "\n" + skill_text
