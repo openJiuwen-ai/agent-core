@@ -39,6 +39,53 @@ class OpenAIModelClient(BaseModelClient):
         """Get client name."""
         return "OpenAI client"
 
+    def _build_request_params(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            stop: Union[Optional[str], None],
+            max_tokens: Optional[int],
+            stream: bool,
+            **kwargs
+    ) -> dict:
+        """
+        Build request params with OpenAI-specific adjustments.
+
+        Custom rule:
+            For api_base containing "openai.com", keep only one of temperature/top_p:
+            - temperature has higher priority than top_p
+            - if temperature is present, drop top_p
+            - if temperature is not present but top_p is, keep top_p
+        """
+        # First, use the base implementation to build standard OpenAI-compatible params
+        params = super()._build_request_params(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            stop=stop,
+            max_tokens=max_tokens,
+            stream=stream,
+            **kwargs
+        )
+
+        api_base = (self.model_client_config.api_base or "").lower()
+        if "openai.com" in api_base:
+            has_temperature = "temperature" in params and params["temperature"] is not None
+            has_top_p = "top_p" in params and params["top_p"] is not None
+
+            # If both exist, keep temperature and remove top_p
+            if has_temperature and has_top_p:
+                params.pop("top_p", None)
+            # If only one exists, keep as-is
+
+        return params
+
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """
         Create an OpenAI Async client with configured SSL/proxy/http client settings.
