@@ -9,7 +9,7 @@ Author: huenrui1@huawei.com
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Optional, Union, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from pydantic import Field, BaseModel
 
@@ -34,9 +34,9 @@ from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
-from openjiuwen.core.single_agent.base import BaseAgent, HookEvent
+from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.skills.remote_skill_util import GitHubTree
 
 
 class ReActAgentConfig(BaseModel):
@@ -285,9 +285,6 @@ class ReActAgent(BaseAgent):
         )
         self._llm = None
         self._init_memory_scope()
-        # 延迟导入以避免循环依赖：skills -> runner -> single_agent -> skills
-        from openjiuwen.core.skills.skill_util import SkillUtil
-        self._skill_util = SkillUtil(self._config.sys_operation_id)
         super().__init__(card)
 
     def _init_memory_scope(self) -> None:
@@ -363,13 +360,6 @@ class ReActAgent(BaseAgent):
             )
         return self._llm
 
-    async def register_skill(self, skill_path: Union[str, List[str]]):
-        """Register a skill"""
-        await self._skill_util.register_skills(skill_path, self)
-
-    async def register_remote_skills(self, skills_dir: str, github_tree: GitHubTree, token: str = ""):
-        await self._skill_util.register_remote_skills(skills_dir, github_tree, token=token)
-
     async def _call_llm(
         self,
         messages: List,
@@ -443,7 +433,7 @@ class ReActAgent(BaseAgent):
             raise ValueError("Input must be dict with 'query' or str")
 
         # Hook: before invoke
-        await self._execute_hooks(HookEvent.BEFORE_INVOKE, inputs=inputs)
+        await self._execute_callbacks(AgentCallbackEvent.BEFORE_INVOKE, inputs=inputs)
 
         # Get or create model context
         context = await self._init_context(session)
@@ -459,7 +449,7 @@ class ReActAgent(BaseAgent):
             if msg.get("role") == "system"
         ]
 
-        if len(system_messages) > 0 and self._skill_util.has_skill():
+        if len(system_messages) > 0 and hasattr(self, "_skill_util") and self._skill_util.has_skill():
             skill_prompt = self._skill_util.get_skill_prompt()
             last_msg = system_messages[-1]
             last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
@@ -482,8 +472,8 @@ class ReActAgent(BaseAgent):
             )
 
             # Hook: before model call
-            await self._execute_hooks(
-                HookEvent.BEFORE_MODEL_CALL,
+            await self._execute_callbacks(
+                AgentCallbackEvent.BEFORE_MODEL_CALL,
                 inputs=inputs,
                 iteration=iteration + 1,
                 messages=context_window.get_messages()
@@ -496,8 +486,8 @@ class ReActAgent(BaseAgent):
             )
 
             # Hook: after model call
-            await self._execute_hooks(
-                HookEvent.AFTER_MODEL_CALL,
+            await self._execute_callbacks(
+                AgentCallbackEvent.AFTER_MODEL_CALL,
                 inputs=inputs,
                 iteration=iteration + 1,
                 response=ai_message
@@ -520,8 +510,8 @@ class ReActAgent(BaseAgent):
                     )
 
                     # Hook: before tool call
-                    await self._execute_hooks(
-                        HookEvent.BEFORE_TOOL_CALL,
+                    await self._execute_callbacks(
+                        AgentCallbackEvent.BEFORE_TOOL_CALL,
                         inputs=inputs,
                         iteration=iteration + 1,
                         tool_name=tool_call.name,
@@ -540,8 +530,8 @@ class ReActAgent(BaseAgent):
 
                     # Hook: after tool call
                     tool_call = ai_message.tool_calls[idx]
-                    await self._execute_hooks(
-                        HookEvent.AFTER_TOOL_CALL,
+                    await self._execute_callbacks(
+                        AgentCallbackEvent.AFTER_TOOL_CALL,
                         inputs=inputs,
                         iteration=iteration + 1,
                         tool_name=tool_call.name,
@@ -556,8 +546,8 @@ class ReActAgent(BaseAgent):
                     "result_type": "answer"
                 }
                 # Hook: after invoke
-                await self._execute_hooks(
-                    HookEvent.AFTER_INVOKE,
+                await self._execute_callbacks(
+                    AgentCallbackEvent.AFTER_INVOKE,
                     inputs=inputs,
                     result=result
                 )
@@ -570,8 +560,8 @@ class ReActAgent(BaseAgent):
             "result_type": "error"
         }
         # Hook: after invoke
-        await self._execute_hooks(
-            HookEvent.AFTER_INVOKE,
+        await self._execute_callbacks(
+            AgentCallbackEvent.AFTER_INVOKE,
             inputs=inputs,
             result=result
         )

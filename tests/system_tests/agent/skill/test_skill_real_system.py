@@ -57,9 +57,9 @@ from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.skills.skill_manager import SkillManager
-from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
-from openjiuwen.core.skills.skill_util import SkillUtil
+from openjiuwen.core.single_agent.skills.skill_manager import SkillManager
+from openjiuwen.core.single_agent.skills.skill_tool_kit import SkillToolKit
+from openjiuwen.core.single_agent.skills import SkillUtil
 
 load_dotenv()
 

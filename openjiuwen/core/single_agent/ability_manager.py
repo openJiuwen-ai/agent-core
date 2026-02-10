@@ -1,40 +1,22 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Single Agent Base Class Definition
-
-Main classes included:
- - Ability: Ability type definition
- - AbilityManager: Agent ability manager
- - BaseAgent: Single agent base class
-
-Created on: 2025-11-25
-Author: huenrui1@huawei.com
+"""AbilityManager Class Definition
 """
 from __future__ import annotations
 
 import asyncio
 import json
-from abc import abstractmethod, ABC
-from typing import List, Any, AsyncIterator, Union, Optional, Tuple, Dict, TYPE_CHECKING
+from typing import List, Any, Union, Optional, Tuple, Dict
 from pydantic import BaseModel
 
-from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.controller.schema.event import InputEvent
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.session import Session
-from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
-from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
-from openjiuwen.core.controller.config import ControllerConfig
-from openjiuwen.core.common.exception.errors import build_error, BaseError
-from openjiuwen.core.common.exception.codes import StatusCode
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]

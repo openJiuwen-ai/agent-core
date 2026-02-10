@@ -6,7 +6,7 @@ Main classes included:
  - Ability: Ability type definition
  - AbilityManager: Agent ability manager
  - BaseAgent: Single agent base class
- - HookEvent: Hook event types
+ - AgentCallbackEvent: Hook event types
  - HookContext: Hook context data
  - HookRegistry: Hook registration and execution
  - Plugin: Plugin base class for grouped hooks
@@ -16,22 +16,13 @@ Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 
-import asyncio
-import json
 from abc import abstractmethod, ABC
-from dataclasses import dataclass, field
-from enum import Enum
 from typing import (
     List,
     Any,
     AsyncIterator,
     Union,
-    Optional,
-    Tuple,
-    Dict,
-    Callable,
-    Awaitable,
-    TYPE_CHECKING,
+    Optional
 )
 from pydantic import BaseModel
 
@@ -40,317 +31,18 @@ from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
-from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
+from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent, AgentCallbackContext, AgentMiddleware, \
+    AnyAgentCallback
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.single_agent.ability_manager import AbilityManager, Ability
-
-
-# =============================================================================
-# Hook System - Event Types
-# =============================================================================
-
-class HookEvent(str, Enum):
-    """Hook event types for agent lifecycle.
-
-    Lifecycle Hooks:
-        BEFORE_INVOKE: Triggered before agent.invoke() starts
-        AFTER_INVOKE: Triggered after agent.invoke() completes
-
-    Model Interaction Hooks:
-        BEFORE_MODEL_CALL: Triggered before LLM is called
-        AFTER_MODEL_CALL: Triggered after LLM response is received
-
-    Tool Execution Hooks:
-        BEFORE_TOOL_CALL: Triggered before a tool is executed
-        AFTER_TOOL_CALL: Triggered after a tool execution completes
-    """
-    BEFORE_INVOKE = "before_invoke"
-    AFTER_INVOKE = "after_invoke"
-    BEFORE_MODEL_CALL = "before_model_call"
-    AFTER_MODEL_CALL = "after_model_call"
-    BEFORE_TOOL_CALL = "before_tool_call"
-    AFTER_TOOL_CALL = "after_tool_call"
-
-
-# =============================================================================
-# Hook System - Context
-# =============================================================================
-
-@dataclass
-class HookContext:
-    """Context object passed to hook callbacks.
-
-    Provides access to the agent instance, current state, and utility methods.
-    This allows hooks to read and modify agent behavior.
-
-    Attributes:
-        agent: Reference to the BaseAgent instance
-        event: The hook event that triggered this callback
-        inputs: Original inputs to invoke/stream
-        iteration: Current iteration number (for model/tool hooks)
-        extra: Additional event-specific data
-    """
-    agent: 'BaseAgent'
-    event: HookEvent
-    inputs: Any = None
-    iteration: int = 0
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-
-# =============================================================================
-# Hook System - Callback Types
-# =============================================================================
-
-# Type for async hook callbacks
-HookCallback = Callable[[HookContext], Awaitable[None]]
-
-# Type for sync hooks (will be wrapped to async)
-SyncHookCallback = Callable[[HookContext], None]
-
-# Union type for any hook callback
-AnyHookCallback = Union[HookCallback, SyncHookCallback]
-
-
-# =============================================================================
-# Hook System - Plugin Base Class
-# =============================================================================
-
-class Plugin(ABC):
-    """Abstract base class for plugin-style hooks.
-
-    Plugin provides a class-based approach to hooks, allowing for:
-    - State management across multiple hook calls
-    - Grouped related hooks in a single class
-    - Easier testing and composition
-
-    Example:
-        ```python
-        class LoggingPlugin(Plugin):
-            def __init__(self, log_level: str = "INFO"):
-                self.log_level = log_level
-                self.call_count = 0
-
-            async def before_model_call(self, ctx: HookContext):
-                self.call_count += 1
-                print(f"[{self.log_level}] Model call #{self.call_count}")
-
-            async def after_model_call(self, ctx: HookContext):
-                response = ctx.extra.get('response')
-                print(f"[{self.log_level}] Response received")
-
-        agent = MyAgent(card=card)
-        agent.register_plugin(LoggingPlugin())
-        ```
-    """
-
-    # Optional: Define priority (lower = runs first)
-    priority: int = 100
-
-    async def before_invoke(self, ctx: HookContext) -> None:
-        """Called before agent.invoke() starts."""
-        pass
-
-    async def after_invoke(self, ctx: HookContext) -> None:
-        """Called after agent.invoke() completes."""
-        pass
-
-    async def before_model_call(self, ctx: HookContext) -> None:
-        """Called before LLM is invoked."""
-        pass
-
-    async def after_model_call(self, ctx: HookContext) -> None:
-        """Called after LLM response is received."""
-        pass
-
-    async def before_tool_call(self, ctx: HookContext) -> None:
-        """Called before a tool is executed."""
-        pass
-
-    async def after_tool_call(self, ctx: HookContext) -> None:
-        """Called after a tool execution completes."""
-        pass
-
-    def get_hooks(self) -> Dict[HookEvent, HookCallback]:
-        """Extract all hook methods from this plugin.
-
-        Returns:
-            Dict mapping HookEvent to the corresponding method
-        """
-        hooks = {}
-        event_method_map = {
-            HookEvent.BEFORE_INVOKE: 'before_invoke',
-            HookEvent.AFTER_INVOKE: 'after_invoke',
-            HookEvent.BEFORE_MODEL_CALL: 'before_model_call',
-            HookEvent.AFTER_MODEL_CALL: 'after_model_call',
-            HookEvent.BEFORE_TOOL_CALL: 'before_tool_call',
-            HookEvent.AFTER_TOOL_CALL: 'after_tool_call',
-        }
-
-        for event, method_name in event_method_map.items():
-            method = getattr(self, method_name, None)
-            if method and not self._is_base_method(method_name):
-                hooks[event] = method
-
-        return hooks
-
-    def _is_base_method(self, method_name: str) -> bool:
-        """Check if method is the base class implementation (no-op)."""
-        method = getattr(self.__class__, method_name, None)
-        base_method = getattr(Plugin, method_name, None)
-        return method is base_method
-
-
-# =============================================================================
-# Hook System - Registry
-# =============================================================================
-
-class HookRegistry:
-    """Registry for managing and executing hooks.
-
-    Supports both function-style and plugin-style hooks with priority ordering.
-
-    Example:
-        ```python
-        registry = HookRegistry()
-
-        # Register function hook
-        async def my_hook(ctx: HookContext):
-            print(f"Hook triggered: {ctx.event}")
-
-        registry.register(HookEvent.BEFORE_INVOKE, my_hook)
-
-        # Register plugin
-        registry.register_plugin(MyPlugin())
-
-        # Execute hooks
-        ctx = HookContext(agent=agent, event=HookEvent.BEFORE_INVOKE)
-        await registry.execute(HookEvent.BEFORE_INVOKE, ctx)
-        ```
-    """
-
-    def __init__(self):
-        self._hooks: Dict[HookEvent, List[Tuple[int, HookCallback]]] = {
-            event: [] for event in HookEvent
-        }
-        self._plugins: List[Plugin] = []
-
-    def register(
-        self,
-        event: HookEvent,
-        callback: AnyHookCallback,
-        priority: int = 100
-    ) -> 'HookRegistry':
-        """Register a hook callback for an event.
-
-        Args:
-            event: The hook event to register for
-            callback: The callback function (sync or async)
-            priority: Execution priority (lower = runs first)
-
-        Returns:
-            self for chaining
-        """
-        # Wrap sync callbacks to async
-        if not asyncio.iscoroutinefunction(callback):
-            original = callback
-
-            async def async_wrapper(ctx: HookContext):
-                original(ctx)
-            callback = async_wrapper
-
-        self._hooks[event].append((priority, callback))
-        # Sort by priority
-        self._hooks[event].sort(key=lambda x: x[0])
-        return self
-
-    def register_plugin(self, plugin: Plugin) -> 'HookRegistry':
-        """Register a plugin instance.
-
-        Args:
-            plugin: Plugin instance
-
-        Returns:
-            self for chaining
-        """
-        self._plugins.append(plugin)
-
-        # Extract and register hooks from plugin
-        for event, callback in plugin.get_hooks().items():
-            self.register(event, callback, plugin.priority)
-
-        return self
-
-    def unregister(self, event: HookEvent, callback: AnyHookCallback) -> bool:
-        """Unregister a hook callback.
-
-        Args:
-            event: The hook event
-            callback: The callback to remove
-
-        Returns:
-            True if callback was found and removed
-        """
-        original_len = len(self._hooks[event])
-        self._hooks[event] = [
-            (p, cb) for p, cb in self._hooks[event]
-            if cb != callback
-        ]
-        return len(self._hooks[event]) < original_len
-
-    def clear(self, event: Optional[HookEvent] = None) -> None:
-        """Clear hooks.
-
-        Args:
-            event: Specific event to clear, or None to clear all
-        """
-        if event:
-            self._hooks[event] = []
-        else:
-            for e in HookEvent:
-                self._hooks[e] = []
-
-    def has_hooks(self, event: HookEvent) -> bool:
-        """Check if any hooks are registered for an event.
-
-        Args:
-            event: The hook event to check
-
-        Returns:
-            True if hooks are registered
-        """
-        return len(self._hooks[event]) > 0
-
-    async def execute(
-        self,
-        event: HookEvent,
-        ctx: HookContext
-    ) -> HookContext:
-        """Execute all hooks for an event.
-
-        Args:
-            event: The hook event
-            ctx: The hook context
-
-        Returns:
-            The (potentially modified) context
-        """
-        for priority, callback in self._hooks[event]:
-            try:
-                await callback(ctx)
-            except Exception as e:
-                logger.error(f"Hook error for {event.value}: {e}", exc_info=True)
-                raise
-        return ctx
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.skills import GitHubTree
 
 
 # =============================================================================
@@ -382,7 +74,11 @@ class BaseAgent(ABC):
         """
         self.card = card
         self._ability_manager = AbilityManager()
-        self._hook_registry = HookRegistry()
+        self._agent_callback_manager = AgentCallbackManager()
+        # 延迟导入以避免循环依赖：skills -> runner -> single_agent -> skills
+        from openjiuwen.core.single_agent.skills import SkillUtil
+        if hasattr(self._config, "sys_operation_id") and self._config.sys_operation_id is not None:
+            self._skill_util = SkillUtil(self._config.sys_operation_id)
 
     # ========== Configuration Interface ==========
     @abstractmethod
@@ -400,88 +96,78 @@ class BaseAgent(ABC):
         return self._ability_manager
 
     @property
-    def hook_registry(self) -> HookRegistry:
+    def agent_callback_manager(self) -> AgentCallbackManager:
         """Access the hook registry for advanced registration."""
-        return self._hook_registry
+        return self._agent_callback_manager
 
-    # ========== Hook Interface ==========
-    def register_hook(
+    async def register_skill(self, skill_path: Union[str, List[str]]):
+        """Register a skill"""
+        await self._skill_util.register_skills(skill_path, self)
+
+    async def register_remote_skills(self, skills_dir: str, github_tree: GitHubTree, token: str = ""):
+        """Register remote skills"""
+        await self._skill_util.register_remote_skills(skills_dir, github_tree, token=token)
+
+    def register_callback(
         self,
-        event: HookEvent,
-        callback: AnyHookCallback,
+        event: AgentCallbackEvent,
+        callback: AnyAgentCallback,
         priority: int = 100
     ) -> 'BaseAgent':
-        """Register a hook callback.
+        """Register an agent callback.
 
         Args:
-            event: Hook event type
+            event: agent callback event type
             callback: Callback function (sync or async)
             priority: Execution priority (lower = runs first)
 
         Returns:
             self for chaining
-
-        Example:
-            ```python
-            async def my_hook(ctx: HookContext):
-                print(f"Event: {ctx.event}, Iteration: {ctx.iteration}")
-
-            agent.register_hook(HookEvent.BEFORE_MODEL_CALL, my_hook)
-            ```
         """
-        self._hook_registry.register(event, callback, priority)
+        self._agent_callback_manager.register_callback(event, callback, priority)
         return self
 
-    def register_plugin(self, plugin: Plugin) -> 'BaseAgent':
-        """Register a plugin instance.
+    def register_middleware(self, middleware: AgentMiddleware) -> 'BaseAgent':
+        """Register a middleware instance.
 
         Args:
-            plugin: Plugin to register
+            middleware: MiddleWare to register
 
         Returns:
             self for chaining
-
-        Example:
-            ```python
-            class MyPlugin(Plugin):
-                async def before_invoke(self, ctx: HookContext):
-                    print("Starting task...")
-
-            agent.register_plugin(MyPlugin())
-            ```
         """
-        self._hook_registry.register_plugin(plugin)
+        self._agent_callback_manager.register_middleware(middleware)
         return self
 
-    async def _execute_hooks(
+    async def _execute_callbacks(
         self,
-        event: HookEvent,
+        event: AgentCallbackEvent,
         inputs: Any = None,
         iteration: int = 0,
         **extra
-    ) -> HookContext:
-        """Execute hooks for a given event.
+    ) -> AgentCallbackContext:
+        """Execute callbacks for a given event.
 
         This method should be called by subclasses at appropriate points
         in their execution flow.
 
         Args:
-            event: The hook event
+            event: The agent callback event
             inputs: Original inputs
             iteration: Current iteration number
             **extra: Additional context data
 
         Returns:
-            HookContext with potential modifications
+            AgentCallbackContext with potential modifications
         """
-        ctx = HookContext(
+        ctx = AgentCallbackContext(
             agent=self,
             event=event,
             inputs=inputs,
             iteration=iteration,
             extra=extra
         )
-        return await self._hook_registry.execute(event, ctx)
+        return await self._agent_callback_manager.execute(event, ctx)
 
     @abstractmethod
     async def invoke(

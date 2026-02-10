@@ -21,7 +21,7 @@ import unittest
 import pytest
 from dotenv import load_dotenv
 
-from openjiuwen.core.skills.remote_skill_util import GitHubTree, RemoteSkillUtil
+from openjiuwen.core.single_agent.skills import GitHubTree, RemoteSkillUtil
 
 load_dotenv()
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")

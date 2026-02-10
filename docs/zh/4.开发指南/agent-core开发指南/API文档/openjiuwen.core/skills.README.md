@@ -92,7 +92,7 @@
 ### 典型使用方式示例
 
 ```python
-from openjiuwen.core.skills import SkillUtil
+from openjiuwen.core.single_agent.skills import SkillUtil
 from openjiuwen.core.single_agent import BaseAgent
 
 

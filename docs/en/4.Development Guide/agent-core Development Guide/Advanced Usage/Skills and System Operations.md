@@ -84,7 +84,7 @@ Key points:
 `SkillUtil` is the main entry point for advanced usage. A typical initialization method is as follows:
 
 ```python
-from openjiuwen.core.skills import SkillUtil
+from openjiuwen.core.single_agent.skills import SkillUtil
 
 
 async def setup_agent_with_skills(agent, sys_operation_id: str = "default_sys_op"):

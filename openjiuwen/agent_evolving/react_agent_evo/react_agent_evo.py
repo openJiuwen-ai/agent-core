@@ -204,7 +204,7 @@ class ReActAgent(BaseAgent):
         self._memory_op: Optional[MemoryCallOperator] = None
         self._init_memory_scope()
         # Lazy import to avoid circular dependency: skills -> runner -> single_agent -> skills
-        from openjiuwen.core.skills.skill_util import SkillUtil
+        from openjiuwen.core.single_agent.skills import SkillUtil
 
         self._skill_util = SkillUtil(self.config.sys_operation_id)
         super().__init__(card)
@@ -397,10 +397,6 @@ class ReActAgent(BaseAgent):
                 model_client_config=self.config.model_client_config, model_config=self.config.model_config_obj
             )
         return self._llm
-
-    def register_skill(self, skill_path: Union[str, List[str]]):
-        """Register a skill"""
-        self._skill_util.register_skills(skill_path, self)
 
     async def invoke(self, inputs: Any, session: Optional[Session] = None) -> Dict[str, Any]:
         """Execute ReAct process

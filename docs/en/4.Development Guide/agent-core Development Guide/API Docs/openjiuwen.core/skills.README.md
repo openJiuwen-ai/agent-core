@@ -92,7 +92,7 @@ Corresponding source: `openjiuwen.core.skills.skill_util.SkillUtil`.
 ### Typical Usage Example
 
 ```python
-from openjiuwen.core.skills import SkillUtil
+from openjiuwen.core.single_agent.skills import SkillUtil
 from openjiuwen.core.single_agent import BaseAgent
 
 

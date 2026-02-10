@@ -1,12 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.single_agent import BaseAgent
-from openjiuwen.core.skills.remote_skill_util import GitHubTree, RemoteSkillUtil
-from openjiuwen.core.skills.skill_manager import SkillManager
-from openjiuwen.core.skills.skill_tool_kit import SkillToolKit
+from openjiuwen.core.single_agent.skills.remote_skill_util import GitHubTree, RemoteSkillUtil
+from openjiuwen.core.single_agent.skills.skill_manager import SkillManager
+from openjiuwen.core.single_agent.skills.skill_tool_kit import SkillToolKit
+
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent import BaseAgent
 
 SKILL_PROMPT_CONTENT = '''
 To help you better complete tasks, the following skill knowledge is equipped:

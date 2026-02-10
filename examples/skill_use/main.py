@@ -8,7 +8,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.skills import GitHubTree
+from openjiuwen.core.single_agent.skills import GitHubTree
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig

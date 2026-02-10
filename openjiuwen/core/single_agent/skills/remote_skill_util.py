@@ -38,7 +38,7 @@ class GitHubTree():
         repo_owner: str, 
         repo_name: str, 
         tree_ref: str = "HEAD", 
-        directory: Union[str, Path] = Path(".")
+        directory: Union[str, Path] = Path("")
     ):
         self.repo_owner = repo_owner
         self.repo_name = repo_name
@@ -74,7 +74,7 @@ class RemoteSkillUtil:
     def _recursively_list_github_files(
         self,
         tree: GitHubTree,
-        current_directory: Path = Path("."),
+        current_directory: Path = Path(""),
         token: str = None,
     ):
         headers = {
@@ -133,7 +133,7 @@ class RemoteSkillUtil:
             
         return self._recursively_list_github_files(
             tree=tree,
-            current_directory=Path("."),
+            current_directory=Path(""),
             token=token
         )
 
