@@ -6,29 +6,27 @@ ChromaDB index manager implementation, responsible for building, updating, and d
 
 
 ```python
-ChromaIndexer(chroma_path: str, text_field: str = "content", vector_field: str = "embedding", sparse_vector_field: str = "sparse_vector", metadata_field: str = "metadata", doc_id_field: str = "document_id", **kwargs: Any)
+ChromaIndexer(config: VectorStoreConfig, chroma_path: str, text_field: str = "content", vector_field: str | ChromaVectorField = "embedding", sparse_vector_field: str = "sparse_vector", metadata_field: str = "metadata", doc_id_field: str = "document_id", doc_index_callback: type[BaseCallback] = TqdmCallback, **kwargs: Any)
 ```
 
 Initialize ChromaDB index manager.
 
 **Parameters**:
 
+* **config**(VectorStoreConfig): Vector store configuration.
 * **chroma_path**(str): ChromaDB persistence path (required).
 * **text_field**(str): Text field name. Default: "content".
-* **vector_field**(str): Vector field name. Default: "embedding".
+* **vector_field**(str | ChromaVectorField): Vector field name (str) or vector field configuration object (ChromaVectorField). Default: "embedding". For more configuration options about ChromaVectorField, please refer to [ChromaVectorField documentation](../../../foundation/store/vector_fields/chroma_fields.md).
 * **sparse_vector_field**(str): Sparse vector field name. Default: "sparse_vector".
 * **metadata_field**(str): Metadata field name. Default: "metadata".
 * **doc_id_field**(str): Document ID field name. Default: "document_id".
+* **doc_index_callback**(type[BaseCallback]): Callback object class, must be a subclass of BaseCallback. Default: TqdmCallback.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
-
-**Exceptions**:
-
-* **ValueError**: If chroma_path is not provided or is empty.
 
 ### property client
 
 ```python
-client() -> chromadb.PersistentClient
+client -> chromadb.PersistentClient
 ```
 
 Get ChromaDB client.
@@ -47,7 +45,7 @@ Build index.
 
 **Parameters**:
 
-* **chunks**(List[TextChunk]): List of text chunks.
+* **chunks**(List[TextChunk]): List of text chunks (e.g., list).
 * **config**(IndexConfig): Index configuration.
 * **embed_model**(Embedding, optional): Embedding model instance (required for vector index). Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
@@ -66,7 +64,7 @@ Update index.
 
 **Parameters**:
 
-* **chunks**(List[TextChunk]): List of text chunks.
+* **chunks**(List[TextChunk]): List of text chunks (e.g., list).
 * **doc_id**(str): Document ID.
 * **config**(IndexConfig): Index configuration.
 * **embed_model**(Embedding, optional): Embedding model instance (required for vector index). Default: None.

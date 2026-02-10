@@ -31,12 +31,7 @@ parse(doc: str, doc_id: str = "", **kwargs: Any) -> List[Document]
 
 **返回**：
 
-**List[Document]**，返回文档列表。
-
-**异常**：
-
-* **FileNotFoundError**：文件不存在。
-* **ValueError**：不支持的文件格式。
+**List[Document]**，返回文档列表（比如 list）。
 
 ## function register_parser
 
@@ -48,7 +43,7 @@ register_parser(file_extensions: List[str])
 
 **参数**：
 
-* **file_extensions**(List[str])：支持的文件扩展名列表，例如[".pdf", ".PDF"]。
+* **file_extensions**(List[str])：支持的文件扩展名列表（比如 list），例如[".pdf", ".PDF"]。
 
 **返回**：
 

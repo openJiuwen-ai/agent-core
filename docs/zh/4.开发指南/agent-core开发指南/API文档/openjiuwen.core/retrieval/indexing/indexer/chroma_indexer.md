@@ -6,29 +6,27 @@ ChromaDB索引管理器实现，负责构建、更新和删除ChromaDB索引。
 
 
 ```python
-ChromaIndexer(chroma_path: str, text_field: str = "content", vector_field: str = "embedding", sparse_vector_field: str = "sparse_vector", metadata_field: str = "metadata", doc_id_field: str = "document_id", **kwargs: Any)
+ChromaIndexer(config: VectorStoreConfig, chroma_path: str, text_field: str = "content", vector_field: str | ChromaVectorField = "embedding", sparse_vector_field: str = "sparse_vector", metadata_field: str = "metadata", doc_id_field: str = "document_id", doc_index_callback: type[BaseCallback] = TqdmCallback, **kwargs: Any)
 ```
 
 初始化ChromaDB索引管理器。
 
 **参数**：
 
+* **config**(VectorStoreConfig)：向量存储配置。
 * **chroma_path**(str)：ChromaDB持久化路径（必需）。
 * **text_field**(str)：文本字段名。默认值："content"。
-* **vector_field**(str)：向量字段名。默认值："embedding"。
+* **vector_field**(str | ChromaVectorField)：向量字段名（str）或向量字段配置对象（ChromaVectorField）。默认值："embedding"。更多关于 ChromaVectorField 的配置选项，请参考 [ChromaVectorField 文档](../../../foundation/store/vector_fields/chroma_fields.md)。
 * **sparse_vector_field**(str)：稀疏向量字段名。默认值："sparse_vector"。
 * **metadata_field**(str)：元数据字段名。默认值："metadata"。
 * **doc_id_field**(str)：文档ID字段名。默认值："document_id"。
+* **doc_index_callback**(type[BaseCallback])：回调对象类，必须是BaseCallback的子类。默认值：TqdmCallback。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
-
-**异常**：
-
-* **ValueError**：如果chroma_path未提供或为空。
 
 ### property client
 
 ```python
-client() -> chromadb.PersistentClient
+client -> chromadb.PersistentClient
 ```
 
 获取ChromaDB客户端。
@@ -36,6 +34,18 @@ client() -> chromadb.PersistentClient
 **返回**：
 
 **chromadb.PersistentClient**，返回ChromaDB持久化客户端实例。
+
+### property distance_metric
+
+```python
+distance_metric -> str
+```
+
+获取原始距离度量字符串。
+
+**返回**：
+
+**str**，返回距离度量字符串。
 
 ### async build_index
 
@@ -47,7 +57,7 @@ build_index(chunks: List[TextChunk], config: IndexConfig, embed_model: Optional[
 
 **参数**：
 
-* **chunks**(List[TextChunk])：文本块列表。
+* **chunks**(List[TextChunk])：文本块列表（比如 list）。
 * **config**(IndexConfig)：索引配置。
 * **embed_model**(Embedding, 可选)：嵌入模型实例（向量索引必需）。默认值：None。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
@@ -66,7 +76,7 @@ update_index(chunks: List[TextChunk], doc_id: str, config: IndexConfig, embed_mo
 
 **参数**：
 
-* **chunks**(List[TextChunk])：文本块列表。
+* **chunks**(List[TextChunk])：文本块列表（比如 list）。
 * **doc_id**(str)：文档ID。
 * **config**(IndexConfig)：索引配置。
 * **embed_model**(Embedding, 可选)：嵌入模型实例（向量索引必需）。默认值：None。

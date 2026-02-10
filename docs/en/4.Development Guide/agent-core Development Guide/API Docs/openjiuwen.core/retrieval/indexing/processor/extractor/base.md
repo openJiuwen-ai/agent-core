@@ -14,10 +14,10 @@ Extract information (e.g., triples).
 
 **Parameters**:
 
-* **chunks**(List[TextChunk]): List of text chunks.
+* **chunks**(List[TextChunk]): List of text chunks (e.g., `[TextChunk(...), TextChunk(...)]`).
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 **Returns**:
 
-**List[Triple]**, returns a list of extraction results (e.g., triple list).
+**List[Triple]**, returns a list of extraction results (e.g., triple list `[Triple(...), Triple(...)]`).
 

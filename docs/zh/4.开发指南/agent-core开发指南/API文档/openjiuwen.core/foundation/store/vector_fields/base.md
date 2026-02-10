@@ -1,6 +1,6 @@
-# openjiuwen.core.retrieval.indexing.vector_fields.base
+# openjiuwen.core.foundation.store.vector_fields.base
 
-## class openjiuwen.core.retrieval.indexing.vector_fields.base.VectorField
+## class openjiuwen.core.foundation.store.vector_fields.base.VectorField
 
 向量字段配置基类，用于配置向量数据库中的近似最近邻（ANN）搜索索引。
 

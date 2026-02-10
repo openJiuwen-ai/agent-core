@@ -30,9 +30,9 @@ chunk_documents(documents: List[Document]) -> List[TextChunk]
 
 **参数**：
 
-* **documents**(List[Document])：文档列表。
+* **documents**(List[Document])：文档列表（比如 `[Document(...), Document(...)]`）。
 
 **返回**：
 
-**List[TextChunk]**，返回文档分块列表。
+**List[TextChunk]**，返回文档分块列表（比如 `[TextChunk(...), TextChunk(...)]`）。
 

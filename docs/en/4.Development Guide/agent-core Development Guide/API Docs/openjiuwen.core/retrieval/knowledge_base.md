@@ -134,10 +134,6 @@ Delete a collection from current database.
 
 * **collection**(str): Name of the collection to delete.
 
-**Exceptions**:
-
-* **JiuWenBaseException**: Raised when vector_store is not set.
-
 ### async close
 
 ```python

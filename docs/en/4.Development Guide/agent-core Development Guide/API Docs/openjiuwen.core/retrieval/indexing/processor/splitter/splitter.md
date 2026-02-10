@@ -13,7 +13,7 @@ Initialize sentence splitter.
 
 **Parameters**:
 
-* **tokenizer**(Callable): Tokenizer, must have encode and decode methods.
+* **tokenizer**(Callable): Tokenizer (e.g., an object with encode and decode methods), must have encode and decode methods.
 * **chunk_size**(int): Chunk size (number of tokens).
 * **chunk_overlap**(int): Chunk overlap size (number of tokens).
 * **lan**(str, optional): Language code, defaults to "zh" (Chinese). Default: "zh".
@@ -32,7 +32,7 @@ Split document into sentence-level chunks.
 
 **Returns**:
 
-**List[Tuple[str, int, int]]**, returns a list of chunks, each element is (text, start char position, end char position).
+**List[Tuple[str, int, int]]**, returns a list of chunks (e.g., `[("text1", 0, 10), ("text2", 10, 20)]`), each element is (text, start char position, end char position).
 
 **Description**:
 

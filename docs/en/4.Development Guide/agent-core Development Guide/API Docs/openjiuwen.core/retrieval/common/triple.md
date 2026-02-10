@@ -10,7 +10,7 @@ Triple data model, representing a triple (subject-predicate-object) in a knowled
 * **predicate**(str): Predicate.
 * **object**(str): Object.
 * **confidence**(float, optional): Confidence. Default: None.
-* **metadata**(Dict[str, Any]): Metadata. Default: {}.
+* **metadata**(Dict[str, Any]): Metadata (e.g., `{"doc_id": "doc1", "source": "kb1"}`). Default: {}.
 
 **Example**:
 

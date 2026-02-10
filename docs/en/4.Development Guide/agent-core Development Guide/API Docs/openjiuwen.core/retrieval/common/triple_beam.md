@@ -4,15 +4,40 @@
 
 Triple beam data model that holds a sequence of triples that participate in the beam.
 
+```python
+TripleBeam(nodes: List[RetrievalResult], score: float)
+```
+
+Initialize triple beam.
+
 **Parameters**:
 
-* **nodes**(List[RetrievalResult]): The triples stored in this beam.
+* **nodes**(List[RetrievalResult]): The triples stored in this beam (e.g., `[RetrievalResult(text="...", score=0.9)]`).
 * **score**(float): Aggregated score associated with the beam.
 
-**Properties**:
+### property triples
 
-* **triples**(List[RetrievalResult]): The triples currently in the beam.
-* **score**(float): Beam score.
+```python
+triples -> List[RetrievalResult]
+```
+
+Get the triples currently in the beam.
+
+**Returns**:
+
+**List[RetrievalResult]**, returns the list of triples currently in the beam.
+
+### property score
+
+```python
+score -> float
+```
+
+Get beam score.
+
+**Returns**:
+
+**float**, returns the beam score.
 
 **Example**:
 

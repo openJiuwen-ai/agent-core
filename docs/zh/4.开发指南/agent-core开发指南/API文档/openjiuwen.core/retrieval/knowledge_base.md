@@ -134,10 +134,6 @@ delete_collection(collection: str) -> None
 
 * **collection**(str)：要删除的集合名称。
 
-**异常**：
-
-* **JiuWenBaseException**：当 vector_store 未设置时抛出。
-
 ### async close
 
 ```python

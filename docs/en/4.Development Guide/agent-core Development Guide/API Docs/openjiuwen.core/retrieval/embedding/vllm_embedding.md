@@ -5,7 +5,7 @@
 vLLM embedding model implementation, supports multimodal embedding models for vLLM-like services (e.g., Qwen3-VL-Embedding).
 
 ```python
-VLLMEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, dimension: Optional[int] = None, verify: bool | str | ssl.SSLContext = True, **kwargs)
+VLLMEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, max_concurrent: int = 50, dimension: Optional[int] = None, verify: bool | str | ssl.SSLContext = True, **kwargs)
 ```
 
 Initialize vLLM embedding model.
@@ -17,6 +17,7 @@ Initialize vLLM embedding model.
 * **max_retries**(int): Maximum retry count. Default: 3.
 * **extra_headers**(dict, optional): Additional request headers. Default: None.
 * **max_batch_size**(int): Maximum batch size. Default: 8.
+* **max_concurrent**(int): Maximum number of concurrent requests. Default: 50.
 * **dimension**(int, optional): Embedding dimension (for Matryoshka models). Default: None.
 * **verify**(bool | str | ssl.SSLContext): SSL verification settings. Default: True.
 * **kwargs**: Variable arguments for passing additional configuration parameters.
@@ -28,7 +29,7 @@ VLLMEmbedding inherits from OpenAIEmbedding and supports multimodal document emb
 ### property dimension
 
 ```python
-dimension() -> int
+dimension -> int
 ```
 
 Returns the embedding vector dimension.

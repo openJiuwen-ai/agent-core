@@ -14,7 +14,7 @@ build_index(chunks: List[TextChunk], config: IndexConfig, embed_model: Optional[
 
 **参数**：
 
-* **chunks**(List[TextChunk])：文本块列表。
+* **chunks**(List[TextChunk])：文本块列表（比如 list）。
 * **config**(IndexConfig)：索引配置。
 * **embed_model**(Embedding, 可选)：嵌入模型实例（向量索引必需）。默认值：None。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
@@ -33,7 +33,7 @@ update_index(chunks: List[TextChunk], doc_id: str, config: IndexConfig, embed_mo
 
 **参数**：
 
-* **chunks**(List[TextChunk])：文本块列表。
+* **chunks**(List[TextChunk])：文本块列表（比如 list）。
 * **doc_id**(str)：文档ID。
 * **config**(IndexConfig)：索引配置。
 * **embed_model**(Embedding, 可选)：嵌入模型实例（向量索引必需）。默认值：None。

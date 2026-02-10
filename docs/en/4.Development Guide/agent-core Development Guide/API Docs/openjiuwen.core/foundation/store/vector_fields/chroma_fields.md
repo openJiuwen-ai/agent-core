@@ -1,6 +1,6 @@
-# openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields
+# openjiuwen.core.foundation.store.vector_fields.chroma_fields
 
-## class openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields.ChromaVectorField
+## class openjiuwen.core.foundation.store.vector_fields.chroma_fields.ChromaVectorField
 
 HNSW index configuration for ChromaDB vector database.
 

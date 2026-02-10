@@ -85,7 +85,7 @@ Added 1 documents with graph index
 retrieve(query: str, config: Optional[RetrievalConfig] = None, **kwargs: Any) -> List[RetrievalResult]
 ```
 
-检索相关文档，支持图检索。如果config.use_graph或config.use_graph为True，将使用图检索器进行检索，支持图扩展和多跳检索。
+检索相关文档，支持图检索。如果config.use_graph或知识库配置的use_graph为True，将使用图检索器进行检索，支持图扩展和多跳检索。
 
 **参数**：
 
@@ -169,7 +169,7 @@ close() -> None
 
 关闭知识库并释放资源，包括图检索器、文档块检索器和三元组检索器。
 
-## async retrieve_multi_graph_kb
+## func async retrieve_multi_graph_kb
 
 ```python
 retrieve_multi_graph_kb(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[str]
@@ -188,7 +188,7 @@ retrieve_multi_graph_kb(kbs: List[KnowledgeBase], query: str, config: Optional[R
 
 **List[str]**，返回去重并排序后的文本列表。
 
-## async retrieve_multi_graph_kb_with_source
+## func async retrieve_multi_graph_kb_with_source
 
 ```python
 retrieve_multi_graph_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[Dict[str, Any]]

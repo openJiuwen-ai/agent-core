@@ -15,12 +15,8 @@ Chunker(chunk_size: int = 512, chunk_overlap: int = 50, length_function: Optiona
 
 * **chunk_size**(int)：分块大小。默认值：512。
 * **chunk_overlap**(int)：分块重叠大小。默认值：50。
-* **length_function**(Callable[[str], int], 可选)：长度计算函数（默认使用字符计数）。默认值：None。
+* **length_function**(Callable[[str], int], 可选)：长度计算函数（比如 `len` 函数，默认使用字符计数）。默认值：None。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
-
-**异常**：
-
-* **ValueError**：如果chunk_overlap大于等于chunk_size。
 
 ### chunk_text
 

@@ -20,7 +20,7 @@ parse(doc: str, doc_id: str = "", **kwargs: Any) -> List[Document]
 
 **返回**：
 
-**List[Document]**，返回文档列表。
+**List[Document]**，返回文档列表（比如 list）。
 
 ### async lazy_parse
 
@@ -38,7 +38,7 @@ lazy_parse(doc: str, doc_id: str = "", **kwargs: Any) -> AsyncIterator[Document]
 
 **返回**：
 
-**AsyncIterator[Document]**，返回文档的异步迭代器。
+**AsyncIterator[Document]**，返回文档的异步迭代器（比如 async generator）。
 
 ### supports
 

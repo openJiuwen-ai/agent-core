@@ -6,8 +6,8 @@ Remove duplicates from an iterable while preserving the original order, optional
 
 **Parameters**:
 
-* **data**(Iterable[T]): Source iterable from which duplicates should be removed.
-* **key**(Callable[[T], Hashable], optional): Function that maps each item to a hashable key used for deduplication. Defaults to the identity function.
+* **data**(Iterable[T]): Source iterable from which duplicates should be removed (e.g., list or tuple).
+* **key**(Callable[[T], Hashable], optional): Function that maps each item to a hashable key used for deduplication (e.g., `lambda x: x.id`). Defaults to the identity function.
 
 **Returns**:
 

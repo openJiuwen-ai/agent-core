@@ -34,7 +34,7 @@ Callback function (empty implementation).
 ### property call_counter
 
 ```python
-call_counter() -> int
+call_counter -> int
 ```
 
 Get call counter for current callback object.
@@ -49,7 +49,7 @@ Tqdm callback class for tracking embedding progress.
 
 
 ```python
-BaseCallback(seq: Sequence, use_rich: bool = False, desc: str = "Indexing", **kwargs)
+TqdmCallback(seq: Sequence, use_rich: bool = False, desc: str = "Indexing", **kwargs)
 ```
 
 Initialize Tqdm callback object.

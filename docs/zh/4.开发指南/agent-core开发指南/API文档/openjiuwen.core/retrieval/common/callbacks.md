@@ -34,7 +34,7 @@ __call__(start_idx: int = -1, end_idx: int = -1, batch: Optional[list[str]] = No
 ### property call_counter
 
 ```python
-call_counter() -> int
+call_counter -> int
 ```
 
 获取当前回调对象的调用计数器。
@@ -49,7 +49,7 @@ call_counter() -> int
 
 
 ```python
-BaseCallback(seq: Sequence, use_rich: bool = False, desc: str = "Indexing", **kwargs)
+TqdmCallback(seq: Sequence, use_rich: bool = False, desc: str = "Indexing", **kwargs)
 ```
 
 初始化 Tqdm 回调对象。

@@ -6,8 +6,8 @@
 
 **参数**：
 
-* **data**(Iterable[T])：需要去重的可迭代对象。
-* **key**(Callable[[T], Hashable], 可选)：用于生成去重键的函数。默认使用恒等函数。
+* **data**(Iterable[T])：需要去重的可迭代对象（比如 list 或 tuple）。
+* **key**(Callable[[T], Hashable], 可选)：用于生成去重键的函数（比如 `lambda x: x.id`）。默认使用恒等函数。
 
 **返回**：
 

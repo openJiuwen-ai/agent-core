@@ -4,6 +4,10 @@
 
 嵌入模型抽象基类，提供统一的接口用于文本嵌入。
 
+> **参考示例**：更多使用示例请参考 [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) 仓库中 `examples/retrieval/` 目录下的示例代码，包括：
+> - `showcase_text_embedding.py` - 文本嵌入示例
+> - `showcase_multimodal_embedding.py` - 多模态嵌入示例
+
 ### abstractmethod async embed_query
 
 ```python
@@ -42,7 +46,7 @@ embed_documents(texts: List[str], batch_size: Optional[int] = None, **kwargs: An
 ### property dimension
 
 ```python
-dimension() -> int
+dimension -> int
 ```
 
 返回嵌入向量的维度。

@@ -4,9 +4,11 @@
 
 Ollama embedding model implementation.
 
+> **Reference Examples**: For more usage examples, please refer to the example code in the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under the `examples/retrieval/` directory, including:
+> - `showcase_text_embedding.py` - Text embedding examples
 
 ```python
-__init__(config: EmbeddingConfig, hf_tokenizer_name: Optional[str] = None, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None,max_batch_size: int = 8, dimension: Optional[int] = None)
+OllamaEmbedding(config: EmbeddingConfig, hf_tokenizer_name: Optional[str] = None, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, max_concurrent: int = 50, dimension: Optional[int] = None)
 ```
 
 Initialize Ollama embedding model.
@@ -19,16 +21,13 @@ Initialize Ollama embedding model.
 * **max_retries**(int): Maximum number of retries. Default: 3.
 * **extra_headers**(dict, optional): Additional request headers. Default: None.
 * **max_batch_size**(int): Maximum batch size. Default: 8.
+* **max_concurrent**(int): Maximum number of concurrent requests. Default: 50.
 * **dimension**(int, optional): Embedding output dimension. Default: None.
-
-**Exceptions**:
-
-* **ValueError**: If Ollama is not running or model is unavailable.
 
 ### property dimension
 
 ```python
-dimension() -> int
+dimension -> int
 ```
 
 Return the dimension of embedding vectors.
@@ -40,7 +39,7 @@ Return the dimension of embedding vectors.
 ### property tokenizer
 
 ```python
-tokenizer() -> Optional[AutoTokenizer]
+tokenizer -> Optional[AutoTokenizer]
 ```
 
 Get tokenizer instance (if configured).

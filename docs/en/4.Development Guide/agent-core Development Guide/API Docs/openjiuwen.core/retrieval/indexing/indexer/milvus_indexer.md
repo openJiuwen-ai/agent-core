@@ -6,26 +6,28 @@ Milvus index manager implementation, responsible for building, updating, and del
 
 
 ```python
-MilvusIndexer(milvus_uri: str, milvus_token: Optional[str] = None, text_field: str = "content", vector_field: str = "embedding", sparse_vector_field: str = "sparse_vector", metadata_field: str = "metadata", doc_id_field: str = "document_id", **kwargs: Any)
+MilvusIndexer(config: VectorStoreConfig, milvus_uri: str, milvus_token: Optional[str] = None, text_field: str = "content", vector_field: str | MilvusVectorField = "embedding", sparse_vector_field: str = "sparse_vector", metadata_field: str = "metadata", doc_id_field: str = "document_id", doc_index_callback: type[BaseCallback] = TqdmCallback, **kwargs: Any)
 ```
 
 Initialize Milvus index manager.
 
 **Parameters**:
 
+* **config**(VectorStoreConfig): Vector store configuration.
 * **milvus_uri**(str): Milvus URI.
 * **milvus_token**(str, optional): Milvus Token. Default: None.
 * **text_field**(str): Text field name. Default: "content".
-* **vector_field**(str): Vector field name. Default: "embedding".
+* **vector_field**(str | MilvusVectorField): Vector field name (str) or vector field configuration object (MilvusVectorField). Default: "embedding". For more configuration options about MilvusVectorField, please refer to [MilvusVectorField documentation](../../../foundation/store/vector_fields/milvus_fields.md).
 * **sparse_vector_field**(str): Sparse vector field name. Default: "sparse_vector".
 * **metadata_field**(str): Metadata field name. Default: "metadata".
 * **doc_id_field**(str): Document ID field name. Default: "document_id".
+* **doc_index_callback**(type[BaseCallback]): Callback object class, must be a subclass of BaseCallback. Default: TqdmCallback.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 ### property client
 
 ```python
-client() -> MilvusClient
+client -> MilvusClient
 ```
 
 Get Milvus client.
@@ -44,7 +46,7 @@ Build index.
 
 **Parameters**:
 
-* **chunks**(List[TextChunk]): List of text chunks.
+* **chunks**(List[TextChunk]): List of text chunks (e.g., list).
 * **config**(IndexConfig): Index configuration.
 * **embed_model**(Embedding, optional): Embedding model instance (required for vector index). Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
@@ -63,7 +65,7 @@ Update index.
 
 **Parameters**:
 
-* **chunks**(List[TextChunk]): List of text chunks.
+* **chunks**(List[TextChunk]): List of text chunks (e.g., list).
 * **doc_id**(str): Document ID.
 * **config**(IndexConfig): Index configuration.
 * **embed_model**(Embedding, optional): Embedding model instance (required for vector index). Default: None.

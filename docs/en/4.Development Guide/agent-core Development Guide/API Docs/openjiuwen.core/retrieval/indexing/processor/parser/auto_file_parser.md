@@ -31,12 +31,7 @@ Automatically select appropriate parser based on file format for parsing.
 
 **Returns**:
 
-**List[Document]**, returns a list of documents.
-
-**Exceptions**:
-
-* **FileNotFoundError**: File does not exist.
-* **ValueError**: Unsupported file format.
+**List[Document]**, returns a list of documents (e.g., list).
 
 ## function register_parser
 
@@ -48,7 +43,7 @@ Decorator: Register file format parser.
 
 **Parameters**:
 
-* **file_extensions**(List[str]): List of supported file extensions, e.g. [".pdf", ".PDF"].
+* **file_extensions**(List[str]): List of supported file extensions (e.g., list), e.g. [".pdf", ".PDF"].
 
 **Returns**:
 

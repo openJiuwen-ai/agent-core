@@ -4,6 +4,10 @@
 
 Embedding model abstract base class, providing a unified interface for text embedding.
 
+> **Reference Examples**: For more usage examples, please refer to the example code in the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under the `examples/retrieval/` directory, including:
+> - `showcase_text_embedding.py` - Text embedding examples
+> - `showcase_multimodal_embedding.py` - Multimodal embedding examples
+
 ### abstractmethod async embed_query
 
 ```python
@@ -42,7 +46,7 @@ Get embedding vectors for a list of documents.
 ### property dimension
 
 ```python
-dimension() -> int
+dimension -> int
 ```
 
 Return the dimension of embedding vectors.

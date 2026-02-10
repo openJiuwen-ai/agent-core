@@ -4,9 +4,12 @@
 
 API embedding model implementation, supporting multiple API formats.
 
+> **Reference Examples**: For more usage examples, please refer to the example code in the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under the `examples/retrieval/` directory, including:
+> - `showcase_text_embedding.py` - Text embedding examples
+
 
 ```python
-APIEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8)
+APIEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, max_concurrent: int = 50)
 ```
 
 Initialize API embedding model.
@@ -18,6 +21,7 @@ Initialize API embedding model.
 * **max_retries**(int): Maximum number of retries. Default: 3.
 * **extra_headers**(dict, optional): Additional request headers. Default: None.
 * **max_batch_size**(int): Maximum batch size. Default: 8.
+* **max_concurrent**(int): Maximum number of concurrent requests. Default: 50.
 
 **Description**:
 
@@ -29,7 +33,7 @@ Supported API response formats:
 ### property dimension
 
 ```python
-dimension() -> int
+dimension -> int
 ```
 
 Return the dimension of embedding vectors.
@@ -55,10 +59,6 @@ Get the embedding vector of text (async).
 
 **List[float]**, returns the embedding vector of the query text.
 
-**Exceptions**:
-
-* **ValueError**: If text is empty.
-
 ### embed_query_sync
 
 ```python
@@ -75,10 +75,6 @@ Get the embedding vector of text (sync).
 **Returns**:
 
 **List[float]**, returns the embedding vector of the query text.
-
-**Exceptions**:
-
-* **ValueError**: If text is empty.
 
 ### async embed_documents
 

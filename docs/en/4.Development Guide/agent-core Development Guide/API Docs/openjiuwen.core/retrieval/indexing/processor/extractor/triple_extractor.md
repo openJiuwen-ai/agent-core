@@ -29,10 +29,10 @@ Extract triples.
 
 **Parameters**:
 
-* **chunks**(List[TextChunk]): List of text chunks.
+* **chunks**(List[TextChunk]): List of text chunks (e.g., `[TextChunk(...), TextChunk(...)]`).
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 **Returns**:
 
-**List[Triple]**, returns a list of triples.
+**List[Triple]**, returns a list of triples (e.g., `[Triple(...), Triple(...)]`).
 

@@ -4,9 +4,12 @@
 
 Ollama嵌入模型实现。
 
+> **参考示例**：更多使用示例请参考 [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) 仓库中 `examples/retrieval/` 目录下的示例代码，包括：
+> - `showcase_text_embedding.py` - 文本嵌入示例
+
 
 ```python
-__init__(config: EmbeddingConfig, hf_tokenizer_name: Optional[str] = None, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, dimension: Optional[int] = None)
+OllamaEmbedding(config: EmbeddingConfig, hf_tokenizer_name: Optional[str] = None, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, max_concurrent: int = 50, dimension: Optional[int] = None)
 ```
 
 初始化Ollama嵌入模型。
@@ -19,16 +22,13 @@ __init__(config: EmbeddingConfig, hf_tokenizer_name: Optional[str] = None, timeo
 * **max_retries**(int)：最大重试次数。默认值：3。
 * **extra_headers**(dict, 可选)：额外的请求头。默认值：None。
 * **max_batch_size**(int)：最大批处理大小。默认值：8。
+* **max_concurrent**(int)：最大并发请求数。默认值：50。
 * **dimension**(int, 可选)：嵌入输出维度。默认值：None。
-
-**异常**：
-
-* **ValueError**：如果Ollama未运行或模型不可用。
 
 ### property dimension
 
 ```python
-dimension() -> int
+dimension -> int
 ```
 
 返回嵌入向量的维度。
@@ -40,7 +40,7 @@ dimension() -> int
 ### property tokenizer
 
 ```python
-tokenizer() -> Optional[AutoTokenizer]
+tokenizer -> Optional[AutoTokenizer]
 ```
 
 获取tokenizer实例（如果已配置）。

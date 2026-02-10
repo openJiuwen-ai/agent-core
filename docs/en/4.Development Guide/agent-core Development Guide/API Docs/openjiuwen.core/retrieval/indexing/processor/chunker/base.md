@@ -15,12 +15,8 @@ Initialize text chunker.
 
 * **chunk_size**(int): Chunk size. Default: 512.
 * **chunk_overlap**(int): Chunk overlap size. Default: 50.
-* **length_function**(Callable[[str], int], optional): Length calculation function (default uses character count). Default: None.
+* **length_function**(Callable[[str], int], optional): Length calculation function (e.g., `len` function, default uses character count). Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
-
-**Exceptions**:
-
-* **ValueError**: If chunk_overlap is greater than or equal to chunk_size.
 
 ### chunk_text
 

@@ -180,7 +180,7 @@ Get knowledge base statistics.
 
 **Dict[str, Any]**, returns a dictionary containing knowledge base ID, index type, index information, and other statistics.
 
-## async retrieve_multi_kb
+## func async retrieve_multi_kb
 
 ```python
 retrieve_multi_kb(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[str]
@@ -199,7 +199,7 @@ Perform retrieval on multiple knowledge bases, deduplicate by text and merge res
 
 **List[str]**, returns a deduplicated and sorted list of texts.
 
-## async retrieve_multi_kb_with_source
+## func async retrieve_multi_kb_with_source
 
 ```python
 retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[Dict[str, Any]]

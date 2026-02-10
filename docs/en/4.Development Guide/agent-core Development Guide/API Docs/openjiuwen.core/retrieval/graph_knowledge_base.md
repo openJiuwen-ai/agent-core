@@ -169,7 +169,7 @@ close() -> None
 
 Close the knowledge base and release resources, including graph retriever, document chunk retriever, and triple retriever.
 
-## async retrieve_multi_graph_kb
+## func async retrieve_multi_graph_kb
 
 ```python
 retrieve_multi_graph_kb(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[str]
@@ -188,7 +188,7 @@ Perform retrieval on multiple knowledge bases (returns text list).
 
 **List[str]**, returns a deduplicated and sorted list of texts.
 
-## async retrieve_multi_graph_kb_with_source
+## func async retrieve_multi_graph_kb_with_source
 
 ```python
 retrieve_multi_graph_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[Dict[str, Any]]

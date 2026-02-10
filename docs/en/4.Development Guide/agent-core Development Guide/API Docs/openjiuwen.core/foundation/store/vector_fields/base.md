@@ -1,6 +1,6 @@
-# openjiuwen.core.retrieval.indexing.vector_fields.base
+# openjiuwen.core.foundation.store.vector_fields.base
 
-## class openjiuwen.core.retrieval.indexing.vector_fields.base.VectorField
+## class openjiuwen.core.foundation.store.vector_fields.base.VectorField
 
 Base class for configuring Approximate Nearest Neighbor (ANN) search in vector databases.
 

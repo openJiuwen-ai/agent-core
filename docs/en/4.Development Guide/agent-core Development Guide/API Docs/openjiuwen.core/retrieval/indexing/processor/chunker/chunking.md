@@ -30,9 +30,9 @@ Chunk document list.
 
 **Parameters**:
 
-* **documents**(List[Document]): Document list.
+* **documents**(List[Document]): Document list (e.g., `[Document(...), Document(...)]`).
 
 **Returns**:
 
-**List[TextChunk]**, returns a list of document chunks.
+**List[TextChunk]**, returns a list of document chunks (e.g., `[TextChunk(...), TextChunk(...)]`).
 

@@ -10,7 +10,7 @@
 * **predicate**(str)：谓词。
 * **object**(str)：客体。
 * **confidence**(float, 可选)：置信度。默认值：None。
-* **metadata**(Dict[str, Any])：元数据。默认值：{}。
+* **metadata**(Dict[str, Any])：元数据（比如 `{"doc_id": "doc1", "source": "kb1"}`）。默认值：{}。
 
 **样例**：
 

@@ -179,7 +179,7 @@ get_statistics() -> Dict[str, Any]
 
 **Dict[str, Any]**，返回包含知识库ID、索引类型、索引信息等统计信息的字典。
 
-## async retrieve_multi_kb
+## func async retrieve_multi_kb
 
 ```python
 retrieve_multi_kb(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[str]
@@ -198,7 +198,7 @@ retrieve_multi_kb(kbs: List[KnowledgeBase], query: str, config: Optional[Retriev
 
 **List[str]**，返回去重并排序后的文本列表。
 
-## async retrieve_multi_kb_with_source
+## func async retrieve_multi_kb_with_source
 
 ```python
 retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[Dict[str, Any]]

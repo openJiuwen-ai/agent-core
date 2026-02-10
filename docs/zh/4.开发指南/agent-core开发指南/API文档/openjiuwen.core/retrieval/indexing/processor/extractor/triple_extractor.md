@@ -16,7 +16,7 @@ TripleExtractor(llm_client: Any, model_name: str, temperature: float = 0.0, max_
 * **llm_client**(Any)：LLM客户端实例。
 * **model_name**(str)：模型名称。
 * **temperature**(float)：温度参数。默认值：0.0。
-* **max_concurrent**(int)：最大并发数，默认值：50。默认值：50。
+* **max_concurrent**(int)：最大并发数。默认值：50。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
 
 ### async extract
@@ -29,10 +29,10 @@ extract(chunks: List[TextChunk], **kwargs: Any) -> List[Triple]
 
 **参数**：
 
-* **chunks**(List[TextChunk])：文本分块列表。
+* **chunks**(List[TextChunk])：文本分块列表（比如 `[TextChunk(...), TextChunk(...)]`）。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
 
 **返回**：
 
-**List[Triple]**，返回三元组列表。
+**List[Triple]**，返回三元组列表（比如 `[Triple(...), Triple(...)]`）。
 

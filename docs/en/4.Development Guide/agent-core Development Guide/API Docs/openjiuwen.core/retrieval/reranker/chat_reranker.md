@@ -4,6 +4,9 @@
 
 Chat-based reranker implementation, supports any chat completion API that provide logprobs.
 
+> **Reference Examples**: For more usage examples, please refer to the example code in the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under the `examples/retrieval/` directory, including:
+> - `showcase_reranker.py` - Reranker examples
+
 ```python
 ChatReranker(config: RerankerConfig, max_retries: int = 3, retry_wait: float = 0.1, extra_headers: Optional[dict] = None, verify: bool | str | ssl.SSLContext = True, **kwargs)
 ```

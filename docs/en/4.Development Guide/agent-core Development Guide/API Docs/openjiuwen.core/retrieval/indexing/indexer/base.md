@@ -14,7 +14,7 @@ Build index.
 
 **Parameters**:
 
-* **chunks**(List[TextChunk]): List of text chunks.
+* **chunks**(List[TextChunk]): List of text chunks (e.g., list).
 * **config**(IndexConfig): Index configuration.
 * **embed_model**(Embedding, optional): Embedding model instance (required for vector index). Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
@@ -33,7 +33,7 @@ Update index.
 
 **Parameters**:
 
-* **chunks**(List[TextChunk]): List of text chunks.
+* **chunks**(List[TextChunk]): List of text chunks (e.g., list).
 * **doc_id**(str): Document ID.
 * **config**(IndexConfig): Index configuration.
 * **embed_model**(Embedding, optional): Embedding model instance (required for vector index). Default: None.

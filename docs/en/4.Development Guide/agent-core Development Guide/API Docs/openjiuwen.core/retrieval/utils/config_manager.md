@@ -27,12 +27,6 @@ Load configuration from file (supports JSON and YAML formats).
 
 * **path**(str): Configuration file path.
 
-**Exceptions**:
-
-* **FileNotFoundError**: If the configuration file does not exist.
-* **ImportError**: If YAML file requires PyYAML but it is not installed.
-* **ValueError**: If unsupported file format.
-
 ### save_to_file
 
 ```python
@@ -44,12 +38,6 @@ Save configuration to file (supports JSON and YAML formats).
 **Parameters**:
 
 * **path**(str): Configuration file path.
-
-**Exceptions**:
-
-* **ValueError**: If there is no configuration to save.
-* **ImportError**: If YAML file requires PyYAML but it is not installed.
-* **ValueError**: If unsupported file format.
 
 ### get_config
 
@@ -78,10 +66,6 @@ Get knowledge base configuration.
 **Returns**:
 
 **KnowledgeBaseConfig**, returns knowledge base configuration.
-
-**Exceptions**:
-
-* **ValueError**: If knowledge base configuration is not loaded.
 
 ### update_config
 

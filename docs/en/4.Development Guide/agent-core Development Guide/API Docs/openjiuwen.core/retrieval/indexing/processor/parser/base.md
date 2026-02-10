@@ -20,7 +20,7 @@ Parse document.
 
 **Returns**:
 
-**List[Document]**, returns a list of documents.
+**List[Document]**, returns a list of documents (e.g., list).
 
 ### async lazy_parse
 
@@ -38,7 +38,7 @@ Lazy loading parse document (default implementation based on parse method).
 
 **Returns**:
 
-**AsyncIterator[Document]**, returns an async iterator of documents.
+**AsyncIterator[Document]**, returns an async iterator of documents (e.g., async generator).
 
 ### supports
 

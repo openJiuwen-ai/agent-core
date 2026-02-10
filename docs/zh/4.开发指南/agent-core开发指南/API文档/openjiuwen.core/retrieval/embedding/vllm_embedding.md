@@ -5,7 +5,7 @@
 vLLM嵌入模型实现，支持类似vLLM服务的多模态嵌入模型（如Qwen3-VL-Embedding）。
 
 ```python
-VLLMEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, dimension: Optional[int] = None, verify: bool | str | ssl.SSLContext = True, **kwargs)
+VLLMEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, extra_headers: Optional[dict] = None, max_batch_size: int = 8, max_concurrent: int = 50, dimension: Optional[int] = None, verify: bool | str | ssl.SSLContext = True, **kwargs)
 ```
 
 初始化vLLM嵌入模型。
@@ -17,6 +17,7 @@ VLLMEmbedding(config: EmbeddingConfig, timeout: int = 60, max_retries: int = 3, 
 * **max_retries**(int)：最大重试次数。默认值：3。
 * **extra_headers**(dict, 可选)：额外的请求头。默认值：None。
 * **max_batch_size**(int)：最大批处理大小。默认值：8。
+* **max_concurrent**(int)：最大并发请求数。默认值：50。
 * **dimension**(int, 可选)：嵌入向量维度（用于Matryoshka模型）。默认值：None。
 * **verify**(bool | str | ssl.SSLContext)：SSL验证设置。默认值：True。
 * **kwargs**：可变参数，用于传递其他额外的配置参数。
@@ -28,7 +29,7 @@ VLLMEmbedding继承自OpenAIEmbedding，支持多模态文档嵌入。
 ### property dimension
 
 ```python
-dimension() -> int
+dimension -> int
 ```
 
 返回嵌入向量的维度。

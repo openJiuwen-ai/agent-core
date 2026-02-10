@@ -121,6 +121,13 @@
           - [tool](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool.README.md)
           - [prompt](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/foundation/prompt.README.md)
           - [store](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/foundation/store.README.md)
+            - vector_fields
+              - [base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/foundation/store/vector_fields/base.md)
+              - [chroma_fields](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/foundation/store/vector_fields/chroma_fields.md)
+              - [milvus_fields](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/foundation/store/vector_fields/milvus_fields.md)
+            - query
+              - [base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/foundation/store/query/base.md)
+              - [registry](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/foundation/store/query/registry.md)
         - [session](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/session.README.md)
         - [single_agent](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/single_agent.README.md)
         - [application](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/application.README.md)
@@ -144,10 +151,13 @@
             - [base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/operator/llm_call/base.md)
         - [retrieval](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval.README.md)
           - common
+            - [callbacks](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/common/callbacks.md)
             - [config](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/common/config.md)
             - [document](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/common/document.md)
             - [retrieval_result](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/common/retrieval_result.md)
             - [triple](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/common/triple.md)
+            - [triple_beam](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/common/triple_beam.md)
+            - [triple_memory](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/common/triple_memory.md)
           - embedding
             - [api_embedding](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/embedding/api_embedding.md)
             - [base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/embedding/base.md)
@@ -176,6 +186,12 @@
               - parser
                 - [auto_file_parser](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/indexing/processor/parser/auto_file_parser.md)
                 - [base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/indexing/processor/parser/base.md)
+                - [json_parser](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/indexing/processor/parser/json_parser.md)
+                - [pdf_parser](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/indexing/processor/parser/pdf_parser.md)
+                - [txt_md_parser](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/indexing/processor/parser/txt_md_parser.md)
+                - [word_parser](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/indexing/processor/parser/word_parser.md)
+              - splitter
+                - [splitter](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/indexing/processor/splitter/splitter.md)
           - retriever
             - [agentic_retriever](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/retriever/agentic_retriever.md)
             - [base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/retriever/base.md)
@@ -190,6 +206,10 @@
           - [simple_knowledge_base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/simple_knowledge_base.md)
           - [knowledge_base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/knowledge_base.md)
           - [graph_knowledge_base](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/graph_knowledge_base.md)
+          - utils
+            - [common](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/utils/common.md)
+            - [config_manager](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/utils/config_manager.md)
+            - [fusion](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/retrieval/utils/fusion.md)
         - [runner](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/runner.README.md)
           - [runner](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/runner/runner.md)
         - [workflow](4.Development%20Guide/agent-core%20Development%20Guide/API%20Docs/openjiuwen.core/workflow.README.md)

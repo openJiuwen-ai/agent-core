@@ -27,12 +27,6 @@ load_from_file(path: str) -> None
 
 * **path**(str)：配置文件路径。
 
-**异常**：
-
-* **FileNotFoundError**：配置文件不存在时抛出。
-* **ImportError**：YAML 文件需要 PyYAML 但未安装时抛出。
-* **ValueError**：不支持的文件格式时抛出。
-
 ### save_to_file
 
 ```python
@@ -44,12 +38,6 @@ save_to_file(path: str) -> None
 **参数**：
 
 * **path**(str)：配置文件路径。
-
-**异常**：
-
-* **ValueError**：没有配置可保存时抛出。
-* **ImportError**：YAML 文件需要 PyYAML 但未安装时抛出。
-* **ValueError**：不支持的文件格式时抛出。
 
 ### get_config
 
@@ -78,10 +66,6 @@ get_knowledge_base_config() -> KnowledgeBaseConfig
 **返回**：
 
 **KnowledgeBaseConfig**，返回知识库配置。
-
-**异常**：
-
-* **ValueError**：知识库配置未加载时抛出。
 
 ### update_config
 

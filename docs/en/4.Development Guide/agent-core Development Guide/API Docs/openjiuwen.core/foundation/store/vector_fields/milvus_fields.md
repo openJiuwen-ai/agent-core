@@ -1,6 +1,6 @@
-# openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields
+# openjiuwen.core.foundation.store.vector_fields.milvus_fields
 
-## class openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields.MilvusFLAT
+## class openjiuwen.core.foundation.store.vector_fields.milvus_fields.MilvusFLAT
 
 FLAT index configuration for Milvus.
 
@@ -17,7 +17,7 @@ Initialize Milvus FLAT index configuration.
 
 * **vector_field**(str, optional): Vector field name. Default: "embedding".
 
-## class openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields.MilvusAUTO
+## class openjiuwen.core.foundation.store.vector_fields.milvus_fields.MilvusAUTO
 
 AUTOINDEX configuration for Milvus.
 
@@ -27,7 +27,7 @@ Configurable in milvus.yaml when deploying Milvus database. Defaults to {"M": 18
 
 
 ```python
-MilvusFLAT(vector_field: str = "embedding")
+MilvusAUTO(vector_field: str = "embedding")
 ```
 
 Initialize Milvus AUTOINDEX configuration.
@@ -36,7 +36,7 @@ Initialize Milvus AUTOINDEX configuration.
 
 * **vector_field**(str, optional): Vector field name. Default: "embedding".
 
-## class openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields.MilvusSCANN
+## class openjiuwen.core.foundation.store.vector_fields.milvus_fields.MilvusSCANN
 
 SCANN (Scalable Nearest Neighbors) index configuration for Milvus.
 
@@ -46,7 +46,7 @@ Inherits IVF clustering parameters (nlist, nprobe) from MilvusIVFBase.
 
 
 ```python
-MilvusFLAT(vector_field: str = "embedding", nlist: int = 128, nprobe: int = 8, with_raw_data: bool = True, reorder_k: int = None)
+MilvusSCANN(vector_field: str = "embedding", nlist: int = 128, nprobe: int = 8, with_raw_data: bool = True, reorder_k: int = None)
 ```
 
 Initialize Milvus SCANN index configuration.
@@ -59,7 +59,7 @@ Initialize Milvus SCANN index configuration.
 * **with_raw_data**(bool, optional): Whether to store original vectors. Setting to True improves accuracy at the cost of increased storage. Default: True.
 * **reorder_k**(int, optional): Number of results to reorder using higher precision vectors during search. Only effective when with_raw_data is True. Higher values improve accuracy but increase latency. Default: None (no reordering).
 
-## class openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields.MilvusIVF
+## class openjiuwen.core.foundation.store.vector_fields.milvus_fields.MilvusIVF
 
 Inverted File (IVF) index configuration for Milvus.
 
@@ -73,7 +73,7 @@ Supports different quantization variants to further optimize memory usage:
 
 
 ```python
-MilvusFLAT(vector_field: str = "embedding", variant: Literal["FLAT", "SQ8", "PQ", "RABITQ"] = "FLAT", nlist: int = 128, nprobe: int = 8, extra_construct: dict[str, Any] = {}, extra_search: dict[str, Any] = {})
+MilvusIVF(vector_field: str = "embedding", variant: Literal["FLAT", "SQ8", "PQ", "RABITQ"] = "FLAT", nlist: int = 128, nprobe: int = 8, extra_construct: dict[str, Any] = {}, extra_search: dict[str, Any] = {})
 ```
 
 Initialize Milvus IVF index configuration.
@@ -99,7 +99,7 @@ Initialize Milvus IVF index configuration.
 * **refine_k**(float): Refinement factor, must be >= 1
 * **rbq_query_bits**(int): Query bits, Range: [0, 8]
 
-## class openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields.MilvusHNSW
+## class openjiuwen.core.foundation.store.vector_fields.milvus_fields.MilvusHNSW
 
 Hierarchical Navigable Small World (HNSW) index configuration for Milvus.
 
@@ -112,7 +112,7 @@ Supports optional quantization variants to reduce memory usage:
 
 
 ```python
-MilvusFLAT(vector_field: str = "embedding", M: int = 30, efConstruction: int = 360, efSearchFactor: float = None, variant: Optional[Literal["SQ", "PQ", "PRQ"]] = None, extra_construct: dict[str, Any] = {}, extra_search: dict[str, Any] = {})
+MilvusHNSW(vector_field: str = "embedding", M: int = 30, efConstruction: int = 360, efSearchFactor: float = None, variant: Optional[Literal["SQ", "PQ", "PRQ"]] = None, extra_construct: dict[str, Any] = {}, extra_search: dict[str, Any] = {})
 ```
 
 Initialize Milvus HNSW index configuration.

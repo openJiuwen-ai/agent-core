@@ -130,6 +130,13 @@
           - [tool](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/foundation/tool.README.md)
           - [prompt](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/foundation/prompt.README.md)
           - [store](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/foundation/store.README.md)
+            - vector_fields
+              - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/foundation/store/vector_fields/base.md)
+              - [chroma_fields](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/foundation/store/vector_fields/chroma_fields.md)
+              - [milvus_fields](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/foundation/store/vector_fields/milvus_fields.md)
+            - query
+              - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/foundation/store/query/base.md)
+              - [registry](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/foundation/store/query/registry.md)
         - [session](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/session.README.md)
         - [single_agent](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/single_agent.README.md)
         - [application](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/application.README.md)
@@ -158,10 +165,13 @@
             - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/operator/memory_call/base.md)
         - [retrieval](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval.README.md)
           - common
+            - [callbacks](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/common/callbacks.md)
             - [config](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/common/config.md)
             - [document](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/common/document.md)
             - [retrieval_result](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/common/retrieval_result.md)
             - [triple](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/common/triple.md)
+            - [triple_beam](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/common/triple_beam.md)
+            - [triple_memory](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/common/triple_memory.md)
           - embedding
             - [api_embedding](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/embedding/api_embedding.md)
             - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/embedding/base.md)
@@ -190,6 +200,12 @@
               - parser
                 - [auto_file_parser](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/auto_file_parser.md)
                 - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/base.md)
+                - [json_parser](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/json_parser.md)
+                - [pdf_parser](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/pdf_parser.md)
+                - [txt_md_parser](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/txt_md_parser.md)
+                - [word_parser](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/word_parser.md)
+              - splitter
+                - [splitter](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/splitter/splitter.md)
           - retriever
             - [agentic_retriever](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/retriever/agentic_retriever.md)
             - [base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/retriever/base.md)
@@ -204,6 +220,10 @@
           - [simple_knowledge_base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/simple_knowledge_base.md)
           - [knowledge_base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/knowledge_base.md)
           - [graph_knowledge_base](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/graph_knowledge_base.md)
+          - utils
+            - [common](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/utils/common.md)
+            - [config_manager](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/utils/config_manager.md)
+            - [fusion](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/retrieval/utils/fusion.md)
         - [runner](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/runner.README.md)
           - [runner](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/runner/runner.md)
         - [workflow](4.开发指南/agent-core开发指南/API文档/openjiuwen.core/workflow.README.md)

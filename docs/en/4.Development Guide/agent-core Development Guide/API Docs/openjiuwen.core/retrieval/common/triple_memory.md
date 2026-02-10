@@ -4,19 +4,52 @@
 
 Triple memory data model that retains unique triples during multi-step reasoning in Agentic retriever.
 
+```python
+TripleMemory()
+```
+
+Initialize triple memory.
+
 **Attributes**:
 
-* **included_triples**(Set[str]): Lowercase string representations of the triples that have already been recorded.
-* **memory**(List[tuple[str, ...]]): Original tuple triples stored in insertion order.
+* **included_triples**(Set[str]): Lowercase string representations of the triples that have already been recorded (e.g., `{"beijing is capital", "paris is capital"}`).
+* **memory**(List[tuple[str, ...]]): Original tuple triples stored in insertion order (e.g., `[("Beijing", "is", "capital"), ("Paris", "is", "capital")]`).
 
-**Properties**:
+### property triples_str
 
-* **triples_str**(str): Human-readable, newline-separated view of all stored triples.
+```python
+triples_str -> str
+```
 
-**Methods**:
+Get human-readable, newline-separated view of all stored triples.
 
-* **extend_memory**(new_triple: tuple[str, ...]) -> None: Adds a single triple if its normalized string form has not yet been observed.
-* **batch_extend_memory**(new_triples: list[tuple[str, ...]]) -> None: Calls `extend_memory` for each triple in `new_triples`.
+**Returns**:
+
+**str**, returns the formatted triple string.
+
+### extend_memory
+
+```python
+extend_memory(new_triple: tuple[str, ...]) -> None
+```
+
+Adds a single triple if its normalized string form has not yet been observed.
+
+**Parameters**:
+
+* **new_triple**(tuple[str, ...]): Triple to add (e.g., `("Beijing", "is", "capital")`).
+
+### batch_extend_memory
+
+```python
+batch_extend_memory(new_triples: list[tuple[str, ...]]) -> None
+```
+
+Calls `extend_memory` for each triple in `new_triples`.
+
+**Parameters**:
+
+* **new_triples**(list[tuple[str, ...]]): List of triples to add (e.g., `[("Beijing", "is", "capital"), ("Paris", "is", "capital")]`).
 
 **Example**:
 

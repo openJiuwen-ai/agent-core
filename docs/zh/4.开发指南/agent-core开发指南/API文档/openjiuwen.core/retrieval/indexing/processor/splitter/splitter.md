@@ -13,7 +13,7 @@ SentenceSplitter(tokenizer: Callable, chunk_size: int, chunk_overlap: int, lan: 
 
 **参数**：
 
-* **tokenizer**(Callable)：分词器，必须具有 encode 和 decode 方法。
+* **tokenizer**(Callable)：分词器（比如具有 encode 和 decode 方法的对象），必须具有 encode 和 decode 方法。
 * **chunk_size**(int)：分块大小（token 数量）。
 * **chunk_overlap**(int)：分块重叠大小（token 数量）。
 * **lan**(str, 可选)：语言代码，默认为 "zh"（中文）。默认值："zh"。
@@ -32,7 +32,7 @@ __call__(doc: str) -> List[Tuple[str, int, int]]
 
 **返回**：
 
-**List[Tuple[str, int, int]]**，返回分块列表，每个元素为 (文本, 起始字符位置, 结束字符位置)。
+**List[Tuple[str, int, int]]**，返回分块列表（比如 `[("文本1", 0, 10), ("文本2", 10, 20)]`），每个元素为 (文本, 起始字符位置, 结束字符位置)。
 
 **说明**：
 

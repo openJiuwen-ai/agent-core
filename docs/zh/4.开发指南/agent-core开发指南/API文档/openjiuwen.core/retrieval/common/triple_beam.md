@@ -4,15 +4,40 @@
 
 三元组beam数据模型，用于保存参与beam的三元组序列。
 
+```python
+TripleBeam(nodes: List[RetrievalResult], score: float)
+```
+
+初始化三元组beam。
+
 **参数**：
 
-* **nodes**(List[RetrievalResult])：beam中保存的三元组结果。
+* **nodes**(List[RetrievalResult])：beam中保存的三元组结果（比如 `[RetrievalResult(text="...", score=0.9)]`）。
 * **score**(float)：与beam关联的聚合得分。
 
-**属性**：
+### property triples
 
-* **triples**(List[RetrievalResult])：当前beam中的三元组结果。
-* **score**(float)：beam得分。
+```python
+triples -> List[RetrievalResult]
+```
+
+获取当前beam中的三元组结果。
+
+**返回**：
+
+**List[RetrievalResult]**，返回当前beam中的三元组结果列表。
+
+### property score
+
+```python
+score -> float
+```
+
+获取beam得分。
+
+**返回**：
+
+**float**，返回beam得分。
 
 **样例**：
 
