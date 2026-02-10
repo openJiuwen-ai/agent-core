@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from openjiuwen.core.common.constants.constant import END_NODE_STREAM
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import workflow_logger, LogEventType
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.common.utils.dict_utils import extract_leaf_nodes, format_path
 from openjiuwen.core.workflow.components.component import WorkflowComponent
@@ -53,7 +53,14 @@ class End(WorkflowComponent):
         self._mix = True
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        logger.debug(f"end component invoke method inputs: {inputs}")
+        workflow_logger.debug(
+            "End component invoke started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=session.get_executable_id(),
+            component_type_str="End",
+            session_id=session.get_session_id(),
+            metadata={"has_inputs": inputs is not None}
+        )
         if self._template is not None:
             if inputs is None:
                 inputs = {}
@@ -63,26 +70,68 @@ class End(WorkflowComponent):
                 output = {k: v for k, v in inputs.items() if v is not None} if isinstance(inputs, dict) else inputs
             else:
                 output = None
-            logger.debug(f"end component invoke method output: {output}")
+            workflow_logger.debug(
+                "End component invoke completed",
+                event_type=LogEventType.WORKFLOW_COMPONENT_END,
+                component_id=session.get_executable_id(),
+                component_type_str="End",
+                session_id=session.get_session_id(),
+                metadata={"has_output": output is not None}
+            )
             return {"output": output} if output is not None else output
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
-        logger.debug(f"end component stream method inputs: {inputs}")
+        workflow_logger.debug(
+            "End component stream started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=session.get_executable_id(),
+            component_type_str="End",
+            session_id=session.get_session_id(),
+            metadata={"has_inputs": inputs is not None, "has_template": self._template is not None}
+        )
         if inputs is None:
-            logger.debug("end component stream method received None inputs, using empty dict")
+            workflow_logger.debug(
+                "End component received None inputs",
+                event_type=LogEventType.WORKFLOW_COMPONENT_START,
+                component_id=session.get_executable_id(),
+                component_type_str="End",
+                session_id=session.get_session_id(),
+                metadata={"using_empty_dict": True}
+            )
             inputs = {}
         try:
             if self._template is not None:
-                logger.debug(f"end component has template, inputs: {inputs}")
+                workflow_logger.debug(
+                    "End component rendering with template",
+                    event_type=LogEventType.WORKFLOW_COMPONENT_START,
+                    component_id=session.get_executable_id(),
+                    component_type_str="End",
+                    session_id=session.get_session_id(),
+                    metadata={"input_keys": list(inputs.keys()) if isinstance(inputs, dict) else None}
+                )
                 generator = self._template.render_stream(inputs,
                                                          session.get_env(END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY))
                 frame_count = 0
                 async for frame in generator:
-                    logger.debug(f"rendering stream frame: {frame}")
+                    workflow_logger.debug(
+                        "End component stream chunk",
+                        event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                        component_id=session.get_executable_id(),
+                        component_type_str="End",
+                        session_id=session.get_session_id(),
+                        metadata={"frame_index": frame.get("index"), "frame_count": frame_count}
+                    )
                     frame_count += 1
                     yield OutputSchema(type=END_NODE_STREAM, index=frame.get("index"),
                                        payload=dict(response=frame.get("data")))
-                logger.debug(f"end component stream method yielded {frame_count} frames")
+                workflow_logger.debug(
+                    "End component stream completed",
+                    event_type=LogEventType.WORKFLOW_COMPONENT_END,
+                    component_id=session.get_executable_id(),
+                    component_type_str="End",
+                    session_id=session.get_session_id(),
+                    metadata={"total_frames": frame_count}
+                )
             else:
                 if isinstance(inputs, dict):
                     for key, value in inputs.items():
@@ -91,18 +140,36 @@ class End(WorkflowComponent):
                     yield dict(output=inputs)
 
         except Exception as e:
-            if UserConfig.is_sensitive():
-                logger.info("stream output error")
-            else:
-                logger.error("stream output error: {}".format(e), exc_info=True)
+            workflow_logger.error(
+                "End component stream error",
+                event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,
+                component_id=session.get_executable_id(),
+                component_type_str="End",
+                session_id=session.get_session_id(),
+                metadata={"error": str(e) if not UserConfig.is_sensitive() else None}
+            )
 
     async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
-        logger.debug(f"end component transform method inputs: {inputs}")
+        workflow_logger.debug(
+            "End component transform started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=session.get_executable_id(),
+            component_type_str="End",
+            session_id=session.get_session_id(),
+            metadata={"has_template": self._template is not None}
+        )
         if self._template is not None:
             generator = self._template.render_stream(inputs,
                                                      session.get_env(END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY))
             async for frame in generator:
-                logger.debug(f"rendering transform frame: {frame}")
+                workflow_logger.debug(
+                    "End component transform chunk",
+                    event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                    component_id=session.get_executable_id(),
+                    component_type_str="End",
+                    session_id=session.get_session_id(),
+                    metadata={"frame_index": frame.get("index")}
+                )
                 yield OutputSchema(type=END_NODE_STREAM, index=frame.get("index"),
                                    payload=dict(response=frame.get("data")))
         else:
@@ -114,7 +181,14 @@ class End(WorkflowComponent):
                     yield dict(output={format_path(path): value})
 
     async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        logger.debug(f"end component collect method inputs: {inputs}")
+        workflow_logger.debug(
+            "End component collect started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=session.get_executable_id(),
+            component_type_str="End",
+            session_id=session.get_session_id(),
+            metadata={"has_template": self._template is not None}
+        )
         if self._template is not None:
             return await self._render(inputs, session.get_env(END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY))
         else:
@@ -125,7 +199,14 @@ class End(WorkflowComponent):
                         chunks.append({format_path(path): frame})
                 else:
                     chunks.append({format_path(path): value})
-            logger.debug(f"collect chunks: {chunks}")
+            workflow_logger.debug(
+                "End component collect completed",
+                event_type=LogEventType.WORKFLOW_COMPONENT_END,
+                component_id=session.get_executable_id(),
+                component_type_str="End",
+                session_id=session.get_session_id(),
+                metadata={"chunk_count": len(chunks)}
+            )
             return {
                 "output": chunks
             }
@@ -140,7 +221,13 @@ class End(WorkflowComponent):
                         await asyncio.wait_for(self._batch_template.condition.wait(),
                                                timeout if timeout and timeout > 0 else None)
                     except asyncio.TimeoutError as e:
-                        logger.error(f"render template stream timeout, {e}")
+                        workflow_logger.error(
+                            "End component render timeout",
+                            event_type=LogEventType.WORKFLOW_STREAM_ERROR,
+                            component_id="end",
+                            component_type_str="End",
+                            metadata={"error": str(e)}
+                        )
                         return None
                 self._batch_template = None
                 return None
@@ -227,13 +314,28 @@ class TemplateProcessor:
                     try:
                         await asyncio.wait_for(self._condition.wait(), timeout=timeout if timeout > 0 else None)
                     except asyncio.TimeoutError as e:
-                        logger.error(f"render template stream timeout {timeout}s, {e}")
+                        workflow_logger.error(
+                            "Template render stream timeout",
+                            event_type=LogEventType.WORKFLOW_STREAM_ERROR,
+                            component_type_str="TemplateProcessor",
+                            metadata={"timeout_seconds": timeout, "error": str(e)}
+                        )
                         self.advance_position()
                     except asyncio.CancelledError as e:
-                        logger.error(f"render template stream cancelled {e}")
+                        workflow_logger.error(
+                            "Template render stream cancelled",
+                            event_type=LogEventType.WORKFLOW_STREAM_ERROR,
+                            component_type_str="TemplateProcessor",
+                            metadata={"error": str(e)}
+                        )
                         break
                 should_wait = False
-                logger.debug("previous segment has been finished")
+                workflow_logger.debug(
+                    "Template segment finished",
+                    event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                    component_type_str="TemplateProcessor",
+                    metadata={"position": self._current_position}
+                )
             async with self._lock:
                 if self.is_finished():
                     break
@@ -251,25 +353,47 @@ class TemplateProcessor:
                 if value is None:
                     # In mixed mode (concurrent render_stream calls), should wait instead of skipping
                     if self._count > 1:
-                        logger.debug(
-                            f"current segment [{segment}] should wait for other method "
-                            f"(concurrent render_stream)"
+                        workflow_logger.debug(
+                            "Template segment waiting for concurrent render",
+                            event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                            component_type_str="TemplateProcessor",
+                            metadata={"segment": segment, "concurrent_count": self._count}
                         )
                         should_wait = True
                         continue
                     # If only one call and no other values exist, skip None values
                     if not has_any_value:
-                        logger.debug(f"current segment [{segment}] is None and no other values exist, skipping")
+                        workflow_logger.debug(
+                            "Template segment skipped (None value)",
+                            event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                            component_type_str="TemplateProcessor",
+                            metadata={"segment": segment}
+                        )
                         self.advance_position()
                         continue
-                    logger.debug(f"current segment [{segment}] should wait for other method")
+                    workflow_logger.debug(
+                        "Template segment waiting",
+                        event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                        component_type_str="TemplateProcessor",
+                        metadata={"segment": segment}
+                    )
                     should_wait = True
                     continue
 
                 if isinstance(value, AsyncGenerator):
-                    logger.debug(f"current segment generator [{segment}] is generator")
+                    workflow_logger.debug(
+                        "Template segment is generator",
+                        event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                        component_type_str="TemplateProcessor",
+                        metadata={"segment": segment}
+                    )
                     async for frame in value:
-                        logger.debug(f"rendering generator frame: {frame}")
+                        workflow_logger.debug(
+                            "Template generator frame",
+                            event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                            component_type_str="TemplateProcessor",
+                            metadata={"chunk_index": self._chunk_index}
+                        )
                         yield {"data": frame, "index": self._chunk_index}
                         self._chunk_index += 1
                 else:
@@ -278,7 +402,12 @@ class TemplateProcessor:
                 self.advance_position()
                 async with self._condition:
                     self._condition.notify_all()
-                logger.debug(f"current segment [{segment}] has been finished")
+                workflow_logger.debug(
+                    "Template segment completed",
+                    event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                    component_type_str="TemplateProcessor",
+                    metadata={"segment": segment, "position": self._current_position}
+                )
 
     def is_finished(self) -> bool:
         return self._current_position >= len(self._segments)
@@ -298,7 +427,12 @@ class TemplateBatchProcessor:
         generator = self._template.render_stream(inputs)
         answer = []
         async for frame in generator:
-            logger.debug(f"rendering collect frame: {frame}")
+            workflow_logger.debug(
+                "Template batch render frame",
+                event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
+                component_type_str="TemplateBatchProcessor",
+                metadata={"frame_index": frame.get("index")}
+            )
             answer.append(str(frame.get("data")))
         return "".join(answer)
 

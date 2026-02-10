@@ -5,7 +5,7 @@ from typing import Dict, Optional, List, AsyncIterator, Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.stream.base import StreamMode, BaseStreamMode
 from openjiuwen.core.session.stream.emitter import StreamEmitter
 from openjiuwen.core.session.stream.writer import StreamWriter, OutputStreamWriter, TraceStreamWriter, \
@@ -57,18 +57,29 @@ class StreamWriterManager:
 
             if data is not None:
                 if data == StreamEmitter.END_FRAME:
-                    logger.info("Received END_FRAME, stopping stream output.")
                     if need_close:
                         await self._stream_emitter.stream_queue.close(timeout=timeout)
                     break
                 else:
                     if UserConfig.is_sensitive():
-                        logger.debug(f"Received stream data")
+                        session_logger.debug(
+                            "Stream data received",
+                            event_type=LogEventType.SESSION_STREAM_CHUNK,
+                            metadata={"sensitive_mode": True}
+                        )
                     else:
-                        logger.debug(f"Received stream data: {data}")
+                        session_logger.debug(
+                            "Stream data received",
+                            event_type=LogEventType.SESSION_STREAM_CHUNK,
+                            metadata={"data_type": type(data).__name__}
+                        )
                     yield data
             else:
-                logger.debug("No data received, waiting for data.")
+                session_logger.debug(
+                    "No stream data received, waiting",
+                    event_type=LogEventType.SESSION_STREAM_CHUNK,
+                    metadata={"status": "waiting"}
+                )
 
     def add_writer(self, key: StreamMode, writer: StreamWriter) -> None:
         self._writers[key] = writer

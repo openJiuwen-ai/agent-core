@@ -3,7 +3,7 @@
 
 from typing import Callable, Dict, List
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.callback.base import BaseHandler
 
 
@@ -28,7 +28,11 @@ class CallbackManager:
         if handler_class_name not in self._trigger_events or event_name not in self._trigger_events[
             handler_class_name
         ]:
-            logger.error(f"event name not exists: {handler_class_name}, {event_name}")
+            session_logger.error(
+                "Event name not registered in callback manager",
+                event_type=LogEventType.SYSTEM_ERROR,
+                metadata={"handler_class_name": handler_class_name, "event_name": event_name}
+            )
             raise TypeError(f"event name not exists")
         handler = self._handlers[handler_class_name]
         if hasattr(handler, event_name):

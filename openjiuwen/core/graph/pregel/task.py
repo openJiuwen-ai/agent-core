@@ -7,7 +7,7 @@ import asyncio
 import inspect
 from typing import Dict, Optional, List, Union
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.pregel.base import Message, PregelNode, GraphInterrupt
 from openjiuwen.core.graph.pregel.config import PregelConfig, InnerPregelConfig, \
     create_inner_config
@@ -71,7 +71,11 @@ class TaskExecutorPool:
         results = await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
         for result in results:
             if isinstance(result, Exception):
-                logger.warning(f"running task with exception {result}")
+                graph_logger.warning(
+                    "Task cancelled with exception",
+                    event_type=LogEventType.GRAPH_NODE_CALL_ERROR,
+                    metadata={"error": str(result)}
+                )
         for t in tasks_to_cancel:
             if t in self.running_tasks:
                 node = self.running_tasks.pop(t)

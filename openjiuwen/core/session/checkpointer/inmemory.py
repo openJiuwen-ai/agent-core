@@ -1,10 +1,11 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from importlib_metadata import metadata
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.graph.store import (
     Serializer,
     Store,
@@ -27,21 +28,44 @@ class InMemoryCheckpointer(Checkpointer):
         self._session_to_workflow_ids = {}
 
     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
-        logger.info(f"workflow: {session.workflow_id()} create or restore checkpoint from "
-                    f"session: {session.session_id()}")
-        workflow_store = self._workflow_stores.setdefault(session.session_id(), WorkflowStorage())
-        self._session_to_workflow_ids.setdefault(session.session_id(), set())
+        session_id = session.session_id()
+        workflow_id = session.workflow_id()
+        is_new_workflow_store = session_id not in self._workflow_stores
+        workflow_store = self._workflow_stores.setdefault(session_id, WorkflowStorage())
+        if is_new_workflow_store:
+            session_logger.debug(
+                "Workflow store added",
+                event_type=LogEventType.CHECKPOINTER_STORE_ADD,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"store_type": "workflow", "storage_type": "inmemory"}
+            )
+        self._session_to_workflow_ids.setdefault(session_id, set())
         if isinstance(inputs, InteractiveInput):
+            session_logger.debug(
+                "Workflow store recover",
+                event_type=LogEventType.CHECKPOINT_RESTORE,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"store_type": "workflow", "storage_type": "inmemory"}
+            )
             await workflow_store.recover(session, inputs)
         else:
             if not await workflow_store.exists(session):
                 return
             if session.config().get_env(FORCE_DEL_WORKFLOW_STATE_KEY, False):
-                await self._graph_store.delete(session.session_id(), session.workflow_id())
-                await workflow_store.clear(session.workflow_id())
+                session_logger.warning(
+                    "Workflow store not found during cleanup",
+                    event_type=LogEventType.CHECKPOINT_ERROR,
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    metadata={"store_type": "workflow", "storage_type": "inmemory"}
+                )
+                await self._graph_store.delete(session_id, workflow_id)
+                await workflow_store.clear(workflow_id)
             else:
-                raise build_error(StatusCode.CHECKPOINTER_PRE_WORKFLOW_EXECUTION_ERROR, session_id=session.session_id(),
-                                  workflow=session.workflow_id(),
+                raise build_error(StatusCode.CHECKPOINTER_PRE_WORKFLOW_EXECUTION_ERROR, session_id=session_id,
+                                  workflow=workflow_id,
                                   reason="workflow state exists but non-interactive input and cleanup is disabled")
 
     async def post_workflow_execute(self, session: BaseSession, result, exception):
@@ -50,33 +74,66 @@ class InMemoryCheckpointer(Checkpointer):
         workflow_store = self._workflow_stores.get(session_id)
         workflow_ids = self._session_to_workflow_ids.get(session_id)
         if exception is not None:
-            logger.info(f"exception in workflow, save checkpoint for "
-                        f"workflow: {workflow_id} in session: {session_id}")
             if workflow_store is None:
                 raise build_error(StatusCode.CHECKPOINTER_POST_WORKFLOW_EXECUTION_ERROR, workflow=workflow_id,
                                   reason="workflow store not found")
+            session_logger.info(
+                "Workflow checkpoint save on exception",
+                event_type=LogEventType.CHECKPOINT_SAVE,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"storage_type": "inmemory"}
+            )
             await workflow_store.save(session)
             workflow_ids.add(workflow_id)
             raise exception
         from openjiuwen.core.graph.pregel import TASK_STATUS_INTERRUPT
         if result.get(TASK_STATUS_INTERRUPT) is None:
-            logger.info(f"clear checkpoint for workflow: {workflow_id} in session: {session_id}")
+            session_logger.info(
+                "Workflow checkpoint cleared on completion",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"reason": "workflow_completed", "storage_type": "inmemory"}
+            )
             await self._graph_store.delete(session_id, workflow_id)
             if workflow_store is not None:
                 await workflow_store.clear(workflow_id)
                 workflow_ids.discard(workflow_id)
             else:
-                logger.warning(f"workflow_store of workflow: {workflow_id} dose not exist in "
-                               f"session: {session_id}")
+                session_logger.warning(
+                    "Workflow store not found during cleanup",
+                    event_type=LogEventType.CHECKPOINT_ERROR,
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    metadata={"operation": "clear"}
+                )
 
             from openjiuwen.core.session.internal.agent import AgentSession
             if not isinstance(session.parent(), AgentSession):
-                logger.info(f"clear session: {session_id}")
+                session_logger.info(
+                    "Session cleared",
+                    event_type=LogEventType.CHECKPOINT_CLEAR,
+                    session_id=session_id,
+                    metadata={"operation": "cleanup", "storage_type": "inmemory"}
+                )
+                if session_id in self._workflow_stores:
+                    session_logger.debug(
+                        "Workflow store deleted",
+                        event_type=LogEventType.CHECKPOINTER_STORE_DELETE,
+                        session_id=session_id,
+                        metadata={"store_type": "workflow", "storage_type": "inmemory"}
+                    )
                 self._workflow_stores.pop(session_id, None)
                 self._session_to_workflow_ids.pop(session_id, None)
         else:
-            logger.info(f"interaction required, save checkpoint for "
-                        f"workflow: {workflow_id} in session: {session_id}")
+            session_logger.info(
+                "Workflow checkpoint save on interrupt",
+                event_type=LogEventType.CHECKPOINT_SAVE,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"reason": "interaction_required", "storage_type": "inmemory"}
+            )
             if workflow_store is None:
                 raise build_error(StatusCode.CHECKPOINTER_POST_WORKFLOW_EXECUTION_ERROR, workflow=workflow_id,
                                   reason="workflow store not found")
@@ -84,16 +141,36 @@ class InMemoryCheckpointer(Checkpointer):
             workflow_ids.add(workflow_id)
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
-        logger.info(f"agent: {session.agent_id()} create or restore checkpoint from session: {session.session_id()}")
-        agent_store = self._agent_stores.setdefault(session.session_id(), AgentStorage())
+        session_logger.info(
+            "Agent checkpoint restore initiated",
+            event_type=LogEventType.CHECKPOINT_RESTORE,
+            session_id=session.session_id(),
+            agent_id=session.agent_id(),
+            metadata={"operation": "pre_execute", "storage_type": "inmemory"}
+        )
+        session_id = session.session_id()
+        is_new_agent_store = session_id not in self._agent_stores
+        agent_store = self._agent_stores.setdefault(session_id, AgentStorage())
+        if is_new_agent_store:
+            session_logger.debug(
+                "Agent store added",
+                event_type=LogEventType.CHECKPOINTER_STORE_ADD,
+                session_id=session_id,
+                metadata={"store_type": "agent", "storage_type": "inmemory"}
+            )
         await agent_store.recover(session)
         if inputs is not None:
             session.state().set_state({INTERACTIVE_INPUT: [inputs]})
 
     async def interrupt_agent_execute(self, session: BaseSession):
         agent_id = session.agent_id()
-        logger.info(f"interaction required, save checkpoint for "
-                    f"agent: {agent_id} in session: {session.session_id()}")
+        session_logger.info(
+            "Agent checkpoint save on interrupt",
+            event_type=LogEventType.CHECKPOINT_SAVE,
+            session_id=session.session_id(),
+            agent_id=agent_id,
+            metadata={"reason": "interaction_required", "storage_type": "inmemory"}
+        )
         agent_store = self._agent_stores.get(session.session_id())
         if agent_store is None:
             raise build_error(StatusCode.CHECKPOINTER_INTERRUPT_AGENT_ERROR, agent=agent_id,
@@ -102,8 +179,13 @@ class InMemoryCheckpointer(Checkpointer):
 
     async def post_agent_execute(self, session: BaseSession):
         agent_id = session.agent_id()
-        logger.info(f"agent finished, save checkpoint for "
-                    f"agent: {agent_id} in session: {session.session_id()}")
+        session_logger.info(
+            "Agent checkpoint save on completion",
+            event_type=LogEventType.CHECKPOINT_SAVE,
+            session_id=session.session_id(),
+            agent_id=agent_id,
+            metadata={"reason": "agent_finished", "storage_type": "inmemory"}
+        )
         agent_store = self._agent_stores.get(session.session_id())
         if agent_store is None:
             raise build_error(StatusCode.CHECKPOINTER_POST_AGENT_EXECUTION_ERROR,
@@ -115,20 +197,51 @@ class InMemoryCheckpointer(Checkpointer):
 
     async def release(self, session_id: str, agent_id: str = None):
         if agent_id is not None:
-            logger.info(f"clear checkpoint for agent: {agent_id} in session: {session_id}")
+            session_logger.info(
+                "Agent checkpoint cleared",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                agent_id=agent_id,
+                metadata={"operation": "release", "storage_type": "inmemory"}
+            )
             agent_store = self._agent_stores.get(session_id)
             if agent_store is None:
-                logger.warning(f"agent_store of agent: {agent_id} does not exist in session: {session_id}")
+                session_logger.warning(
+                    "Agent store not found during release",
+                    event_type=LogEventType.CHECKPOINT_ERROR,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    metadata={"operation": "release"}
+                )
                 return
             await agent_store.clear(agent_id)
         else:
-            logger.info(f"clear session: {session_id}")
+            session_logger.info(
+                "Session cleared",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                metadata={"operation": "release_all", "storage_type": "inmemory"}
+            )
             workflow_ids = self._session_to_workflow_ids.get(session_id)
             if workflow_ids:
                 for workflow_id in workflow_ids:
                     await self._graph_store.delete(session_id, workflow_id)
             self._session_to_workflow_ids.pop(session_id, None)
+            if session_id in self._workflow_stores:
+                session_logger.debug(
+                    "Workflow store deleted",
+                    event_type=LogEventType.CHECKPOINTER_STORE_DELETE,
+                    session_id=session_id,
+                    metadata={"store_type": "workflow", "storage_type": "inmemory", "operation": "release"}
+                )
             self._workflow_stores.pop(session_id, None)
+            if session_id in self._agent_stores:
+                session_logger.debug(
+                    "Agent store deleted",
+                    event_type=LogEventType.CHECKPOINTER_STORE_DELETE,
+                    session_id=session_id,
+                    metadata={"store_type": "agent", "storage_type": "inmemory", "operation": "release"}
+                )
             self._agent_stores.pop(session_id, None)
 
     def graph_store(self) -> Store:

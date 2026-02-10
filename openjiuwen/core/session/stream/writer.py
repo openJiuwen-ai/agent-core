@@ -6,7 +6,7 @@ from pydantic import BaseModel, ValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.stream.base import OutputSchema, TraceSchema, CustomSchema
 from openjiuwen.core.session.stream.emitter import StreamEmitter
 
@@ -44,7 +44,11 @@ class StreamWriter(Generic[T, S]):
         if self._stream_emitter and not self._stream_emitter.is_closed():
             await self._stream_emitter.emit(validated_data)
         else:
-            logger.warning(f'discard message [{validated_data}], because stream emitter has already been closed')
+            session_logger.warning(
+                "Stream message discarded, emitter already closed",
+                event_type=LogEventType.SESSION_STREAM_CHUNK,
+                metadata={"data_type": type(validated_data).__name__}
+            )
 
 
 class OutputStreamWriter(StreamWriter[dict, OutputSchema]):

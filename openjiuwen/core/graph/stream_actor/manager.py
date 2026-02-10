@@ -5,7 +5,7 @@ from typing import Dict, Any, Callable, Awaitable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.workflow.workflow_config import WorkflowSpec
 from openjiuwen.core.session import Transformer, get_by_schema, STREAM_INPUT_GEN_TIMEOUT_KEY
@@ -66,7 +66,11 @@ class ActorManager:
         if consumer_ids:
             for consumer_id in consumer_ids:
                 actor = self._get_actor(consumer_id)
-                logger.debug(f"send message to consumer [{consumer_id}] actor from producer [{producer_id}]")
+                graph_logger.debug(
+                    "Sending message to consumer",
+                    event_type=LogEventType.GRAPH_STREAM_CHUNK,
+                    metadata={"producer_id": producer_id, "consumer_id": consumer_id}
+                )
                 await actor.send({producer_id: message_content}, ability, first_frame=first_frame)
 
     async def end_message(self, producer_id: str, ability: ComponentAbility):

@@ -113,6 +113,56 @@ class LogEventType(Enum):
     SYS_OP_ERROR = "sys_operation_error"  # System Operation error occurred
     SYS_OP_STREAM = "sys_operation_stream"  # System operation streaming scenario
 
+    # Checkpoint related events
+    CHECKPOINT_SAVE = "checkpoint_save"  # Checkpoint saved
+    CHECKPOINT_RESTORE = "checkpoint_restore"  # Checkpoint restored
+    CHECKPOINT_CLEAR = "checkpoint_clear"  # Checkpoint cleared
+    CHECKPOINT_ERROR = "checkpoint_error"  # Checkpoint error
+
+    # Checkpointer store events
+    CHECKPOINTER_STORE_ADD = "checkpointer_store_add"  # Checkpointer store added
+    CHECKPOINTER_STORE_DELETE = "checkpointer_store_delete"  # Checkpointer store deleted
+
+    # Graph streaming events
+    GRAPH_STREAM_CHUNK = "graph_stream_chunk"  # Graph stream chunk
+    GRAPH_STREAM_ERROR = "graph_stream_error"  # Graph stream error
+
+    # Workflow streaming events
+    WORKFLOW_STREAM_CHUNK = "workflow_stream_chunk"  # Workflow stream chunk
+    WORKFLOW_STREAM_ERROR = "workflow_stream_error"  # Workflow stream error
+
+    # Session streaming events
+    SESSION_STREAM_CHUNK = "session_stream_chunk"  # Session stream chunk
+    SESSION_STREAM_ERROR = "session_stream_error"  # Session stream error
+
+    # Graph execution related events
+    GRAPH_NODE_CALL_START = "graph_node_start"  # Graph node started
+    GRAPH_NODE_CALL_END = "graph_node_end"  # Graph node ended
+    GRAPH_NODE_CALL_ERROR = "graph_node_error"  # Graph node error
+
+    # Graph node stream events
+    GRAPH_NODE_STREAM_START = "graph_node_stream_start"  # Graph node stream started
+    GRAPH_NODE_STREAM_END = "graph_node_stream_end"  # Graph node stream ended
+    GRAPH_NODE_STREAM_ERROR = "graph_node_stream_error"  # Graph node stream error
+
+    # Graph super step events
+    GRAPH_SUPER_STEP_START = "graph_super_step_start"  # Graph super step started
+    GRAPH_SUPER_STEP_END = "graph_super_step_end"  # Graph super step ended
+    GRAPH_SUPER_STEP_ERROR = "graph_super_step_error"  # Graph super step error
+
+    # Graph lifecycle events
+    GRAPH_START = "graph_start"  # Graph execution started
+    GRAPH_END = "graph_end"  # Graph execution ended
+    GRAPH_ERROR = "graph_error"  # Graph-level error
+
+    # Graph Store related events
+    GRAPH_STORE_ADD = "graph_store_add"  # Graph state saved
+    GRAPH_STORE_DELETE = "graph_store_delete"  # Graph state deleted
+    GRAPH_STORE_RETRIEVE = "graph_store_retrieve"  # Graph state retrieved
+
+    # State related events
+    STATE_UPDATE = "state_update"  # State updated
+
 
 class LogLevel(Enum):
     """Log level enumeration"""
@@ -478,6 +528,45 @@ class SysOperationEvent(BaseLogEvent):
         self.module_type = ModuleType.SYS_OPERATION
 
 
+@dataclass
+class StreamEvent(BaseLogEvent):
+    """Stream related event - base class for all streaming events"""
+
+    stream_type: Optional[str] = None  # "workflow", "graph", "session"
+    chunk_index: Optional[int] = None  # Chunk index in stream
+    frame_count: Optional[int] = None  # Total frame count
+    stream_id: Optional[str] = None  # Stream identifier
+
+
+@dataclass
+class WorkflowStreamEvent(StreamEvent):
+    """Workflow streaming event - for workflow component streaming"""
+
+    workflow_id: Optional[str] = None
+    workflow_name: Optional[str] = None
+    component_id: Optional[str] = None
+    component_name: Optional[str] = None
+    component_type_str: Optional[str] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.module_type = ModuleType.WORKFLOW_COMPONENT
+
+
+@dataclass
+class GraphEvent(BaseLogEvent):
+    """Graph execution related event"""
+
+    graph_id: Optional[str] = None
+    node_id: Optional[str] = None
+    node_name: Optional[str] = None
+    ability: Optional[str] = None  # ComponentAbility name
+    operation: Optional[str] = None  # Operation being performed
+    chunk: Optional[Any] = None  # Stream chunk data
+    chunk_idx: Optional[int] = None  # Chunk index
+    first_frame: Optional[bool] = None  # Is first frame
+
+
 # Event type mapping for creating corresponding event classes based on event type
 EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     # Agent events
@@ -534,6 +623,42 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.SYS_OP_END: SysOperationEvent,
     LogEventType.SYS_OP_ERROR: SysOperationEvent,
     LogEventType.SYS_OP_STREAM: SysOperationEvent,
+    # Checkpoint events
+    LogEventType.CHECKPOINT_SAVE: SessionEvent,
+    LogEventType.CHECKPOINT_RESTORE: SessionEvent,
+    LogEventType.CHECKPOINT_CLEAR: SessionEvent,
+    LogEventType.CHECKPOINT_ERROR: SessionEvent,
+    # Checkpointer store events
+    LogEventType.CHECKPOINTER_STORE_ADD: SessionEvent,
+    LogEventType.CHECKPOINTER_STORE_DELETE: SessionEvent,
+    # Graph stream events
+    LogEventType.GRAPH_STREAM_CHUNK: GraphEvent,
+    LogEventType.GRAPH_STREAM_ERROR: GraphEvent,
+    # Workflow stream events
+    LogEventType.WORKFLOW_STREAM_CHUNK: WorkflowEvent,
+    LogEventType.WORKFLOW_STREAM_ERROR: WorkflowEvent,
+    # Session stream events
+    LogEventType.SESSION_STREAM_CHUNK: SessionEvent,
+    LogEventType.SESSION_STREAM_ERROR: SessionEvent,
+    # Graph events
+    LogEventType.GRAPH_NODE_CALL_START: GraphEvent,
+    LogEventType.GRAPH_NODE_CALL_END: GraphEvent,
+    LogEventType.GRAPH_NODE_CALL_ERROR: GraphEvent,
+    LogEventType.GRAPH_NODE_STREAM_START: GraphEvent,
+    LogEventType.GRAPH_NODE_STREAM_END: GraphEvent,
+    LogEventType.GRAPH_NODE_STREAM_ERROR: GraphEvent,
+    LogEventType.GRAPH_SUPER_STEP_START: GraphEvent,
+    LogEventType.GRAPH_SUPER_STEP_END: GraphEvent,
+    LogEventType.GRAPH_SUPER_STEP_ERROR: GraphEvent,
+    LogEventType.GRAPH_START: GraphEvent,
+    LogEventType.GRAPH_END: GraphEvent,
+    LogEventType.GRAPH_ERROR: GraphEvent,
+    # Graph Store events
+    LogEventType.GRAPH_STORE_ADD: GraphEvent,
+    LogEventType.GRAPH_STORE_DELETE: GraphEvent,
+    LogEventType.GRAPH_STORE_RETRIEVE: GraphEvent,
+    # State events
+    LogEventType.STATE_UPDATE: SessionEvent,
 }
 
 # Cache for event class field names to improve performance
@@ -668,6 +793,12 @@ def create_log_event(event_type: LogEventType | str, **kwargs: Any) -> BaseLogEv
     """
     # Get event class from dynamic registry first, then static mapping, then base class
     event_class = get_event_class(event_type)
+
+    # Smart detection: Stream events choose specific class based on context
+    if event_class == StreamEvent:
+        workflow_indicators = {'workflow_id', 'component_id', 'component_type_str'}
+        if any(key in kwargs for key in workflow_indicators):
+            event_class = WorkflowStreamEvent
 
     # Early return if no kwargs to filter
     if not kwargs:

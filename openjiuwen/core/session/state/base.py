@@ -6,7 +6,7 @@ from typing import Any, Union, Optional, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.utils import update_dict, get_by_schema
 
 
@@ -149,7 +149,11 @@ class InMemoryCommitState(CommitStateLike):
         else:
             node_updates = self._updates.get(node_id)
             if not node_updates:
-                logger.debug(f"node [{node_id}] outputs has no updates")
+                session_logger.debug(
+                    "Node outputs has no updates",
+                    event_type=LogEventType.STATE_UPDATE,
+                    metadata={"node_id": node_id}
+                )
                 return
             for update in node_updates:
                 self._state.update(update)

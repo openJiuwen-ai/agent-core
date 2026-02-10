@@ -12,7 +12,7 @@ from dateutil.tz import tzlocal
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.callback.base import BaseHandler, trigger_event
 from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
@@ -97,7 +97,11 @@ class TraceAgentHandler(TraceBaseHandler):
                            default=lambda _obj: f"<<no-serializable: {type(_obj).__qualname__}>>")
             )
         except json.decoder.JSONDecodeError as err:
-            logger.error("meta_data process error")
+            session_logger.error(
+                "Failed to process metadata for trace",
+                event_type=LogEventType.SYSTEM_ERROR,
+                metadata={"error": str(err), "instance_info": str(instance_info)}
+            )
             raise ValueError(f"meta_data error: Decoder error") from err
 
         update_data = {

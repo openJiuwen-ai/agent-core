@@ -19,7 +19,7 @@ from typing import (
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.base import (
     ExecutableGraph,
     Graph,
@@ -136,7 +136,15 @@ class PregelGraph(Graph):
         def after_step(loop):
             if self._session:
                 self._session.state().commit()
-            logger.debug(f"ns: {loop.config['ns']}, step: {loop.step}, active_nodes: {list(loop.active_nodes)}")
+            graph_logger.debug(
+                "Graph super step completed",
+                event_type=LogEventType.GRAPH_SUPER_STEP_END,
+                metadata={
+                    "ns": loop.config['ns'],
+                    "step": loop.step,
+                    "active_nodes": list(loop.active_nodes)
+                }
+            )
 
         if self.pregel is None:
             self.checkpointer = session.checkpointer()
@@ -205,7 +213,11 @@ class CompiledGraph(ExecutableGraph):
             try:
                 result = await self._pregel.run(config=config)
             except asyncio.CancelledError:
-                logger.debug("pregel cancelled")
+                graph_logger.debug(
+                    "Pregel execution cancelled",
+                    event_type=LogEventType.GRAPH_END,
+                    metadata={"session_id": session_id, "workflow_id": workflow_id, "cancelled": True}
+                )
                 raise
             except Exception as e:
                 exception = e

@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import (
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.foundation.store import (
     BaseKVStore,
     DbBasedKVStore,
@@ -99,7 +99,12 @@ class BaseStorage(Storage, ABC):
                 blob_bytes = blob
             return self._serde.loads_typed((dump_type_str, blob_bytes))
         except Exception as e:
-            logger.error(f"Failed to deserialize state: {e}")
+            session_logger.error(
+                "Failed to deserialize state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                error_message=str(e),
+                metadata={"operation": "deserialize"}
+            )
             return None
 
 
@@ -118,7 +123,13 @@ class AgentStorage(BaseStorage):
 
         state_blob = self._serialize_state(state)
         if not state_blob:
-            logger.warning(f"Failed to serialize state for agent {agent_id}, session {session_id}")
+            session_logger.warning(
+                "Failed to serialize agent state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                agent_id=agent_id,
+                metadata={"operation": "serialize"}
+            )
             return
 
         try:
@@ -133,9 +144,22 @@ class AgentStorage(BaseStorage):
             await pipeline.set(dump_type_key, dump_type)
             await pipeline.set(blob_key, blob)
             await pipeline.execute()
-            logger.debug(f"Saved state for agent {agent_id}, session {session_id}")
+            session_logger.debug(
+                "Agent state saved successfully",
+                event_type=LogEventType.CHECKPOINT_SAVE,
+                session_id=session_id,
+                agent_id=agent_id,
+                metadata={"storage_type": "persistence"}
+            )
         except Exception as e:
-            logger.error(f"Failed to save state for agent {agent_id}, session {session_id}: {e}")
+            session_logger.error(
+                "Failed to save agent state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                agent_id=agent_id,
+                error_message=str(e),
+                metadata={"operation": "save", "storage_type": "persistence"}
+            )
             raise
 
     async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
@@ -155,22 +179,45 @@ class AgentStorage(BaseStorage):
         results = await pipeline.execute()
 
         if len(results) != self._KEY_NUMS:
-            logger.debug(
-                f"Expected {self._KEY_NUMS} keys but got {len(results)} results "
-                f"for agent {agent_id}, session {session_id}")
+            session_logger.debug(
+                "Unexpected key count during agent state recovery",
+                event_type=LogEventType.CHECKPOINT_RESTORE,
+                session_id=session_id,
+                agent_id=agent_id,
+                metadata={"expected_keys": self._KEY_NUMS, "actual_keys": len(results)}
+            )
             return
 
         dump_type, blob = results[0], results[1]
         state = self._deserialize_state(dump_type, blob)
         if state is None:
-            logger.debug(f"No state found for agent {agent_id}, session {session_id}")
+            session_logger.debug(
+                "No agent state found",
+                event_type=LogEventType.CHECKPOINT_RESTORE,
+                session_id=session_id,
+                agent_id=agent_id,
+                metadata={"storage_type": "persistence"}
+            )
             return
 
         try:
             session.state().set_state(state)
-            logger.debug(f"Recovered state for agent {agent_id}, session {session_id}")
+            session_logger.debug(
+                "Agent state recovered successfully",
+                event_type=LogEventType.CHECKPOINT_RESTORE,
+                session_id=session_id,
+                agent_id=agent_id,
+                metadata={"storage_type": "persistence"}
+            )
         except Exception as e:
-            logger.error(f"Failed to set state for agent {agent_id}, session {session_id}: {e}")
+            session_logger.error(
+                "Failed to set agent state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                agent_id=agent_id,
+                error_message=str(e),
+                metadata={"operation": "set_state"}
+            )
             raise
 
     async def clear(self, agent_id: str, session_id: str):
@@ -183,7 +230,13 @@ class AgentStorage(BaseStorage):
         )
         # Use batch_delete for multiple keys
         deleted = await self._kv_store.batch_delete([dump_type_key, blob_key])
-        logger.debug(f"Cleared {deleted} keys for agent {agent_id}, session {session_id}")
+        session_logger.debug(
+            "Agent checkpoint cleared",
+            event_type=LogEventType.CHECKPOINT_CLEAR,
+            session_id=session_id,
+            agent_id=agent_id,
+            metadata={"deleted_keys": deleted, "storage_type": "persistence"}
+        )
 
     async def exists(self, session: BaseSession) -> bool:
         """Check if agent state exists in KV store."""
@@ -258,7 +311,13 @@ class WorkflowStorage(BaseStorage):
             await pipeline.set(blob_key, blob)
             has_operations = True
         else:
-            logger.warning(f"Failed to serialize state for workflow {workflow_id}, session {session_id}")
+            session_logger.warning(
+                "Failed to serialize workflow state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"operation": "serialize"}
+            )
 
         updates = session.state().get_updates()
         updates_blob = self._serialize_state(updates)
@@ -277,9 +336,22 @@ class WorkflowStorage(BaseStorage):
         if has_operations:
             try:
                 await pipeline.execute()
-                logger.debug(f"Saved state for workflow {workflow_id}, session {session_id}")
+                session_logger.debug(
+                    "Workflow state saved successfully",
+                    event_type=LogEventType.CHECKPOINT_SAVE,
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    metadata={"storage_type": "persistence"}
+                )
             except Exception as e:
-                logger.error(f"Failed to save state for workflow {workflow_id}, session {session_id}: {e}")
+                session_logger.error(
+                    "Failed to save workflow state",
+                    event_type=LogEventType.CHECKPOINT_ERROR,
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    error_message=str(e),
+                    metadata={"operation": "save", "storage_type": "persistence"}
+                )
                 raise
 
     async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
@@ -307,9 +379,13 @@ class WorkflowStorage(BaseStorage):
         results = await pipeline.execute()
 
         if len(results) != self._KEY_NUMS:
-            logger.warning(
-                f"Expected {self._KEY_NUMS} keys but got {len(results)} results "
-                f"for workflow {workflow_id}, session {session_id}")
+            session_logger.warning(
+                "Unexpected key count during workflow state recovery",
+                event_type=LogEventType.CHECKPOINT_RESTORE,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"expected_keys": self._KEY_NUMS, "actual_keys": len(results)}
+            )
             return
 
         # Recover state
@@ -322,7 +398,14 @@ class WorkflowStorage(BaseStorage):
                 if state is not None:
                     session.state().set_state(state)
             except Exception as e:
-                logger.error(f"Failed to deserialize state for workflow {workflow_id}, session {session_id}: {e}")
+                session_logger.error(
+                    "Failed to deserialize workflow state",
+                    event_type=LogEventType.CHECKPOINT_ERROR,
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    error_message=str(e),
+                    metadata={"operation": "deserialize_state"}
+                )
 
         # Process interactive inputs
         if inputs is not None:
@@ -338,7 +421,14 @@ class WorkflowStorage(BaseStorage):
                 if state_updates is not None:
                     session.state().set_updates(state_updates)
             except Exception as e:
-                logger.error(f"Failed to deserialize updates for workflow {workflow_id}, session {session_id}: {e}")
+                session_logger.error(
+                    "Failed to deserialize workflow updates",
+                    event_type=LogEventType.CHECKPOINT_ERROR,
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    error_message=str(e),
+                    metadata={"operation": "deserialize_updates"}
+                )
 
     async def clear(self, workflow_id: str, session_id: str):
         """Clear workflow state from KV store."""
@@ -359,7 +449,13 @@ class WorkflowStorage(BaseStorage):
             state_dump_type_key, state_blob_key,
             state_updates_dump_type_key, state_updates_blob_key
         ])
-        logger.debug(f"Cleared {deleted} keys for workflow {workflow_id}, session {session_id}")
+        session_logger.debug(
+            "Workflow checkpoint cleared",
+            event_type=LogEventType.CHECKPOINT_CLEAR,
+            session_id=session_id,
+            workflow_id=workflow_id,
+            metadata={"deleted_keys": deleted, "storage_type": "persistence"}
+        )
 
     async def exists(self, session: BaseSession) -> bool:
         """Check if workflow state exists in KV store."""
@@ -440,7 +536,12 @@ class GraphStore(Store):
                 blob_bytes = blob
             return self._serde.loads_typed((dump_type_str, blob_bytes))
         except Exception as e:
-            logger.error(f"Failed to deserialize graph state: {e}")
+            session_logger.error(
+                "Failed to deserialize graph state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                error_message=str(e),
+                metadata={"operation": "deserialize"}
+            )
             return None
 
     async def get(self, session_id: str, ns: str) -> Optional[GraphState]:
@@ -457,17 +558,32 @@ class GraphStore(Store):
         results = await pipeline.execute()
 
         if len(results) != self._KEY_NUMS:
-            logger.error(f"KV store expected {self._KEY_NUMS} keys but got {len(results)} results")
+            session_logger.error(
+                "Unexpected key count during graph state retrieval",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                metadata={"expected_keys": self._KEY_NUMS, "actual_keys": len(results), "namespace": ns}
+            )
             return None
 
         _type, _value = results[0], results[1]
         if not _type or not _value:
-            logger.debug(f"Not found in KV store: {_type}, {_value}, input session_id: {session_id}, ns: {ns}")
+            session_logger.debug(
+                "Graph state not found in KV store",
+                event_type=LogEventType.CHECKPOINT_RESTORE,
+                session_id=session_id,
+                metadata={"namespace": ns, "has_type": bool(_type), "has_value": bool(_value)}
+            )
             return None
 
         graph_state = self._deserialize_graph_state(_type, _value)
         if graph_state is None:
-            logger.debug(f"Failed to deserialize graph state for session {session_id}, ns {ns}")
+            session_logger.debug(
+                "Failed to deserialize graph state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                metadata={"namespace": ns}
+            )
             return None
         return graph_state
 
@@ -475,7 +591,12 @@ class GraphStore(Store):
         """Save graph state to KV store."""
         serialized = self._serialize_graph_state(state)
         if not serialized:
-            logger.warning(f"Failed to serialize graph state for session {session_id}, ns {ns}")
+            session_logger.warning(
+                "Failed to serialize graph state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                metadata={"namespace": ns, "operation": "serialize"}
+            )
             return
 
         dump_type, blob = serialized
@@ -492,9 +613,20 @@ class GraphStore(Store):
             )
             await pipeline.set(key_value, blob)
             await pipeline.execute()
-            logger.debug(f"Saved graph state for session {session_id}, ns {ns}")
+            session_logger.debug(
+                "Graph state saved successfully",
+                event_type=LogEventType.CHECKPOINT_SAVE,
+                session_id=session_id,
+                metadata={"namespace": ns, "storage_type": "graph"}
+            )
         except Exception as e:
-            logger.error(f"Failed to save graph state for session {session_id}, ns {ns}: {e}")
+            session_logger.error(
+                "Failed to save graph state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                error_message=str(e),
+                metadata={"namespace": ns, "operation": "save", "storage_type": "graph"}
+            )
             raise
 
     async def delete(self, session_id: str, ns: Optional[str] = None) -> None:
@@ -510,14 +642,24 @@ class GraphStore(Store):
             # Delete all graph state data for this session_id
             prefix = build_key(session_id, WORKFLOW_NAMESPACE_GRAPH)
             await self._kv_store.delete_by_prefix(prefix)
-            logger.debug(f"Deleted keys for session {session_id} (all namespaces)")
+            session_logger.debug(
+                "Graph checkpoint cleared for all namespaces",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                metadata={"storage_type": "graph"}
+            )
         else:
             # Delete specific namespace
             prefix = build_key_with_namespace(
                 session_id, WORKFLOW_NAMESPACE_GRAPH, ns
             )
             await self._kv_store.delete_by_prefix(prefix)
-            logger.debug(f"Deleted keys for session {session_id}, ns {ns}")
+            session_logger.debug(
+                "Graph checkpoint cleared",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                metadata={"namespace": ns, "storage_type": "graph"}
+            )
 
 
 class PersistenceCheckpointer(Checkpointer):
@@ -542,21 +684,37 @@ class PersistenceCheckpointer(Checkpointer):
 
     async def pre_agent_execute(self, session: BaseSession, inputs):
         """Prepare agent execution by recovering agent state."""
-        logger.info(f"agent: {session.agent_id()} create or restore checkpoint from session: {session.session_id()}")
+        session_logger.info(
+            "Agent checkpoint restore initiated",
+            event_type=LogEventType.CHECKPOINT_RESTORE,
+            session_id=session.session_id(),
+            agent_id=session.agent_id(),
+            metadata={"operation": "pre_execute", "storage_type": "persistence"}
+        )
         await self._agent_storage.recover(session)
         if inputs is not None:
             session.state().update({INTERACTIVE_INPUT: [inputs]})
 
     async def interrupt_agent_execute(self, session: BaseSession):
         """Save agent state when interaction is required."""
-        logger.info(f"interaction required, save checkpoint for "
-                    f"agent: {session.agent_id()} in session: {session.session_id()}")
+        session_logger.info(
+            "Agent checkpoint save on interrupt",
+            event_type=LogEventType.CHECKPOINT_SAVE,
+            session_id=session.session_id(),
+            agent_id=session.agent_id(),
+            metadata={"reason": "interaction_required", "storage_type": "persistence"}
+        )
         await self._agent_storage.save(session)
 
     async def post_agent_execute(self, session: BaseSession):
         """Save agent state after execution completes."""
-        logger.info(f"agent finished, save checkpoint for "
-                    f"agent: {session.agent_id()} in session: {session.session_id()}")
+        session_logger.info(
+            "Agent checkpoint save on completion",
+            event_type=LogEventType.CHECKPOINT_SAVE,
+            session_id=session.session_id(),
+            agent_id=session.agent_id(),
+            metadata={"reason": "agent_finished", "storage_type": "persistence"}
+        )
         await self._agent_storage.save(session)
 
     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
@@ -573,8 +731,13 @@ class PersistenceCheckpointer(Checkpointer):
             inputs (InteractiveInput): The input for the workflow execution.
         """
         workflow_id = session.workflow_id()
-        logger.info(f"workflow: {workflow_id} create or restore checkpoint from "
-                    f"session: {session.session_id()}")
+        session_logger.info(
+            "Workflow checkpoint restore initiated",
+            event_type=LogEventType.CHECKPOINT_RESTORE,
+            session_id=session.session_id(),
+            workflow_id=workflow_id,
+            metadata={"operation": "pre_execute", "storage_type": "persistence"}
+        )
         if isinstance(inputs, InteractiveInput):
             await self._workflow_storage.recover(session, inputs)
         else:
@@ -586,14 +749,22 @@ class PersistenceCheckpointer(Checkpointer):
             if session.config().get_env(FORCE_DEL_WORKFLOW_STATE_KEY, False):
                 workflow_id = session.workflow_id()
                 if workflow_id is None:
-                    logger.warning(f"workflow_id is None for session: {session.session_id()}")
+                    session_logger.warning(
+                        "Workflow ID is None during state cleanup",
+                        event_type=LogEventType.CHECKPOINT_ERROR,
+                        session_id=session.session_id(),
+                        metadata={"operation": "force_delete"}
+                    )
                     return
                 session_id = session.session_id()
                 await self._graph_state.delete(session_id, workflow_id)
                 await self._workflow_storage.clear(workflow_id, session_id)
-                logger.info(
-                    f"Force deleted workflow state for workflow: {workflow_id} "
-                    f"in session: {session_id}"
+                session_logger.info(
+                    "Workflow state force deleted",
+                    event_type=LogEventType.CHECKPOINT_CLEAR,
+                    session_id=session_id,
+                    workflow_id=workflow_id,
+                    metadata={"reason": "force_delete", "storage_type": "persistence"}
                 )
             else:
                 # Raise exception if state exists but cleanup is disabled
@@ -609,18 +780,34 @@ class PersistenceCheckpointer(Checkpointer):
         session_id = session.session_id()
 
         if exception is not None:
-            logger.info(f"exception in workflow, save checkpoint for "
-                        f"workflow: {workflow_id} in session: {session_id}")
+            session_logger.info(
+                "Workflow checkpoint save on exception",
+                event_type=LogEventType.CHECKPOINT_SAVE,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"reason": "exception", "storage_type": "persistence"}
+            )
             await self._workflow_storage.save(session)
             raise exception
 
         if result.get(TASK_STATUS_INTERRUPT) is None:
-            logger.info(f"clear checkpoint for workflow: {workflow_id} in session: {session_id}")
+            session_logger.info(
+                "Workflow checkpoint cleared on completion",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"reason": "workflow_completed", "storage_type": "persistence"}
+            )
             await self._graph_state.delete(session_id, workflow_id)
             await self._workflow_storage.clear(workflow_id, session_id)
         else:
-            logger.info(f"interaction required, save checkpoint for "
-                        f"workflow: {workflow_id} in session: {session_id}")
+            session_logger.info(
+                "Workflow checkpoint save on interrupt",
+                event_type=LogEventType.CHECKPOINT_SAVE,
+                session_id=session_id,
+                workflow_id=workflow_id,
+                metadata={"reason": "interaction_required", "storage_type": "persistence"}
+            )
             await self._workflow_storage.save(session)
 
     async def session_exists(self, session_id: str) -> bool:
@@ -650,18 +837,39 @@ class PersistenceCheckpointer(Checkpointer):
             agent_id (str, optional): If provided, only release resources for this specific agent.
         """
         if self._kv_store is None:
-            logger.warning("Cannot release resources: KV store is None")
+            session_logger.warning(
+                "Cannot release resources: KV store is None",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                metadata={"operation": "release"}
+            )
             return
 
         if agent_id is not None:
-            logger.info(f"clear checkpoint for agent: {agent_id} in session: {session_id}")
+            session_logger.info(
+                "Agent checkpoint cleared",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                agent_id=agent_id,
+                metadata={"operation": "release", "storage_type": "persistence"}
+            )
             await self._agent_storage.clear(agent_id, session_id)
         else:
-            logger.info(f"clear session: {session_id}")
+            session_logger.info(
+                "Session cleared",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                metadata={"operation": "release_all", "storage_type": "persistence"}
+            )
             # Delete all keys matching the session prefix
             prefix = f"{session_id}:"
             await self._kv_store.delete_by_prefix(prefix)
-            logger.debug(f"Released all resources for session {session_id}")
+            session_logger.debug(
+                "All session resources released",
+                event_type=LogEventType.CHECKPOINT_CLEAR,
+                session_id=session_id,
+                metadata={"storage_type": "persistence"}
+            )
 
     def graph_store(self) -> Store:
         """Return the graph store instance."""

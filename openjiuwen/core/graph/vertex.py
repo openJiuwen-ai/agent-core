@@ -9,7 +9,7 @@ from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT, END_NOD
 from openjiuwen.core.common.exception.errors import BaseError, ExecutionError, build_error
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.atomic_node import AsyncAtomicNode
 from openjiuwen.core.graph.executable import Executable, Output
 from openjiuwen.core.graph.graph_state import GraphState
@@ -59,9 +59,15 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
     async def _run_executable(self, ability: ComponentAbility, is_subgraph: bool = False, config: Any = None,
                               event: asyncio.Event = None) -> bool:
         try:
+            graph_logger.debug(
+                "Node ability call started",
+                event_type=LogEventType.GRAPH_NODE_CALL_START,
+                node_id=self._node_id,
+                metadata={"ability": ability.name}
+            )
+
             def set_event():
                 if event is not None:
-                    logger.debug(f"node {self._node_id} with ability {ability.name} set event")
                     event.set()
 
             # Simplified strategy pattern using lambda functions wrapping async execution
@@ -87,11 +93,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
 
             async def transform_strategy():
                 transform_iter = None
-                try:
-                    transform_iter = await self._pre_stream(ComponentAbility.TRANSFORM)
-                    set_event()
-                except Exception as e:
-                    logger.error(f"failed to prepare transform for node {self._node_id}, error: {e}")
+                transform_iter = await self._pre_stream(ComponentAbility.TRANSFORM)
+                set_event()
                 output_iter = self._executable.on_transform(transform_iter, self._session, context=self._context)
                 await self._post_stream(output_iter, ComponentAbility.TRANSFORM)
 
@@ -104,10 +107,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
 
             # Execute strategy if found
             strategy = ability_strategies.get(ability)
-            if strategy:
-                await strategy()
-            else:
-                logger.error(f"error ComponentAbility: {ability.name}")
+            await strategy()
             return True
         except GraphInterrupt:
             raise
@@ -121,9 +121,21 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         finally:
             if event and not event.is_set():
                 event.set()
+            graph_logger.debug(
+                "Node ability call finished",
+                event_type=LogEventType.GRAPH_NODE_CALL_END,
+                node_id=self._node_id,
+                metadata={"ability": ability.name}
+            )
 
     async def __call__(self, state: GraphState, config) -> Output:
-        logger.debug(f"begin to call node [{self._node_id}]")
+        graph_logger.info(
+            "Node call started",
+            event_type=LogEventType.GRAPH_NODE_CALL_START,
+            graph_id=self._session.workflow_id(),
+            node_id=self._node_id,
+            metadata={"operation": "call", "abilities": [a.name for a in self._component_ability]}
+        )
         try:
             if self._executable.post_commit():
                 await self.atomic_invoke(config=config, session=self._session)
@@ -138,6 +150,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             self._call_count += 1
             self._is_started.clear()
             self._is_call_started.clear()
+            graph_logger.info(
+                "Node call finished",
+                event_type=LogEventType.GRAPH_NODE_CALL_END,
+                node_id=self._node_id,
+                metadata={"operation": "call", "abilities": [a.name for a in self._component_ability]}
+            )
 
     async def _atomic_invoke(self, **kwargs) -> Any:
         return await self.call(kwargs.get("config", None))
@@ -181,19 +199,36 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         return results
 
     async def _pre_stream(self, ability: ComponentAbility) -> dict:
-        await self.__trace_component_begin__()
-        actor_manager = self._session.actor_manager()
-        inputs_schema = self._node_config.stream_io_configs.inputs_schema if self._node_config else None
-        if not isinstance(inputs_schema, dict):
-            inputs_schema = None
-        logger.debug(f"{ability} consumer handler inputs schema: {inputs_schema}")
-        if (not self._session.tracer()) or self._executable.skip_trace():
-            return await actor_manager.consume(self._node_id, ability, inputs_schema)
+        try:
+            graph_logger.debug(
+                "Node stream started",
+                event_type=LogEventType.GRAPH_NODE_STREAM_START,
+                node_id=self._node_id,
+                graph_id=self._session.workflow_id(),
+                ability=ability.name
+            )
+            await self.__trace_component_begin__()
+            actor_manager = self._session.actor_manager()
+            inputs_schema = self._node_config.stream_io_configs.inputs_schema if self._node_config else None
+            if not isinstance(inputs_schema, dict):
+                inputs_schema = None
+            if (not self._session.tracer()) or self._executable.skip_trace():
+                return await actor_manager.consume(self._node_id, ability, inputs_schema)
 
-        async def stream_callable(chunk):
-            await TracerWorkflowUtils.trace_component_stream_input(self._session, chunk, send=False)
+            async def stream_callable(chunk):
+                await TracerWorkflowUtils.trace_component_stream_input(self._session, chunk, send=False)
 
-        return await actor_manager.consume(self._node_id, ability, inputs_schema, stream_callable)
+            return await actor_manager.consume(self._node_id, ability, inputs_schema, stream_callable)
+        except Exception as e:
+            graph_logger.error(
+                "Failed to prepare stream for node",
+                event_type=LogEventType.GRAPH_NODE_STREAM_ERROR,
+                node_id=self._node_id,
+                graph_id=self._session.workflow_id(),
+                error_message=str(e),
+                ability=ability.name
+            )
+            raise e
 
     async def _post_stream(self, results_iter: AsyncIterator, ability: ComponentAbility) -> None:
         is_end_node = self.is_end_node
@@ -218,6 +253,14 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         else:
             await self._session.actor_manager().end_message(self._node_id, ability)
         self._clear_interactive()
+        graph_logger.debug(
+            "Node stream completed",
+            event_type=LogEventType.GRAPH_NODE_STREAM_END,
+            node_id=self._node_id,
+            graph_id=self._session.workflow_id(),
+            ability=ability.name,
+            metadata={"chunk_count": end_stream_index}
+        )
 
     async def _process_chunk(self, message,
                              is_end_node: bool,
@@ -242,7 +285,15 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             await self._session.actor_manager().sub_workflow_stream().send(message_stream_data)
         else:
             first_frame = end_stream_index == 0
-            logger.debug(f"sending message: {message}, first_frame: {first_frame}")
+            graph_logger.debug(
+                "node produce stream chunk",
+                event_type=LogEventType.GRAPH_STREAM_CHUNK,
+                node_id=self._node_id,
+                ability=ability.name,
+                chunk=message,
+                chunk_idx=end_stream_index,
+                first_frame=first_frame
+            )
             await self.__trace_component_stream_output__(message)
             await self._session.actor_manager().produce(self._node_id, message, ability, first_frame=first_frame)
 
@@ -263,16 +314,19 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                             ability in [ComponentAbility.INVOKE, ComponentAbility.STREAM]]
             for ability in call_ability:
                 current_ability = ability
-                logger.debug(f"begin call ability: {call_ability}, node: {self._node_id}")
                 await self._run_executable(ability, is_subgraph, config)
-                logger.debug(f"succeed call ability: {call_ability}, node: {self._node_id}")
         except ExecutionError as e:
-            logger.error(f"failed call ability: {current_ability.name}, node: {self._node_id}, error: {e}")
+            graph_logger.error(
+                "Node ability call failed",
+                event_type=LogEventType.GRAPH_NODE_CALL_ERROR,
+                node_id=self._node_id,
+                error_message=str(e),
+                metadata={"ability": current_ability.name if current_ability else None}
+            )
             raise e
 
         if self._stream_called():
             # 3. wait for node's 'stream-in' abilities execution finished
-            logger.debug(f"node [{self._node_id}] stream called: {self._stream_called()}")
             stream_timeout = self._stream_called_timeout if (
                     self._stream_called_timeout and self._stream_called_timeout > 0) else None
             try:
@@ -292,10 +346,14 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
 
         # 4. when the component output is in streaming mode, send an end tracer frame with empty outputs.
         await self.__trace_component_done__()
-        logger.debug("node [%s] call finished", self._node_id)
+        graph_logger.debug(
+            "Node call finished",
+            event_type=LogEventType.GRAPH_NODE_CALL_END,
+            node_id=self._node_id,
+            metadata={"operation": "call"}
+        )
 
     def is_done(self) -> bool:
-        logger.debug(f"call_count: {self._call_count}, stream_call_count: {self._stream_call_count}")
         return (self._call_count == self._stream_call_count
                 or self._call_count == self._stream_call_count + 1)
 
@@ -305,7 +363,6 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
     async def stream_call(self, event: asyncio.Event, error_callback):
         self._stream_call_count += 1
         self._stream_done = asyncio.Future()
-        logger.debug(f"node [{self._node_id}] stream entrypoint has been called")
 
         if self._session is None or self._session.actor_manager() is None:
             error = build_error(StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR, reason="queue manager is not initialized",
@@ -324,29 +381,56 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 await e.wait()
             event.set()
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            logger.debug(f"node [{self._node_id}] all streaming tasks have been finished")
             for result in results:
                 if isinstance(result, Exception):
                     raise result
         except asyncio.CancelledError:
-            logger.warning(f"node [{self._node_id}] all streaming tasks have been cancelled")
+            cancelled_tasks = []
+            finished_tasks = []
+            error_tasks = {}
+
+            for idx, task in enumerate(tasks):
+                ability_name = call_ability[idx].name if idx < len(call_ability) else f"task_{idx}"
+                if task.done():
+                    if task.exception():
+                        error_tasks[ability_name] = str(task.exception())
+                    else:
+                        finished_tasks.append(ability_name)
+                else:
+                    cancelled_tasks.append(ability_name)
+
             pending_tasks = []
             for task in tasks:
                 if not task.done() and not task.cancelled():
                     task.cancel()
                     pending_tasks.append(task)
-                results = await asyncio.gather(*pending_tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, Exception):
-                        logger.warning(f"task with exception, {result}")
+
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+            graph_logger.warning(
+                "All streaming tasks cancelled",
+                event_type=LogEventType.GRAPH_STREAM_ERROR,
+                node_id=self._node_id,
+                metadata={
+                    "cancelled": cancelled_tasks,
+                    "finished": finished_tasks,
+                    "error": error_tasks
+                }
+            )
         except Exception as e:
-            logger.error(f"failed to call node [{self._node_id}], error: {e}")
+            graph_logger.error(
+                "Failed to call node",
+                event_type=LogEventType.GRAPH_NODE_CALL_ERROR,
+                node_id=self._node_id,
+                error_message=str(e),
+                metadata={"operation": "stream_call"}
+            )
             error_callback(e)
             error = e
         finally:
             self._stream_done.set_result(error if error else True)
             await self.__trace_component_stream_input_send__()
-            logger.debug(f"node [{self._node_id}] stream call finished")
 
     def _stream_abilities(self) -> list[Literal[ComponentAbility.COLLECT, ComponentAbility.TRANSFORM]]:
         call_ability = [ability for ability in self._component_ability if

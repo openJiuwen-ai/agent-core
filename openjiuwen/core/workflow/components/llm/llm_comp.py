@@ -9,7 +9,7 @@ from pydantic import ValidationError, Field, BaseModel
 
 from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import workflow_logger, LogEventType
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
@@ -502,10 +502,18 @@ class LLMExecutable(ComponentExecutable):
         self._set_session(session)
         self._set_context(context)
         model_inputs = await self._prepare_model_inputs(inputs)
-        if UserConfig.is_sensitive():
-            logger.info("[%s] model inputs", self._session.get_executable_id())
-        else:
-            logger.info("[%s] model inputs %s", self._session.get_executable_id(), model_inputs)
+        workflow_logger.info(
+            "LLM component invoke started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=self._session.get_executable_id(),
+            component_type_str="LLMComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "model_name": self._config.model_config.model_name if self._config.model_config else None,
+                "has_inputs": bool(model_inputs),
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
         response = ""
         try:
             llm_response = await self._llm.invoke(messages=model_inputs)
@@ -524,10 +532,18 @@ class LLMExecutable(ComponentExecutable):
                     cause=e
                 ) from e
 
-        if UserConfig.is_sensitive():
-            logger.info("[%s] model outputs", self._session.get_executable_id())
-        else:
-            logger.info("[%s] model outputs %s", self._session.get_executable_id(), response)
+        workflow_logger.info(
+            "LLM component invoke completed",
+            event_type=LogEventType.WORKFLOW_COMPONENT_END,
+            component_id=self._session.get_executable_id(),
+            component_type_str="LLMComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "has_response": bool(response),
+                "response_length": len(response) if response else 0,
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
         return self._create_output(response)
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
@@ -652,10 +668,18 @@ class LLMExecutable(ComponentExecutable):
 
     async def _invoke_for_json_format(self, inputs: Input) -> AsyncIterator[Output]:
         model_inputs = await self._prepare_model_inputs(inputs)
-        if UserConfig.is_sensitive():
-            logger.info("[%s] model inputs", self._session.get_executable_id())
-        else:
-            logger.info("[%s] model inputs %s", self._session.get_executable_id(), model_inputs)
+        workflow_logger.info(
+            "LLM component JSON format invoke started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=self._session.get_executable_id(),
+            component_type_str="LLMComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "response_format": "json",
+                "has_inputs": bool(model_inputs),
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
         llm_output = await self._llm.invoke(messages=model_inputs) # Add await if invoke is async
         llm_output_content = llm_output.content
         yield self._create_output(llm_output_content)
