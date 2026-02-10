@@ -14,7 +14,7 @@
 * **best**(Dict[str, Any])：最佳信息（如 best_score）。
 * **seed**(int，可选)：随机种子。
 * **operators_state**(Dict[str, Dict[str, Any]])：算子 ID 到状态的映射，用于恢复各 Operator。
-* **producer_state**(Dict[str, Any])：更新生产者内部状态（可为空）。
+* **updater_state**(Dict[str, Any])：更新器内部状态（可为空）。
 * **searcher_state**(Dict[str, Any])：参数搜索器状态（可为空）。
 * **last_metrics**(Dict[str, Any])：最近轮次汇总指标（可为空）。
 
@@ -66,9 +66,9 @@ class FileCheckpointStore(base_dir: str)
 
 根据当前轮次与是否提升决定是否保存。
 
-### build_checkpoint(*, agent, progress, producer_state=None) -> EvolveCheckpoint
+### build_checkpoint(*, agent, progress, updater_state=None) -> EvolveCheckpoint
 
-构建当前检查点（含算子状态、进度、producer 状态等）。
+构建当前检查点（含算子状态、进度、updater 状态等）。
 
 ### restore(*, agent, checkpoint: EvolveCheckpoint) -> Dict[str, Any]
 
@@ -105,9 +105,9 @@ class DefaultCheckpointManager(
 
 提升时或 epoch 为 save_every_n_epochs 的倍数时返回 True。
 
-### build_checkpoint(*, agent, progress, producer_state=None) -> EvolveCheckpoint
+### build_checkpoint(*, agent, progress, updater_state=None) -> EvolveCheckpoint
 
-对 agent 调用 get_operators()，快照各算子 get_state()，与 progress、producer_state 等一起组装为 EvolveCheckpoint。
+对 agent 调用 get_operators()，快照各算子 get_state()，与 progress、updater_state 等一起组装为 EvolveCheckpoint。
 
 ### restore(*, agent, checkpoint: EvolveCheckpoint) -> Dict[str, Any]
 

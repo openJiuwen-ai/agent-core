@@ -112,7 +112,7 @@
         - [dataset](4.开发指南/agent-core开发指南/API文档/openjiuwen.agent_evolving/dataset.md)
         - [trainer](4.开发指南/agent-core开发指南/API文档/openjiuwen.agent_evolving/trainer.md)
         - [trajectory](4.开发指南/agent-core开发指南/API文档/openjiuwen.agent_evolving/trajectory.md)
-        - [producer](4.开发指南/agent-core开发指南/API文档/openjiuwen.agent_evolving/producer.md)
+        - [updater](4.开发指南/agent-core开发指南/API文档/openjiuwen.agent_evolving/updater.md)
         - [checkpointing](4.开发指南/agent-core开发指南/API文档/openjiuwen.agent_evolving/checkpointing.md)
         - [optimizer](4.开发指南/agent-core开发指南/API文档/openjiuwen.agent_evolving/optimizer.md)
         - [evaluator](4.开发指南/agent-core开发指南/API文档/openjiuwen.agent_evolving/evaluator.md)

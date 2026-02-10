@@ -1,17 +1,17 @@
 # openjiuwen.agent_evolving.trainer
 
-`openjiuwen.agent_evolving.trainer` 提供自演进训练编排：评估 → 前向 → 生产者生成更新 → 写回算子 → 再评估，并支持检查点与恢复。
+`openjiuwen.agent_evolving.trainer` 提供自演进训练编排：评估 → 前向 → 更新器生成更新 → 写回算子 → 再评估，并支持检查点与恢复。
 
 ---
 
 ## class openjiuwen.agent_evolving.trainer.trainer.Trainer
 
-编排「评估 → 生成更新 → 写回」的自进化循环，依赖 `UpdateProducer` 与 `BaseEvaluator`，可选检查点与恢复。
+编排「评估 → 生成更新 → 写回」的自进化循环，依赖 `Updater` 与 `BaseEvaluator`，可选检查点与恢复。
 
 ```text
 class Trainer(
     *,
-    producer: UpdateProducer,
+    updater: Updater,
     evaluator: BaseEvaluator,
     extractor: Optional[TracerTrajectoryExtractor] = None,
     callbacks: Optional[Callbacks] = None,
@@ -27,7 +27,7 @@ class Trainer(
 
 **参数**：
 
-* **producer**(UpdateProducer)：根据轨迹与评估结果生成参数更新。
+* **updater**(Updater)：根据轨迹与评估结果生成参数更新。
 * **evaluator**(BaseEvaluator)：对模型输出与期望答案打分。
 * **extractor**(TracerTrajectoryExtractor，可选)：从 Session 抽取轨迹；默认 `TracerTrajectoryExtractor()`。
 * **callbacks**(Callbacks，可选)：训练生命周期钩子。
@@ -45,7 +45,7 @@ class Trainer(
 
 ### train(agent, train_cases=None, val_cases=None, num_iterations=TuneConstant.default_iteration_num, **kwargs) -> BaseAgent
 
-执行自演进训练：先做验证基线评估，再多轮「训练前向 → 生产者更新 → 验证评估 → 检查点」。通过 `agent.get_operators()` 获取可优化算子并应用更新。
+执行自演进训练：先做验证基线评估，再多轮「训练前向 → 更新器更新 → 验证评估 → 检查点」。通过 `agent.get_operators()` 获取可优化算子并应用更新。
 
 **参数**：
 
@@ -53,11 +53,11 @@ class Trainer(
 * **train_cases**(CaseLoader，可选)：训练集；黑盒优化器可不依赖此前向数据。
 * **val_cases**(CaseLoader，可选)：验证集；未提供时使用 train_cases。
 * **num_iterations**(int，可选)：最大训练轮数。
-* **kwargs**：透传给 producer.produce 的 config。
+* **kwargs**：透传给 updater.update 的 config。
 
 **返回**：
 
-**BaseAgent**，训练后的智能体（内部参数已被 producer 更新）。
+**BaseAgent**，训练后的智能体（内部参数已被 updater 更新）。
 
 ### forward(agent, cases) -> Tuple[float, List[EvaluatedCase], List[Trajectory], List[Any]]
 
@@ -85,7 +85,7 @@ class Trainer(
 
 ### staticmethod apply_updates(operators: Dict[str, Operator], updates: Updates) -> None
 
-将生产者给出的 updates 应用到算子字典；对 SingleDimProducer 直接写回时 updates 可能为空，本方法会跳过。
+将更新器给出的 updates 应用到算子字典；对 SingleDimUpdater 直接写回时 updates 可能为空，本方法会跳过。
 
 ---
 
