@@ -4,7 +4,6 @@
 from typing import List, Optional, AsyncIterator, Union, Any
 
 import httpx
-import openai
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -37,13 +36,15 @@ class OpenAIModelClient(BaseModelClient):
         """Get client name."""
         return "OpenAI client"
 
-    def _create_async_openai_client(self, timeout: Optional[float] = None) -> openai.AsyncOpenAI:
+    def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """
         Create an OpenAI Async client with configured SSL/proxy/http client settings.
         
         Args:
             timeout: Optional timeout override for this specific request
         """
+        import openai
+        
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
