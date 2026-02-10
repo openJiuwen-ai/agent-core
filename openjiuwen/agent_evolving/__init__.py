@@ -19,6 +19,15 @@ from openjiuwen.agent_evolving.constant import TuneConstant
 # dataset
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase, CaseLoader
 
+# dataset
+from openjiuwen.agent_evolving.evaluator import (
+    BaseEvaluator,
+    DefaultEvaluator,
+    MetricEvaluator,
+    Metric,
+    ExactMatchMetric,
+    LLMAsJudgeMetric,
+)
 
 # optimizer
 from openjiuwen.agent_evolving.optimizer import (

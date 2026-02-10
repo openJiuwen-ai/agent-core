@@ -21,7 +21,7 @@ from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
-from openjiuwen.core.single_agent.agent import BaseAgent
+from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
