@@ -12,19 +12,21 @@ Note: Legacy classes have been moved to the legacy submodule.
 Please use 'from openjiuwen.core.single_agent.legacy import ...' for
 legacy classes like LegacyReActAgent, AgentConfig, etc.
 """
-from typing import Union
 
-# Legacy classes
-from openjiuwen.core.single_agent.legacy import LegacyBaseAgent
+import importlib
+from typing import TYPE_CHECKING
+
 # New classes (current API)
-from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.ability_manager import AbilityManager
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.single_agent.agents.react_agent import (
-    ReActAgent,
-    ReActAgentConfig
-)
 from openjiuwen.core.session.agent import Session, create_agent_session
+from openjiuwen.core.single_agent.base import BaseAgent  # Base class import must come first
+
+from .ability_manager import AbilityManager
+from .agents.react_agent import ReActAgent, ReActAgentConfig
+from .schema.agent_card import AgentCard
+
+# Legacy classes (need this import for IDE hinting to work)
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent.legacy import LegacyBaseAgent
 
 __all__ = [
     # New classes
@@ -36,5 +38,16 @@ __all__ = [
     "BaseAgent",
     "AbilityManager",
     # For compatibility
-    "LegacyBaseAgent"
+    "LegacyBaseAgent",
 ]
+
+
+def __getattr__(name: str):
+    """
+    Lazy import for deprecated modules using PEP 562.
+    """
+    if name == "LegacyBaseAgent":
+        from openjiuwen.core.single_agent.legacy import LegacyBaseAgent
+
+        return LegacyBaseAgent
+    return importlib.import_module("." + name, __name__)
