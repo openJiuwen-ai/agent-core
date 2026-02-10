@@ -1,5 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""
+Retrieval module, supporting knowledge base management, document indexing, embedding generation,
+vector search, and multi-strategy retrieval (vector, sparse, hybrid, graph, and agentic).
+
+Lazy-loading module using PEP 562 __getattr__ to avoid unnecessary import of heavy dependencies.
+"""
 
 import importlib
 from typing import TYPE_CHECKING

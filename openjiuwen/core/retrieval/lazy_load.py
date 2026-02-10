@@ -3,7 +3,7 @@
 """
 Lazy loading for attributes in retrieval
 
-Lazy loading helper for classes / functions involving heavy dependencies, not in __all__ of __init__.py
+Lazy loading helper for classes / functions involving heavy dependencies, used in __init__.py
 """
 
 from typing import Optional

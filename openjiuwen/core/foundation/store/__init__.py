@@ -2,8 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """
-Lazy-loading module using PEP 562 __getattr__ to avoid importing heavy dependencies
-like SQLAlchemy when only specific submodules (e.g., query) are needed.
+Foundation store module, supporting various kind of relational & vector databases
+
+Lazy-loading module using PEP 562 __getattr__ to avoid unnecessary import of heavy dependencies like SQLAlchemy.
 """
 
 import importlib

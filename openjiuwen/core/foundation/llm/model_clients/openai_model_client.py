@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Optional, AsyncIterator, Union, Any
+from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any
 
 import httpx
 
@@ -25,6 +25,9 @@ from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutp
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
+if TYPE_CHECKING:
+    import openai
+
 
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
@@ -43,7 +46,7 @@ class OpenAIModelClient(BaseModelClient):
         Args:
             timeout: Optional timeout override for this specific request
         """
-        import openai
+        from openai import AsyncOpenAI
         
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
@@ -62,7 +65,7 @@ class OpenAIModelClient(BaseModelClient):
             max_retries=self.model_client_config.max_retries
         )
 
-        return openai.AsyncOpenAI(
+        return AsyncOpenAI(
             api_key=self.model_client_config.api_key,
             base_url=self.model_client_config.api_base,
             http_client=http_client,

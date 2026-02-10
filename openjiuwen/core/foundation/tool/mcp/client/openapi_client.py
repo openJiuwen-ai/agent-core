@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 from collections import defaultdict
-from typing import Union, List, Any, Dict
+from typing import TYPE_CHECKING, Optional, Union, List, Any, Dict
 
 import yaml
 import httpx
@@ -17,22 +17,26 @@ from openjiuwen.core.foundation.tool import McpClient
 from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.common.exception.codes import StatusCode
 
+if TYPE_CHECKING:
+    from fastmcp.server.openapi import OpenAPITool
+    from fastmcp.tools.tool import ToolResult
+    from fastmcp.utilities.openapi import HTTPRoute
+
 
 class ToolManager:
     def __init__(self):
         self.tools: dict[str, "OpenAPITool"] = {}
 
-    async def get_tool(self, tool_name: str):
-        from fastmcp.server.openapi import OpenAPITool
-        if tool_name not in self.tools.keys():
+    async def get_tool(self, tool_name: str) -> Optional["OpenAPITool"]:
+        if tool_name not in self.tools:
             return None
         tool = self.tools[tool_name]
         return tool
 
-    async def get_tools(self):
+    async def get_tools(self) -> dict[str, "OpenAPITool"]:
         return self.tools
 
-    async def call_tool(self, key: str, arguments: dict[str, any]):
+    async def call_tool(self, key: str, arguments: dict[str, any]) -> "ToolResult":
         from fastmcp.tools.tool import ToolResult
         tool = await self.get_tool(key)
         if tool is None:
@@ -40,8 +44,9 @@ class ToolManager:
         try:
             return await tool.run(arguments)
         except Exception as e:
-            raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, cause=e,
-                              reason=f"call tool {key} failed: {e}")
+            raise build_error(
+                StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, cause=e, reason=f"call tool {key} failed: {e}"
+            ) from e
 
 
 class OpenApiClient(McpClient):
@@ -78,7 +83,7 @@ class OpenApiClient(McpClient):
         self._used_names: defaultdict[str, int] = defaultdict(int)
         self._server_path = server_path
 
-    def _generate_tool_name(self, route) -> str:
+    def _generate_tool_name(self, route: "HTTPRoute") -> str:
         if route.operation_id:
             name = route.operation_id.split("__")[0]
         else:
@@ -105,7 +110,7 @@ class OpenApiClient(McpClient):
 
     def _create_openapi_tool(
             self,
-            http_route,
+            http_route: "HTTPRoute",
             original_name: str,
             http_tags: set[str],
             timout: float,
