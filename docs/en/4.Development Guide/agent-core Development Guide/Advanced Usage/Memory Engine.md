@@ -52,10 +52,10 @@ from openjiuwen.core.memory import (
     MemoryEngineConfig,
     MemoryScopeConfig,
     AgentMemoryConfig,
-    MemoryMilvusVectorStore,
 )
-from openjiuwen.core.foundation.store.in_memory_kv_store import InMemoryKVStore
-from openjiuwen.core.foundation.store.default_db_store import DefaultDbStore
+from openjiuwen.core.foundation.store import create_vector_store
+from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
+from openjiuwen.core.foundation.store.db.default_db_store import DefaultDbStore
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.common.schema.param import Param
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig
@@ -69,12 +69,12 @@ async def create_memory_engine() -> LongTermMemory:
     # 1. Create underlying storage
     kv_store = InMemoryKVStore()
 
-    # Vector store (Milvus example, MemoryChromaVectorStore can also be used)
-    vector_store = MemoryMilvusVectorStore(
-        milvus_host=os.getenv("MILVUS_HOST", "localhost"),
-        milvus_port=os.getenv("MILVUS_PORT", "19530"),
-        token=os.getenv("MILVUS_TOKEN"),
-        embedding_dims=int(os.getenv("EMBEDDING_MODEL_DIMENSION", 1024)),
+    # Vector store (created using create_vector_store)
+    # Milvus example
+    vector_store = create_vector_store(
+        "milvus",
+        milvus_uri=os.getenv("MILVUS_URI", f"http://{os.getenv('MILVUS_HOST', 'localhost')}:{os.getenv('MILVUS_PORT', '19530')}"),
+        milvus_token=os.getenv("MILVUS_TOKEN"),
     )
 
     # Relational database store (based on SQLAlchemy AsyncEngine + DefaultDbStore)

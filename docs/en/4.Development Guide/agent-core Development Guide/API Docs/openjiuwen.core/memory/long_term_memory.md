@@ -43,7 +43,7 @@ Initialize `LongTermMemory` instance (singleton pattern, multiple calls return t
 async def register_store(
     self,
     kv_store: BaseKVStore,
-    vector_store: VectorStore | None = None,
+    vector_store: BaseVectorStore | None = None,
     db_store: BaseDbStore | None = None,
     embedding_model: Embedding | None = None,
 ) -> None
@@ -54,7 +54,7 @@ Register underlying storage instances, must be completed before calling `set_con
 **Parameters**:
 
 * **kv_store** (BaseKVStore): **Required**, key-value storage instance for fast access to structured data (such as scope configuration, user variables, etc.). If `None`, will raise `JiuWenBaseException` (`MEMORY_REGISTER_STORE_EXECUTION_ERROR`).
-* **vector_store** (VectorStore | None, optional): Vector storage instance for semantic similarity retrieval. If `None`, semantic retrieval functionality is unavailable. Default value: `None`.
+* **vector_store** (BaseVectorStore | None, optional): Vector storage instance for semantic similarity retrieval. If `None`, semantic retrieval functionality is unavailable. Default value: `None`.
 * **db_store** (BaseDbStore | None, optional): Relational database storage instance for persisting messages, scope-user mappings, etc. If `None`, message persistence functionality is unavailable. Default value: `None`.
 * **embedding_model** (Embedding | None, optional): Global embedding model instance for initializing `semantic_store` embedding capability during registration. If `None`, independent embedding models can be configured for different scopes later through `set_scope_config`. Default value: `None`.
 
@@ -66,15 +66,14 @@ Register underlying storage instances, must be completed before calling `set_con
 
 ```python
 >>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
->>> from openjiuwen.core.foundation.store.db_based_kv_store import DbBasedKVStore
->>> from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore
->>> from openjiuwen.core.memory.store.impl.memory_chroma_vector_store import MemoryChromaVectorStore
->>> from openjiuwen.core.foundation.store.default_db_store import DefaultDbStore
+>>> from openjiuwen.core.foundation.store.kv.db_based_kv_store import DbBasedKVStore
+>>> from openjiuwen.core.foundation.store import create_vector_store
+>>> from openjiuwen.core.foundation.store.db.default_db_store import DefaultDbStore
 >>> from sqlalchemy.ext.asyncio import create_async_engine
->>> 
+>>>
 >>> # Create LongTermMemory instance
 >>> engine = LongTermMemory()
->>> 
+>>>
 >>> project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 >>> resource_dir = os.path.join(project_root, "resources")
 >>> os.makedirs(resource_dir, exist_ok=True)
@@ -86,32 +85,34 @@ Register underlying storage instances, must be completed before calling `set_con
 >>> )
 >>> # ---------- KV Store ----------
 >>> kv_store = DbBasedKVStore(engine)
->>> 
+>>>
 >>> # ---------- Vector Store ----------
 >>> # Use Chroma vector storage
->>> vector_store = MemoryChromaVectorStore("./resources")
->>> 
->>> 
+>>> vector_store = create_vector_store("chroma", persist_directory="./resources/chroma")
+>>> # Or use Milvus vector storage
+>>> # vector_store = create_vector_store("milvus", milvus_uri="http://localhost:19530")
+>>>
+>>>
 >>> # ---------- DB Store ----------
 >>> db_user = os.getenv("DB_USER", "root")
 >>> db_passport = os.getenv("DB_PASSWORD", "root")
 >>> db_host = os.getenv("DB_HOST", "124.71.229.79")
 >>> db_port = os.getenv("DB_PORT", "33306")
 >>> agent_db_name = os.getenv("AGENT_DB_NAME", "jiuwen_agent")
->>> 
+>>>
 >>> db_store = DefaultDbStore(create_async_engine(
 >>>     f"mysql+aiomysql://{db_user}:{db_passport}@{db_host}:{db_port}/{agent_db_name}?charset=utf8mb4",
 >>>     pool_size=20,
 >>>     max_overflow=20
 >>> ))
->>> 
+>>>
 >>> # ---------- Register Storage ----------
 >>> await engine.register_store(
 >>>     kv_store=kv_store,
 >>>     vector_store=vector_store,
 >>>     db_store=db_store
 >>> )
->>> 
+>>>
 ```
 
 

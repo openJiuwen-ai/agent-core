@@ -43,7 +43,7 @@ LongTermMemory()
 async def register_store(
     self,
     kv_store: BaseKVStore,
-    vector_store: VectorStore | None = None,
+    vector_store: BaseVectorStore | None = None,
     db_store: BaseDbStore | None = None,
     embedding_model: Embedding | None = None,
 ) -> None
@@ -54,7 +54,7 @@ async def register_store(
 **参数**：
 
 * **kv_store**(BaseKVStore)：**必填**，键值存储实例，用于快速访问结构化数据（如 scope 配置、用户变量等）。若为 `None`，会抛出 `JiuWenBaseException`（`MEMORY_REGISTER_STORE_EXECUTION_ERROR`）。
-* **vector_store**(VectorStore | None, 可选)：向量存储实例，用于语义相似度检索。若为 `None`，则语义检索功能不可用。默认值：`None`。
+* **vector_store**(BaseVectorStore | None, 可选)：向量存储实例，用于语义相似度检索。若为 `None`，则语义检索功能不可用。默认值：`None`。
 * **db_store**(BaseDbStore | None, 可选)：关系型数据库存储实例，用于持久化消息、scope-user 映射等。若为 `None`，则消息持久化功能不可用。默认值：`None`。
 * **embedding_model**(Embedding | None, 可选)：全局嵌入模型实例，用于在注册时初始化 `semantic_store` 的嵌入能力。若为 `None`，后续可通过 `set_scope_config` 为不同 scope 配置独立的嵌入模型。默认值：`None`。
 
@@ -66,15 +66,14 @@ async def register_store(
 
 ```python
 >>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
->>> from openjiuwen.core.foundation.store.db_based_kv_store import DbBasedKVStore
->>> from openjiuwen.core.memory.store.impl.memory_milvus_vector_store import MemoryMilvusVectorStore
->>> from openjiuwen.core.memory.store.impl.memory_chroma_vector_store import MemoryChromaVectorStore
->>> from openjiuwen.core.foundation.store.default_db_store import DefaultDbStore
+>>> from openjiuwen.core.foundation.store.kv.db_based_kv_store import DbBasedKVStore
+>>> from openjiuwen.core.foundation.store import create_vector_store
+>>> from openjiuwen.core.foundation.store.db.default_db_store import DefaultDbStore
 >>> from sqlalchemy.ext.asyncio import create_async_engine
->>> 
+>>>
 >>> # 创建 LongTermMemory 实例
 >>> engine = LongTermMemory()
->>> 
+>>>
 >>> project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 >>> resource_dir = os.path.join(project_root, "resources")
 >>> os.makedirs(resource_dir, exist_ok=True)
@@ -86,32 +85,34 @@ async def register_store(
 >>> )
 >>> # ---------- KV Store ----------
 >>> kv_store = DbBasedKVStore(engine)
->>> 
+>>>
 >>> # ---------- Vector Store ----------
 >>> # 使用 Chroma 向量存储
->>> vector_store = MemoryChromaVectorStore("./resources")
->>> 
->>> 
+>>> vector_store = create_vector_store("chroma", persist_directory="./resources/chroma")
+>>> # 或使用 Milvus 向量存储
+>>> # vector_store = create_vector_store("milvus", milvus_uri="http://localhost:19530")
+>>>
+>>>
 >>> # ---------- DB Store ----------
 >>> db_user = os.getenv("DB_USER", "root")
 >>> db_passport = os.getenv("DB_PASSWORD", "root")
 >>> db_host = os.getenv("DB_HOST", "124.71.229.79")
 >>> db_port = os.getenv("DB_PORT", "33306")
 >>> agent_db_name = os.getenv("AGENT_DB_NAME", "jiuwen_agent")
->>> 
+>>>
 >>> db_store = DefaultDbStore(create_async_engine(
 >>>     f"mysql+aiomysql://{db_user}:{db_passport}@{db_host}:{db_port}/{agent_db_name}?charset=utf8mb4",
 >>>     pool_size=20,
 >>>     max_overflow=20
 >>> ))
->>> 
+>>>
 >>> # ---------- 注册存储 ----------
 >>> await engine.register_store(
 >>>     kv_store=kv_store,
 >>>     vector_store=vector_store,
 >>>     db_store=db_store
 >>> )
->>> 
+>>>
 ```
 
 
