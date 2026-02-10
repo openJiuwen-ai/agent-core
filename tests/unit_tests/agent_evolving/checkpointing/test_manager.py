@@ -4,6 +4,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from openjiuwen.agent_evolving.checkpointing.types import EvolveCheckpoint
 from openjiuwen.agent_evolving.checkpointing.manager import DefaultCheckpointManager
 
@@ -17,7 +19,7 @@ def make_checkpoint(**kwargs):
         best={"best_score": 0.5},
         seed=None,
         operators_state={},
-        producer_state={},
+        updater_state={},
         searcher_state={},
         last_metrics={},
     )
@@ -55,7 +57,7 @@ class TestEvolveCheckpoint:
             best={"best_score": 0.9},
             seed=42,
             operators_state={"op1": {"param": "value"}},
-            producer_state={"key": "value"},
+            updater_state={"key": "value"},
             last_metrics={"score": 0.85},
         )
         assert checkpoint.version == "v1"
@@ -181,8 +183,8 @@ class TestDefaultCheckpointManager:
         assert checkpoint.operators_state["tool_op"]["enabled"] is True
 
     @staticmethod
-    def test_build_checkpoint_with_producer_state():
-        """Build checkpoint includes producer_state."""
+    def test_build_checkpoint_with_updater_state():
+        """Build checkpoint includes updater_state."""
         agent = MagicMock()
         agent.get_operators.return_value = {}
 
@@ -195,10 +197,10 @@ class TestDefaultCheckpointManager:
 
         manager = DefaultCheckpointManager(run_id="test_run")
         checkpoint = manager.build_checkpoint(
-            agent=agent, progress=progress, producer_state={"optimizier_step": 5}
+            agent=agent, progress=progress, updater_state={"optimizier_step": 5}
         )
 
-        assert checkpoint.producer_state == {"optimizier_step": 5}
+        assert checkpoint.updater_state == {"optimizier_step": 5}
 
     @staticmethod
     def test_build_checkpoint_agent_without_get_operators():

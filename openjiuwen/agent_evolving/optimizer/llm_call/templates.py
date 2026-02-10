@@ -129,7 +129,7 @@ The available tools involved in the prompt are as follows:
 {{tools_description}}
 </tools_description> 
 
-However, this prompt failed to produce correct results in the following instances:
+However, this prompt failed to generate correct results in the following instances:
 <bad_cases>
 {{bad_cases}}
 </bad_cases> 

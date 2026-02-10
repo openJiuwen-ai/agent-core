@@ -10,9 +10,9 @@ from openjiuwen.agent_evolving.trajectory import Trajectory, Updates
 from openjiuwen.agent_evolving.optimizer import BaseOptimizer
 
 
-class SingleDimProducer:
+class SingleDimUpdater:
     """
-    Single-dimension update producer: Reuses BaseOptimizer (backward/update),
+    Single-dimension update updater: Reuses BaseOptimizer (backward/step),
     Updates-first applied uniformly by Trainer.
     """
 
@@ -29,12 +29,12 @@ class SingleDimProducer:
         """Delegate to internal optimizer."""
         return self._opt.requires_forward_data()
 
-    def produce(self, trajectories: List[Trajectory], evaluated_cases: List[Any], config: Dict[str, Any]) -> Updates:
+    def update(self, trajectories: List[Trajectory], evaluated_cases: List[Any], config: Dict[str, Any]) -> Updates:
         """Write trajectories -> backward -> update, return Updates applied uniformly by Trainer.apply_updates."""
         for traj in trajectories:
             self._opt.add_trajectory(traj)
         self._opt.backward(evaluated_cases)
-        return self._opt.update()
+        return self._opt.step()
 
     @staticmethod
     def get_state() -> Dict[str, Any]:

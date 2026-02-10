@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional, List, Union, AsyncIterator, Callable
 
 from openjiuwen.core.session import Session
 from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, Model
+from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage, SystemMessage, Model
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.operator.base import Operator, TunableSpec
 
@@ -134,7 +134,7 @@ class LLMCallOperator(Operator):
         inputs: Dict[str, Any],
         session: Session,
         **kwargs: Any,
-    ) -> BaseMessage:
+    ) -> AssistantMessage:
         """Execute LLM invocation.
 
         Args:
@@ -162,7 +162,7 @@ class LLMCallOperator(Operator):
         inputs: Dict[str, Any],
         session: Session,
         **kwargs: Any,
-    ) -> AsyncIterator[BaseMessage]:
+    ) -> AsyncIterator[AssistantMessage]:
         """Stream LLM invocation.
 
         Args:

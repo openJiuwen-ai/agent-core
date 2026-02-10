@@ -11,9 +11,9 @@ if TYPE_CHECKING:
     from openjiuwen.core.operator.base import Operator
 
 
-class MultiDimProducer:
+class MultiDimUpdater:
     """
-    Multi-dimensional update producer: Internally handles "attribution/allocation"
+    Multi-dimensional update updater: Internally handles "attribution/allocation"
     (distributes bad case signals to multiple operators), then runs corresponding
     dimension optimizer for attributed operators, merges Updates applied uniformly
     by Trainer.
@@ -26,7 +26,7 @@ class MultiDimProducer:
       optimizer. A workflow may have multiple LLMCall/ToolCall/MemoryCall, but
       all operators in same domain are managed by same optimizer to avoid
       conflicts.
-    - Attribution/allocation algorithm is internal to MultiDimProducer
+    - Attribution/allocation algorithm is internal to MultiDimUpdater
       (replaceable in future); users don't need to provide selector.
     """
 
@@ -54,7 +54,7 @@ class MultiDimProducer:
         return False
 
     @abstractmethod
-    def produce(
+    def update(
         self,
         trajectories: List["Trajectory"],
         evaluated_cases: List[Any],

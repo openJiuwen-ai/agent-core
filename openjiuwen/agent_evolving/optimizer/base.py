@@ -3,7 +3,7 @@
 """
 Base classes for dimension-specific optimizers.
 
-BaseOptimizer: Filters optimizable Operators, caches Trajectory, produces Updates.
+BaseOptimizer: Filters optimizable Operators, caches Trajectory, generates Updates.
 TextualParameter: Gradient container for operator_id.
 """
 
@@ -28,7 +28,7 @@ class BaseOptimizer:
 
     bind(): Filters optimizable Operators, returns count (0 triggers soft-exit).
     add_trajectory / get_trajectories: Caches Trajectory for backward.
-    update(): Returns Updates, applied by Trainer.apply_updates.
+    step(): Returns Updates, applied by Trainer.apply_updates.
     """
     domain: str = ""
 
@@ -135,11 +135,11 @@ class BaseOptimizer:
                 StatusCode.TOOLCHAIN_OPTIMIZER_BACKWARD_EXECUTION_ERROR, error_msg=f"{str(e)}", cause=e
             ) from e
 
-    def update(self) -> Updates:
-        """Execute _update() and return Updates; applied uniformly by Trainer.apply_updates."""
+    def step(self) -> Updates:
+        """Execute _step() and return Updates; applied uniformly by Trainer.apply_updates."""
         self._validate_parameters()
         try:
-            updates = self._update()
+            updates = self._step()
             self.clear_trajectories()
             return updates or {}
         except Exception as e:
@@ -149,8 +149,8 @@ class BaseOptimizer:
             ) from e
 
     @abstractmethod
-    def _update(self) -> Updates:
-        """Subclass implements: produces Updates based on gradients written during backward."""
+    def _step(self) -> Updates:
+        """Subclass implements: generates Updates based on gradients written during backward."""
         pass
 
     @abstractmethod

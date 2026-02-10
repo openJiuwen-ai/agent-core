@@ -4,6 +4,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from openjiuwen.agent_evolving.trainer.progress import Callbacks, Progress
 
 

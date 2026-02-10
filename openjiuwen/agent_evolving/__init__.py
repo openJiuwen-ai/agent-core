@@ -9,12 +9,20 @@ Includes:
 - BaseOptimizer, TextualParameter, InstructionOptimizer: Optimization
 - Case, EvaluatedCase, CaseLoader: Dataset handling
 - Trajectory, TrajectoryStep, ExecutionSpec: Execution trace types
-- UpdateProducer, SingleDimProducer: Update generation
+- SingleDimUpdater, MultiDimUpdater: Update generation
 - Checkpointing: State persistence
 """
 
 # constants
 from openjiuwen.agent_evolving.constant import TuneConstant
+
+# checkpointing
+from openjiuwen.agent_evolving.checkpointing import (
+    EvolveCheckpoint,
+    FileCheckpointStore,
+    DefaultCheckpointManager,
+    CheckpointManager,
+)
 
 # dataset
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase, CaseLoader
@@ -48,19 +56,18 @@ from openjiuwen.agent_evolving.trajectory import (
     TracerTrajectoryExtractor,
 )
 
-# producer
-from openjiuwen.agent_evolving.producer import UpdateProducer, SingleDimProducer, MultiDimProducer
-
-# checkpointing
-from openjiuwen.agent_evolving.checkpointing import (
-    EvolveCheckpoint,
-    FileCheckpointStore,
-    DefaultCheckpointManager,
-    CheckpointManager,
-)
+# updater
+from openjiuwen.agent_evolving.updater import Updater, SingleDimUpdater, MultiDimUpdater
 
 _CONSTANTS = [
     "TuneConstant",
+]
+
+_CHECKPOINTING = [
+    "EvolveCheckpoint",
+    "FileCheckpointStore",
+    "DefaultCheckpointManager",
+    "CheckpointManager",
 ]
 
 _DATASET = [
@@ -98,26 +105,19 @@ _TRAJECTORY = [
     "TracerTrajectoryExtractor",
 ]
 
-_PRODUCER = [
-    "UpdateProducer",
-    "SingleDimProducer",
-    "MultiDimProducer",
-]
-
-_CHECKPOINTING = [
-    "EvolveCheckpoint",
-    "FileCheckpointStore",
-    "DefaultCheckpointManager",
-    "CheckpointManager",
+_UPDATER = [
+    "Updater",
+    "SingleDimUpdater",
+    "MultiDimUpdater",
 ]
 
 __all__ = (
     _CONSTANTS
+    + _CHECKPOINTING
     + _DATASET
     + _EVALUATOR
     + _OPTIMIZER
     + _TRAINER
     + _TRAJECTORY
-    + _PRODUCER
-    + _CHECKPOINTING
+    + _UPDATER
 )

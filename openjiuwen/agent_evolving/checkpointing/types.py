@@ -23,7 +23,7 @@ class EvolveCheckpoint:
     best: Dict[str, Any]                         # best_score etc.
     seed: Optional[int]
     operators_state: Dict[str, Dict[str, Any]]   # operator_name/operator_id -> state
-    producer_state: Dict[str, Any]               # Unified: update producer internal state (can be empty)
+    updater_state: Dict[str, Any]               # Unified: update updater internal state (can be empty)
     searcher_state: Dict[str, Any]               # Parameter searcher state (can be empty)
     last_metrics: Dict[str, Any]                 # Recent epoch summary (can be empty)
 

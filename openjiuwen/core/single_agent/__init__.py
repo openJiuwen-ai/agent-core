@@ -22,6 +22,7 @@ from openjiuwen.core.single_agent.base import BaseAgent  # Base class import mus
 
 from .ability_manager import AbilityManager
 from .agents.react_agent import ReActAgent, ReActAgentConfig
+from .agents.react_agent_evolve import ReActAgentEvolve
 from .schema.agent_card import AgentCard
 
 # Legacy classes (need this import for IDE hinting to work)
@@ -33,6 +34,7 @@ __all__ = [
     "AgentCard",
     "ReActAgent",
     "ReActAgentConfig",
+    "ReActAgentEvolve",
     "Session",
     "create_agent_session",
     "BaseAgent",

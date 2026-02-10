@@ -6,6 +6,8 @@ import json
 import os
 import tempfile
 
+import pytest
+
 from openjiuwen.agent_evolving.checkpointing.store_file import FileCheckpointStore
 from openjiuwen.agent_evolving.checkpointing.types import EvolveCheckpoint
 
@@ -19,7 +21,7 @@ def make_mock_checkpoint():
         best={"best_score": 0.5},
         seed=42,
         operators_state={"op1": {"param": "value"}},
-        producer_state={},
+        updater_state={},
         searcher_state={},
         last_metrics={},
     )

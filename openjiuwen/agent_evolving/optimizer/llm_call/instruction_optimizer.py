@@ -7,22 +7,19 @@ InstructionOptimizer: Uses LLM to rewrite system/user prompts based on error cas
 - update: Uses LLM to generate optimized prompts, returns Updates (applied uniformly by Trainer).
 """
 
-import random
 import re
-from typing import List, Optional, Dict, Any, Union, Tuple
+from typing import List, Optional, Any, Tuple
 
 import asyncio
 
 from openjiuwen.agent_evolving.utils import TuneUtils
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
-from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
 from openjiuwen.agent_evolving.dataset import EvaluatedCase
-from openjiuwen.agent_evolving.constant import TuneConstant
-from openjiuwen.agent_evolving.optimizer.base import TextualParameter
-from openjiuwen.agent_evolving.optimizer.llm.base import LLMCallOptimizerBase
 from openjiuwen.agent_evolving.trajectory.types import Updates
-from openjiuwen.agent_evolving.optimizer.llm.templates import (
+from openjiuwen.agent_evolving.optimizer.base import TextualParameter
+from openjiuwen.agent_evolving.optimizer.llm_call.base import LLMCallOptimizerBase
+from openjiuwen.agent_evolving.optimizer.llm_call.templates import (
     PROMPT_INSTRUCTION_OPTIMIZE_TEMPLATE,
     PROMPT_INSTRUCTION_OPTIMIZE_BOTH_TEMPLATE,
     CREATE_PROMPT_TEXTUAL_GRADIENT_TEMPLATE,
@@ -70,7 +67,7 @@ class InstructionOptimizer(LLMCallOptimizerBase):
             if not self._is_target_frozen(op, "user_prompt"):
                 param.set_gradient("user_prompt", textual_gradient)
 
-    def _update(self) -> Optional[Updates]:
+    def _step(self) -> Optional[Updates]:
         """Generate optimized prompts from gradients."""
         updates: Updates = {}
 

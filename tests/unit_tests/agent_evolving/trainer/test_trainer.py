@@ -8,18 +8,18 @@ import pytest
 
 from openjiuwen.agent_evolving.dataset import Case, CaseLoader, EvaluatedCase
 from openjiuwen.agent_evolving.evaluator import BaseEvaluator
-from openjiuwen.agent_evolving.producer import UpdateProducer
+from openjiuwen.agent_evolving.updater import Updater
 from openjiuwen.agent_evolving.trainer import Callbacks, Progress, Trainer
 
 
-def create_mock_producer():
-    """Create mock producer with default behaviors."""
-    producer = MagicMock(spec=UpdateProducer)
-    producer.bind.return_value = 1
-    producer.produce.return_value = {}
-    producer.get_state.return_value = {}
-    producer.load_state = MagicMock()
-    return producer
+def create_mock_updater():
+    """Create mock updater with default behaviors."""
+    updater = MagicMock(spec=Updater)
+    updater.bind.return_value = 1
+    updater.update.return_value = {}
+    updater.get_state.return_value = {}
+    updater.load_state = MagicMock()
+    return updater
 
 
 def create_mock_evaluator(score: float = 0.8):
@@ -69,27 +69,27 @@ class TestTrainerInit:
     """Test Trainer initialization via public API behavior."""
 
     @staticmethod
-    def test_init_with_required_args_uses_producer_and_evaluator():
-        """Init with producer and evaluator - verified through train behavior."""
-        producer = create_mock_producer()
+    def test_init_with_required_args_uses_updater_and_evaluator():
+        """Init with updater and evaluator - verified through train behavior."""
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
-        trainer = Trainer(producer=producer, evaluator=evaluator)
-        # Verify through behavior - producer and evaluator are used in train
+        trainer = Trainer(updater=updater, evaluator=evaluator)
+        # Verify through behavior - updater and evaluator are used in train
         agent = create_mock_agent()
         case_loader = create_case_loader()
         trainer.train(agent=agent, train_cases=case_loader, num_iterations=1)
-        producer.bind.assert_called()
+        updater.bind.assert_called()
         evaluator.batch_evaluate.assert_called()
 
     @staticmethod
     def test_init_with_optional_config_affects_behavior():
         """Init with optional arguments - verified through early stopping behavior."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         # Set high early stop score to verify it's respected
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.99)]
         trainer = Trainer(
-            producer=producer,
+            updater=updater,
             evaluator=evaluator,
             num_parallel=4,
             early_stop_score=0.95,
@@ -101,20 +101,20 @@ class TestTrainerInit:
         result = trainer.train(agent=agent, train_cases=case_loader, num_iterations=10)
         # Verify early_stop_score was respected - train stopped early
         assert result is agent
-        producer.produce.assert_not_called()
+        updater.update.assert_not_called()
 
     @staticmethod
     def test_init_defaults_produce_default_behavior():
         """Default parallel is 1, checkpoint disabled - verified through behavior."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
-        trainer = Trainer(producer=producer, evaluator=evaluator)
+        trainer = Trainer(updater=updater, evaluator=evaluator)
         agent = create_mock_agent()
         case_loader = create_case_loader()
         # With defaults, train should work normally
         trainer.train(agent=agent, train_cases=case_loader, num_iterations=1)
         # Verify train executed (checkpoint_dir not set means no checkpointing)
-        producer.bind.assert_called()
+        updater.bind.assert_called()
 
 
 class TestTrainerApplyUpdates:
@@ -168,7 +168,7 @@ class TestTrainerPredict:
     def test_evaluate_calls_batch_evaluate():
         """evaluate calls evaluator.batch_evaluate."""
         evaluator = create_mock_evaluator()
-        trainer = Trainer(producer=create_mock_producer(), evaluator=evaluator)
+        trainer = Trainer(updater=create_mock_updater(), evaluator=evaluator)
         agent = create_mock_agent()
         case_loader = create_case_loader()
         score, evaluated = trainer.evaluate(agent, case_loader)
@@ -177,7 +177,7 @@ class TestTrainerPredict:
     @staticmethod
     def test_predict_returns_predictions_and_sessions():
         """predict returns predictions and sessions."""
-        trainer = Trainer(producer=create_mock_producer(), evaluator=create_mock_evaluator())
+        trainer = Trainer(updater=create_mock_updater(), evaluator=create_mock_evaluator())
         agent = create_mock_agent()
         case_loader = create_case_loader()
 
@@ -190,7 +190,7 @@ class TestTrainerPredict:
     @staticmethod
     def test_predict_only_returns_only_predictions():
         """predict_only returns only predictions."""
-        trainer = Trainer(producer=create_mock_producer(), evaluator=create_mock_evaluator())
+        trainer = Trainer(updater=create_mock_updater(), evaluator=create_mock_evaluator())
         agent = create_mock_agent()
         case_loader = create_case_loader()
         predicts = trainer.predict_only(agent, case_loader)
@@ -203,7 +203,7 @@ class TestTrainerForward:
     @staticmethod
     def test_forward_returns_tuple():
         """forward returns (score, evaluated, trajectories, sessions)."""
-        trainer = Trainer(producer=create_mock_producer(), evaluator=create_mock_evaluator())
+        trainer = Trainer(updater=create_mock_updater(), evaluator=create_mock_evaluator())
         agent = create_mock_agent()
         case_loader = create_case_loader()
 
@@ -224,22 +224,22 @@ class TestTrainerTrain:
     @staticmethod
     def test_early_stop():
         """train returns agent when early stop score reached."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.99)]
-        trainer = Trainer(producer=producer, evaluator=evaluator, early_stop_score=0.95)
+        trainer = Trainer(updater=updater, evaluator=evaluator, early_stop_score=0.95)
         agent = create_mock_agent()
         case_loader = create_case_loader()
         result = trainer.train(agent=agent, train_cases=case_loader, num_iterations=10)
         assert result is agent
-        producer.produce.assert_not_called()
+        updater.update.assert_not_called()
 
     @staticmethod
     def test_no_operator_match():
-        """train returns agent when no Operator matches producer."""
-        producer = create_mock_producer()
-        producer.bind.return_value = 0
-        trainer = Trainer(producer=producer, evaluator=create_mock_evaluator())
+        """train returns agent when no Operator matches updater."""
+        updater = create_mock_updater()
+        updater.bind.return_value = 0
+        trainer = Trainer(updater=updater, evaluator=create_mock_evaluator())
         agent = create_mock_agent()
         case_loader = create_case_loader()
         result = trainer.train(agent=agent, train_cases=case_loader)
@@ -252,12 +252,12 @@ class TestTrainerSetCallbacks:
     @staticmethod
     def test_callbacks_are_invoked_during_training():
         """Callbacks set via set_callbacks are invoked during training."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.5)]
 
         callbacks = MagicMock(spec=Callbacks)
-        trainer = Trainer(producer=producer, evaluator=evaluator, num_parallel=1)
+        trainer = Trainer(updater=updater, evaluator=evaluator, num_parallel=1)
         trainer.set_callbacks(callbacks)
 
         agent = create_mock_agent()
@@ -281,7 +281,7 @@ class TestTrainerPredictException:
     @staticmethod
     def test_handles_invoke_exception():
         """predict handles agent.invoke exception."""
-        trainer = Trainer(producer=create_mock_producer(), evaluator=create_mock_evaluator())
+        trainer = Trainer(updater=create_mock_updater(), evaluator=create_mock_evaluator())
         agent = create_mock_agent()
         case_loader = create_case_loader()
 
@@ -484,12 +484,12 @@ class TestTrainerTrainMultipleIterations:
     @staticmethod
     def test_multiple_iterations():
         """Train runs through multiple iterations."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.5)]
 
         trainer = Trainer(
-            producer=producer,
+            updater=updater,
             evaluator=evaluator,
             early_stop_score=0.95,
             num_parallel=1,
@@ -505,17 +505,17 @@ class TestTrainerTrainMultipleIterations:
         )
 
         assert result is agent
-        assert producer.produce.call_count == 3
+        assert updater.update.call_count == 3
 
     @staticmethod
     def test_early_stop_on_score():
         """Train stops early when score reaches threshold."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.95)]
 
         trainer = Trainer(
-            producer=producer,
+            updater=updater,
             evaluator=evaluator,
             early_stop_score=0.95,
             num_parallel=1,
@@ -530,19 +530,19 @@ class TestTrainerTrainMultipleIterations:
         )
 
         assert result is agent
-        producer.produce.assert_not_called()
+        updater.update.assert_not_called()
 
     @staticmethod
     def test_black_box_optimizer_skips_forward():
         """Black-box optimizer skips forward execution."""
-        producer = create_mock_producer()
-        producer.requires_forward_data.return_value = False
-        producer.produce.return_value = [{("op1", "param"): "v1"}]
+        updater = create_mock_updater()
+        updater.requires_forward_data.return_value = False
+        updater.update.return_value = [{("op1", "param"): "v1"}]
 
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.6)]
 
-        trainer = Trainer(producer=producer, evaluator=evaluator, num_parallel=1)
+        trainer = Trainer(updater=updater, evaluator=evaluator, num_parallel=1)
         agent = create_mock_agent()
 
         operators = {"op1": MagicMock()}
@@ -560,17 +560,17 @@ class TestTrainerTrainMultipleIterations:
         )
 
         assert result is agent
-        assert producer.produce.call_count == 2
+        assert updater.update.call_count == 2
 
     @staticmethod
     def test_checkpoint_dir_enables_checkpointing():
         """Checkpoint directory enables checkpoint behavior."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.5)]
 
         trainer = Trainer(
-            producer=producer,
+            updater=updater,
             evaluator=evaluator,
             early_stop_score=1.0,
             num_parallel=1,
@@ -589,7 +589,7 @@ class TestTrainerTrainMultipleIterations:
 
         assert result is agent
         # Verify training executed (checkpointing was enabled)
-        producer.bind.assert_called()
+        updater.bind.assert_called()
 
 
 class TestTrainerBoundaryCases:
@@ -609,7 +609,7 @@ class TestTrainerBoundaryCases:
     )
     def test_boundary_returns(method_name, args, expected):
         """Methods return correct zeros for empty/None cases."""
-        trainer = Trainer(producer=create_mock_producer(), evaluator=create_mock_evaluator())
+        trainer = Trainer(updater=create_mock_updater(), evaluator=create_mock_evaluator())
         agent = create_mock_agent()
 
         method = getattr(trainer, method_name)
@@ -618,17 +618,17 @@ class TestTrainerBoundaryCases:
 
 
 class TestTrainerCandidatesWithList:
-    """Test train with producer returning list of candidates (public API)."""
+    """Test train with updater returning list of candidates (public API)."""
 
     @staticmethod
     def test_with_candidates_list():
         """Train evaluates and selects from list of candidates."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.6)]
-        producer.produce.return_value = [{("op1", "param"): "candidate1"}]
+        updater.update.return_value = [{("op1", "param"): "candidate1"}]
 
-        trainer = Trainer(producer=producer, evaluator=evaluator, num_parallel=1)
+        trainer = Trainer(updater=updater, evaluator=evaluator, num_parallel=1)
         agent = create_mock_agent()
 
         operators = {"op1": MagicMock()}
@@ -646,7 +646,7 @@ class TestTrainerCandidatesWithList:
         )
 
         assert result is agent
-        assert producer.produce.call_count == 2
+        assert updater.update.call_count == 2
 
 
 class TestTrainerCallbacksInvocation:
@@ -655,12 +655,12 @@ class TestTrainerCallbacksInvocation:
     @staticmethod
     def test_all_callbacks_invoked():
         """All callbacks are invoked during training."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.5)]
 
         callbacks = MagicMock(spec=Callbacks)
-        trainer = Trainer(producer=producer, evaluator=evaluator, num_parallel=1)
+        trainer = Trainer(updater=updater, evaluator=evaluator, num_parallel=1)
         trainer.set_callbacks(callbacks)
 
         agent = create_mock_agent()
@@ -681,12 +681,12 @@ class TestTrainerCallbacksInvocation:
     @staticmethod
     def test_epoch_callback_receives_progress():
         """Epoch callback receives correct progress."""
-        producer = create_mock_producer()
+        updater = create_mock_updater()
         evaluator = create_mock_evaluator()
         evaluator.batch_evaluate.return_value = [create_evaluated_case(score=0.5)]
 
         callbacks = MagicMock(spec=Callbacks)
-        trainer = Trainer(producer=producer, evaluator=evaluator, num_parallel=1)
+        trainer = Trainer(updater=updater, evaluator=evaluator, num_parallel=1)
         trainer.set_callbacks(callbacks)
 
         agent = create_mock_agent()

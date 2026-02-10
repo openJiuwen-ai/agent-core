@@ -9,8 +9,8 @@ LLM optimizer submodule:
 - joint_optimizer.py: Joint optimizer
 - templates.py: Centralized PromptTemplate management
 """
-from openjiuwen.agent_evolving.optimizer.llm.base import LLMCallOptimizerBase
-from openjiuwen.agent_evolving.optimizer.llm.instruction_optimizer import InstructionOptimizer
+from openjiuwen.agent_evolving.optimizer.llm_call.base import LLMCallOptimizerBase
+from openjiuwen.agent_evolving.optimizer.llm_call.instruction_optimizer import InstructionOptimizer
 
 __all__ = [
     "LLMCallOptimizerBase",

@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-Producer protocol definition: UpdateProducer.
+Updater protocol definition.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.operator.base import Operator
 
 
-class UpdateProducer(Protocol):
+class Updater(Protocol):
     """
     Core convergence point: Unifies "single-dimension optimizer" and
     "multi-dimensional attribution + allocation" into one interface.
@@ -32,14 +32,14 @@ class UpdateProducer(Protocol):
 
     def requires_forward_data(self) -> bool:
         """
-        Whether this producer needs framework to execute forward on train_cases.
+        Whether this updater needs framework to execute forward on train_cases.
 
         Returns False for black-box optimizers that generate/execute/evaluate
         internally (e.g., tool_optimizer, data-self-generation).
         """
         ...
 
-    def produce(
+    def update(
         self,
         trajectories: List[Trajectory],
         evaluated_cases: List[Any],

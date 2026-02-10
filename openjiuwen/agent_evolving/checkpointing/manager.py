@@ -15,7 +15,7 @@ class CheckpointManager(Protocol):
         ...
 
     def build_checkpoint(
-        self, *, agent: Any, progress: Any, producer_state: Optional[Dict[str, Any]] = None
+        self, *, agent: Any, progress: Any, updater_state: Optional[Dict[str, Any]] = None
     ) -> EvolveCheckpoint:
         ...
 
@@ -86,7 +86,7 @@ class DefaultCheckpointManager:
         *,
         agent: Any,
         progress: Any,
-        producer_state: Optional[Dict[str, Any]] = None,
+        updater_state: Optional[Dict[str, Any]] = None,
     ) -> EvolveCheckpoint:
         operators_state = self._snapshot_operators_state(agent)
         step = {
@@ -104,7 +104,7 @@ class DefaultCheckpointManager:
             best=best,
             seed=seed,
             operators_state=operators_state,
-            producer_state=producer_state or {},
+            updater_state=updater_state or {},
             searcher_state={},
             last_metrics={
                 "current_epoch_score": float(getattr(progress, "current_epoch_score", 0.0)),

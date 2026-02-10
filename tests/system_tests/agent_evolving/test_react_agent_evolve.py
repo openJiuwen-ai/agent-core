@@ -24,12 +24,11 @@ from openjiuwen.agent_evolving import (
     DefaultEvaluator,
     InstructionOptimizer,
     Trainer,
-    SingleDimProducer,
+    SingleDimUpdater,
     TuneConstant,
 )
-from openjiuwen.agent_evolving.react_agent_evo.react_agent_evo import ReActAgent, ReActAgentConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent import ReActAgentEvolve, ReActAgentConfig, AgentCard
 from openjiuwen.agent_evolving.trainer.progress import Callbacks
 
 
@@ -86,13 +85,13 @@ def _create_optimizer() -> InstructionOptimizer:
     )
 
 
-def _create_producer() -> SingleDimProducer:
-    """Create Producer"""
-    return SingleDimProducer(optimizer=_create_optimizer())
+def _create_updater() -> SingleDimUpdater:
+    """Create Updater"""
+    return SingleDimUpdater(optimizer=_create_optimizer())
 
 
-def _create_react_agent(agent_id: str = "demo_agent") -> ReActAgent:
-    """Create ReActAgent"""
+def _create_react_agent(agent_id: str = "demo_agent") -> ReActAgentEvolve:
+    """Create ReActAgentEvolve"""
     agent_card = AgentCard(
         id=agent_id,
         name=f"{agent_id.title()}",
@@ -112,10 +111,9 @@ def _create_react_agent(agent_id: str = "demo_agent") -> ReActAgent:
             {"role": "user", "content": "{{query}}"},
         ]
     )
-    config.configure_max_iterations(TuneConstant.DEFAULT_ITERATION_NUM)
-    config.configure_context_limit(TuneConstant.DEFAULT_EXAMPLE_NUM * 2)
+    config.configure_max_iterations(TuneConstant.default_iteration_num)
 
-    agent = ReActAgent(card=agent_card)
+    agent = ReActAgentEvolve(card=agent_card)
     agent.configure(config)
     return agent
 
@@ -191,7 +189,7 @@ def test_end_to_end_training(runner):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         trainer = Trainer(
-            producer=_create_producer(),
+            updater=_create_updater(),
             evaluator=_create_evaluator(),
             num_parallel=2,
             early_stop_score=0.95,
@@ -216,7 +214,7 @@ def test_training_with_callbacks(runner):
     train_loader, val_loader = _create_simple_qa_cases().split(ratio=0.6)
 
     trainer = Trainer(
-        producer=_create_producer(),
+        updater=_create_updater(),
         evaluator=_create_evaluator(),
         num_parallel=2,
         early_stop_score=0.95,
@@ -244,7 +242,7 @@ def test_evolved_agent_inference(runner):
     train_loader, val_loader = _create_simple_qa_cases().split(ratio=0.6)
 
     trainer = Trainer(
-        producer=_create_producer(),
+        updater=_create_updater(),
         evaluator=_create_evaluator(),
         num_parallel=2,
         early_stop_score=0.95,
@@ -258,8 +256,8 @@ def test_evolved_agent_inference(runner):
     )
 
     test_queries = [
-        "请介绍一下机器学习。",
-        "Python 怎么写文件？",
+        "Please introduce machine learning.",
+        "Python how to write file?",
     ]
 
     for query in test_queries:
@@ -276,7 +274,7 @@ def test_checkpoint_save_and_resume(runner):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         trainer = Trainer(
-            producer=_create_producer(),
+            updater=_create_updater(),
             evaluator=_create_evaluator(),
             num_parallel=2,
             early_stop_score=0.95,
@@ -298,7 +296,7 @@ def test_checkpoint_save_and_resume(runner):
         # Resume training from checkpoint
         agent2 = _create_react_agent("checkpoint_demo_2")
         trainer2 = Trainer(
-            producer=_create_producer(),
+            updater=_create_updater(),
             evaluator=_create_evaluator(),
             num_parallel=2,
             early_stop_score=0.95,

@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase, CaseLoader
 from openjiuwen.agent_evolving.constant import TuneConstant
-from openjiuwen.agent_evolving.producer import UpdateProducer
+from openjiuwen.agent_evolving.updater import Updater
 from openjiuwen.agent_evolving.evaluator import BaseEvaluator
 from openjiuwen.agent_evolving.trainer.progress import Progress, Callbacks
 from openjiuwen.agent_evolving.trajectory import ExecutionSpec, Trajectory, Updates, TracerTrajectoryExtractor
@@ -30,15 +30,15 @@ from openjiuwen.core.single_agent import BaseAgent
 
 class Trainer:
     """
-    Orchestrates "evaluate -> produce -> writeback" self-evolution cycle.
+    Orchestrates "evaluate -> update -> writeback" self-evolution cycle.
 
-    Accepts UpdateProducer and BaseEvaluator, manages checkpoint/resume.
+    Accepts Updater and BaseEvaluator, manages checkpoint/resume.
     """
 
     def __init__(
         self,
         *,
-        producer: UpdateProducer,
+        updater: Updater,
         evaluator: BaseEvaluator,
         extractor: Optional[TracerTrajectoryExtractor] = None,
         callbacks: Optional[Callbacks] = None,
@@ -53,7 +53,7 @@ class Trainer:
     ):
         """
         Args:
-            producer: Generates parameter updates from trajectory and evaluation.
+            updater: Generates parameter updates from trajectory and evaluation.
             evaluator: Scores model output against expected answers.
             extractor: Extracts Trajectory from Session; defaults to TracerTrajectoryExtractor.
             callbacks: Lifecycle hooks (on_train_begin/end, etc).
@@ -65,7 +65,7 @@ class Trainer:
             checkpoint_on_improve: Also save when validation improves.
             checkpoint_manager: Custom manager; defaults to DefaultCheckpointManager.
         """
-        self._producer = producer
+        self._updater = updater
         self._evaluator = evaluator
         self._extractor = extractor or TracerTrajectoryExtractor()
         self._callbacks = callbacks or Callbacks()
@@ -94,16 +94,16 @@ class Trainer:
             return 0.0
         return sum(c.score for c in evaluated) / len(evaluated)
 
-    def _bind_producer(self, operators: Dict[str, Any], config: Dict[str, Any]) -> int:
-        bind = getattr(self._producer, "bind", None)
+    def _bind_updater(self, operators: Dict[str, Any], config: Dict[str, Any]) -> int:
+        bind = getattr(self._updater, "bind", None)
         if not callable(bind):
             return 0
         bound_n = bind(operators, **config)
         return int(bound_n or 0)
 
-    def _producer_requires_forward(self) -> bool:
-        """Check if producer needs forward execution on train_cases."""
-        requires = getattr(self._producer, "requires_forward_data", None)
+    def _updater_requires_forward(self) -> bool:
+        """Check if updater needs forward execution on train_cases."""
+        requires = getattr(self._updater, "requires_forward_data", None)
         if callable(requires):
             return requires()
         return True  # Default: requires forward data for backward compatibility
@@ -119,9 +119,9 @@ class Trainer:
         progress.start_epoch = int(restored.get("start_epoch", 0))
         progress.best_score = float(restored.get("best_score", 0.0))
 
-        load_state = getattr(self._producer, "load_state", None)
+        load_state = getattr(self._updater, "load_state", None)
         if callable(load_state):
-            load_state(getattr(ckpt, "producer_state", {}) or {})
+            load_state(getattr(ckpt, "updater_state", {}) or {})
 
         logger.info(f"[resume] epoch={progress.start_epoch} best={progress.best_score}")
 
@@ -134,7 +134,7 @@ class Trainer:
         ckpt = self._checkpoint_manager.build_checkpoint(
             agent=agent,
             progress=progress,
-            producer_state=self._producer.get_state(),
+            updater_state=self._updater.get_state(),
         )
         path = self._checkpoint_store.save_checkpoint(ckpt, filename="latest.json")
         logger.info(f"[checkpoint] saved: {path}")
@@ -150,29 +150,29 @@ class Trainer:
     ) -> BaseAgent:
         """
         Execute self-evolving training: validation baseline evaluation -> multiple rounds of
-        "training forward -> producer update -> validation evaluation -> checkpoint".
+        "training forward -> updater update -> validation evaluation -> checkpoint".
 
         Args:
             agent: Agent to optimize (must implement get_operators() and support invoke with session).
             train_cases: Training case loader; optional for black-box optimizers that generate data internally.
             val_cases: Validation case loader; uses train_cases if not provided; optional for black-box optimizers.
             num_iterations: Maximum training epochs.
-            **kwargs: Pass through to producer.produce config.
+            **kwargs: Pass through to updater.update config.
 
         Returns:
-            Agent after training (internal parameters updated by producer).
+            Agent after training (internal parameters updated by updater).
         """
         progress = Progress(max_epoch=num_iterations)
         val_cases = val_cases or train_cases
 
         operators = self._get_operator_registry(agent)
-        if self._bind_producer(operators, config=kwargs) == 0:
-            logger.error("[Trainer] no operator matches producer targets; soft-exit without training.")
+        if self._bind_updater(operators, config=kwargs) == 0:
+            logger.error("[Trainer] no operator matches updater targets; soft-exit without training.")
             return agent
 
         self._resume_if_needed(agent, progress)
 
-        if self._producer_requires_forward():
+        if self._updater_requires_forward():
             progress.current_epoch_score, cur_epoch_evaluated = self.evaluate(agent, val_cases)
             progress.best_score = max(progress.best_score, progress.current_epoch_score)
         else:
@@ -189,7 +189,7 @@ class Trainer:
         for _ in progress.run_epoch():
             self._callbacks.on_train_epoch_begin(agent, progress)
 
-            if self._producer_requires_forward():
+            if self._updater_requires_forward():
                 score, evaluated, trajectories, _sessions = self.forward(agent, train_cases)
                 progress.current_epoch_score = score
             else:
@@ -197,17 +197,17 @@ class Trainer:
                 trajectories, evaluated = [], []
                 progress.current_epoch_score = 0.0
 
-            produced = self._producer.produce(trajectories, evaluated, config=kwargs)
+            updated = self._updater.update(trajectories, evaluated, config=kwargs)
 
-            if isinstance(produced, list):
+            if isinstance(updated, list):
                 val_score, val_evaluated = self._select_best_candidate_on_val(
                     agent=agent,
                     operators=operators,
-                    candidates=produced,
+                    candidates=updated,
                     val_cases=val_cases,
                 )
             else:
-                updates: Updates = produced or {}
+                updates: Updates = updated or {}
                 self.apply_updates(operators, updates)
                 val_score, val_evaluated = self.evaluate(agent, val_cases)
 
@@ -347,9 +347,9 @@ class Trainer:
     @staticmethod
     def apply_updates(operators: Dict[str, Operator], updates: Updates) -> None:
         """
-        Apply producer-generated updates to operator registry.
+        Apply updater-generated updates to operator registry.
 
-        For SingleDimProducer (BaseOptimizer direct writeback), updates usually empty, skipped here.
+        For SingleDimUpdater (BaseOptimizer direct writeback), updates usually empty, skipped here.
         """
         for (operator_id, target), value in updates.items():
             op = operators.get(operator_id)

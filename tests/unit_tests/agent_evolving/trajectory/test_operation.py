@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Tests for trajectory types and operations."""
 
+import pytest
+
 from openjiuwen.agent_evolving.trajectory.operation import get_steps_for_case_operator, iter_steps
 from openjiuwen.agent_evolving.trajectory.types import (
     ExecutionSpec,
