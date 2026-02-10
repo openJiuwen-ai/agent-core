@@ -11,7 +11,6 @@ import json
 from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
-from pymilvus import MilvusClient
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -23,6 +22,8 @@ from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 
 
 class TripleBeamSearch:
+    """Triple beam search"""
+
     def __init__(
         self,
         retriever: Retriever,
@@ -71,6 +72,7 @@ class TripleBeamSearch:
         return "; ".join(x.text for x in triples)
 
     async def beam_search(self, query: str, triples: List[RetrievalResult]) -> List[TripleBeam]:
+        """Perform beam search on query"""
         if not triples:
             logger.warning("beam search got empty input triples, query=%r", query)
             return []
@@ -616,6 +618,8 @@ class GraphRetriever(Retriever):
         # Query triples
         async def fetch_for_chunks(chunk_ids: List[str]) -> List[RetrievalResult]:
             """Fetch triples for a single chunk."""
+            from pymilvus import MilvusClient
+
             try:
                 if isinstance(client, MilvusClient):
                     escaped_ids = [f'"{cid}"' for cid in chunk_ids]
@@ -702,6 +706,8 @@ class GraphRetriever(Retriever):
 
         async def fetch_chunk(chunk_id: str) -> Optional[RetrievalResult]:
             """Fetch a single chunk by chunk_id."""
+            from pymilvus import MilvusClient
+
             try:
                 if isinstance(client, MilvusClient):
                     filter_expr = f'chunk_id == "{chunk_id}"'

@@ -10,7 +10,6 @@ PGVector supports HNSW and IVFFlat algorithms.
 from typing import Any, Literal
 
 from pydantic import Field, field_validator
-from pydantic_core import PydanticCustomError
 
 from .base import IS_CONSTRUCT, VectorField, create_extra_search_field
 
@@ -36,7 +35,7 @@ class PGVectorField(VectorField):
 
     database_type: Literal["pg"] = Field(default="pg", description="Database type", init=False)
     index_type: Literal["hnsw", "ivfflat"] = Field(default="hnsw", description="ANN index type")
-    
+
     # HNSW parameters
     m: int = Field(
         default=16,

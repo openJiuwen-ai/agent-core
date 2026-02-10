@@ -93,7 +93,7 @@ class APIEmbedding(Embedding):
 
     def __del__(self):
         """Custom destructor to shutdown thread pool executor at delete"""
-        if self._executor is not None:
+        if getattr(self, "_executor", None) is not None:
             try:
                 self._executor.shutdown(wait=False, cancel_futures=True)
             except Exception:

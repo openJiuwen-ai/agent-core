@@ -37,8 +37,9 @@ def register_parser(file_extensions: List[str]):
 
         for ext in file_extensions:
             normalized_ext = ext.lower()
-            _PARSER_REGISTRY[normalized_ext] = _create_parser_instance
-            logger.info(f"Registered parser {parser_class.__name__} for {normalized_ext}")
+            if normalized_ext not in _PARSER_REGISTRY:
+                _PARSER_REGISTRY[normalized_ext] = _create_parser_instance
+                logger.info(f"Registered parser {parser_class.__name__} for {normalized_ext}")
         return parser_class
 
     return decorator

@@ -1,16 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from openjiuwen.core.common.logging import logger
+import importlib
+from typing import TYPE_CHECKING
 
 # Knowledge base implementations
 # Common data models and configs
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback, TqdmCallback
 from openjiuwen.core.retrieval.common.config import (
     EmbeddingConfig,
-    RerankerConfig,
     IndexConfig,
     KnowledgeBaseConfig,
+    RerankerConfig,
     RetrievalConfig,
     VectorStoreConfig,
 )
@@ -24,25 +25,14 @@ from openjiuwen.core.retrieval.common.triple_memory import TripleMemory
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.embedding.ollama_embedding import OllamaEmbedding
-from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
-from openjiuwen.core.retrieval.embedding.vllm_embedding import VLLMEmbedding
-from openjiuwen.core.retrieval.embedding.utils import parse_base64_embedding
-
-# Reranker related
-from openjiuwen.core.retrieval.reranker.base import Reranker
-from openjiuwen.core.retrieval.reranker.standard_reranker import StandardReranker
-from openjiuwen.core.retrieval.reranker.chat_reranker import ChatReranker
 
 # Indexer related
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
-from openjiuwen.core.retrieval.indexing.indexer.milvus_indexer import MilvusIndexer
 
-# Processor base classes
+# Processor & Chunker classes
 from openjiuwen.core.retrieval.indexing.processor.base import Processor
 from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
-
-# Chunker implementations
 from openjiuwen.core.retrieval.indexing.processor.chunker.chunking import TextChunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.text_preprocessor import (
     PreprocessingPipeline,
@@ -57,31 +47,17 @@ from openjiuwen.core.retrieval.indexing.processor.chunker.text_splitter import (
     TextSplitter,
 )
 from openjiuwen.core.retrieval.indexing.processor.chunker.tokenizer_chunker import TokenizerChunker
-from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
 
 # Extractor implementations
+from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
 from openjiuwen.core.retrieval.indexing.processor.extractor.triple_extractor import TripleExtractor
 
-# Parser implementations
-from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import AutoFileParser
-from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
-from openjiuwen.core.retrieval.indexing.processor.parser.json_parser import JSONParser
-from openjiuwen.core.retrieval.indexing.processor.parser.pdf_parser import PDFParser
-from openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser import TxtMdParser
-from openjiuwen.core.retrieval.indexing.processor.parser.word_parser import WordParser
-from openjiuwen.core.retrieval.indexing.processor.splitter.base import Splitter
-
 # Splitter implementations
+from openjiuwen.core.retrieval.indexing.processor.splitter.base import Splitter
 from openjiuwen.core.retrieval.indexing.processor.splitter.splitter import SentenceSplitter
 
-# Vector field related
-from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import (
-    MilvusAUTO,
-    MilvusFLAT,
-    MilvusHNSW,
-    MilvusIVF,
-    MilvusSCANN,
-)
+# Reranker related
+from openjiuwen.core.retrieval.reranker.base import Reranker
 
 # Retriever related
 from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
@@ -90,43 +66,47 @@ from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
 from openjiuwen.core.retrieval.retriever.hybrid_retriever import HybridRetriever
 from openjiuwen.core.retrieval.retriever.sparse_retriever import SparseRetriever
 from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
-from openjiuwen.core.retrieval.simple_knowledge_base import (
-    SimpleKnowledgeBase,
-    retrieve_multi_kb,
-    retrieve_multi_kb_with_source,
-)
-from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
-from openjiuwen.core.retrieval.graph_knowledge_base import GraphKnowledgeBase
 
 # Utilities
 from openjiuwen.core.retrieval.utils.common import deduplicate
 from openjiuwen.core.retrieval.utils.config_manager import ConfigManager
-from openjiuwen.core.retrieval.utils.exceptions import (
-    DocumentProcessingError,
-    KnowledgeBaseError,
-    KnowledgeBaseIndexError,
-    KnowledgeBaseRetrievalError,
-    RAGException,
-    VectorStoreError,
-)
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 
 # Vector store related
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
-from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
 
-_KNOWLEDGE_BASE_CLASSES = [
-    "KnowledgeBase",
-    "SimpleKnowledgeBase",
-    "GraphKnowledgeBase",
-]
+from .lazy_load import _LAZY_ATTRIBUTES, _LAZY_IMPORT_CACHE, lazy_load
 
-_KNOWLEDGE_BASE_FUNCTIONS = [
-    "retrieve_multi_kb",
-    "retrieve_multi_kb_with_source",
-]
+if TYPE_CHECKING:
+    # Lazy-loaded imports for type checking / IDE hinting
+    from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
+    from openjiuwen.core.foundation.store.vector_fields.milvus_fields import (
+        MilvusAUTO,
+        MilvusFLAT,
+        MilvusHNSW,
+        MilvusIVF,
+        MilvusSCANN,
+    )
+    from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
+    from openjiuwen.core.retrieval.embedding.utils import parse_base64_embedding
+    from openjiuwen.core.retrieval.embedding.vllm_embedding import VLLMEmbedding
+    from openjiuwen.core.retrieval.graph_knowledge_base import GraphKnowledgeBase
+    from openjiuwen.core.retrieval.indexing.indexer.chroma_indexer import ChromaIndexer
+    from openjiuwen.core.retrieval.indexing.indexer.milvus_indexer import MilvusIndexer
+    from openjiuwen.core.retrieval.indexing.processor import parser
+    from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
+    from openjiuwen.core.retrieval.reranker.chat_reranker import ChatReranker
+    from openjiuwen.core.retrieval.reranker.standard_reranker import StandardReranker
+    from openjiuwen.core.retrieval.simple_knowledge_base import (
+        SimpleKnowledgeBase,
+        retrieve_multi_kb,
+        retrieve_multi_kb_with_source,
+    )
+    from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
+    from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
 
-_COMMON_CLASSES = [
+_NON_LAZY_ATTRIBUTES = [
+    # Common classes
     "KnowledgeBaseConfig",
     "RetrievalConfig",
     "IndexConfig",
@@ -143,35 +123,15 @@ _COMMON_CLASSES = [
     "TripleMemory",
     "BaseCallback",
     "TqdmCallback",
-]
-
-_EMBEDDING_CLASSES = [
+    # Embedding / Reranker / Vector Store / Indexer classes
     "Embedding",
     "APIEmbedding",
     "OllamaEmbedding",
-    "OpenAIEmbedding",
-    "VLLMEmbedding",
-]
-
-_RERANKER_CLASSES = [
     "Reranker",
-    "StandardReranker",
-    "ChatReranker",
-]
-
-_VECTOR_STORE_CLASSES = [
     "VectorStore",
-    "MilvusVectorStore",
-]
-
-_INDEXER_CLASSES = [
     "Indexer",
-    "MilvusIndexer",
-]
-
-_PROCESSOR_CLASSES = [
+    # Processor classes
     "Processor",
-    "Parser",
     "Chunker",
     "Extractor",
     "Splitter",
@@ -187,75 +147,32 @@ _PROCESSOR_CLASSES = [
     "TextChunker",
     "CharChunker",
     "TokenizerChunker",
-    "AutoFileParser",
-    "JSONParser",
-    "PDFParser",
-    "TxtMdParser",
-    "WordParser",
     "TripleExtractor",
-]
-
-_RETRIEVER_CLASSES = [
+    # Retriever classes
     "Retriever",
     "VectorRetriever",
     "SparseRetriever",
     "HybridRetriever",
     "GraphRetriever",
     "AgenticRetriever",
-]
-
-_UTILS = [
+    # Utils
     "ConfigManager",
-    "RAGException",
-    "KnowledgeBaseError",
-    "KnowledgeBaseIndexError",
-    "KnowledgeBaseRetrievalError",
-    "DocumentProcessingError",
-    "VectorStoreError",
     "rrf_fusion",
     "deduplicate",
-    "parse_base64_embedding",
 ]
 
-_VECTOR_FIELD_CLASSES = [
-    "MilvusAUTO",
-    "MilvusFLAT",
-    "MilvusHNSW",
-    "MilvusIVF",
-    "MilvusSCANN",
-]
 
-try:
-    from openjiuwen.core.retrieval.indexing.indexer.chroma_indexer import ChromaIndexer
-    from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
-    from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
+def __getattr__(name: str):
+    """
+    Lazy import for heavy dependencies using PEP 562.
+    """
+    if name in _NON_LAZY_ATTRIBUTES:
+        return importlib.import_module("." + name, __name__)
+    attr = _LAZY_IMPORT_CACHE.get(name) or lazy_load(name)
+    if attr is not None:
+        return attr
 
-    _INDEXER_CLASSES.append("ChromaIndexer")
-    _VECTOR_STORE_CLASSES.append("ChromaVectorStore")
-    _VECTOR_FIELD_CLASSES.append("ChromaVectorField")
-except Exception as e:
-    logger.warning("Chroma database is disabled, reason: %r", e)
-
-try:
-    from openjiuwen.core.retrieval.vector_store.pg_store import PGVectorStore
-    from openjiuwen.core.retrieval.indexing.vector_fields.pg_fields import PGVectorField
-
-    _VECTOR_STORE_CLASSES.append("PGVectorStore")
-    _VECTOR_FIELD_CLASSES.append("PGVectorField")
-except Exception as e:
-    logger.warning("PGVector database is disabled, reason: %r", e)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = (
-    _KNOWLEDGE_BASE_CLASSES
-    + _KNOWLEDGE_BASE_FUNCTIONS
-    + _COMMON_CLASSES
-    + _EMBEDDING_CLASSES
-    + _RERANKER_CLASSES
-    + _VECTOR_STORE_CLASSES
-    + _INDEXER_CLASSES
-    + _PROCESSOR_CLASSES
-    + _RETRIEVER_CLASSES
-    + _UTILS
-    + _VECTOR_FIELD_CLASSES
-)
+__all__ = _NON_LAZY_ATTRIBUTES + _LAZY_ATTRIBUTES

@@ -6,7 +6,7 @@ Chroma vector fields test cases
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 
 
 class TestChromaVectorField:

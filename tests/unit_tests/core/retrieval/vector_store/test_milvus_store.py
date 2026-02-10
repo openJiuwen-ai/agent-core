@@ -526,7 +526,7 @@ class TestMilvusVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
     def test_check_vector_field_index_type_mismatch(self, mock_client_class, vector_store_config):
         """Test check_vector_field when index type doesn't match"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusHNSW
+        from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusHNSW
 
         mock_client = MagicMock()
         mock_client.has_collection = MagicMock(return_value=True)
@@ -553,7 +553,7 @@ class TestMilvusVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
     def test_check_vector_field_config_mismatch(self, mock_client_class, vector_store_config):
         """Test check_vector_field when config parameters don't match"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusHNSW
+        from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusHNSW
 
         mock_client = MagicMock()
         mock_client.has_collection = MagicMock(return_value=True)
@@ -581,7 +581,7 @@ class TestMilvusVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
     def test_check_vector_field_success_matching_config(self, mock_client_class, vector_store_config):
         """Test check_vector_field with matching configuration"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusHNSW
+        from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusHNSW
 
         mock_client = MagicMock()
         mock_client.has_collection = MagicMock(return_value=True)
@@ -633,7 +633,7 @@ class TestMilvusVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
     def test_check_vector_field_ignores_ef_search_factor(self, mock_client_class, vector_store_config):
         """Test that check_vector_field ignores efSearchFactor parameter"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusHNSW
+        from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusHNSW
 
         mock_client = MagicMock()
         mock_client.has_collection = MagicMock(return_value=True)

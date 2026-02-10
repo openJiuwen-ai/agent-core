@@ -6,7 +6,7 @@ Milvus vector fields test cases
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import (
+from openjiuwen.core.foundation.store.vector_fields.milvus_fields import (
     MilvusAUTO,
     MilvusFLAT,
     MilvusHNSW,

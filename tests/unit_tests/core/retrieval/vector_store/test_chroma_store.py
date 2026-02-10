@@ -50,7 +50,7 @@ class TestChromaVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.chroma_store.chromadb.PersistentClient")
     def test_check_vector_field_success_matching_config(self, mock_client_class, vector_store_config):
         """Test check_vector_field with matching configuration"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+        from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 
         mock_client = MagicMock()
         mock_collection = MagicMock()
@@ -79,7 +79,7 @@ class TestChromaVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.chroma_store.chromadb.PersistentClient")
     def test_check_vector_field_config_mismatch(self, mock_client_class, vector_store_config):
         """Test check_vector_field when config parameters don't match"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+        from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 
         mock_client = MagicMock()
         mock_collection = MagicMock()
@@ -108,7 +108,7 @@ class TestChromaVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.chroma_store.chromadb.PersistentClient")
     def test_check_vector_field_distance_metric_mismatch(self, mock_client_class):
         """Test check_vector_field when distance metric doesn't match"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+        from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 
         # Store configured with cosine
         vector_store_config = VectorStoreConfig(
@@ -142,7 +142,7 @@ class TestChromaVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.chroma_store.chromadb.PersistentClient")
     def test_check_vector_field_ignores_ef_search_factor(self, mock_client_class, vector_store_config):
         """Test that check_vector_field ignores efSearchFactor parameter"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+        from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 
         mock_client = MagicMock()
         mock_collection = MagicMock()
@@ -172,7 +172,7 @@ class TestChromaVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.chroma_store.chromadb.PersistentClient")
     def test_check_vector_field_empty_hnsw_config(self, mock_client_class, vector_store_config):
         """Test check_vector_field when collection has empty hnsw config"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+        from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 
         mock_client = MagicMock()
         mock_collection = MagicMock()
@@ -195,7 +195,7 @@ class TestChromaVectorStore:
     @patch("openjiuwen.core.retrieval.vector_store.chroma_store.chromadb.PersistentClient")
     def test_check_vector_field_partial_match(self, mock_client_class, vector_store_config):
         """Test check_vector_field with partial matching configs"""
-        from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
+        from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 
         mock_client = MagicMock()
         mock_collection = MagicMock()
