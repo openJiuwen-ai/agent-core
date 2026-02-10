@@ -8,15 +8,6 @@ from typing import Union, List, Any, Dict
 import yaml
 import httpx
 import anyio
-from fastmcp.utilities.openapi.director import RequestDirector
-from fastmcp.utilities.openapi import (
-    HTTPRoute,
-    extract_output_schema_from_responses,
-    format_simple_description,
-    parse_openapi_to_http_routes,
-)
-from fastmcp.server.openapi import OpenAPITool
-from fastmcp.tools.tool import ToolResult
 from jsonschema_path import SchemaPath
 
 from openjiuwen.core.common.exception.errors import build_error
@@ -29,18 +20,20 @@ from openjiuwen.core.common.exception.codes import StatusCode
 
 class ToolManager:
     def __init__(self):
-        self.tools: dict[str, OpenAPITool] = {}
+        self.tools: dict[str, "OpenAPITool"] = {}
 
-    async def get_tool(self, tool_name: str) -> OpenAPITool | None:
+    async def get_tool(self, tool_name: str):
+        from fastmcp.server.openapi import OpenAPITool
         if tool_name not in self.tools.keys():
             return None
         tool = self.tools[tool_name]
         return tool
 
-    async def get_tools(self) -> dict[str, OpenAPITool]:
+    async def get_tools(self):
         return self.tools
 
-    async def call_tool(self, key: str, arguments: dict[str, any]) -> ToolResult:
+    async def call_tool(self, key: str, arguments: dict[str, any]):
+        from fastmcp.tools.tool import ToolResult
         tool = await self.get_tool(key)
         if tool is None:
             return ToolResult(None, None)
@@ -85,7 +78,7 @@ class OpenApiClient(McpClient):
         self._used_names: defaultdict[str, int] = defaultdict(int)
         self._server_path = server_path
 
-    def _generate_tool_name(self, route: HTTPRoute) -> str:
+    def _generate_tool_name(self, route) -> str:
         if route.operation_id:
             name = route.operation_id.split("__")[0]
         else:
@@ -112,11 +105,17 @@ class OpenApiClient(McpClient):
 
     def _create_openapi_tool(
             self,
-            http_route: HTTPRoute,
+            http_route,
             original_name: str,
             http_tags: set[str],
             timout: float,
     ):
+        from fastmcp.utilities.openapi import (
+            extract_output_schema_from_responses,
+            format_simple_description,
+        )
+        from fastmcp.server.openapi import OpenAPITool
+        
         tool_instruction = format_simple_description(
             request_body=http_route.request_body,
             base_description=(http_route.description or
@@ -150,6 +149,9 @@ class OpenApiClient(McpClient):
         self._tool_manager.tools[generated_name] = openapi_tool
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
+        from fastmcp.utilities.openapi.director import RequestDirector
+        from fastmcp.utilities.openapi import parse_openapi_to_http_routes
+        
         files = self._server_path.split(",")
         for file_path in files:
             self.openapi_spec = await load_conf(file_path)
