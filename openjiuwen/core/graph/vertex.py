@@ -253,6 +253,13 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         else:
             await self._session.actor_manager().end_message(self._node_id, ability)
         self._clear_interactive()
+
+        from openjiuwen.core.workflow.components.llm.llm_comp import LLMExecutable
+        if isinstance(self._executable, LLMExecutable) and hasattr(self._executable, "get_stream_output"):
+            result = self._executable.get_stream_output()
+            if result is not None:
+                self._session.state().set_outputs(result)
+
         graph_logger.debug(
             "Node stream completed",
             event_type=LogEventType.GRAPH_NODE_STREAM_END,
