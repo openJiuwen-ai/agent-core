@@ -95,8 +95,9 @@ class ShellOperation(BaseShellOperation):
                                             data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
 
             exec_env = OperationUtils.prepare_environment(environment)
+            wrap_command = self._wrap_command_with_buffering(command)
             proc = await asyncio.create_subprocess_shell(
-                self._wrap_command_with_buffering(command),
+                wrap_command,
                 cwd=str(actual_cwd),
                 env=exec_env,
                 stdout=asyncio.subprocess.PIPE,
@@ -132,7 +133,8 @@ class ShellOperation(BaseShellOperation):
                 method_name=method_name,
                 method_params=method_params,
                 method_result=self._safe_model_dump(success_result),
-                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000,
+                metadata={"wrap_command": wrap_command}
             ))
             return success_result
 
@@ -212,8 +214,9 @@ class ShellOperation(BaseShellOperation):
                 return
 
             exec_env = OperationUtils.prepare_environment(environment)
+            wrap_command = self._wrap_command_with_buffering(command)
             process = await asyncio.create_subprocess_shell(
-                self._wrap_command_with_buffering(command),
+                wrap_command,
                 cwd=str(actual_cwd),
                 env=exec_env,
                 stdout=asyncio.subprocess.PIPE,
@@ -265,7 +268,8 @@ class ShellOperation(BaseShellOperation):
                         method_name=method_name,
                         method_params=method_params,
                         method_result=self._safe_model_dump(exit_result),
-                        method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+                        method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000,
+                        metadata={"wrap_command": wrap_command}
                     ))
                     return exit_result
 

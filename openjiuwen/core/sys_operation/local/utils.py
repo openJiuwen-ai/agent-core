@@ -171,7 +171,7 @@ class AsyncProcessHandler:
         try:
             start_time = asyncio.get_event_loop().time()
             total_num = 0
-            while self._process.returncode is None or not self._queue.empty():
+            while any(not task.done() for task in tasks) or not self._queue.empty():
                 if self._overall_timeout > 0:
                     elapsed_time = asyncio.get_event_loop().time() - start_time
                     if elapsed_time >= self._overall_timeout:
@@ -187,8 +187,8 @@ class AsyncProcessHandler:
                     sys_operation_logger.debug("Success to get stream queue item",
                                                event_type=LogEventType.SYS_OP_STREAM,
                                                metadata={"total_num": total_num,
-                                                         "has_returncode": self._process.returncode is not None,
-                                                         "queue_empty": self._queue.empty()})
+                                                         "returncode": self._process.returncode,
+                                                         "queue_size": self._queue.qsize()})
                 except asyncio.TimeoutError:
                     sys_operation_logger.debug("Get stream queue time out",
                                                event_type=LogEventType.SYS_OP_STREAM,
@@ -211,14 +211,21 @@ class AsyncProcessHandler:
             )
 
         # Cancel any unfinished reader tasks to prevent orphaned coroutines
+        canceled_num = 0
         for task in tasks:
             if not task.done():
                 task.cancel()
+                canceled_num += 1
 
+        sys_operation_logger.info(f"Finished canceling reader tasks",
+                                  event_type=LogEventType.SYS_OP_STREAM,
+                                  metadata={"total_tasks": len(tasks),
+                                            "canceled_tasks": canceled_num,
+                                            "done_tasks": len(tasks) - canceled_num})
         results = await asyncio.gather(*tasks, return_exceptions=True)
         # Emit ERROR events for any reader task exceptions
         for result in results:
-            if isinstance(result, Exception):
+            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 yield StreamEvent(
                     type=StreamEventType.ERROR,
                     data=f"reader task error: {str(result)}"
@@ -256,8 +263,8 @@ class AsyncProcessHandler:
                     sys_operation_logger.info("Receive stream eof",
                                               event_type=LogEventType.SYS_OP_STREAM,
                                               metadata={"total_num": total_num,
-                                                        "has_returncode": self._process.returncode is not None,
-                                                        "queue_empty": self._queue.empty()})
+                                                        "returncode": self._process.returncode,
+                                                        "queue_size": self._queue.qsize()})
                     break
                 data = chunk.decode(self._encoding, errors="replace")
                 event = StreamEvent(type=stream_type, data=data)
@@ -266,8 +273,8 @@ class AsyncProcessHandler:
                 sys_operation_logger.debug("Success to put stream queue item",
                                            event_type=LogEventType.SYS_OP_STREAM,
                                            metadata={"total_num": total_num,
-                                                     "has_returncode": self._process.returncode is not None,
-                                                     "queue_empty": self._queue.empty()})
+                                                     "returncode": self._process.returncode,
+                                                     "queue_size": self._queue.qsize()})
         except Exception as e:
             sys_operation_logger.error("Stream read error",
                                        event_type=LogEventType.SYS_OP_ERROR,
