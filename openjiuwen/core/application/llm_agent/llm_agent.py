@@ -181,7 +181,7 @@ class LLMAgent(ControllerAgent):
             # When external session is provided, agent's tools need to be registered
             if self._tools:
                 tools_to_add = [(tool.name, tool) for tool in self._tools]
-                Runner.resource_mgr.add_tools(tools_to_add)
+                Runner.resource_mgr.add_tools(tool=tools_to_add, tag=self.agent_config.id)
             # Sync agent's workflows to external session
             # When external session is provided, agent's workflows need to be registered
 

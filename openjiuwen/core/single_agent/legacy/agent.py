@@ -281,7 +281,7 @@ class BaseAgent(ABC):
                 self._tools.append(tool)
             from openjiuwen.core.runner import Runner
             # 4. Sync to session (auto register)
-            Runner.resource_mgr.add_tool([tool])
+            Runner.resource_mgr.add_tool(tool=[tool], tag=self.agent_config.id)
 
     def add_workflows(
             self,
@@ -395,7 +395,8 @@ class BaseAgent(ABC):
                 from openjiuwen.core.runner import Runner
                 workflow_card_copy = copy.deepcopy(workflow_card)
                 workflow_card_copy.id = workflow_key
-                Runner.resource_mgr.add_workflow(workflow_card_copy, to_register)
+                Runner.resource_mgr.add_workflow(card=workflow_card_copy, workflow=to_register,
+                                                 tag=self.agent_config.id)
                 logger.info(f"Successfully added workflow {'provider' if is_provider else 'instance'} {workflow_key}")
             except Exception as e:
                 logger.error(f"Failed to add workflow to global resource_mgr: {e}")
@@ -646,7 +647,7 @@ class ControllerAgent(BaseAgent):
             from openjiuwen.core.runner import Runner
             if self._tools:
                 tools_to_add = [(tool.card.name, tool) for tool in self._tools]
-                Runner.resource_mgr.add_tool(tools_to_add)
+                Runner.resource_mgr.add_tool(tool=tools_to_add, tag=self.agent_config.id)
             # Sync agent's workflows to external session
             # When external session is provided, agent's workflows need to be registered
         # Store final result for send_to_agent

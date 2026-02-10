@@ -116,7 +116,7 @@ class LegacyReActAgent(BaseAgent):
             msg_dict = msg.model_dump(exclude_none=True)
             messages.append(msg_dict)
         from openjiuwen.core.runner import Runner
-        tools = await Runner.resource_mgr.get_tool_infos()
+        tools = await Runner.resource_mgr.get_tool_infos(tag=self.agent_config.id)
         llm = self._get_llm()
         llm_output = await llm.invoke(
             messages,
@@ -139,7 +139,7 @@ class LegacyReActAgent(BaseAgent):
         except (json.JSONDecodeError, AttributeError):
             tool_args = {}
         from openjiuwen.core.runner import Runner
-        tool = Runner.resource_mgr.get_tool(tool_id=tool_name)
+        tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=self.agent_config.id)
         if not tool:
             raise ValueError(f"Tool not found: {tool_name}")
 
@@ -219,7 +219,7 @@ class LegacyReActAgent(BaseAgent):
             from openjiuwen.core.runner import Runner
             if hasattr(self, '_tools') and self._tools:
                 tools_to_add = [(tool.card.name, tool) for tool in self._tools]
-                Runner.resource_mgr.add_tools(tools_to_add)
+                Runner.resource_mgr.add_tools(tool=tools_to_add, tag=self.agent_config.id)
         await self.context_engine.create_context(session=agent_session)
 
         final_result_holder = {"result": None}
