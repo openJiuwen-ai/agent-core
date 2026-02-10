@@ -12,9 +12,10 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.llm import ModelConfig
-from openjiuwen.core.workflow import ComponentAbility, End, WorkflowCard
+from openjiuwen.core.workflow import ComponentAbility, End, WorkflowCard, WorkflowComponent
 from openjiuwen.core.workflow import Start
-from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
+from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine, ModelContext
+from openjiuwen.core.graph.executable import Input, Output
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, SystemMessage, UserMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -111,7 +112,10 @@ class FakeModel(Model):
     async def stream(self, messages: Union[List[BaseMessage], List[Dict], str],
                       tools: Union[List[ToolInfo], List[Dict]] = None, **kwargs: Any) -> AsyncIterator[
         AssistantMessageChunk]:
-        yield AssistantMessageChunk(role="assistant", content="mocked response")
+        # Simulate streaming with multiple chunks
+        chunks = ["Hello", " ", "world", "!", " This", " is", " a", " streamed", " response."]
+        for chunk_content in chunks:
+            yield AssistantMessageChunk(role="assistant", content=chunk_content)
 
 
 @patch(
@@ -835,4 +839,127 @@ class TestLLMModelInputs:
         model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
         assert len(model_inputs) == 1
         assert isinstance(model_inputs[0], UserMessage)
+
+
+class StreamConsumerComponent(WorkflowComponent):
+    """Custom component that consumes stream output from LLM component"""
+    
+    def __init__(self, component_id: str = "stream_consumer"):
+        super().__init__()
+        self.component_id = component_id
+    
+    async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        """Consume stream output from LLM component"""
+        collected_chunks = []
+        stream_input = inputs.get("result")
+        
+        if stream_input and hasattr(stream_input, '__aiter__'):
+            async for chunk in stream_input:
+                if isinstance(chunk, dict):
+                    chunk_content = chunk.get("result", "")
+                    if chunk_content:
+                        collected_chunks.append(chunk_content)
+                else:
+                    collected_chunks.append(str(chunk))
+        
+        # Store collected chunks count in component output
+        return {
+            "chunks_count": len(collected_chunks),
+            "total_length": sum(len(str(c)) for c in collected_chunks)
+        }
+
+
+@patch(
+    "openjiuwen.core.workflow.components.llm.llm_comp.Model",
+    autospec=True,
+)
+class TestLLMStreamCacheWorkflow:
+    """Test workflow with start-llm-custom_component-end where custom component consumes stream"""
+    
+    @pytest.mark.asyncio
+    async def test_workflow_with_stream_consumer(
+        self,
+        mock_model,
+        fake_model_config,
+        fake_model_client_config
+    ):
+        """Test workflow: start -> llm (stream) -> stream_consumer (collect) -> end
+        
+        The stream_consumer component consumes the stream output from LLM,
+        and the end component should be able to reference the LLM's final result
+        (when cache_stream=True, it will be stored in global state).
+        """
+        session = create_workflow_session()
+        
+        # Mock LLM
+        fake_llm = FakeModel(api_key="fake-key", api_base="http://fake.api.com")
+        mock_model.return_value = fake_llm
+        
+        # Build workflow
+        flow = Workflow()
+        
+        # Start component
+        start_component = Start()
+        flow.set_start_comp("start", start_component, inputs_schema={"query": "${query}"})
+        
+        # LLM component with cache_stream enabled
+        llm_config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[{"role": "user", "content": "Say: {query}"}],
+            response_format={"type": "text"},
+            output_config={"result": {"type": "string", "required": True}},
+            cache_stream=True,  # Enable stream caching
+        )
+        llm_comp = LLMComponent(llm_config)
+        flow.add_workflow_comp(
+            "llm",
+            llm_comp,
+            inputs_schema={"query": "${start.query}"},
+            comp_ability=[ComponentAbility.STREAM],
+            wait_for_all=True
+        )
+        
+        # Custom stream consumer component
+        stream_consumer = StreamConsumerComponent("stream_consumer")
+        flow.add_workflow_comp(
+            "stream_consumer",
+            stream_consumer,
+            stream_inputs_schema={"result": "${llm.result}"},
+            comp_ability=[ComponentAbility.COLLECT],
+            wait_for_all=True
+        )
+        
+        # End component that references LLM output
+        end_component = End({"responseTemplate": "LLM said: {{llm_result}}"})
+        flow.set_end_comp(
+            "end",
+            end_component,
+            inputs_schema={"llm_result": "${llm.result}"}
+        )
+        
+        # Add connections
+        flow.add_connection("start", "llm")
+        flow.add_stream_connection("llm", "stream_consumer")
+        flow.add_connection("stream_consumer", "end")
+
+        # Execute workflow
+        result = await flow.invoke(
+            inputs={"query": "Hello"},
+            session=session
+        )
+        
+        # Verify results
+        assert result is not None
+        # The end component should be able to access llm.result from IO state
+        # Verify that the cached result contains the complete mock LLM output
+        assert hasattr(result, 'result')
+        result_dict = result.result
+        assert "response" in result_dict
+        output_content = result_dict.get("response", "")
+        # Verify that the output contains the complete streamed content
+        assert "Hello" in output_content
+        assert "world" in output_content
+        # The complete mock output should be: "Hello world! This is a streamed response."
+        assert "Hello world! This is a streamed response." in output_content
 
