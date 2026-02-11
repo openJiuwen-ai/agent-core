@@ -73,15 +73,213 @@ async def main():
     logger.info("=" * 60)
 
     # =========================================================================
+    # STEP 0.5: Setup .env file if needed
+    # =========================================================================
+    context_evolver_root = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "openjiuwen", "extensions", "context_evolver"
+    )
+    env_path = os.path.join(context_evolver_root, ".env")
+    env_example_path = os.path.join(context_evolver_root, ".env.example")
+
+    # Check if running in interactive mode
+    is_interactive = sys.stdin.isatty()
+
+    # Check if .env exists
+    env_exists = os.path.exists(env_path)
+    should_recreate = False
+
+    if env_exists and is_interactive:
+        # .env exists - ask user if they want to reconfigure
+        logger.info("\n" + "=" * 60)
+        logger.info(f"Found existing .env file at: {env_path}")
+        logger.info("=" * 60)
+
+        # Load and display current configuration
+        try:
+            with open(env_path, 'r', encoding='utf-8') as f:
+                current_config = {}
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, value = line.split("=", 1)
+                        current_config[key.strip()] = value.strip()
+
+            logger.info("\nCurrent configuration:")
+            api_key_value = current_config.get('API_KEY', 'Not set')
+            api_key_display = f"{api_key_value[:20]}..." if len(api_key_value) > 20 else api_key_value
+            logger.info(f"  API_KEY: {api_key_display}")
+            logger.info(f"  API_BASE: {current_config.get('API_BASE', 'Not set')}")
+            logger.info(f"  MODEL_NAME: {current_config.get('MODEL_NAME', 'Not set')}")
+            logger.info(f"  EMBEDDING_MODEL: {current_config.get('EMBEDDING_MODEL', 'Not set')}")
+            logger.info(f"  MODEL_PROVIDER: {current_config.get('MODEL_PROVIDER', 'Not set')}")
+        except (OSError, UnicodeDecodeError) as e:
+            current_config = {}
+            logger.info(f"\n(Unable to read current configuration: {e})")
+
+        response = input("\nDo you want to reconfigure? (y/N): ").strip().lower()
+        should_recreate = response in ['y', 'yes']
+
+        if not should_recreate:
+            logger.info("Using existing configuration.")
+    elif not env_exists:
+        logger.info("\n[Step 0.5] .env file not found. Creating one...")
+        should_recreate = True
+
+    if should_recreate:
+        # Read .env.example as template
+        if os.path.exists(env_example_path):
+            with open(env_example_path, 'r', encoding='utf-8') as f:
+                env_template = f.read()
+        else:
+            # Fallback template if .env.example doesn't exist
+            env_template = """# API Configuration
+API_KEY=your-api-key-here
+API_BASE=https://api.openai.com/v1
+
+# Model Configuration  #gpt-5.2 gpt-4
+MODEL_NAME=gpt-5.2
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSIONS=2560
+MODEL_PROVIDER=OpenAI
+
+# Optional: LLM Parameters
+LLM_TEMPERATURE=0.7
+LLM_SEED=42
+LLM_SSL_VERIFY=false
+"""
+
+        if is_interactive:
+            # Prompt user for configuration
+            logger.info("\n" + "=" * 60)
+            logger.info("Configuration setup: Please provide your settings")
+            logger.info("=" * 60)
+
+            # Load current values if updating
+            default_values = {}
+            if env_exists:
+                try:
+                    with open(env_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith("#") and "=" in line:
+                                key, value = line.split("=", 1)
+                                default_values[key.strip()] = value.strip()
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.warning(f"Unable to load existing config values: {e}")
+
+            # Get API_KEY
+            current_api_key = default_values.get('API_KEY', '')
+            is_valid_key = (current_api_key and
+                           current_api_key != 'your-api-key-here' and
+                           not current_api_key.startswith('sk-proj-xxx'))
+
+            if is_valid_key:
+                api_key_display = (f"{current_api_key[:20]}..."
+                                  if len(current_api_key) > 20 else current_api_key)
+                prompt = f"\nAPI_KEY [current: {api_key_display}] (press Enter to keep): "
+                api_key = input(prompt).strip()
+                if not api_key:
+                    api_key = current_api_key
+            else:
+                api_key = input("\nAPI_KEY (required): ").strip()
+
+            if not api_key:
+                logger.error("ERROR: API_KEY is required!")
+                return
+
+            # Prompt for optional parameters with defaults
+            logger.info("\nOptional parameters (press Enter to use defaults):")
+
+            default_api_base = default_values.get('API_BASE', 'https://api.openai.com/v1')
+            api_base = input(f"API_BASE [{default_api_base}]: ").strip() or default_api_base
+
+            default_model = default_values.get('MODEL_NAME', 'gpt-5.2')
+            model_name = input(f"MODEL_NAME [{default_model}]: ").strip() or default_model
+
+            default_embed = default_values.get('EMBEDDING_MODEL', 'text-embedding-3-small')
+            embedding_model = input(f"EMBEDDING_MODEL [{default_embed}]: ").strip() or default_embed
+
+            default_dims = default_values.get('EMBEDDING_DIMENSIONS', '2560')
+            embedding_dims = input(f"EMBEDDING_DIMENSIONS [{default_dims}]: ").strip() or default_dims
+
+            default_provider = default_values.get('MODEL_PROVIDER', 'OpenAI')
+            model_provider = input(f"MODEL_PROVIDER [{default_provider}]: ").strip() or default_provider
+
+            default_temp = default_values.get('LLM_TEMPERATURE', '0.7')
+            llm_temp = input(f"LLM_TEMPERATURE [{default_temp}]: ").strip() or default_temp
+
+            default_seed = default_values.get('LLM_SEED', '42')
+            llm_seed = input(f"LLM_SEED [{default_seed}]: ").strip() or default_seed
+
+            default_ssl = default_values.get('LLM_SSL_VERIFY', 'false')
+            llm_ssl_verify = input(f"LLM_SSL_VERIFY [{default_ssl}]: ").strip() or default_ssl
+        else:
+            # Non-interactive mode: read from stdin or environment
+            logger.info("  Running in non-interactive mode.")
+            logger.info("  Reading API_KEY from environment or stdin...")
+
+            # Try to read API_KEY from environment first
+            api_key = os.environ.get("API_KEY", "").strip()
+
+            # If not in environment, try to read from stdin
+            if not api_key:
+                try:
+                    api_key = sys.stdin.readline().strip()
+                except (OSError, EOFError) as e:
+                    logger.warning(f"Unable to read API_KEY from stdin: {e}")
+
+            if not api_key:
+                logger.error("ERROR: API_KEY is required!")
+                logger.error("Please provide API_KEY via environment variable or stdin")
+                return
+
+            # Use defaults for all other parameters
+            api_base = os.environ.get("API_BASE", "https://api.openai.com/v1")
+            model_name = os.environ.get("MODEL_NAME", "gpt-5.2")
+            embedding_model = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+            embedding_dims = os.environ.get("EMBEDDING_DIMENSIONS", "2560")
+            model_provider = os.environ.get("MODEL_PROVIDER", "OpenAI")
+            llm_temp = os.environ.get("LLM_TEMPERATURE", "0.7")
+            llm_seed = os.environ.get("LLM_SEED", "42")
+            llm_ssl_verify = os.environ.get("LLM_SSL_VERIFY", "false")
+
+        # Create .env content
+        env_content = f"""# API Configuration
+API_KEY={api_key}
+API_BASE={api_base}
+
+# Model Configuration  #gpt-5.2 gpt-4
+MODEL_NAME={model_name}
+EMBEDDING_MODEL={embedding_model}
+EMBEDDING_DIMENSIONS={embedding_dims}
+MODEL_PROVIDER={model_provider}
+
+# Optional: LLM Parameters
+LLM_TEMPERATURE={llm_temp}
+LLM_SEED={llm_seed}
+LLM_SSL_VERIFY={llm_ssl_verify}
+"""
+
+        # Write .env file
+        with open(env_path, 'w', encoding='utf-8') as f:
+            f.write(env_content)
+
+        logger.info(f"\n✓ .env file {'updated' if env_exists else 'created'} at: {env_path}")
+        logger.info("  You can edit this file later to update configuration.")
+
+        # Reload config to pick up new .env
+        app_config.reload()
+
+    # =========================================================================
     # STEP 1: Check Configuration
     # =========================================================================
     logger.info("\n[Step 1] Checking configuration...")
 
     api_key = app_config.get("API_KEY")
-    if not api_key:
-        logger.error("ERROR: API_KEY not found in config.yaml")
-        logger.error("Please add your OpenAI API key to config.yaml:")
-        logger.error('  API_KEY: "your-api-key-here"')
+    if not api_key or api_key == "your-api-key-here" or api_key.startswith("sk-proj-xxx"):
+        logger.error("ERROR: Valid API_KEY not found in .env file")
+        logger.error(f"Please edit {env_path} and add your OpenAI API key")
         return
 
     api_base = app_config.get("API_BASE", "https://api.openai.com/v1")
