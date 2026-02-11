@@ -181,37 +181,12 @@ async def test_delete_object_error(client, mock_s3_client, caplog):
 
 
 @pytest.mark.asyncio
-async def er(client, mock_s3_client):
+async def test_delete_object_success(client, mock_s3_client):
     await client.delete_object("bucket", "obj")
 
     mock_s3_client.delete_object.assert_awaited_once_with(
         Bucket="bucket",
         Key="obj",
-    )
-
-
-@pytest.mark.asyncio
-async def test_delete_object_error(client, mock_s3_client, caplog):
-    mock_s3_client.delete_object.side_effect = ClientError(
-        {"Error": {"Code": "Error", "Message": "delete failed"}},
-        "DeleteObject",
-    )
-
-    with caplog.at_level("ERROR"):
-        await client.delete_object(
-            bucket_name="bucket",
-            object_name="obj",
-        )
-
-    # delete was attempted
-    mock_s3_client.delete_object.assert_awaited_once_with(
-        Bucket="bucket",
-        Key="obj",
-    )
-
-    # error was logged
-    assert any(
-        'Delete file "obj" failed' in record.message for record in caplog.records
     )
 
 
