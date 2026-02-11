@@ -766,3 +766,191 @@ flowchart TB
 	node_2 --> node_3
 
 ```
+
+## class openjiuwen.core.workflow.Session
+
+```python
+class openjiuwen.core.workflow.Session(parent: "AgentSession" = None, session_id: str = None, envs: dict[str, Any] = None)
+```
+
+工作流执行的核心运行时会话，实现了工作流场景下的会话管理。
+
+**参数**：
+
+- **parent**(AgentSession, 可选)：Agent的Session，默认值：`None`。
+- **session_id**(str, 可选)：会话唯一标识。默认值：`None`，未提供时自动生成UUID。
+- **envs**(dict[str, Any], 可选)：工作流执行过程中使用的环境变量，默认值：`None`。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> 
+>>> session = Session(session_id="123")
+>>> 
+```
+
+### get_callback_manager
+
+```python
+get_callback_manager(self) -> CallbackManager
+```
+
+获取本次工作流执行的回调函数管理器。
+
+**返回**：
+
+**CallbackManager**：当前工作流执行的回调函数管理器。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> 
+>>> session = Session()
+>>> 
+>>> callback_manager = session.get_callback_manager()
+```
+
+### get_session_id
+
+```python
+get_session_id(self) -> str
+```
+
+获取本次工作流执行的唯一会话标识。
+
+**返回**：
+
+**str**：当前工作流的唯一会话标识。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> 
+>>> session = Session(session_id="123")
+>>> 
+>>> print(f"session id is: {session.get_session_id()}")
+session id is: 123
+```
+
+### get_envs
+
+```python
+get_envs(self)
+```
+
+获取本次工作流执行配置的环境变量。
+
+**返回**：
+
+**dict[str, Any]**：为本次工作流执行配置的环境变量。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.session import WORKFLOW_EXECUTE_TIMEOUT
+>>>
+>>> session = Session(envs={WORKFLOW_EXECUTE_TIMEOUT: 100})
+>>> 
+>>> print(f"envs is: {session.get_envs()}")
+envs is: {'_execute_timeout': 100}
+```
+
+### get_parent
+
+```python
+get_parent(self)
+```
+
+获取本工作流执行时所属的Agent的Session。
+
+**返回**：
+
+**AgentSession**：当前工作流执行时所属的Agent的Session。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.single_agent import Session as AgentSession
+>>> 
+>>> session = Session(parent=AgentSession())
+>>> 
+>>> agent_session = session.get_parent()
+```
+
+### set_workflow_card
+
+```python
+set_workflow_card(self, card)
+```
+
+设置本次会话的工作流卡片信息。
+
+**参数**：
+
+- **card**(WorkflowCard)：工作流卡片信息。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.workflow import Session, WorkflowCard
+>>> 
+>>> session = Session()
+>>> session.set_workflow_card(WorkflowCard(id="workflow_id"))
+```
+
+### get_workflow_card
+
+```python
+get_workflow_card(self)
+```
+
+获取本次会话的工作流卡片信息。
+
+**返回**：
+
+**WorkflowCard**：当前会话的工作流卡片信息。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.workflow import Session, WorkflowCard
+>>> 
+>>> session = Session()
+>>> session.set_workflow_card(WorkflowCard(id="workflow_id"))
+>>> print(session.get_workflow_card())
+id='workflow_id' name='' description='' version='' input_params=None
+```
+
+## function create_workflow_session
+
+```python
+create_workflow_session(parent: "AgentSession" = None, session_id: str = None, envs: dict[str, Any] = None) -> Session
+```
+
+创建工作流执行所需的会话。
+
+**参数**：
+
+- **parent**(AgentSession, 可选)：Agent的Session，默认值：`None`。
+- **session_id**(str, 可选)：会话唯一标识。默认值：`None`，未提供时自动生成 UUID。
+- **envs**(dict[str, Any], 可选)：工作流执行过程中使用的环境变量，默认值：`None`。
+
+**返回**：
+
+**Session**：工作流执行所需的会话。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.workflow import create_workflow_session
+>>> 
+>>> session = create_workflow_session(session_id="123")
+>>> 
+>>> print(f"session id is: {session.get_session_id()}")
+session id is: 123
+```

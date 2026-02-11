@@ -360,6 +360,22 @@ Get session ID.
 
 **str**, session ID.
 
+### get_env
+
+```python
+get_env(self, key) -> Optional[Any]
+```
+
+Retrieve the value of an environment variable configured for the current Agent execution.
+
+**Parameters:**
+
+- **key** (str): The key of the environment variable.
+
+**Returns:**
+
+**Optional[Any]**, The value of the environment variable configured for this Agent execution.
+
 ### get_envs() -> dict
 
 Get environment variables.
@@ -392,6 +408,40 @@ Get associated Agent description.
 
 **str**, Agent's description.
 
+### update_state
+
+```python
+update_state(self, data: dict)
+```
+
+Update the state during Agent execution. This method updates the current Agent's state data: new fields will be added if they do not exist, and updates take effect immediately.
+
+**Parameters:**
+
+- **data**(dict): A dictionary of key–value pairs to add or update. If data is None or {}, no update is performed.
+
+
+### get_state
+
+```python
+get_state(self, key: Union[str, list, dict] = None) -> Any
+```
+
+Retrieve state information during Agent execution. This method is used to query the current Agent’s state.
+
+**Parameters:**
+
+- **key** (Union[str, list, dict], optional): The key used to query values from the state. Defaults to `None`, which means returning all state information. Multiple query modes are supported based on the type of `key`:
+  - If `key` is of type `str`, it represents a path to a value in the state. Nested paths are supported, for example `"user_inputs.query"`.
+  - If `key` is of type `dict` or `list`, it is used to retrieve multiple state values. The `dict` or `list` may contain multiple variables wrapped in `"${}"`, where each variable represents a path in the state.
+
+**Returns:**
+
+**Any**, The resolved state value. The return value depends on the type of `key`:
+
+- If `key` is a `str`, the value at the specified path is returned. If the path does not exist, `None` is returned.
+- If `key` is a `dict` or `list`, all variables wrapped in `"${}"` within the input `dict` or `list` are replaced with the values from their corresponding state paths. If a path does not exist, it is replaced with `None`. The final result after all substitutions is returned.
+
 ### async write_stream(data: Union[dict, OutputSchema])
 
 Write streaming output data.
@@ -415,6 +465,10 @@ Get streaming output iterator.
 **Returns:**
 
 **AsyncIterator[Any]**, async iterator.
+
+### async pre_run()
+
+Pre-execution processing. Creates a checkpoint before execution starts.
 
 ### async post_run()
 

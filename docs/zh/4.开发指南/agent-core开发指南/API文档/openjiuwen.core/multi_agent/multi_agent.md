@@ -3,7 +3,7 @@
 ## class openjiuwen.core.multi_agent.Session
 
 ```python
-class openjiuwen.core.multi_agent.Sesssion(session_id: str = None, envs: dict[str, Any] = None)
+class openjiuwen.core.multi_agent.Session(session_id: str = None, envs: dict[str, Any] = None)
 ```
 
 `AgentGroup`执行的核心运行时会话，实现了`AgentGroup`场景下的会话管理。

@@ -19,7 +19,7 @@ class SubWorkflowComponent(sub_workflow: Workflow)
 >>> import asyncio
 >>> 
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session.node import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> 
 >>> from openjiuwen.core.workflow import Input, Output, SubWorkflowComponent, WorkflowCard, WorkflowComponent, Start, \
 ...     Workflow, End, create_workflow_session

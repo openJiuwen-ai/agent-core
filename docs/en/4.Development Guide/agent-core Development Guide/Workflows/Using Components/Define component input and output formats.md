@@ -77,8 +77,9 @@ schema is a structural description of component inputs and outputs:
 - If connected to a succeeding component via a standard connection, the return value `invoke_value` of component a's invoke method is formatted as `invoke_output` via outputs_schema. The succeeding component b retrieves component a's return value via `${a.invoke_output}`:
   
   ```python
-  from openjiuwen.core.workflow import WorkflowComponent, Session, Workflow
-  from openjiuwen.core.context_engine.base import Context
+  from openjiuwen.core.workflow import WorkflowComponent, Workflow
+  from openjiuwen.core.workflow.components import Session
+  from openjiuwen.core.context_engine import ModelContext
   from openjiuwen.core.workflow.components.component import Input, Output
   from openjiuwen.core.workflow.workflow_config import ComponentAbility
 
@@ -87,7 +88,7 @@ schema is a structural description of component inputs and outputs:
           super().__init__()
           self.node_id = node_id
 
-      async def invoke(self, inputs: Input, session: Session, context: Context) -> Output:
+      async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
           if inputs and "value" in inputs:
               return {"value": inputs["value"] * 2}  # The actual field name returned by the component is "value"
           return {"value": 0}  # The actual field name returned by the component is "value"
@@ -107,9 +108,10 @@ schema is a structural description of component inputs and outputs:
   from typing import AsyncIterator
 
   from openjiuwen.core.common.logging import logger
-  from openjiuwen.core.workflow import WorkflowComponent, Session, Workflow
-  from openjiuwen.core.context_engine.base import Context
-  from openjiuwen.core.workflow.components.component import Input, Output
+  from openjiuwen.core.workflow import WorkflowComponent, Workflow
+  from openjiuwen.core.workflow.components import Session
+  from openjiuwen.core.context_engine import ModelContext
+  from openjiuwen.core.workflow import Input, Output
   from openjiuwen.core.workflow.workflow_config import ComponentAbility
 
   class StreamCompNode(WorkflowComponent):
@@ -117,7 +119,7 @@ schema is a structural description of component inputs and outputs:
           super().__init__()
           self.node_id = node_id
 
-      async def stream(self, inputs: Input, session: Session, context: Context) -> AsyncIterator[Output]:
+      async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
           if inputs and "value" in inputs:
               # Generate two streaming data frames
               for i in range(1, 3):
@@ -129,7 +131,7 @@ schema is a structural description of component inputs and outputs:
           super().__init__()
           self.node_id = node_id
 
-      async def transform(self, inputs: Input, session: Session, context: Context) -> AsyncIterator[Output]:
+      async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
           try:
               value_generator = inputs.get("value")
               async for value in value_generator:
@@ -154,9 +156,10 @@ schema is a structural description of component inputs and outputs:
   from typing import AsyncIterator
 
   from openjiuwen.core.common.logging import logger
-  from openjiuwen.core.workflow import WorkflowComponent, Session, Workflow
-  from openjiuwen.core.context_engine.base import Context
-  from openjiuwen.core.workflow.components.component import Input, Output
+  from openjiuwen.core.workflow import WorkflowComponent, Workflow
+  from openjiuwen.core.workflow.components import Session
+  from openjiuwen.core.context_engine import ModelContext
+  from openjiuwen.core.workflow import Input, Output
   from openjiuwen.core.workflow.workflow_config import ComponentAbility
 
   # Component that implements invoke capability, used for batch processing
@@ -165,7 +168,7 @@ schema is a structural description of component inputs and outputs:
           super().__init__()
           self.node_id = node_id
 
-      async def invoke(self, inputs: Input, session: Session, context: Context) -> Output:
+      async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
           if inputs and "value" in inputs:
               # Simple implementation: double the input value
               return {"value": inputs["value"] * 2}
@@ -178,7 +181,7 @@ schema is a structural description of component inputs and outputs:
           super().__init__()
           self.node_id = node_id
 
-      async def stream(self, inputs: Input, session: Session, context: Context) -> AsyncIterator[Output]:
+      async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
           if inputs and "value" in inputs:
               # Generate two streaming data frames
               for i in range(1, 3):
@@ -191,7 +194,7 @@ schema is a structural description of component inputs and outputs:
           super().__init__()
           self.node_id = node_id
 
-      async def transform(self, inputs: Input, session: Session, context: Context) -> AsyncIterator[Output]:
+      async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
           try:
               value_generator = inputs.get("value")
               async for value in value_generator:

@@ -766,3 +766,191 @@ flowchart TB
 	node_2 --> node_3
 
 ```
+
+## class openjiuwen.core.workflow.Session
+
+```python
+class openjiuwen.core.workflow.Session(parent: "AgentSession" = None, session_id: str = None, envs: dict[str, Any] = None)
+```
+
+The core runtime session for workflow execution. This class provides session management for workflow execution scenarios.
+
+**Parameters:**
+
+- **parent**(AgentSession, optional): The session of the parent Agent associated with this workflow execution. Default: `None`.
+- **session_id**(str, optional): The unique identifier of the session. Default: `None`. If not provided, a UUID will be automatically generated.
+- **envs**(dict[str, Any], optional): Environment variables used during workflow execution. Default: `None`.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> 
+>>> session = Session(session_id="123")
+>>> 
+```
+
+### get_callback_manager
+
+```python
+get_callback_manager(self) -> CallbackManager
+```
+
+Returns the callback manager for the current workflow execution.
+
+**Returns:**
+
+**CallbackManager**: The callback manager associated with the current workflow execution.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> 
+>>> session = Session()
+>>> 
+>>> callback_manager = session.get_callback_manager()
+```
+
+### get_session_id
+
+```python
+get_session_id(self) -> str
+```
+
+Returns the unique session identifier for the current workflow execution.
+
+**Returns:**
+
+**str**: The unique session identifier of the current workflow.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> 
+>>> session = Session(session_id="123")
+>>> 
+>>> print(f"session id is: {session.get_session_id()}")
+session id is: 123
+```
+
+### get_envs
+
+```python
+get_envs(self)
+```
+
+Retrieves the environment variables configured for the current workflow execution.
+
+**Returns:**
+
+**dict[str, Any]**: The environment variables configured for the current workflow execution.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.session import WORKFLOW_EXECUTE_TIMEOUT
+>>>
+>>> session = Session(envs={WORKFLOW_EXECUTE_TIMEOUT: 100})
+>>> 
+>>> print(f"envs is: {session.get_envs()}")
+envs is: {'_execute_timeout': 100}
+```
+
+### get_parent
+
+```python
+get_parent(self)
+```
+
+Returns the Agent session associated with the current workflow execution.
+
+**Returns:**
+
+**AgentSession**: The Agent session to which the current workflow execution belongs.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.single_agent import Session as AgentSession
+>>> 
+>>> session = Session(parent=AgentSession())
+>>> 
+>>> agent_session = session.get_parent()
+```
+
+### set_workflow_card
+
+```python
+set_workflow_card(self, card)
+```
+
+Sets the workflow card information for the current session.
+
+**Parameters:**
+
+- **card**(WorkflowCard): The workflow card information.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.workflow import Session, WorkflowCard
+>>> 
+>>> session = Session()
+>>> session.set_workflow_card(WorkflowCard(id="workflow_id"))
+```
+
+### get_workflow_card
+
+```python
+get_workflow_card(self)
+```
+
+Retrieves the workflow card information associated with the current session.
+
+**Returns:**
+
+**WorkflowCard**: The workflow card information of the current session.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.workflow import Session, WorkflowCard
+>>> 
+>>> session = Session()
+>>> session.set_workflow_card(WorkflowCard(id="workflow_id"))
+>>> print(session.get_workflow_card())
+id='workflow_id' name='' description='' version='' input_params=None
+```
+
+## function create_workflow_session
+
+```python
+create_workflow_session(parent: "AgentSession" = None, session_id: str = None, envs: dict[str, Any] = None) -> Session
+```
+
+Creates a session for workflow execution.
+
+**Parameters:**
+
+- **parent**(AgentSession, optional): The session of the parent Agent. Default: `None`.
+- **session_id**(str, optional): The unique identifier of the session. Default: `None`. If not provided, a UUID will be automatically generated.
+- **envs**(dict[str, Any], optional): Environment variables used during workflow execution. Default: `None`.
+
+**Returns:**
+
+**Session**: The session required for workflow execution.
+
+**Example:**
+
+```python
+>>> from openjiuwen.core.workflow import create_workflow_session
+>>> 
+>>> session = create_workflow_session(session_id="123")
+>>> 
+>>> print(f"session id is: {session.get_session_id()}")
+session id is: 123
+```

@@ -85,10 +85,10 @@ Define a custom node `DemoCmpWithRandomEnd` and implement `add_component` to ran
 ```python
 >>> import random
 >>> 
->>> from openjiuwen.core.workflow import WorkflowComponent
+>>> from openjiuwen.core.workflow import WorkflowComponent, Input, Output, 
 >>> from openjiuwen.core.context_engine import ModelContext
 >>> from openjiuwen.core.graph.base import Graph
->>> from openjiuwen.core.graph.executable import Input, Output, Executable
+>>> from openjiuwen.core.graph.executable import Executable
 >>> from openjiuwen.core.workflow.components import Session
 >>> 
 >>> 
@@ -138,10 +138,10 @@ Define a custom node `DemoCmpWithNode` and implement `add_component` to add `inn
 
 ```python
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, WorkflowComponent
+>>> from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, Input, Output
 >>> from openjiuwen.core.graph.base import Graph
->>> from openjiuwen.core.graph.executable import Input, Output, Executable
->>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.graph.executable import Executable
+>>> from openjiuwen.core.workflow.components import Session
 >>> 
 >>> 
 >>> class DemoCmpWithNode(ComponentComposable):
@@ -193,10 +193,10 @@ Define a custom node `DemoCmpWithNode` and implement `add_component` to add `inn
 
 ```python
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable
+>>> from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, Input, Output
 >>> from openjiuwen.core.graph.base import Graph
->>> from openjiuwen.core.graph.executable import Input, Output, Executable
->>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.graph.executable import Executable
+>>> from openjiuwen.core.workflow.components import Session
 >>> 
 >>> 
 >>> class DemoCmpWithNode(ComponentComposable):
@@ -248,12 +248,11 @@ Add conditional edges to the current graph, starting from the source node, and d
 ```python
 >>> import random
 >>> 
->>> from openjiuwen.core.workflow import WorkflowComponent
+>>> from openjiuwen.core.workflow import WorkflowComponent, Input, Output
 >>> from openjiuwen.core.workflow import BranchRouter
 >>> from openjiuwen.core.context_engine.base import ModelContext
 >>> from openjiuwen.core.graph.base import Graph
->>> from openjiuwen.core.graph.executable import Input, Output
->>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.workflow import Workflow
 >>> 
 >>> 

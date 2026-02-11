@@ -399,7 +399,8 @@ To demonstrate user-defined streaming data, the following code is temporarily ad
 
 ```python
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.workflow import WorkflowComponent, Session, Input, Output
+from openjiuwen.core.workflow import WorkflowComponent, Input, Output
+from openjiuwen.core.workflow.components import Session
 
 
 class LLMComponent(WorkflowComponent):
