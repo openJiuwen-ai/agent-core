@@ -28,8 +28,9 @@ Async Callback Framework 是一个生产级的异步事件驱动框架，专为 
 - ✅ **性能监控**: 内置指标收集和分析
 - ✅ **生命周期钩子**: Before/After/Error/Cleanup 钩子
 - ✅ **触发模式**: 7种触发模式（顺序/并行/条件/超时/延迟/流式/生成器）
-- ✅ **装饰器支持**: 4种自动触发装饰器
+- ✅ **装饰器支持**: 5种自动触发装饰器 + 输入输出变换装饰器（支持事件回调）
 - ✅ **异步生成器**: 支持流式输入/输出处理
+- ✅ **输入输出变换**: 基于回调或事件的函数入参/返回值变换，支持异步与生成器
 
 ### 1.3 模块结构
 
@@ -40,6 +41,7 @@ openjiuwen/core/runner/callback/
 ├── models.py            # 数据模型和结构
 ├── filters.py           # 过滤器实现
 ├── chain.py             # 回调链实现
+├── decorator.py         # 装饰器实现（on/trigger_on_call/emits/emits_stream/emit_around/transform_io）
 └── framework.py         # 核心框架类
 ```
 
@@ -61,6 +63,7 @@ graph TB
         B3[@emits Decorator<br/>发射装饰器]
         B4[@emit_around<br/>环绕装饰器]
         B5[@emits_stream<br/>流式发射装饰器]
+        B6[@transform_io<br/>输入输出变换装饰器]
     end
 
     subgraph "Framework Core 框架核心"
@@ -100,11 +103,13 @@ graph TB
     A --> B3
     A --> B4
     A --> B5
+    A --> B6
     B1 --> C
     B2 --> C
     B3 --> C
     B4 --> C
     B5 --> C
+    B6 --> C
     C --> D1
     C --> D2
     C --> D3
@@ -156,6 +161,7 @@ classDiagram
         +emits(event) decorator
         +emit_around(before, after) decorator
         +emits_stream(event) decorator
+        +transform_io(input_event, output_event, ...) decorator
         +add_filter(event, filter) void
         +add_hook(event, hook_type, hook) void
         +get_metrics() Dict
@@ -829,6 +835,23 @@ async def important_task(task_id):
     result = await do_work(task_id)
     # 自动触发 task_end
     return result
+
+# 输入输出变换装饰器（支持直接回调或事件回调）
+@framework.on("transform_input")
+async def normalize_input(*args, **kwargs):
+    return (args, {**kwargs, "limit": kwargs.get("limit", 10)})
+
+@framework.on("transform_output")
+async def serialize_output(result):
+    return json.dumps(result) if isinstance(result, dict) else result
+
+@framework.transform_io(
+    input_event="transform_input",
+    output_event="transform_output",
+)
+async def fetch_data(limit: int):
+    return {"count": limit}
+# 或使用直接回调：transform_io(input_transform=..., output_transform=...)
 ```
 
 ---
@@ -1245,6 +1268,41 @@ async for metric in collect_metrics():
     # metric_collected 已自动触发
     display_on_dashboard(metric)
 ```
+
+##### transform_io() - 输入输出变换 ⭐ 新增
+
+```python
+@framework.transform_io(
+    input_event: Optional[str] = None,
+    output_event: Optional[str] = None,
+    result_key: str = "result",
+    input_transform: Optional[InputTransform] = None,
+    output_transform: Optional[OutputTransform] = None,
+)
+async def my_function(*args, **kwargs):
+    # 调用前通过 input_event 或 input_transform 变换参数
+    # 返回后通过 output_event 或 output_transform 变换返回值
+    return result
+```
+
+**两种模式：**
+
+1. **事件模式**：设置 `input_event` / `output_event`。框架在调用前触发 `input_event`，将最后一个回调返回值作为新的 `(args, kwargs)`；在返回后（或生成器每项）触发 `output_event`，将最后一个回调返回值作为变换后的结果。输入事件回调需返回 `(new_args, new_kwargs)`，输出事件回调接收 `result_key=<value>` 并返回新值。
+2. **直接回调模式**：设置 `input_transform` / `output_transform`。`input_transform(*args, **kwargs)` 返回 `(new_args, new_kwargs)`；`output_transform(value)` 返回新值。支持同步/异步；对生成器则对每项应用 output 变换。
+
+**参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| input_event | str | None | 输入变换事件名（与 input_transform 二选一） |
+| output_event | str | None | 输出变换事件名（与 output_transform 二选一） |
+| result_key | str | "result" | 输出事件触发时传参的键名 |
+| input_transform | InputTransform | None | 直接输入变换回调 |
+| output_transform | OutputTransform | None | 直接输出变换回调 |
+
+**特点：**
+- 支持异步/同步函数及异步/同步生成器
+- 事件模式与过滤器、钩子、多回调兼容；取最后一个回调结果作为变换结果
 
 ### 6.2 过滤器 API
 
@@ -1735,9 +1793,10 @@ A: 使用 `ConditionalFilter` 或 `trigger_until`
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
 | 1.0.0 | 2026-01-31 | 初始版本发布 |
+| 1.1.0 | 2026-02 | 装饰器实现抽离至 decorator.py；新增 transform_io 装饰器（直接回调 + 事件回调），支持输入/输出变换及异步与生成器 |
 
 ---
 
 **文档维护者**: OpenJiuwen Team
-**最后更新**: 2026-01-31
+**最后更新**: 2026-02
 **许可证**: Copyright (c) Huawei Technologies Co., Ltd. 2025

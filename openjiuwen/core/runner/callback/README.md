@@ -104,7 +104,7 @@ async def update_inventory(order: dict, **kwargs):
 result = await framework.trigger_chain("checkout", order={...})
 ```
 
-### 🎯 自动触发装饰器
+### 🎯 自动触发与变换装饰器
 
 ```python
 # 1. 调用时触发
@@ -132,6 +132,20 @@ async def process_file(filepath):
         for line in f:
             yield {"line": line.strip()}
     # 每次 yield 都自动触发 chunk_ready 事件
+
+# 5. 输入输出变换（支持事件回调或直接回调）
+@framework.on("transform_input")
+async def normalize(*args, **kwargs):
+    return (args, {**kwargs, "limit": kwargs.get("limit", 10)})
+
+@framework.on("transform_output")
+async def serialize(result):
+    return str(result)
+
+@framework.transform_io(input_event="transform_input", output_event="transform_output")
+async def fetch_data(limit: int):
+    return {"count": limit}
+# 或使用直接回调：transform_io(input_transform=..., output_transform=...)
 ```
 
 ### 🌊 异步生成器支持
@@ -313,6 +327,7 @@ openjiuwen/core/runner/callback/
 ├── models.py            # CallbackMetrics, ChainContext, etc.
 ├── filters.py           # 8种内置过滤器
 ├── chain.py             # CallbackChain 实现
+├── decorator.py         # 装饰器实现（on/trigger_on_call/emits/emits_stream/emit_around/transform_io）
 ├── framework.py         # AsyncCallbackFramework 核心
 ├── README.md            # 本文档
 └── DESIGN.md            # 详细设计文档
@@ -338,6 +353,18 @@ openjiuwen/core/runner/callback/
 )
 async def callback(*args, **kwargs):
     pass
+```
+
+### 装饰器（含 transform_io）
+
+```python
+# 输入输出变换（事件模式）
+@framework.transform_io(input_event="in_ev", output_event="out_ev")
+async def my_func(x): return x
+
+# 输入输出变换（直接回调）
+@framework.transform_io(input_transform=..., output_transform=...)
+async def my_func(x): return x
 ```
 
 ### 触发事件
@@ -451,5 +478,5 @@ Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 ---
 
-**版本**: 1.0.0
-**最后更新**: 2026-01-31
+**版本**: 1.1.0
+**最后更新**: 2026-02

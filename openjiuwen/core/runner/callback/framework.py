@@ -17,7 +17,6 @@ from collections import (
     deque,
 )
 from datetime import datetime
-from functools import wraps
 from typing import (
     Any,
     AsyncIterator,
@@ -38,6 +37,17 @@ from openjiuwen.core.runner.callback.enums import (
 from openjiuwen.core.runner.callback.filters import (
     CircuitBreakerFilter,
     EventFilter,
+)
+from openjiuwen.core.runner.callback.decorator import (
+    create_emit_around_decorator,
+    create_emits_decorator,
+    create_emits_stream_decorator,
+    create_on_decorator,
+    create_transform_io_by_events_decorator,
+    create_transform_io_decorator,
+    create_trigger_on_call_decorator,
+    InputTransform,
+    OutputTransform,
 )
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
@@ -173,30 +183,20 @@ class AsyncCallbackFramework:
         Returns:
             Decorator function
         """
-
-        def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
-            # 装饰器中使用同步注册方法
-            self.register_sync(
-                event, func,
-                priority=priority,
-                once=once,
-                namespace=namespace,
-                tags=tags,
-                filters=filters,
-                rollback_handler=rollback_handler,
-                error_handler=error_handler,
-                max_retries=max_retries,
-                retry_delay=retry_delay,
-                timeout=timeout
-            )
-
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                return await func(*args, **kwargs)
-
-            return wrapper
-
-        return decorator
+        return create_on_decorator(
+            self,
+            event,
+            priority=priority,
+            once=once,
+            namespace=namespace,
+            tags=tags,
+            filters=filters,
+            rollback_handler=rollback_handler,
+            error_handler=error_handler,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            timeout=timeout,
+        )
 
     def register_sync(
             self,
@@ -213,11 +213,14 @@ class AsyncCallbackFramework:
             max_retries: int = 0,
             retry_delay: float = 0.0,
             timeout: Optional[float] = None
-    ) -> None:
+    ) -> 'CallbackInfo':
         """Synchronous registration method for decorator use.
 
         This is an internal method used by the decorator to register callbacks
         synchronously during module loading.
+
+        Returns:
+            The registered CallbackInfo instance
         """
         callback_info = CallbackInfo(
             callback=callback,
@@ -249,6 +252,8 @@ class AsyncCallbackFramework:
         if self.enable_logging:
             self.logger.info(f"Registered callback: {event} -> {callback.__name__}")
 
+        return callback_info
+
     def trigger_on_call(
             self,
             event: str,
@@ -272,28 +277,9 @@ class AsyncCallbackFramework:
         Returns:
             Decorator function
         """
-
-        def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                # Trigger event before function execution
-                if pass_args:
-                    await self.trigger(event, *args, **kwargs)
-                else:
-                    await self.trigger(event)
-
-                # Execute the original function
-                result = await func(*args, **kwargs)
-
-                # Optionally trigger with result
-                if pass_result:
-                    await self.trigger(event, result=result)
-
-                return result
-
-            return wrapper
-
-        return decorator
+        return create_trigger_on_call_decorator(
+            self, event, pass_result=pass_result, pass_args=pass_args
+        )
 
     def emits(
             self,
@@ -320,26 +306,9 @@ class AsyncCallbackFramework:
         Returns:
             Decorator function
         """
-
-        def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                # Execute the original function
-                result = await func(*args, **kwargs)
-
-                # Trigger event with result
-                event_kwargs = {result_key: result}
-                if include_args:
-                    event_kwargs.update(kwargs)
-                    await self.trigger(event, *args, **event_kwargs)
-                else:
-                    await self.trigger(event, **event_kwargs)
-
-                return result
-
-            return wrapper
-
-        return decorator
+        return create_emits_decorator(
+            self, event, result_key=result_key, include_args=include_args
+        )
 
     def emits_stream(
             self,
@@ -374,39 +343,7 @@ class AsyncCallbackFramework:
         Returns:
             Decorated async generator function
         """
-
-        def decorator(func: Callable) -> Callable:
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                # Call the original async generator function
-                async_gen = func(*args, **kwargs)
-
-                # Check if it's an async generator
-                if not inspect.isasyncgen(async_gen):
-                    raise TypeError(
-                        f"emits_stream can only decorate async generator functions, "
-                        f"got {type(async_gen)}"
-                    )
-
-                try:
-                    # Iterate through the async generator
-                    async for item in async_gen:
-                        # Trigger event with the item
-                        await self.trigger(event, **{item_key: item})
-
-                        # Yield the item to caller
-                        yield item
-
-                except Exception as e:
-                    if self.enable_logging:
-                        self.logger.error(
-                            f"Error in emits_stream for event '{event}': {e}"
-                        )
-                    raise
-
-            return wrapper
-
-        return decorator
+        return create_emits_stream_decorator(self, event, item_key=item_key)
 
     def emit_around(
             self,
@@ -437,52 +374,82 @@ class AsyncCallbackFramework:
         Returns:
             Decorator function
         """
+        return create_emit_around_decorator(
+            self,
+            before_event,
+            after_event,
+            pass_args=pass_args,
+            pass_result=pass_result,
+            on_error_event=on_error_event,
+        )
 
-        def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                # Trigger before event
-                if pass_args:
-                    await self.trigger(before_event, *args, **kwargs)
-                else:
-                    await self.trigger(before_event)
+    def transform_io(
+            self,
+            *,
+            input_event: Optional[str] = None,
+            output_event: Optional[str] = None,
+            result_key: str = "result",
+            input_transform: Optional[InputTransform] = None,
+            output_transform: Optional[OutputTransform] = None,
+    ):
+        """Decorator to transform function inputs and outputs via callbacks.
 
-                try:
-                    # Execute the original function
-                    result = await func(*args, **kwargs)
+        Supports two modes: event-based or direct callable. When
+        input_event/output_event are set, the framework triggers those
+        events and uses the last callback return value as the transformed
+        input or output. Otherwise uses input_transform/output_transform
+        callables directly.
 
-                    # Trigger after event with result
-                    if pass_result:
-                        after_kwargs = kwargs.copy()
-                        after_kwargs['result'] = result
-                        if pass_args:
-                            await self.trigger(after_event, *args, **after_kwargs)
-                        else:
-                            await self.trigger(after_event, result=result)
-                    else:
-                        if pass_args:
-                            await self.trigger(after_event, *args, **kwargs)
-                        else:
-                            await self.trigger(after_event)
+        Event-based example:
+            >>> @framework.on("transform_input")
+            ... async def normalize(*args, **kwargs):
+            ...     return (args, {**kwargs, "limit": kwargs.get("limit", 10)})
+            >>> @framework.on("transform_output")
+            ... async def serialize(result):
+            ...     return json.dumps(result) if isinstance(result, dict) else result
+            >>> @framework.transform_io(
+            ...     input_event="transform_input",
+            ...     output_event="transform_output",
+            ... )
+            ... async def fetch_data(limit: int):
+            ...     return {"count": limit}
 
-                    return result
+        Direct callable example:
+            >>> @framework.transform_io(
+            ...     input_transform=normalize_input,
+            ...     output_transform=serialize_output,
+            ... )
+            ... async def fetch_data(limit: int):
+            ...     return {"count": limit}
 
-                except Exception as e:
-                    # Trigger error event if specified
-                    if on_error_event:
-                        error_kwargs = kwargs.copy()
-                        error_kwargs['error'] = e
-                        if pass_args:
-                            await self.trigger(on_error_event, *args, **error_kwargs)
-                        else:
-                            await self.trigger(on_error_event, error=e)
+        Args:
+            input_event: Optional event name for input transform. When
+                triggered, callbacks receive (*args, **kwargs) and must
+                return (new_args, new_kwargs). Last result is used.
+            output_event: Optional event name for output transform. When
+                triggered, callbacks receive result_key=<value> and must
+                return the transformed value. Last result is used.
+            result_key: Keyword for output_event payload (default: "result").
+            input_transform: Optional direct callback (args, kwargs) ->
+                (new_args, new_kwargs). Used when input_event is not set.
+            output_transform: Optional direct callback value -> new_value.
+                Used when output_event is not set.
 
-                    # Re-raise the exception
-                    raise
-
-            return wrapper
-
-        return decorator
+        Returns:
+            Decorator that applies input/output transformation via
+            events or callbacks.
+        """
+        if input_event is not None or output_event is not None:
+            return create_transform_io_by_events_decorator(
+                self,
+                input_event=input_event,
+                output_event=output_event,
+                result_key=result_key,
+            )
+        return create_transform_io_decorator(
+            input_transform=input_transform,
+            output_transform=output_transform,
+        )
 
     async def register(
             self,
@@ -550,21 +517,48 @@ class AsyncCallbackFramework:
     async def unregister(self, event: str, callback: Callable) -> None:
         """Unregister a callback from an event.
 
+        Supports unregistering by either the original callback function or
+        the wrapper function returned by the @framework.on decorator.
+
         Args:
             event: Event name
-            callback: Callback to remove
+            callback: Callback to remove (can be original function or decorator wrapper)
         """
         async with self._locks["registration"]:
-            self._callbacks[event] = [
-                ci for ci in self._callbacks[event] if ci.callback != callback
-            ]
-            self._callback_filters.pop(callback, None)
+            # Check if event exists
+            if event not in self._callbacks:
+                return
 
-            if event in self._chains:
-                self._chains[event].remove(callback)
+            # Find the CallbackInfo to remove
+            callback_to_remove = None
+            for callback_info in self._callbacks[event]:
+                # Check if callback matches the original function
+                if callback_info.callback == callback:
+                    callback_to_remove = callback_info.callback
+                    break
+                # Check if callback matches the wrapper function
+                elif callback_info.wrapper == callback:
+                    callback_to_remove = callback_info.callback
+                    break
+                # Check if callback is a wrapper with __wrapped__ pointing to the original
+                elif hasattr(callback, '__wrapped__'):
+                    wrapped_func = getattr(callback, '__wrapped__', None)
+                    if wrapped_func is not None and callback_info.callback == wrapped_func:
+                        callback_to_remove = callback_info.callback
+                        break
 
-            if self.enable_logging:
-                self.logger.info(f"Unregistered callback: {event} -> {callback.__name__}")
+            if callback_to_remove is not None:
+                self._callbacks[event] = [
+                    ci for ci in self._callbacks[event] if ci.callback != callback_to_remove
+                ]
+                self._callback_filters.pop(callback_to_remove, None)
+
+                if event in self._chains:
+                    self._chains[event].remove(callback_to_remove)
+
+                if self.enable_logging:
+                    callback_name = getattr(callback_to_remove, '__name__', 'unknown')
+                    self.logger.info(f"Unregistered callback: {event} -> {callback_name}")
 
     async def unregister_namespace(self, namespace: str) -> None:
         """Unregister all callbacks in a namespace.
@@ -591,6 +585,44 @@ class AsyncCallbackFramework:
                     ci for ci in self._callbacks[event]
                     if not ci.tags.intersection(tags)
                 ]
+
+    async def unregister_event(self, event: str) -> None:
+        """Unregister all callbacks for a specific event.
+
+        Removes all callbacks, filters, chains, hooks, and circuit breakers
+        associated with the event.
+
+        Args:
+            event: Event name to clear
+        """
+        async with self._locks["registration"]:
+            # Remove all callbacks for this event
+            if event in self._callbacks:
+                # Remove callback filters and circuit breakers for all callbacks in this event
+                for callback_info in self._callbacks[event]:
+                    callback = callback_info.callback
+                    self._callback_filters.pop(callback, None)
+                    # Remove circuit breakers for this callback
+                    cb_key = f"{event}:{callback.__name__}"
+                    self._circuit_breakers.pop(cb_key, None)
+                
+                # Clear callbacks
+                del self._callbacks[event]
+
+            # Remove chain if exists
+            if event in self._chains:
+                del self._chains[event]
+
+            # Remove hooks for this event
+            if event in self._hooks:
+                del self._hooks[event]
+
+            # Remove event-specific filters
+            if event in self._filters:
+                del self._filters[event]
+
+            if self.enable_logging:
+                self.logger.info(f"Unregistered all callbacks for event: {event}")
 
     # ========== Triggering ==========
 
