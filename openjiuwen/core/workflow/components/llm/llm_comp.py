@@ -603,14 +603,15 @@ class LLMExecutable(ComponentExecutable):
                     cause=e
                 ) from e
 
-    def get_stream_output(self) -> dict:
-        final_result = {}
+    def get_stream_output(self) -> Optional[dict]:
+        output = None
         if self._config.cache_stream and self._session:
             final_result = self._state.build_final_result(
                 self._config.response_format,
                 self._config.output_config
             )
-        return final_result
+            output = final_result if final_result else output
+        return output
 
     async def _initialize_if_needed(self):
         if not self._initialized:
