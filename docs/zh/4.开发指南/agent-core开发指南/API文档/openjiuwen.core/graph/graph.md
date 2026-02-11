@@ -85,10 +85,10 @@ end_node(self, node_id) -> Self
 ```python
 >>> import random
 >>> 
->>> from openjiuwen.core.workflow import WorkflowComponent
+>>> from openjiuwen.core.workflow import WorkflowComponent, Input, Output
 >>> from openjiuwen.core.context_engine import ModelContext
 >>> from openjiuwen.core.graph.base import Graph
->>> from openjiuwen.core.graph.executable import Input, Output, Executable
+>>> from openjiuwen.core.graph.executable import Executable
 >>> from openjiuwen.core.workflow.components import Session
 >>> 
 >>> 
@@ -138,10 +138,10 @@ add_node(self, node_id: str, node: Executable, *, wait_for_all: bool=False) -> S
 
 ```python
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, WorkflowComponent
+>>> from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, Input, Output
 >>> from openjiuwen.core.graph.base import Graph
->>> from openjiuwen.core.graph.executable import Input, Output, Executable
->>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.graph.executable import Executable
+>>> from openjiuwen.core.workflow.components import Session
 >>> 
 >>> 
 >>> class DemoCmpWithNode(ComponentComposable):
@@ -193,10 +193,10 @@ add_edge(self, source_node_id: Union[str, list[str]], target_node_id: str) -> Se
 
 ```python
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable
+>>> from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, Input, Output
 >>> from openjiuwen.core.graph.base import Graph
->>> from openjiuwen.core.graph.executable import Input, Output, Executable
->>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.graph.executable import Executable
+>>> from openjiuwen.core.workflow.components import Session
 >>> 
 >>> 
 >>> class DemoCmpWithNode(ComponentComposable):
@@ -248,12 +248,11 @@ add_conditional_edges(self, source_node_id: str, router: Router) -> Self
 ```python
 >>> import random
 >>> 
->>> from openjiuwen.core.workflow import WorkflowComponent
+>>> from openjiuwen.core.workflow import WorkflowComponent, Input, Output
 >>> from openjiuwen.core.workflow import BranchRouter
 >>> from openjiuwen.core.context_engine.base import ModelContext
 >>> from openjiuwen.core.graph.base import Graph
->>> from openjiuwen.core.graph.executable import Input, Output
->>> from openjiuwen.core.workflow import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.workflow import Workflow
 >>> 
 >>> 
