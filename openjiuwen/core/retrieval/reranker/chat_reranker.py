@@ -101,9 +101,11 @@ class ChatReranker(StandardReranker):
 
         confidence = max(yes_scores)
         total_prob = confidence + max(no_scores)
+        doc_id = doc[0].id_ if isinstance(doc[0], Document) else doc[0]
+
         if total_prob == 0:
-            return 0.0
-        return confidence / total_prob
+            return {doc_id: 0.0}
+        return {doc_id: confidence / total_prob}
 
     def _assemble_params(
         self, query: str, doc: list[str | Document], instruct: bool | str, kwargs: dict

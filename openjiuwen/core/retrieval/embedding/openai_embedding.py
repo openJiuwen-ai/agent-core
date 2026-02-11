@@ -130,6 +130,7 @@ class OpenAIEmbedding(APIEmbedding):
     async def _get_embeddings(self, text: str | List[str], **kwargs) -> List[List[float]]:
         """Get embedding vectors"""
 
+        kwargs.pop("callback_cls", None)
         dimensions = kwargs.get("dimensions")
         if self.matryoshka_dimension and dimensions is None:
             kwargs["dimensions"] = self._dimension
@@ -171,6 +172,7 @@ class OpenAIEmbedding(APIEmbedding):
     def _get_embeddings_sync(self, text: str | List[str], **kwargs) -> List[List[float]]:
         """Get embedding vectors (sync version)."""
 
+        kwargs.pop("callback_cls", None)
         dimensions = kwargs.get("dimensions")
         if self.matryoshka_dimension and dimensions is None:
             kwargs["dimensions"] = self._dimension
