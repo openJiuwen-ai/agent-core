@@ -10,6 +10,8 @@
 |-------|-------------|
 | **BaseKVStore** | KV storage abstract base class. |
 | **BaseDbStore** | Database storage abstract base class. |
+| **BaseObjectStorageClient** | Object storage client abstract base class. |
 | **InMemoryKVStore** | In-memory KV storage implementation. |
 | **DbBasedKVStore** | Database-based KV storage implementation. |
 | **DefaultDbStore** | Default database storage implementation. |
+| **AioBotoClient** | Async S3 client implementation using aioboto3. |
