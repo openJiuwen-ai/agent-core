@@ -4,8 +4,11 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool import Tool, ToolCard
+from openjiuwen.core.runner.resources_manager.base import GLOBAL
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.workflow import WorkflowCard
 
 
 class TestResourceMgrAddMethodsValidation:
@@ -82,7 +85,7 @@ class TestResourceMgrAddMethodsValidation:
             StatusCode.RESOURCE_ID_VALUE_INVALID,
             "agent id is invalid, reason='cannot be empty or None'")
         with pytest.raises(ValidationError) as err:
-            # 卡片ID为空格
+            # Card ID is whitespace only
             card.id = "   "
             resource_mgr.add_agent(card, mock_agent_provider)
 
@@ -197,3 +200,128 @@ class TestResourceMgrAddMethodsValidation:
             err,
             StatusCode.RESOURCE_VALUE_INVALID,
             "tool value is invalid, reason='invalid tool type: expected Tool, got Mock'")
+
+
+class _SimpleTool(Tool):
+    """Simple Tool implementation for testing"""
+
+    async def invoke(self, inputs, **kwargs):
+        return "ok"
+
+    async def stream(self, inputs, **kwargs):
+        yield "ok"
+
+
+def _make_tool(tool_id: str, name: str = "") -> Tool:
+    """Create a Tool instance for testing"""
+    card = ToolCard(id=tool_id, name=name or tool_id, description=f"tool {tool_id}")
+    return _SimpleTool(card)
+
+
+class TestResourceMgrToolTagIsolation:
+    """
+    Test add_tool / get_tool tag isolation.
+    Covers commit: fix(controller): use agent_id as tag to get tool
+    """
+
+    @pytest.fixture
+    def resource_mgr(self):
+        return ResourceMgr()
+
+    @staticmethod
+    def test_add_tool_with_tag_and_get_by_same_tag(resource_mgr):
+        """After add_tool with tag, get_tool with the same tag should find it"""
+        tool = _make_tool("tool_a")
+        result = resource_mgr.add_tool(tool, tag="agent_1")
+        assert result.is_ok()
+
+        found = resource_mgr.get_tool(tool_id="tool_a", tag="agent_1")
+        assert found is not None
+
+    @staticmethod
+    def test_get_tool_by_tag_only_returns_tagged_tools(resource_mgr):
+        """Without tool_id, get_tool by tag only returns tools under that tag"""
+        tool_a = _make_tool("tool_a1", "search")
+        tool_b = _make_tool("tool_b1", "calculator")
+        resource_mgr.add_tool(tool_a, tag="agent_1")
+        resource_mgr.add_tool(tool_b, tag="agent_2")
+
+        # Query with tag="agent_1" should only return tool_a1
+        found_list = resource_mgr.get_tool(tag="agent_1")
+        found_ids = [t.card.id for t in found_list if t]
+        assert "tool_a1" in found_ids
+        assert "tool_b1" not in found_ids
+
+    @staticmethod
+    def test_add_tool_without_tag_gets_global(resource_mgr):
+        """add_tool without tag should assign the GLOBAL tag"""
+        tool = _make_tool("tool_c")
+        resource_mgr.add_tool(tool)
+
+        assert resource_mgr.resource_has_tag("tool_c", GLOBAL)
+
+    @staticmethod
+    def test_add_tool_with_tag_does_not_get_global(resource_mgr):
+        """add_tool with tag should not assign the GLOBAL tag"""
+        tool = _make_tool("tool_d")
+        resource_mgr.add_tool(tool, tag="agent_1")
+
+        assert not resource_mgr.resource_has_tag("tool_d", GLOBAL)
+        assert resource_mgr.resource_has_tag("tool_d", "agent_1")
+
+    @staticmethod
+    def test_two_agents_tools_isolated_by_tag(resource_mgr):
+        """Tools registered by two agents are isolated via tag query"""
+        tool_1 = _make_tool("tool_for_agent1", "search")
+        tool_2 = _make_tool("tool_for_agent2", "search2")
+        resource_mgr.add_tool(tool_1, tag="agent_1")
+        resource_mgr.add_tool(tool_2, tag="agent_2")
+
+        # agent_1 can only see its own tool
+        agent1_tools = resource_mgr.get_tool(tag="agent_1")
+        agent1_ids = [t.card.id for t in agent1_tools if t]
+        assert "tool_for_agent1" in agent1_ids
+        assert "tool_for_agent2" not in agent1_ids
+
+        # agent_2 can only see its own tool
+        agent2_tools = resource_mgr.get_tool(tag="agent_2")
+        agent2_ids = [t.card.id for t in agent2_tools if t]
+        assert "tool_for_agent2" in agent2_ids
+        assert "tool_for_agent1" not in agent2_ids
+
+    @pytest.mark.asyncio
+    async def test_get_tool_infos_with_tag(self, resource_mgr):
+        """get_tool_infos with tag filter only returns tool infos under that tag"""
+        tool_1 = _make_tool("info_tool_1", "tool_one")
+        tool_2 = _make_tool("info_tool_2", "tool_two")
+        resource_mgr.add_tool(tool_1, tag="agent_x")
+        resource_mgr.add_tool(tool_2, tag="agent_y")
+
+        infos = await resource_mgr.get_tool_infos(tag="agent_x")
+        names = [info.name for info in infos if info]
+        assert "tool_one" in names
+        assert "tool_two" not in names
+
+    @pytest.mark.asyncio
+    async def test_add_workflow_with_tag_and_get_by_same_tag(self, resource_mgr):
+        """After add_workflow with tag, get_workflow with the same tag should find it"""
+        card = WorkflowCard(id="wf_1", name="workflow_1")
+        provider = Mock()
+        resource_mgr.add_workflow(card, provider, tag="agent_1")
+
+        found = await resource_mgr.get_workflow(workflow_id="wf_1", tag="agent_1")
+        assert found is not None
+
+    @pytest.mark.asyncio
+    async def test_get_workflow_by_tag_only_returns_tagged_workflows(self, resource_mgr):
+        """Without workflow_id, get_workflow by tag only returns workflows under that tag"""
+        card_1 = WorkflowCard(id="wf_agent1", name="workflow_1")
+        card_2 = WorkflowCard(id="wf_agent2", name="workflow_2")
+        provider_1 = Mock()
+        provider_2 = Mock()
+        resource_mgr.add_workflow(card_1, provider_1, tag="agent_1")
+        resource_mgr.add_workflow(card_2, provider_2, tag="agent_2")
+
+        # Query with tag="agent_1" should only return wf_agent1
+        found_list = await resource_mgr.get_workflow(tag="agent_1")
+        assert len(found_list) == 1

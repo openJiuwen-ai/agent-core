@@ -205,7 +205,8 @@ class AbilityManager:
     async def execute(
             self,
             tool_call: Union[ToolCall, List[ToolCall]],
-            session: Session
+            session: Session,
+            tag=None
     ) -> List[Tuple[Any, ToolMessage]]:
         """Execute an ability call
 
@@ -229,7 +230,7 @@ class AbilityManager:
 
         # Execute all tool calls in parallel
         tasks = [
-            self._execute_single_tool_call(tool_call, session)
+            self._execute_single_tool_call(tool_call, session, tag=tag)
             for tool_call in tool_calls
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -251,7 +252,8 @@ class AbilityManager:
 
         return final_results
 
-    async def _execute_single_tool_call(self, tool_call: ToolCall, session: Session) -> Tuple[Any, ToolMessage]:
+    async def _execute_single_tool_call(self, tool_call: ToolCall, session: Session,
+                                        tag=None) -> Tuple[Any, ToolMessage]:
         result, error_msg = None, None
         tool_name = tool_call.name
 
@@ -271,7 +273,7 @@ class AbilityManager:
             tool_card = self._tools[tool_name]
             tool_id = tool_card.id or tool_card.name
             from openjiuwen.core.runner import Runner
-            tool = Runner.resource_mgr.get_tool(tool_id=tool_id)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)
@@ -285,7 +287,7 @@ class AbilityManager:
             workflow_card = self._workflows[tool_name]
             workflow_id = workflow_card.id or workflow_card.name
             from openjiuwen.core.runner import Runner
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=tag)
             if workflow:
                 try:
                     result = await workflow.invoke(tool_args, session)
@@ -318,7 +320,7 @@ class AbilityManager:
         else:
             # Fallback: try to get tool from Runner.resource_mgr by name
             from openjiuwen.core.runner import Runner
-            tool = Runner.resource_mgr.get_tool(tool_id=tool_name)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=tag)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)

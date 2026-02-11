@@ -295,7 +295,7 @@ class LegacyReActAgent(BaseAgent):
             from openjiuwen.core.runner import Runner
             if hasattr(self, '_tools') and self._tools:
                 tools_to_add = [(tool.card.name, tool) for tool in self._tools]
-                Runner.resource_mgr.add_tools(tool=tools_to_add, tag=self.agent_config.id)
+                Runner.resource_mgr.add_tool(tool=tools_to_add, tag=self.agent_config.id)
         await self.context_engine.create_context(session=agent_session)
 
         final_result_holder = {"result": None}

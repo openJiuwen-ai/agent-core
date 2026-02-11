@@ -825,5 +825,87 @@ class TestNewReActAgentConfigUpdate(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(agent.context_engine, old_context_engine)
 
 
+class TestNewReActAgentToolTagIsolation(unittest.IsolatedAsyncioTestCase):
+    """Test tool tag isolation for the new ReActAgent.
+    Covers commit: fix(controller): use agent_id as tag to get tool
+
+    Core logic: ReActAgent registers tools via Runner.resource_mgr.add_tool(tool, tag=card.id)
+    and retrieves them via ability_manager.execute(..., tag=card.id), ensuring tools
+    from different agents are isolated.
+    """
+
+    async def asyncSetUp(self):
+        """Start Runner before each test"""
+        from openjiuwen.core.runner import Runner
+        await Runner.start()
+
+    async def asyncTearDown(self):
+        """Stop Runner after each test"""
+        from openjiuwen.core.runner import Runner
+        await Runner.stop()
+
+    @pytest.mark.asyncio
+    async def test_react_agent_add_tool_with_agent_tag(self):
+        """When ReActAgent registers a tool, the tag should be agent card.id, not GLOBAL"""
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.resources_manager.base import GLOBAL
+        from openjiuwen.core.foundation.tool import LocalFunction
+
+        agent_card = AgentCard(id="react_agent_001", name="test_react")
+        tool_card = ToolCard(
+            id="add_tool",
+            name="add",
+            description="addition",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number", "description": "addend"},
+                    "b": {"type": "number", "description": "augend"}
+                },
+                "required": ["a", "b"]
+            }
+        )
+        tool = LocalFunction(card=tool_card, func=lambda a, b: a + b)
+
+        # Simulate ReActAgent registering tool with tag=agent_card.id
+        Runner.resource_mgr.add_tool(tool, tag=agent_card.id)
+
+        # Verify: tool is tagged with agent_card.id, not GLOBAL
+        assert Runner.resource_mgr.resource_has_tag("add_tool", agent_card.id)
+        assert not Runner.resource_mgr.resource_has_tag("add_tool", GLOBAL)
+
+    @pytest.mark.asyncio
+    async def test_react_agent_tools_isolated_between_agents(self):
+        """Tools registered by two different ReActAgents are isolated via tag"""
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.foundation.tool import LocalFunction
+
+        # Agent A registers its tool
+        tool_a = LocalFunction(
+            card=ToolCard(id="tool_a", name="tool_a", description="Agent A tool"),
+            func=lambda: "a"
+        )
+        Runner.resource_mgr.add_tool(tool_a, tag="agent_A")
+
+        # Agent B registers its tool
+        tool_b = LocalFunction(
+            card=ToolCard(id="tool_b", name="tool_b", description="Agent B tool"),
+            func=lambda: "b"
+        )
+        Runner.resource_mgr.add_tool(tool_b, tag="agent_B")
+
+        # Agent A can only see its own tool via tag query
+        infos_a = await Runner.resource_mgr.get_tool_infos(tag="agent_A")
+        names_a = [info.name for info in infos_a if info]
+        assert "tool_a" in names_a
+        assert "tool_b" not in names_a
+
+        # Agent B can only see its own tool via tag query
+        infos_b = await Runner.resource_mgr.get_tool_infos(tag="agent_B")
+        names_b = [info.name for info in infos_b if info]
+        assert "tool_b" in names_b
+        assert "tool_a" not in names_b
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

@@ -521,7 +521,7 @@ class ReActAgent(BaseAgent):
 
                 # Execute tools using _execute_ability (supports parallel)
                 results = await self.ability_manager.execute(
-                    ai_message.tool_calls, session
+                    ai_message.tool_calls, session, tag=self.card.id
                 )
 
                 # Process results and add tool messages to context
