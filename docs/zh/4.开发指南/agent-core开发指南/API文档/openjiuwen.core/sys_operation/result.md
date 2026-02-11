@@ -12,7 +12,7 @@ class BaseResult(Generic[T])
 
 * **code**(int)：状态码。0表示成功，非0表示失败。
 * **message**(str)：消息详情。
-* **data**(Optional[T], 可选)：业务数据载荷。默认值：`None`。
+* **data**(Optional[T], 可选)：具体业务数据。默认值：`None`。
 
 ## class ExecuteCodeData
 

@@ -24,13 +24,53 @@ Represents the local work environment configuration used when system operations 
 class SysOperationCard(BaseCard)
 ```
 
-`SysOperation` is the data class for system operation configuration card, inheriting from `BaseCard`.
+`SysOperationCard` is the data class for system operation configuration card, inheriting from `BaseCard`.
 
 **Parameters**:
 
 * **mode** ([OperationMode](#class-operationmode), optional): Execution mode. Default value: `OperationMode.LOCAL`.
 * **work_config** ([LocalWorkConfig](#class-localworkconfig), optional): Local work configuration. Default value: `None`.
-* **gateway_config** (SandboxGatewayConfig, optional): Sandbox gateway configuration. Default value: `None`. Note: Sandbox mode is currently not supported in this version.
+* **gateway_config** (SandboxGatewayConfig, optional): Sandbox gateway configuration. Default value: `None`.
+* **fs**: Shorthand for getting file system tool IDs.
+* **shell**: Shorthand for getting Shell tool IDs.
+* **code**: Shorthand for getting code execution tool IDs.
+* **Others**: Supports dynamic access to other operation tool IDs. For example, `card.browser.navigate`.
+
+**Example**:
+
+```python
+>>> card = SysOperationCard(id="sys_op")
+>>> print(card.fs.read_file)  # Quickly get the Tool ID
+'sys_op.fs.read_file'
+```
+
+**Methods**:
+
+### generate_tool_id
+
+```python
+@staticmethod
+generate_tool_id(card_id: str, op_type: str, method_name: str) -> str
+```
+
+Static method. Generates a unique identifier (Tool ID) for a system operation tool.
+
+**Parameters**:
+
+* **card_id** (str): The ID of the operation card.
+* **op_type** (str): The type of operation, such as `fs`, `shell`, `code`, etc.
+* **method_name** (str): The specific method name.
+
+**Returns**:
+
+**str**, the Tool ID string in the format `{card_id}.{op_type}.{method_name}`.
+
+**Example**:
+
+```python
+>>> SysOperationCard.generate_tool_id("sys_op", "fs", "read_file")
+'sys_op.fs.read_file'
+```
 
 ## class SysOperation
 

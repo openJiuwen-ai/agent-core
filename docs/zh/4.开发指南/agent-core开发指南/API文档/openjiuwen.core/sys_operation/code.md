@@ -14,7 +14,7 @@ class BaseCodeOperation()
 abstractmethod async execute_code(
     code: str,
     language: Literal['python', 'javascript'] = "python",
-    time_out: int = 300,
+    timeout: int = 300,
     environment: Optional[Dict[str, str]] = None,
     options: Optional[Dict[str, Any]] = None) -> ExecuteCodeResult
 ```
@@ -25,23 +25,27 @@ abstractmethod async execute_code(
 
 * **code**(str)：要执行的源代码字符串。
 * **language**(Literal['python', 'javascript'], 可选)：编程语言。默认值："python"。
-* **time_out**(int, 可选)：最大执行时间。单位：秒。默认值：300。
+* **timeout**(int, 可选)：最大执行时间。单位：秒。默认值：300。
 * **environment**(Dict[str, str], 可选)：自定义环境变量。
-* **options**(Dict[str, Any], 可选)：扩展配置选项。
+* **options**(Dict[str, Any], 可选)：扩展配置选项。支持以下键值：
+    * **encoding**(str)：输出流的字符编码。默认值："utf-8"。
+    * **force_file**(bool)：是否强制以文件方式执行。
+        * `True`：始终将代码写入临时文件并执行。
+        * `False` (默认)：根据代码长度自动选择。短代码通过命令行 CLI 执行，超过限制的长代码会自动切换为临时文件执行方式。
 
 **返回**：
 
 **[ExecuteCodeResult](./result.md#class-executecoderesult)**，代码执行结果。
 
-### abstractmethod aysnc execute_code_stream
+### abstractmethod async execute_code_stream
 
 ```python
 abstractmethod async execute_code_stream(
     code: str,
     language: Literal['python', 'javascript'] = "python",
-    time_out: int = 300,
+    timeout: int = 300,
     environment: Optional[Dict[str, str]] = None,
-    options: Optional[Dict[str, Any]] = None) -> 		 AsyncIterator[ExecuteCodeStreamResult]
+    options: Optional[Dict[str, Any]] = None) -> AsyncIterator[ExecuteCodeStreamResult]
 ```
 
 异步流式执行代码。
@@ -50,9 +54,14 @@ abstractmethod async execute_code_stream(
 
 * **code**(str)：要执行的源代码字符串。
 * **language**(Literal['python', 'javascript'], 可选)：编程语言。默认值："python"。
-* **time_out**(int, 可选)：最大执行时间。单位：秒。默认值：300。
+* **timeout**(int, 可选)：最大执行时间。单位：秒。默认值：300。
 * **environment**(Dict[str, str], 可选)：自定义环境变量。
-* **options**(Dict[str, Any], 可选)：扩展配置选项。
+* **options**(Dict[str, Any], 可选)：扩展配置选项。支持以下键值：
+    * **encoding**(str)：输出流的字符编码。默认值："utf-8"。
+    * **chunk_size**(int)：流式输出的分块大小。单位：字节。
+    * **force_file**(bool)：是否强制以文件方式执行。
+        * `True`：始终将代码写入临时文件并执行。
+        * `False` (默认)：根据代码长度自动选择。短代码通过命令行 CLI 执行，超过限制的长代码会自动切换为临时文件执行方式。
 
 **返回**：
 

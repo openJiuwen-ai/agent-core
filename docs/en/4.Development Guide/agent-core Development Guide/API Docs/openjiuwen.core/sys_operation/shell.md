@@ -27,7 +27,7 @@ Asynchronously execute Shell command.
 * **cwd** (str, optional): Working directory for command execution. Default value: current directory.
 * **timeout** (int, optional): Command execution timeout. Unit: seconds. Default value: 300.
 * **environment** (Dict[str, str], optional): Custom environment variables.
-* **options** (Dict[str, Any], optional): Extended configuration options.
+* **options** (Dict[str, Any], optional): Extended configuration options, such as `encoding` (output encoding, default utf-8).
 
 **Returns**:
 
@@ -52,7 +52,7 @@ Asynchronously execute Shell command in streaming mode.
 * **cwd** (str, optional): Working directory for command execution. Default value: current directory.
 * **timeout** (int, optional): Command execution timeout. Unit: seconds. Default value: 300.
 * **environment** (Dict[str, str], optional): Custom environment variables.
-* **options** (Dict[str, Any], optional): Extended configuration options.
+* **options** (Dict[str, Any], optional): Extended configuration options, such as `encoding` (output encoding) and `chunk_size` (chunk size for streaming output).
 
 **Returns**:
 

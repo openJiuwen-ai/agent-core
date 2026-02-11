@@ -22,17 +22,18 @@ abstractmethod async read_file(
     options: Optional[Dict[str, Any]] = None) -> ReadFileResult
 ```
 
-Asynchronously read file with specified mode and parameters.
+Asynchronously read file with specified mode and parameters. 
+Parameters `head`, `tail`, and `line_range` are mutually exclusive, and only supported in text mode (`mode='text'`).
 
 **Parameters**:
 
 * **path** (str): Complete or relative path of the file to read.
-* **mode** (Literal['text', 'bytes'], optional): Read mode. 'text' means read file in text mode, 'bytes' means read file in binary byte stream mode. Default value: "text".
-* **head** (int, optional): Number of lines to read from the beginning, text mode only.
-* **tail** (int, optional): Number of lines to read from the end, text mode only.
-* **line_range** (Tuple[int, int], optional): Specific line range to read, line index starts from 1, text mode only. Note: The three parameters `head`, `tail`, and `line_range` are mutually exclusive.
+* **mode** (Literal['text', 'bytes'], optional): Read mode. 'text' means text mode, 'bytes' means binary byte stream mode. Default value: "text".
+* **head** (int, optional): Number of lines to read from the beginning, text mode only. 0 is equivalent to None.
+* **tail** (int, optional): Number of lines to read from the end, text mode only. 0 is equivalent to None.
+* **line_range** (Tuple[int, int], optional): Specific line range to read, line index starts from 1, text mode only.
 * **encoding** (str, optional): Character encoding for text mode. Default value: "utf-8".
-* **chunk_size** (int, optional): Buffer size for binary byte stream mode reading. Unit: bytes. Default value: 8192.
+* **chunk_size** (int, optional): Buffer size for 'bytes' mode reading. Unit: bytes. Default value: 0 (unlimited).
 * **options** (Dict[str, Any], optional): Extended configuration options.
 
 **Returns**:
@@ -53,15 +54,16 @@ abstractmethod async read_file_stream(
     options: Optional[Dict[str, Any]] = None) -> AsyncIterator[ReadFileStreamResult]
 ```
 
-Asynchronously read file in streaming mode with specified mode and parameters.
+Asynchronously read file in streaming mode with specified mode and parameters. 
+Parameters `head`, `tail`, and `line_range` are mutually exclusive, and only supported in text mode (`mode='text'`).
 
 **Parameters**:
 
 * **path** (str): Complete or relative path of the file to read.
 * **mode** (Literal['text', 'bytes'], optional): Read mode. 'text' means read file in text mode, 'bytes' means read file in binary byte stream mode. Default value: "text".
-* **head** (int, optional): Number of lines to read from the beginning, text mode only.
-* **tail** (int, optional): Number of lines to read from the end, text mode only.
-* **line_range** (Tuple[int, int], optional): Specific line range to read, line index starts from 1, text mode only. Note: The three parameters `head`, `tail`, and `line_range` are mutually exclusive, it is not recommended to pass them simultaneously.
+* **head** (int, optional): Number of lines to read from the beginning, text mode only. Passing 0 is equivalent to passing None.
+* **tail** (int, optional): Number of lines to read from the end, text mode only. Passing 0 is equivalent to passing None.
+* **line_range** (Tuple[int, int], optional): Specific line range to read, line index starts from 1, inclusive, text mode only.
 * **encoding** (str, optional): Character encoding for text mode. Default value: "utf-8".
 * **chunk_size** (int, optional): Buffer size for binary byte stream mode reading. Unit: bytes. Default value: 8192.
 * **options** (Dict[str, Any], optional): Extended configuration options.
@@ -112,7 +114,7 @@ abstractmethod async upload_file(
     overwrite: bool = False,
     create_parent_dirs: bool = True,
     preserve_permissions: bool = True,
-    chunk_size: int = 1024 * 1024,
+    chunk_size: int = 0,
     options: Optional[Dict[str, Any]] = None) -> UploadFileResult
 ```
 
@@ -125,7 +127,7 @@ Asynchronously upload file.
 * **overwrite** (bool, optional): Whether to overwrite existing target file. `True` means overwrite existing target file, `False` means do not overwrite existing target file. Default value: `False`.
 * **create_parent_dirs** (bool, optional): Whether to automatically create target parent directories. `True` means automatically create target parent directories, `False` means do not automatically create target parent directories. Default value: `True`.
 * **preserve_permissions** (bool, optional): Whether to preserve file permissions. `True` means preserve file permissions, `False` means do not preserve file permissions. Default value: `True`.
-* **chunk_size** (int, optional): Transfer chunk size. Default value: 1MB.
+* **chunk_size** (int, optional): Maximum number of bytes to upload at once. Default value: 0 (unlimited).
 * **options** (Dict[str, Any], optional): Extended configuration options.
 
 **Returns**:
@@ -154,7 +156,7 @@ Asynchronously upload file in streaming mode.
 * **overwrite** (bool, optional): Whether to overwrite existing target file. `True` means overwrite existing target file, `False` means do not overwrite existing target file. Default value: `False`.
 * **create_parent_dirs** (bool, optional): Whether to automatically create target parent directories. `True` means automatically create target parent directories, `False` means do not automatically create target parent directories. Default value: `True`.
 * **preserve_permissions** (bool, optional): Whether to preserve file permissions. `True` means preserve file permissions, `False` means do not preserve file permissions. Default value: `True`.
-* **chunk_size** (int, optional): Transfer chunk size. Default value: 1MB.
+* **chunk_size** (int, optional): Chunk size for cross-filesystem transfers. Default value: 1MB (1024 * 1024 bytes).
 * **options** (Dict[str, Any], optional): Extended configuration options.
 
 **Returns**:
@@ -170,7 +172,7 @@ abstractmethod async download_file(
     overwrite: bool = False,
     create_parent_dirs: bool = True,
     preserve_permissions: bool = True,
-    chunk_size: int = 1024 * 1024,
+    chunk_size: int = 0,
     options: Optional[Dict[str, Any]] = None) -> DownloadFileResult
 ```
 
@@ -183,7 +185,7 @@ Asynchronously download file.
 * **overwrite** (bool, optional): Whether to overwrite existing local file. `True` means overwrite existing local file, `False` means do not overwrite existing local file. Default value: `False`.
 * **create_parent_dirs** (bool, optional): Whether to automatically create target parent directories. `True` means automatically create target parent directories, `False` means do not automatically create target parent directories. Default value: `True`.
 * **preserve_permissions** (bool, optional): Whether to preserve file permissions. `True` means preserve file permissions, `False` means do not preserve file permissions. Default value: `True`.
-* **chunk_size** (int, optional): Transfer chunk size. Default value: 1MB.
+* **chunk_size** (int, optional): Maximum number of bytes to download at once. Default value: 0 (unlimited).
 * **options** (Dict[str, Any], optional): Extended configuration options.
 
 **Returns**:
@@ -238,7 +240,7 @@ Asynchronously list files under the specified path.
 
 * **path** (str): Target parent directory path.
 * **recursive** (bool, optional): Whether to recursively list files in subdirectories. `True` means recursively list files in subdirectories, `False` means do not recursively list files in subdirectories. Default value: `False`.
-* **max_depth** (int, optional): Maximum recursion depth. Configure when recursively listing files in subdirectories is needed.
+* **max_depth** (int, optional): Maximum recursion depth. Configure when recursively listing files in subdirectories is needed. Only effective when recursive=True.
 * **sort_by** (Literal['name', 'modified_time', 'size'], optional): Sort field. Default value: "name".
 * **sort_descending** (bool, optional): Whether to sort in descending order. `True` means descending order, `False` means ascending order. Default value: `False`.
 * **file_types** (List[str], optional): Filter files by extension, e.g., `['.txt', '.pdf']`.
@@ -266,7 +268,7 @@ Asynchronously list directories under the specified path.
 
 * **path** (str): Target parent directory path.
 * **recursive** (bool, optional): Whether to recursively list files in subdirectories. `True` means recursively list files in subdirectories, `False` means do not recursively list files in subdirectories. Default value: `False`.
-* **max_depth** (int, optional): Maximum recursion depth. Configure when recursively listing files in subdirectories is needed.
+* **max_depth** (int, optional): Maximum recursion depth. Configure when recursively listing files in subdirectories is needed. Only effective when recursive=True.
 * **sort_by** (Literal['name', 'modified_time', 'size'], optional): Sort field. Default value: "name".
 * **sort_descending** (bool, optional): Whether to sort in descending order. `True` means descending order, `False` means ascending order. Default value: `False`.
 * **options** (Dict[str, Any], optional): Extended configuration options.

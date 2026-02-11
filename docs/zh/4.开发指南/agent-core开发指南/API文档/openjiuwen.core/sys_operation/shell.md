@@ -27,7 +27,7 @@ abstractmethod async execute_cmd(
 * **cwd**(str, 可选)：命令执行的工作目录。默认值：当前目录。
 * **timeout**(int, 可选)：命令执行超时时间。单位：秒。默认值：300。
 * **environment**(Dict[str, str], 可选)：自定义环境变量。
-* **options**(Dict[str, Any], 可选)：扩展配置选项。
+* **options**(Dict[str, Any], 可选)：扩展配置选项，如 `encoding`（输出编码，默认 utf-8）。
 
 **返回**：
 
@@ -52,7 +52,7 @@ abstractmethod async execute_cmd_stream(
 * **cwd**(str, 可选)：命令执行的工作目录。默认值：当前目录。
 * **timeout**(int, 可选)：命令执行超时时间。单位：秒。默认值：300。
 * **environment**(Dict[str, str], 可选)：自定义环境变量。
-* **options**(Dict[str, Any], 可选)：扩展配置选项。
+* **options**(Dict[str, Any], 可选)：扩展配置选项，如 `encoding`（输出编码）及 `chunk_size`（流式输出的分块大小）。
 
 **返回**：
 

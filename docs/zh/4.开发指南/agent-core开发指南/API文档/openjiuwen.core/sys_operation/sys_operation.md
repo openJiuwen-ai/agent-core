@@ -24,13 +24,53 @@
 class SysOperationCard(BaseCard)
 ```
 
-`SysOperation`是系统操作配置卡片的数据类，继承于`BaseCard`。
+`SysOperationCard`是系统操作配置卡片的数据类，继承于`BaseCard`。
 
 **参数**：
 
 * **mode**([OperationMode](#class-operationmode), 可选)：运行模式。默认值：`OperationMode.LOCAL`。
 * **work_config**([LocalWorkConfig](#class-localworkconfig), 可选)：本地工作配置。默认值：`None`。
-* **gateway_config**(SandboxGatewayConfig, 可选)：沙箱网关配置。默认值：`None`。其中，沙箱模式在当前版本暂不支持。
+* **gateway_config**(SandboxGatewayConfig, 可选)：沙箱网关配置。默认值：`None`。
+* **fs**：快速获取文件系统工具 ID 的入口。
+* **shell**：快速获取 Shell 工具 ID 的入口。
+* **code**：快速获取代码执行工具 ID 的入口。
+* **其它参数**：支持动态获取。例如通过 `card.browser.navigate` 获取浏览器操作的工具 ID。
+
+**样例**：
+
+```python
+>>> card = SysOperationCard(id="sys_op")
+>>> print(card.fs.read_file)  # 快速获取工具 ID
+'sys_op.fs.read_file'
+```
+
+**方法**：
+
+### generate_tool_id
+
+```python
+@staticmethod
+generate_tool_id(card_id: str, op_type: str, method_name: str) -> str
+```
+
+静态方法。生成系统操作工具的唯一标识符（Tool ID）。
+
+**参数**：
+
+* **card_id**(str)：操作卡片的 ID。
+* **op_type**(str)：操作类型，如 `fs`、`shell`、`code` 等。
+* **method_name**(str)：具体的方法名称。
+
+**返回**：
+
+**str**，格式为 `{card_id}.{op_type}.{method_name}` 的工具 ID 字符串。
+
+**样例**：
+
+```python
+>>> SysOperationCard.generate_tool_id("sys_op", "fs", "read_file")
+'sys_op.fs.read_file'
+```
 
 ## class SysOperation
 
