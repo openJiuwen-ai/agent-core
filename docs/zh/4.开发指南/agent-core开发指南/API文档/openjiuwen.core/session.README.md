@@ -13,3 +13,4 @@
 | [OutputSchema](./session/stream/stream.md) | 标准流式输出数据格式。 |
 | [TraceSchema](./session/stream/stream.md) | 调试信息流式输出数据格式。 |
 | [CustomSchema](./session/stream/stream.md) | 自定义流式输出数据格式。 |
+| [Checkpointer](./session/checkpointer.md) | 检查点抽象基类及实现。 |

@@ -13,3 +13,4 @@
 | [OutputSchema](./session/stream/stream.md) | Standard streaming output data format. |
 | [TraceSchema](./session/stream/stream.md) | Debug information streaming output data format. |
 | [CustomSchema](./session/stream/stream.md) | Custom streaming output data format. |
+| [Checkpointer](./session/checkpointer.md) | Checkpoint abstract base class and implementations. |

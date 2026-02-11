@@ -7,4 +7,5 @@
 | MODULE | DESCRIPTION |
 |---|---|
 | [message_queue](./openjiuwen.extensions/message_queue.README.md) | 消息队列扩展（如 Pulsar）。 |
+| [checkpointer](./openjiuwen.extensions/checkpointer.README.md) | 检查点扩展（如 Redis）。 |
 

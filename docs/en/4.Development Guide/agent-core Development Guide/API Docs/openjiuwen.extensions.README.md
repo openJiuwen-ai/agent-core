@@ -7,3 +7,4 @@
 | MODULE | DESCRIPTION |
 |---|---|
 | [message_queue](./openjiuwen.extensions/message_queue.README.md) | Message queue extensions (e.g., Pulsar). |
+| [checkpointer](./openjiuwen.extensions/checkpointer.README.md) | Checkpoint extensions (e.g., Redis). |
