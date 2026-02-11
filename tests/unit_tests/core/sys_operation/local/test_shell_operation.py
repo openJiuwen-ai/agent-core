@@ -17,7 +17,6 @@ from openjiuwen.core.sys_operation import (
     OperationMode,
     SysOperationCard,
 )
-
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
 
 
@@ -336,10 +335,12 @@ async def test_execute_cmd_stream_continuous_output(sys_op):
     async for res in sys_op.shell().execute_cmd_stream(command=cmd, timeout=10):
         stream_results.append(res)
 
-    # Validate at least multiple stdout chunks (ping output is chunked)
+    # Validate at least multiple stdout chunks (ping output is chunked).
+    # Chunks may split arbitrarily by buffer, so only require combined stdout to contain the target.
     stdout_chunks = [r for r in stream_results if r.data.type == "stdout"]
     assert len(stdout_chunks) >= 1
-    assert all("127.0.0.1" in r.data.text for r in stdout_chunks)
+    combined_stdout = "".join(r.data.text for r in stdout_chunks)
+    assert "127.0.0.1" in combined_stdout
 
     # Validate exit code
     exit_chunk = next(r for r in stream_results if r.data.exit_code is not None)

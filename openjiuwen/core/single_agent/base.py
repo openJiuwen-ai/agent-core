@@ -308,7 +308,7 @@ class ControllerAgent(BaseAgent):
                 session_id=session_id
             )
         from openjiuwen.core.runner import Runner
-        await Runner().release(session_id=session_id)
+        await Runner.release(session_id=session_id)
 
     async def invoke(
         self,

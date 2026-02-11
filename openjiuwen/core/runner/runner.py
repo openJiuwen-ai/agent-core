@@ -3,6 +3,7 @@
 
 from typing import (
     Any,
+    AsyncIterator,
     Optional,
     Union,
 )
@@ -11,7 +12,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.multi_agent import BaseGroup
+from openjiuwen.core.multi_agent import (
+    BaseGroup,
+    Session as AgentGroupSession,
+)
+from openjiuwen.core.runner.callback import AsyncCallbackFramework
 from openjiuwen.core.runner.drunner.dmessage_queue.dsubscription.reply_topic_subscription import ReplyTopicSubscription
 from openjiuwen.core.runner.drunner.dmessage_queue.message_queue_factory import MessageQueueFactory
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
@@ -39,12 +44,11 @@ from openjiuwen.core.workflow import (
     Session as WorkflowSession,
     Workflow,
 )
-from openjiuwen.core.multi_agent import Session as AgentGroupSession
 
 
-class Runner:
+class _RunnerImpl:
     """
-    Runner
+    Runner implementation class.
     """
     _DEFAULT_RUNNER_ID = "global"
 
@@ -70,6 +74,7 @@ class Runner:
         # Distributed system related components
         self.system_reply_sub: ReplyTopicSubscription | None = None
         self._distribute_message_queue = None
+        self._callback_framework = AsyncCallbackFramework()
 
     @property
     def resource_mgr(self) -> ResourceMgr:
@@ -85,6 +90,11 @@ class Runner:
     def dist_pubsub(self):
         """Get the distributed message queue for cross-process communication."""
         return self._distribute_message_queue
+
+    @property
+    def callback_framework(self) -> AsyncCallbackFramework:
+        """Get the callback framework for asynchronous callbacks."""
+        return self._callback_framework
 
     def set_config(self, config: RunnerConfig):
         """Set the runner configuration with provided config object.
@@ -403,4 +413,265 @@ class Runner:
         return agent_session
 
 
-Runner = Runner(config=DEFAULT_RUNNER_CONFIG)
+# Global runner instance
+GLOBAL_RUNNER = _RunnerImpl(config=DEFAULT_RUNNER_CONFIG)
+
+
+class _ClassProperty:
+    """Descriptor for class-level properties."""
+    
+    def __init__(self, name: str):
+        self.name = name
+    
+    def __get__(self, obj, objtype=None):
+        return getattr(GLOBAL_RUNNER, self.name)
+
+
+class Runner:
+    """
+    Runner singleton class that proxies all calls to the global runner instance.
+    
+    This class provides a singleton interface for accessing the global runner instance.
+    All method calls and property accesses are automatically proxied to GLOBAL_RUNNER.
+    
+    Example:
+        >>> from openjiuwen.core.runner import Runner
+        >>> await Runner.start()
+        >>> resource_mgr = Runner.resource_mgr
+        >>> await Runner.run_agent(agent, inputs)
+    """
+    
+    # Properties
+    resource_mgr: ResourceMgr = _ClassProperty("resource_mgr")  # type: ignore[assignment]
+    """Get the resource manager for workflow, agent, agent_group, tool, model, prompt..."""
+    
+    pubsub = _ClassProperty("pubsub")
+    """Get the local message queue for publish/subscribe communication."""
+    
+    dist_pubsub = _ClassProperty("dist_pubsub")
+    """Get the distributed message queue for cross-process communication."""
+
+    system_reply_sub: ReplyTopicSubscription = _ClassProperty("system_reply_sub")
+    """Get the reply topic subscription for distributed system reply messages."""
+    
+    callback_framework: AsyncCallbackFramework = _ClassProperty("callback_framework")  # type: ignore[assignment]
+    """Get the callback framework for asynchronous callbacks."""
+    
+    # Methods
+    @classmethod
+    def set_config(cls, config: RunnerConfig) -> None:
+        """Set the runner configuration with provided config object.
+
+        Args:
+            config: The RunnerConfig object containing configuration settings
+        """
+        GLOBAL_RUNNER.set_config(config)
+    
+    @classmethod
+    def get_config(cls) -> RunnerConfig:
+        """Retrieve the current runner configuration.
+
+        Returns:
+            RunnerConfig: The current configuration object
+        """
+        return GLOBAL_RUNNER.get_config()
+    
+    @classmethod
+    async def start(cls) -> bool:
+        """Start the runner and its associated components, such as message queue."""
+        return await GLOBAL_RUNNER.start()
+    
+    @classmethod
+    async def stop(cls):
+        """Stop the runner and clean up resources."""
+        return await GLOBAL_RUNNER.stop()
+    
+    @classmethod
+    async def run_workflow(
+        cls,
+        workflow: str | Workflow,
+        inputs: Any,
+        *,
+            session: Optional[str | WorkflowSession | AgentSession] = None,
+        context: Optional[ModelContext] = None,
+        envs: Optional[dict[str, Any]] = None
+    ) -> Any:
+        """
+        Execute a workflow with given inputs.
+
+        Args:
+            workflow: Workflow name or Workflow instance to execute
+            inputs: Input data for the workflow
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            envs: Environment variables or configuration overrides
+        """
+        return await GLOBAL_RUNNER.run_workflow(
+            workflow=workflow,
+            inputs=inputs,
+            session=session,
+            context=context,
+            envs=envs
+        )
+    
+    @classmethod
+    async def run_workflow_streaming(
+        cls,
+        workflow: str | Workflow,
+        inputs: Any,
+        *,
+            session: Optional[str | WorkflowSession | AgentSession] = None,
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None
+    ) -> AsyncIterator[Any]:
+        """
+        Execute a workflow with streaming output support.
+
+        Args:
+            workflow: Workflow name or Workflow instance to execute
+            inputs: Input data for the workflow
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            stream_modes: Types of streaming data to output
+            envs: Environment variables or configuration overrides
+        """
+        async for chunk in GLOBAL_RUNNER.run_workflow_streaming(
+            workflow=workflow,
+            inputs=inputs,
+            session=session,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs
+        ):
+            yield chunk
+    
+    @classmethod
+    async def run_agent(
+        cls,
+        agent: str | BaseAgent | LegacyBaseAgent,
+        inputs: Any,
+        *,
+            session: Optional[str | AgentSession] = None,
+        context: Optional[ModelContext] = None,
+        envs: Optional[dict[str, Any]] = None,
+    ) -> Any:
+        """
+        Execute a single agent with given inputs.
+
+        Args:
+            agent: Agent name or BaseAgent instance to execute
+            inputs: Input data for the agent
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            envs: Environment variables or configuration overrides
+        """
+        return await GLOBAL_RUNNER.run_agent(
+            agent=agent,
+            inputs=inputs,
+            session=session,
+            context=context,
+            envs=envs
+        )
+    
+    @classmethod
+    async def run_agent_streaming(
+        cls,
+        agent: str | BaseAgent | LegacyBaseAgent,
+        inputs: Any,
+        *,
+            session: Optional[str | AgentSession] = None,
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None
+    ) -> AsyncIterator[Any]:
+        """
+        Execute a single agent with streaming output support.
+
+        Args:
+            agent: Agent name or BaseAgent instance to execute
+            inputs: Input data for the agent
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            stream_modes: Types of streaming data to output
+            envs: Environment variables or configuration override
+        """
+        async for chunk in GLOBAL_RUNNER.run_agent_streaming(
+            agent=agent,
+            inputs=inputs,
+            session=session,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs
+        ):
+            yield chunk
+    
+    @classmethod
+    async def run_agent_group(
+        cls,
+        agent_group: Union[str, 'BaseGroup'],
+        inputs: Any,
+        *,
+            session: Optional[str | AgentGroupSession] = None,
+        context: Optional[ModelContext] = None,
+        envs: Optional[dict[str, Any]] = None
+    ) -> Any:
+        """
+        Execute a group of agents with given inputs.
+
+        Args:
+            agent_group: AgentGroup name or instance to execute
+            inputs: Input data for the agent group
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            envs: Environment variables or configuration overrides
+        """
+        return await GLOBAL_RUNNER.run_agent_group(
+            agent_group=agent_group,
+            inputs=inputs,
+            session=session,
+            context=context,
+            envs=envs
+        )
+    
+    @classmethod
+    async def run_agent_group_streaming(
+        cls,
+        agent_group: Union[str, 'BaseGroup'],
+        inputs: Any,
+        *,
+            session: Optional[str | AgentGroupSession] = None,
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+    ) -> AsyncIterator[Any]:
+        """
+        Execute a group of agents with streaming output support.
+
+        Args:
+            agent_group: AgentGroup name or instance to execute
+            inputs: Input data for the agent group
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            stream_modes: Types of streaming data to output
+            envs: Environment variables or configuration overrides
+        """
+        async for chunk in GLOBAL_RUNNER.run_agent_group_streaming(
+            agent_group=agent_group,
+            inputs=inputs,
+            session=session,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs
+        ):
+            yield chunk
+    
+    @classmethod
+    async def release(cls, session_id: str) -> None:
+        """
+        Release resources associated with a session.
+
+        Args:
+            session_id: ID of the session to clean up
+        """
+        await GLOBAL_RUNNER.release(session_id)

@@ -1,10 +1,15 @@
+# Executor Runner
+
 Runner is the unified entry point and control center for executing all core components of openJiuwen (including Workflow, Agent, AgentGroup, and Tool). It abstracts complex execution logic and provides developers with a concise, consistent, and powerful programming interface.
+
+**Important Note**: Runner is a singleton class. All method calls and property accesses are automatically proxied to the global Runner instance. You don't need to instantiate Runner; simply call methods directly through the class name, for example: `Runner.start()`, `Runner.resource_mgr`.
+
 The main functions of Runner include:
+
 - Provide standard asynchronous invocation (invoke) and asynchronous streaming invocation (stream) entry points for Agent.
 - Provide standard asynchronous invocation (invoke) and asynchronous streaming invocation (stream) entry points for Workflow.
 - Provide standard asynchronous invocation (invoke) and asynchronous streaming invocation (stream) entry points for Tool.
 - Provide standard asynchronous invocation (invoke) and asynchronous streaming invocation (stream) entry points for AgentGroup.
-
 
 ## Agent Execution
 
@@ -58,9 +63,8 @@ def create_agent(runner):
     return agent
 
 
-# Use global Runner instance
-runner = Runner
-agent = create_agent(runner)
+# Runner is a singleton class, use the class name directly
+agent = create_agent(Runner)
 ```
 
 Then, call the `run_agent` interface to directly run the WorkflowAgent:
@@ -68,8 +72,9 @@ Then, call the `run_agent` interface to directly run the WorkflowAgent:
 ```python
 import asyncio
 
-print(asyncio.run(runner.run_agent(agent=agent, inputs={"conversation_id": "id1", "query": "haha"})))
+print(asyncio.run(Runner.run_agent(agent=agent, inputs={"conversation_id": "id1", "query": "haha"})))
 ```
+
 Execution result:
 
 ```python
@@ -107,12 +112,12 @@ Then, call `Runner`'s `run_workflow` to directly run the `Workflow` (no need to 
 
 ```python
 import asyncio
-from openjiuwen.core.runner.runner import Runner
+from openjiuwen.core.runner import Runner
 
-runner = Runner
-result = asyncio.run(runner.run_workflow(workflow=workflow, inputs={"query": "query workflow"}))
+result = asyncio.run(Runner.run_workflow(workflow=workflow, inputs={"query": "query workflow"}))
 print(result)
 ```
+
 Execution result:
 
 ```python
@@ -127,6 +132,7 @@ Runner supports single-output and streaming-output execution for all Tools, incl
 Below, we construct a `LocalFunction` tool for addition to illustrate the process of executing a `Tool` via `Runner`.
 
 First, create a Tool:
+
 ```python
 from openjiuwen.core.utils.tool.function.function import LocalFunction, Param
 
@@ -141,14 +147,18 @@ add_plugin = LocalFunction(
     func=lambda a, b: a + b
 )
 ```
+
 Then, use `Runner.run_tool` to execute the tool:
+
 ```python
 import asyncio
 from openjiuwen.core.runner.runner import Runner
 
 print(asyncio.run(Runner.run_tool(tool=add_plugin, inputs={'a':1, 'b':2})))
 ```
+
 Finally, execution result:
+
 ```python
 3
 ```
@@ -391,6 +401,7 @@ asyncio.run(Runner.stop())
 ```
 
 Finally, obtain the output:
+
 ```python
 [OutputSchema(type='__interaction__', index=0, payload=InteractionOutput(id='questioner', value='Please provide information related to the transfer amount (number)'))]
 ```

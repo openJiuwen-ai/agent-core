@@ -381,7 +381,7 @@ class DefaultLogger(LoggerProtocol):
         Args:
             log_level: Log level for the message
             msg: Log message (string)
-            event_type: Event type for creating structured event 
+            event_type: Event type for creating structured event
                 (LogEventType enum or string identifier, only used when event is None)
             event: Optional structured log event object
             **kwargs: Additional keyword arguments for event creation

@@ -1,4 +1,9 @@
+# 执行器Runner
+
 Runner是openJiuwen执行所有核心组件（包括Workflow，Agent）的统一入口和控制中心。它将复杂的执行逻辑抽象化，为开发者提供了一个简洁、一致且强大的编程接口。
+
+**重要说明**：Runner是一个单例类，所有方法调用和属性访问都会自动代理到全局的Runner实例。无需实例化Runner，直接通过类名调用即可，例如：`Runner.start()`、`Runner.resource_mgr`。
+
 Runner的主要功能包括：
 
 - 提供Agent标准的异步调用（invoke）和异步流式调用（stream）两种执行入口。
@@ -56,9 +61,8 @@ def create_agent(runner):
     return agent
 
 
-# 使用全局 Runner 实例
-runner = Runner
-agent = create_agent(runner)
+# Runner 是单例类，直接使用类名即可
+agent = create_agent(Runner)
 ```
 
 然后，调用 `run_agent` 接口直接运行 WorkflowAgent：
@@ -66,7 +70,7 @@ agent = create_agent(runner)
 ```python
 import asyncio
 
-print(asyncio.run(runner.run_agent(agent=agent, inputs={"conversation_id": "id1", "query": "哈哈"})))
+print(asyncio.run(Runner.run_agent(agent=agent, inputs={"conversation_id": "id1", "query": "哈哈"})))
 ```
 
 执行结果：
@@ -106,10 +110,9 @@ workflow = build_workflow("test_workflow", "test_workflow", "1")
 
 ```python
 import asyncio
-from openjiuwen.core.runner.runner import Runner
+from openjiuwen.core.runner import Runner
 
-runner = Runner
-result = asyncio.run(runner.run_workflow(workflow=workflow, inputs={"query": "query workflow"}))
+result = asyncio.run(Runner.run_workflow(workflow=workflow, inputs={"query": "query workflow"}))
 print(result)
 ```
 

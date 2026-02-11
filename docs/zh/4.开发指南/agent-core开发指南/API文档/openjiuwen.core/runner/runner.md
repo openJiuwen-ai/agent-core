@@ -4,11 +4,14 @@
 
 Runner提供了Workflow、Agent、Tool和Group的统一执行接口。
 
+Runner是一个单例类，所有方法调用和属性访问都会自动代理到全局的Runner实例（`GLOBAL_RUNNER`）。无需实例化Runner，直接通过类名调用即可。
+
 
 ### start
 
 ```python
-async def start(self) -> bool
+@classmethod
+async def start(cls) -> bool
 ```
 
 启动Runner。
@@ -25,7 +28,8 @@ async def start(self) -> bool
 ### stop
 
 ```python
-async def stop(self)
+@classmethod
+async def stop(cls)
 ```
 
 关闭Runner。
@@ -42,11 +46,12 @@ async def stop(self)
 ### resource_mgr
 
 ```python
-@property
-def resource_mgr(self) -> ResourceMgr
+resource_mgr: ResourceMgr
 ```
 
 获取资源管理器实例，用于管理和注册Workflow、Agent、Tool等资源。
+
+这是一个类属性，可以直接通过 `Runner.resource_mgr` 访问。
 
 **返回**：
 
@@ -55,8 +60,9 @@ def resource_mgr(self) -> ResourceMgr
 ### run_agent
 
 ```python
+@classmethod
 async def run_agent(
-    self,
+    cls,
     agent: str | BaseAgent | LegacyBaseAgent,
     inputs: Any,
     *,
@@ -139,8 +145,9 @@ async def run_agent(
 ### run_workflow
 
 ```python
+@classmethod
 async def run_workflow(
-    self,
+    cls,
     workflow: str | Workflow,
     inputs: Any,
     *,
@@ -213,8 +220,9 @@ result={'output': {'result': 'query workflow'}} state=<WorkflowExecutionState.CO
 ### run_agent_group
 
 ```python
+@classmethod
 async def run_agent_group(
-    self,
+    cls,
     agent_group: str | BaseGroup,
     inputs: Any,
     *,
@@ -282,8 +290,9 @@ async def run_agent_group(
 ### run_agent_group_streaming
 
 ```python
+@classmethod
 async def run_agent_group_streaming(
-    self,
+    cls,
     agent_group: str | BaseGroup,
     inputs: Any,
     *,
@@ -363,7 +372,8 @@ async def run_agent_group_streaming(
 ### release
 
 ```python
-async def release(self, session_id: str)
+@classmethod
+async def release(cls, session_id: str)
 ```
 
 清理指定`session_id`的缓存数据，如中断状态数据。

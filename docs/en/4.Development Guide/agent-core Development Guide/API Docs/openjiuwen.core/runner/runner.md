@@ -4,11 +4,14 @@
 
 Runner provides a unified execution interface for Workflow, Agent, Tool, and Group.
 
+Runner is a singleton class. All method calls and property accesses are automatically proxied to the global Runner instance (`GLOBAL_RUNNER`). You don't need to instantiate Runner; simply call methods directly through the class name.
+
 
 ### start
 
 ```python
-async def start(self) -> bool
+@classmethod
+async def start(cls) -> bool
 ```
 
 Start the Runner.
@@ -25,7 +28,8 @@ Start the Runner.
 ### stop
 
 ```python
-async def stop(self)
+@classmethod
+async def stop(cls)
 ```
 
 Stop the Runner.
@@ -42,11 +46,12 @@ Stop the Runner.
 ### resource_mgr
 
 ```python
-@property
-def resource_mgr(self) -> ResourceMgr
+resource_mgr: ResourceMgr
 ```
 
 Get the resource manager instance for managing and registering resources such as Workflow, Agent, Tool, etc.
+
+This is a class property that can be accessed directly via `Runner.resource_mgr`.
 
 **Returns**:
 
@@ -55,8 +60,9 @@ Get the resource manager instance for managing and registering resources such as
 ### run_agent
 
 ```python
+@classmethod
 async def run_agent(
-    self,
+    cls,
     agent: str | BaseAgent | LegacyBaseAgent,
     inputs: Any,
     *,
@@ -139,8 +145,9 @@ Execute an agent and return its result.
 ### run_workflow
 
 ```python
+@classmethod
 async def run_workflow(
-    self,
+    cls,
     workflow: str | Workflow,
     inputs: Any,
     *,
@@ -213,8 +220,9 @@ result={'output': {'result': 'query workflow'}} state=<WorkflowExecutionState.CO
 ### run_agent_group
 
 ```python
+@classmethod
 async def run_agent_group(
-    self,
+    cls,
     agent_group: str | BaseGroup,
     inputs: Any,
     *,
@@ -282,8 +290,9 @@ Execute AgentGroup and return the result.
 ### run_agent_group_streaming
 
 ```python
+@classmethod
 async def run_agent_group_streaming(
-    self,
+    cls,
     agent_group: str | BaseGroup,
     inputs: Any,
     *,
@@ -363,7 +372,8 @@ Execute AgentGroup in streaming mode and return the result.
 ### release
 
 ```python
-async def release(self, session_id: str)
+@classmethod
+async def release(cls, session_id: str)
 ```
 
 Clean up cached data for the specified `session_id`, such as interruption state data.
