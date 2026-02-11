@@ -131,7 +131,7 @@ class TraceAgentHandler(TraceBaseHandler):
             error_info = {"error_code": error.status.code, "message": error.message}
         else:
             error_info = {"error_code": StatusCode.WORKFLOW_EXECUTION_ERROR.code,
-                          "message": StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(str(error))}
+                          "message": StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(reason=str(error), workflow="")}
         elapsed_time = self._get_elapsed_time(span.start_time, end_time) if span.start_time else None
         update_data = {
             "end_time": end_time,

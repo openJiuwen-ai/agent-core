@@ -27,7 +27,7 @@ Add workflow component to loop body. Note that components added to loop body can
 
 ```python
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Input, Output, LoopGroup
 >>> # Custom component AddTenNode, each call adds 10 to source in inputs
 >>> class AddTenNode(WorkflowComponent):
@@ -146,7 +146,7 @@ The following example demonstrates how to use LoopComponent with AlwaysTrue cond
 >>> import asyncio
 >>>
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Input, Output, LoopGroup, BranchComponent, LoopComponent, \
 ...   Workflow, Start, End, LoopSetVariableComponent, LoopBreakComponent
@@ -259,7 +259,7 @@ Interruption component class, used to control loop interruption, provides powerf
 >>> import asyncio
 >>> 
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Workflow, Start, End, LoopGroup, LoopSetVariableComponent, \
 ...     BranchComponent, LoopBreakComponent, LoopComponent
@@ -406,8 +406,8 @@ class LoopSetVariableComponent(variable_mapping: dict[str, Any])
 >>> # Use `LoopSetVariableComponent` to set intermediate variables in loop body
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
->>> from openjiuwen.core.session.workflow import create_workflow_session
+>>> from openjiuwen.core.workflow.components import Session
+>>> from openjiuwen.core.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Workflow, Start, End, LoopGroup, LoopSetVariableComponent, \
 ...     BranchComponent, LoopBreakComponent, LoopComponent
 >>> 
@@ -472,7 +472,7 @@ class LoopSetVariableComponent(variable_mapping: dict[str, Any])
 >>> 
 >>> 
 >>> async def run_workflow():
-...     return await flow.invoke({"input_number": 2}, WorkflowRuntime())
+...     return await flow.invoke({"input_number": 2}, create_workflow_session())
 >>> 
 >>> 
 >>> if __name__ == "__main__":
@@ -487,7 +487,7 @@ class LoopSetVariableComponent(variable_mapping: dict[str, Any])
 >>> # Use `LoopSetVariableComponent` to set intermediate variables in loop body
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Workflow, Start, End, LoopGroup, LoopSetVariableComponent, \
 ...     BranchComponent, LoopBreakComponent, LoopComponent
@@ -543,7 +543,7 @@ class LoopSetVariableComponent(variable_mapping: dict[str, Any])
 ```python
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Workflow, Start, End, LoopGroup, LoopSetVariableComponent, \
     BranchComponent, LoopBreakComponent, LoopComponent

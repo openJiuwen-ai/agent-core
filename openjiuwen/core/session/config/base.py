@@ -3,6 +3,7 @@
 import contextvars
 import os
 from abc import ABC
+from copy import deepcopy
 from typing import TypedDict, Any, Optional
 
 from openjiuwen.core.common.logging import session_logger, LogEventType
@@ -139,6 +140,9 @@ class Config(ABC):
             return self._env[key]
         else:
             return default
+
+    def get_envs(self):
+        return deepcopy(self._env)
 
     def _load_envs_(self) -> None:
         self._load_builtin_configs_()

@@ -23,10 +23,7 @@ from openjiuwen.core.runner.runner_config import (
     RunnerConfig,
     set_runner_config,
 )
-from openjiuwen.core.session import (
-    Config,
-    Session,
-)
+from openjiuwen.core.session import Config
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.single_agent import (
@@ -42,6 +39,7 @@ from openjiuwen.core.workflow import (
     Session as WorkflowSession,
     Workflow,
 )
+from openjiuwen.core.multi_agent import Session as AgentGroupSession
 
 
 class Runner:
@@ -173,7 +171,7 @@ class Runner:
                            workflow: str | Workflow,
                            inputs: Any,
                            *,
-                           session: Optional[str | Session] = None,
+                           session: Optional[str | WorkflowSession | AgentSession] = None,
                            context: ModelContext = None,
                            envs: Optional[dict[str, Any]] = None):
         """
@@ -193,7 +191,7 @@ class Runner:
                                      workflow: str | Workflow,
                                      inputs: Any,
                                      *,
-                                     session: Optional[str | Session] = None,
+                                     session: Optional[str | WorkflowSession | AgentSession] = None,
                                      context: ModelContext = None,
                                      stream_modes: list[BaseStreamMode] = None,
                                      envs: Optional[dict[str, Any]] = None):
@@ -217,7 +215,7 @@ class Runner:
                         agent: str | BaseAgent | LegacyBaseAgent,
                         inputs: Any,
                         *,
-                        session: Optional[str | Session] = None,
+                        session: Optional[str | AgentSession] = None,
                         context: ModelContext = None,
                         envs: Optional[dict[str, Any]] = None,
                         ):
@@ -239,14 +237,14 @@ class Runner:
             res = await agent_instance.invoke(inputs, session=None)
         else:
             res = await agent_instance.invoke(inputs, agent_session)
-            await getattr(agent_session, "_inner").post_run()
+            await agent_session.post_run()
         return res
 
     async def run_agent_streaming(self,
                                   agent: str | BaseAgent | LegacyBaseAgent,
                                   inputs: Any,
                                   *,
-                                  session: Optional[str | Session] = None,
+                                  session: Optional[str | AgentSession] = None,
                                   context: ModelContext = None,
                                   stream_modes: list[BaseStreamMode] = None,
                                   envs: Optional[dict[str, Any]] = None):
@@ -272,13 +270,13 @@ class Runner:
         else:
             async for chunk in agent_instance.stream(inputs, session=agent_session):
                 yield chunk
-            await getattr(agent_session, "_inner").post_run()
+            await agent_session.post_run()
 
     async def run_agent_group(self,
                               agent_group: Union[str, 'BaseGroup'],
                               inputs: Any,
                               *,
-                              session: Optional[str | Session] = None,
+                              session: Optional[str | AgentGroupSession] = None,
                               context: ModelContext = None,
                               envs: Optional[dict[str, Any]] = None
                               ):
@@ -299,7 +297,7 @@ class Runner:
                                         agent_group: Union[str, 'BaseGroup'],
                                         inputs: Any,
                                         *,
-                                        session: Optional[str | Session] = None,
+                                        session: Optional[str | AgentGroupSession] = None,
                                         context: ModelContext = None,
                                         stream_modes: list[BaseStreamMode] = None,
                                         envs: Optional[dict[str, Any]] = None,
@@ -329,7 +327,7 @@ class Runner:
         await CheckpointerFactory.get_checkpointer().release(session_id)
 
     @classmethod
-    def _is_called_by_agent(cls, session: Session) -> bool:
+    def _is_called_by_agent(cls, session: AgentSession) -> bool:
         return session and isinstance(session, AgentSession)
 
     @classmethod
@@ -345,7 +343,8 @@ class Runner:
             workflow_session = session
         return workflow_session
 
-    async def _prepare_agent(self, agent: Union[str, BaseAgent], inputs: Any, session: Optional[str | Session] = None):
+    async def _prepare_agent(self, agent: Union[str, BaseAgent], inputs: Any,
+                             session: Optional[str | AgentSession] = None):
         session_id = inputs.get(self._AGENT_CONVERSATION_ID,
                                 session if isinstance(session, str) else self._DEFAULT_AGENT_SESSION_ID)
         if isinstance(agent, str):
@@ -358,16 +357,16 @@ class Runner:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
                 return agent_instance, None
 
-            task_session = self._create_task_session(agent_instance, session_id)
-            await task_session.pre_run(inputs=inputs)
-            return agent_instance, task_session
+            agent_session = self._create_agent_session(agent_instance, session_id)
+            await agent_session.pre_run(inputs=inputs)
+            return agent_instance, agent_session
 
-        task_session = self._create_task_session(agent, session_id)
-        await task_session.pre_run(inputs=inputs)
-        return agent, task_session
+        agent_session = self._create_agent_session(agent, session_id)
+        await agent_session.pre_run(inputs=inputs)
+        return agent, agent_session
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],
-                                session: str | Session | WorkflowSession) -> tuple[Workflow, WorkflowSession]:
+                                session: str | AgentSession | WorkflowSession) -> tuple[Workflow, WorkflowSession]:
         if isinstance(workflow, str):
             workflow_key = workflow
         else:
@@ -389,7 +388,7 @@ class Runner:
         return agent_group
 
     @staticmethod
-    def _create_task_session(agent, session_id):
+    def _create_agent_session(agent, session_id):
         envs = None
         if hasattr(agent, "card"):
             config = agent.config
@@ -400,8 +399,8 @@ class Runner:
             card = AgentCard(id=config.get_agent_config().id)
         if isinstance(config, Config):
             envs = getattr(config, "_env", None)
-        task_session = create_agent_session(session_id=session_id, envs=envs, card=card)
-        return task_session
+        agent_session = create_agent_session(session_id=session_id, envs=envs, card=card)
+        return agent_session
 
 
 Runner = Runner(config=DEFAULT_RUNNER_CONFIG)

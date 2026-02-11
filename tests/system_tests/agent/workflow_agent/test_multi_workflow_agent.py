@@ -12,7 +12,7 @@ import uuid
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Output, Input
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import WorkflowComponent
 
 os.environ["LLM_SSL_VERIFY"] = "false"

@@ -28,7 +28,6 @@ from openjiuwen.core.runner.resources_manager.base import (
 from openjiuwen.core.runner.resources_manager.resource_registry import ResourceRegistry
 
 from openjiuwen.core.runner.resources_manager.tag_manager import TagMgr
-from openjiuwen.core.session import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.sys_operation import SysOperationCard, SysOperation, SysOperationToolAdapter
@@ -110,7 +109,7 @@ class ResourceMgr:
                               *,
                               tag: Optional[Tag | list[Tag]] = None,
                               tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                              session: Optional[Session] = None
+                              session: Optional["Session"] = None
                               ) -> Optional[BaseGroup] | list[Optional[BaseGroup]]:
         """
         Get an agent group instance by ID or tag.
@@ -221,7 +220,7 @@ class ResourceMgr:
                         *,
                         tag: Optional[Tag | list[Tag]] = None,
                         tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                        session: Optional[Session] = None
+                        session: Optional["Session"] = None
                         ) -> Optional[BaseAgent] | list[Optional[BaseAgent]]:
         """
         Get agent instance(s) by ID or tag.
@@ -324,7 +323,7 @@ class ResourceMgr:
                            *,
                            tag: Optional[Tag | list[Tag]] = None,
                            tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                           session: Optional[Session] = None
+                           session: Optional["Session"] = None
                            ) -> Optional[Workflow] | list[Optional[Workflow]]:
         """
         Get workflow instance(s) by ID or tag.
@@ -381,7 +380,7 @@ class ResourceMgr:
                  *,
                  tag: Optional[Tag | list[Tag]] = None,
                  tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                 session: Optional[Session] = None
+                 session: Optional["Session"] = None
                  ) -> Optional[Tool] | list[Optional[Tool]]:
         """
         Get tool(s) by ID or tag.
@@ -502,7 +501,7 @@ class ResourceMgr:
                         *,
                         tag: Optional[Tag | list[Tag]] = None,
                         tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                        session: Optional[Session] = None) \
+                        session: Optional["Session"] = None) \
             -> Optional[BaseModel] | list[Optional[BaseModel]]:
         """
         Get model instance(s) by ID or tag.
@@ -706,7 +705,7 @@ class ResourceMgr:
                           *,
                           tag: Optional[Tag | List[Tag]] = None,
                           tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                          session: Optional[Session] = None
+                          session: Optional["Session"] = None
                           ) -> Union[Optional[SysOperation], List[Optional[SysOperation]]]:
         """Get sys operation(s) by ID/tag.
 
@@ -890,7 +889,7 @@ class ResourceMgr:
                            tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                            skip_if_tag_not_exists: bool = False,
                            ignore_exception: bool = False,
-                           session: Optional[Session] = None
+                           session: Optional["Session"] = None
                            ) -> Optional[Tool] | list[Optional[Tool]]:
         """
         Get MCP tool(s) by name and server.

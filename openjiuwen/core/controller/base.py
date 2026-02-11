@@ -27,7 +27,7 @@ from openjiuwen.core.controller.modules import (
     EventHandler
 )
 from openjiuwen.core.controller.config import ControllerConfig
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream.base import BaseStreamMode, StreamMode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.errors import build_error, BaseError
@@ -200,15 +200,14 @@ class Controller:
             False if there was no state or restoration failed.
         """
         controller_state = session.get_state("controller")
-
         if not controller_state or "task_manager_state" not in controller_state:
             # No saved state, clear all task manager state
-            logger.info(f"No saved state found for session {session.session_id()}, clearing task manager")
+            logger.info(f"No saved state found for session {session.get_session_id()}, clearing task manager")
             await self._task_manager.clear_state()
             return False
 
         try:
-            logger.info(f"Restoring TaskManager state for session {session.session_id()}")
+            logger.info(f"Restoring TaskManager state for session {session.get_session_id()}")
 
             # Deserialize TaskManagerState from dict
             state_dict = controller_state["task_manager_state"]
@@ -225,7 +224,7 @@ class Controller:
 
         except Exception as e:
             logger.error(
-                f"Failed to restore TaskManager state for session {session.session_id()}: {e}, "
+                f"Failed to restore TaskManager state for session {session.get_session_id()}: {e}, "
                 f"clearing task manager state instead",
                 exc_info=True
             )
@@ -253,12 +252,12 @@ class Controller:
             session.update_state({"controller": controller_state})
 
             logger.info(
-                f"Saved TaskManager state for session {session.session_id()}: "
+                f"Saved TaskManager state for session {session.get_session_id()}: "
                 f"{len(task_manager_state.tasks)} tasks, "
                 f"{len(task_manager_state.root_tasks)} root tasks"
             )
         except Exception as e:
-            logger.error(f"Failed to save TaskManager state for session {session.session_id()}: {e}")
+            logger.error(f"Failed to save TaskManager state for session {session.get_session_id()}: {e}")
 
     def get_task_executor(
             self,
@@ -419,7 +418,7 @@ class Controller:
             logger.info(f"Controller started in event loop {id(current_loop)}")
 
         agent_id = self._card.id
-        session_id = session.session_id()
+        session_id = session.get_session_id()
 
         # Restore controller state
         state_restored = await self._restore_task_manager_state(session)

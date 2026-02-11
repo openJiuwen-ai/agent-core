@@ -31,7 +31,7 @@ from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
 from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent, AgentCallbackContext, AgentMiddleware, \
@@ -331,16 +331,10 @@ class ControllerAgent(BaseAgent):
             # Convert inputs to InputEvent
             input_event = InputEvent.from_user_input(user_input=inputs)
 
-            from openjiuwen.core.session.agent import Session as AgentSession
-            if isinstance(session, AgentSession):
-                agent_session = getattr(session, "_inner")
-            else:
-                agent_session = session
-
             # Call controller.invoke
             return await self.controller.invoke(
                 inputs=input_event,
-                session=agent_session,
+                session=session,
                 **kwargs
             )
 
@@ -391,11 +385,6 @@ class ControllerAgent(BaseAgent):
                     StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="session is required",
                 )
-            from openjiuwen.core.session.agent import Session as AgentSession
-            if isinstance(session, AgentSession):
-                agent_session = getattr(session, "_inner")
-            else:
-                agent_session = session
 
             # Convert inputs to InputEvent
             input_event = InputEvent.from_user_input(user_input=inputs)
@@ -403,7 +392,7 @@ class ControllerAgent(BaseAgent):
             # Forward directly to Controller.stream()
             async for chunk in self.controller.stream(
                 inputs=input_event,
-                session=agent_session,
+                session=session,
                 stream_modes=stream_modes,
                 **kwargs
             ):

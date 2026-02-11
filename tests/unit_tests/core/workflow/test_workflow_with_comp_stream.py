@@ -17,7 +17,7 @@ from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable
 from openjiuwen.core.session import END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY, WORKFLOW_EXECUTE_TIMEOUT
 from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.session import BaseSession, Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import StreamMode, BaseStreamMode, OutputSchema
 from openjiuwen.core.workflow import Workflow, WorkflowOutput, WorkflowChunk
@@ -33,13 +33,13 @@ class MockStreamNode(WorkflowComponent):
     def __init__(self):
         super().__init__()
 
-    async def invoke(self, inputs, session: BaseSession, context: ModelContext = None) -> WorkflowOutput:
+    async def invoke(self, inputs, session: Session, context: ModelContext = None) -> WorkflowOutput:
         return inputs
 
     async def stream(
             self,
             inputs,
-            session: BaseSession,
+            session: Session,
             context: ModelContext = None,
             stream_modes: list[StreamMode] = None
     ) -> AsyncIterator[WorkflowChunk]:

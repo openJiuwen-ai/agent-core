@@ -10,7 +10,7 @@ from openjiuwen.core.context_engine import ContextEngine, ModelContext
 from openjiuwen.core.foundation.llm import AssistantMessage, Model, UserMessage, SystemMessage
 from openjiuwen.core.foundation.llm import AssistantMessage, Model, UserMessage, SystemMessage
 from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent

@@ -3,7 +3,7 @@ import random
 
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from tests.unit_tests.core.workflow.mock_nodes import MockNodeBase
 
 

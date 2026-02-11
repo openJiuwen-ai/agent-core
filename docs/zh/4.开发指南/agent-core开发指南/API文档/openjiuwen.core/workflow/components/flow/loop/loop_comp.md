@@ -27,7 +27,7 @@ add_workflow_comp(comp_id: str, workflow_comp: ComponentComposable, *,  wait_for
 
 ```python
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Input, Output, LoopGroup
 >>> # 自定义组件AddTenNode， 每次调用，对于inputs中的source累加10
 >>> class AddTenNode(WorkflowComponent):
@@ -146,7 +146,7 @@ class LoopComponent(loop_group: LoopGroup, output_schema: dict)
 >>> import asyncio
 >>>
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Input, Output, LoopGroup, BranchComponent, LoopComponent, \
 ...   Workflow, Start, End, LoopSetVariableComponent, LoopBreakComponent
@@ -259,7 +259,7 @@ class LoopComponent(loop_group: LoopGroup, output_schema: dict)
 >>> import asyncio
 >>> 
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Workflow, Start, End, LoopGroup, LoopSetVariableComponent, \
 ...     BranchComponent, LoopBreakComponent, LoopComponent
@@ -406,7 +406,7 @@ class LoopSetVariableComponent(variable_mapping: dict[str, Any])
 >>> # 在循环体中使用`LoopSetVariableComponent`设置中间变量
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Workflow, Start, End, LoopGroup, LoopSetVariableComponent, \
 ...     BranchComponent, LoopBreakComponent, LoopComponent
@@ -472,7 +472,7 @@ class LoopSetVariableComponent(variable_mapping: dict[str, Any])
 >>> 
 >>> 
 >>> async def run_workflow():
-...     return await flow.invoke({"input_number": 2}, WorkflowRuntime())
+...     return await flow.invoke({"input_number": 2}, create_workflow_session())
 >>> 
 >>> 
 >>> if __name__ == "__main__":
@@ -487,7 +487,7 @@ class LoopSetVariableComponent(variable_mapping: dict[str, Any])
 >>> # 在循环体中使用`LoopSetVariableComponent`设置中间变量
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Workflow, Start, End, LoopGroup, LoopSetVariableComponent, \
 ...     BranchComponent, LoopBreakComponent, LoopComponent
@@ -543,7 +543,7 @@ class LoopSetVariableComponent(variable_mapping: dict[str, Any])
 ```python
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.session import Session
+>>> from openjiuwen.core.workflow.components import Session
 >>> from openjiuwen.core.session.workflow import create_workflow_session
 >>> from openjiuwen.core.workflow import WorkflowComponent, Workflow, Start, End, LoopGroup, LoopSetVariableComponent, \
     BranchComponent, LoopBreakComponent, LoopComponent

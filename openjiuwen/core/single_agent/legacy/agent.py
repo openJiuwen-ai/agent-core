@@ -13,46 +13,16 @@ from openjiuwen.core.workflow import WorkflowCard as WorkflowSchema, WorkflowCar
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.legacy.schema import PluginSchema
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
-from openjiuwen.core.session import StaticAgentSession
+
 from openjiuwen.core.session import Config
-from openjiuwen.core.session.internal.wrapper import TaskSession
-from openjiuwen.core.session.agent import Session
-from openjiuwen.core.session import (
-    StaticWrappedSession,
-    WrappedSession
-)
-from openjiuwen.core.session.stream import OutputSchema, CustomSchema
-from openjiuwen.core.foundation.tool import Tool, ToolInfo
+from openjiuwen.core.session.agent import Session, create_agent_session
+from openjiuwen.core.session.stream import CustomSchema
+from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.workflow import Workflow, generate_workflow_key
 
 if TYPE_CHECKING:
     pass
 
-
-class AgentSession(WrappedSession, StaticWrappedSession):
-    """
-    deprecated
-    """
-
-    def __init__(self, config: Config = None):
-        inner = StaticAgentSession(config)
-        super().__init__(inner)
-        self._session = inner
-
-    async def write_stream(self, data: Union[dict, OutputSchema]):
-        return await self.write_custom_stream(data)
-
-    async def pre_run(self, **kwargs) -> TaskSession:
-        session_id = kwargs.get("session_id")
-        if session_id is None:
-            session_id = kwargs.get("trace_id")
-        inputs = kwargs.get("inputs")
-        session = TaskSession(session_id=session_id, config=self._session.config())
-        await self._session.checkpointer().pre_agent_execute(getattr(session, "_inner"), inputs)
-        return session
-
-    async def release(self, session_id: str):
-        await self._session.checkpointer().release(session_id)
 
 
 class WorkflowFactory:
@@ -159,9 +129,6 @@ class BaseAgent(ABC):
         self._config_wrapper.set_agent_config(agent_config)
         self.agent_config = agent_config
         self._config = self._config_wrapper  # Unified interface
-
-        # 2. Create Session
-        self._session = AgentSession(config=self._config)
 
         # 3. Create ContextEngine
         self._context_engine = self._create_context_engine()
@@ -588,7 +555,9 @@ class ControllerAgent(BaseAgent):
         # If session not provided, create one
         session_id = inputs.get("conversation_id", "default_session")
         if session is None:
-            agent_session = await self._session.pre_run(session_id=session_id)
+            from openjiuwen.core.single_agent import AgentCard
+            agent_session = create_agent_session(session_id=session_id, card=AgentCard(id=self.agent_config.id))
+            await agent_session.pre_run(inputs=inputs)
         else:
             if isinstance(session, Session):
                 agent_session = getattr(session, "_inner")
@@ -631,7 +600,9 @@ class ControllerAgent(BaseAgent):
         # If session not provided, create one
         session_id = inputs.get("conversation_id", "default_session")
         if session is None:
-            agent_session = await self._session.pre_run(session_id=session_id)
+            from openjiuwen.core.single_agent import AgentCard
+            agent_session = create_agent_session(session_id=session_id, card=AgentCard(id=self.agent_config.id))
+            await agent_session.pre_run(inputs=inputs)
             need_cleanup = True
             own_stream = True  # Owns stream lifecycle
         else:

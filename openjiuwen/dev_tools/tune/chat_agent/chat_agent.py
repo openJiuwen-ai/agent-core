@@ -11,7 +11,7 @@ from openjiuwen.dev_tools.tune.chat_agent.chat_config import ChatAgentConfig
 from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
 from openjiuwen.core.operator.llm_call import LLMCall
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.tool import Tool
 

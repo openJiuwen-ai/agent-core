@@ -360,6 +360,22 @@ Agent 会话类，提供会话管理与流式输出功能。
 
 **str**，会话 ID。
 
+### get_env
+
+```python
+get_env(self, key) -> Optional[Any]
+```
+
+获取本次Agent执行配置的环境变量的值。
+
+**参数**：
+
+- **key** (str)：环境变量的键。
+
+**返回**：
+
+**Optional[Any]**，为本次Agent执行配置的环境变量的值。
+
 ### get_envs() -> dict
 
 获取环境变量。
@@ -392,6 +408,40 @@ Agent 会话类，提供会话管理与流式输出功能。
 
 **str**，Agent 的 description。
 
+### update_state
+
+```python
+update_state(self, data: dict)
+```
+
+在Agent执行过程中更新状态，表示更新当前Agent的状态数据，若不存在字段会新增，并且立即生效。
+
+**参数**：
+
+- **data**(dict)：新增或更新的键值对字典。若data为None或{}，表示不更新。
+
+
+### get_state
+
+```python
+get_state(self, key: Union[str, list, dict] = None) -> Any
+```
+
+在Agent执行过程中获取状态信息，表示获取本Agent的状态信息。
+
+**参数**：
+
+- **key** (Union[str, list, dict], 可选)：查询状态数据中对应value的key，默认`None`，表示获取全部的状态信息。根据`key`的取值类型，支持多种方式获取状态数据。
+  - 当`key`为`str`类型，表示获取`key`路径下的状态数据，key可以为嵌套路径结构，例如`"user_inputs.query"`。
+  - 当`key`为`dict`\ `list`类型，表示获取多个状态数据，该`dict`\ `list`中存在多个用`"${}"`包裹的变量，每个变量都是一个状态数据的路径。
+
+**返回**：
+
+**Any**，返回的状态值。根据`key`的类型的不同，返回结果为：
+
+- 当`key`为`str`类型，返回为该路径下的状态信息，若不存在，则返回`None`。
+- 当`key`为`dict`\ `list`类型，该接口会将输入的`dict`\ `list`中所有`${}`内的变量替换成相应路径的变量的值，若对应变量路径不存在，则替换为`None`，最终返回为替换完的结果。
+
 ### async write_stream(data: Union[dict, OutputSchema])
 
 写入流式输出数据。
@@ -415,6 +465,10 @@ Agent 会话类，提供会话管理与流式输出功能。
 **返回**：
 
 **AsyncIterator[Any]**，异步迭代器。
+
+### async pre_run()
+
+执行前处理，创建检查点。
 
 ### async post_run()
 

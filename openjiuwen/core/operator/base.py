@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 from typing import AsyncIterator
 
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 
 
 # TunableSpec kind: "prompt" | "continuous" | "discrete" | "tool_selector" | "memory_selector"

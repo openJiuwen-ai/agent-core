@@ -125,7 +125,7 @@ The `invoke` method is used to call the LLM. Before calling, the user input is e
 ```python
 from typing import Dict
 from openjiuwen.core.foundation.llm import UserMessage, SystemMessage
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.single_agent import BaseAgent
 
 class MyAgent(BaseAgent):
@@ -154,7 +154,7 @@ The `stream` method enables streaming invocation capability for the agent, retur
 from typing import AsyncIterator, Any, Optional, List
 
 from openjiuwen.core.session.stream.base import StreamMode
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 
 class MyAgent(BaseAgent):
     async def stream(self,
@@ -195,7 +195,7 @@ from openjiuwen.core.foundation.llm import (
     ModelConfig, BaseModelInfo, UserMessage, SystemMessage,
     Model, ModelClientConfig, ModelRequestConfig
 )
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent import AgentCard, BaseAgent
 

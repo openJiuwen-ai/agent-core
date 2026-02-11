@@ -13,7 +13,7 @@ LLMCallOperator wraps LLM calls with:
 
 from typing import Dict, Any, Optional, List, Union, AsyncIterator, Callable
 
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage, SystemMessage, Model
 from openjiuwen.core.foundation.tool import ToolInfo

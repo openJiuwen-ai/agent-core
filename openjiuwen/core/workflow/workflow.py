@@ -622,10 +622,8 @@ class Workflow:
         if not is_sub:
             session.set_workflow_card(self._card)
             parent = session.get_parent()
-            if parent is not None and not hasattr(parent, "base"):
-                parent = getattr(parent, "_inner")
             workflow_session = WorkflowSession(workflow_id=self._card.id,
-                                               parent=parent.base() if parent is not None else None,
+                                               parent=parent if parent is not None else None,
                                                session_id=session.get_session_id(),
                                                callback_manager=session.get_callback_manager())
             workflow_session.config().set_envs(session.get_envs())

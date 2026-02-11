@@ -8,9 +8,9 @@ from typing import Dict, List, Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.runner.resources_manager.base import WorkflowProvider
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.single_agent.legacy import (
-    ControllerAgent,
+    AgentSession, ControllerAgent,
     PluginSchema,
     LegacyReActAgentConfig as ReActAgentConfig,
     WorkflowSchema,
@@ -18,7 +18,6 @@ from openjiuwen.core.single_agent.legacy import (
 from openjiuwen.core.application.llm_agent.llm_controller import LLMController
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
-from openjiuwen.core.session import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.foundation.llm import ModelConfig, UserMessage, AssistantMessage
 from openjiuwen.core.foundation.tool import Tool
@@ -117,7 +116,7 @@ class LLMAgent(ControllerAgent):
 
         # Initialize base class (pass controller)
         super().__init__(agent_config, controller=None)
-
+        self._session = AgentSession(config=self._config)
         self._long_term_memory_instance = LongTermMemory()
         self._memory_scope_id = agent_config.memory_scope_id
         self._enable_memory = (self._memory_scope_id and (agent_config.agent_memory_config.enable_long_term_mem

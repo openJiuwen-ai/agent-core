@@ -24,7 +24,7 @@ from openjiuwen.core.controller.legacy import (
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import InteractionOutput
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.session.stream import CustomSchema, OutputSchema
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
@@ -219,7 +219,7 @@ class WorkflowController(IntentDetectionController):
             dict: Execution result
         """
         workflow_id = task.input.target_id
-        conversation_id = session.session_id()
+        conversation_id = session.get_session_id()
 
         try:
             # 1. Check if there's a running task for this conversation

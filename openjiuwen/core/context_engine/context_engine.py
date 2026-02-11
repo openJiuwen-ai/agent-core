@@ -10,7 +10,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import context_engine_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext

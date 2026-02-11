@@ -13,7 +13,7 @@ from openjiuwen.core.common.logging import agent_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.operator.llm_call import LLMCall
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.dev_tools.tune.base import EvaluatedCase
 
@@ -123,12 +123,12 @@ class BaseOptimizer:
                              session: Session
                              ):
         trace_node = TraceNode(
-            case_id=session.session_id(),
+            case_id=session.get_session_id(),
             llm_call_id=llm_call_id,
             inputs=node_input,
             outputs=TuneUtils.get_output_string_from_message(output)
         )
-        self._history.add_history(session.session_id(), trace_node)
+        self._history.add_history(session.get_session_id(), trace_node)
 
     def _batch_set_optimizer_callback(self, callback: Optional[Callable]) -> None:
         for _, param in self._parameters.items():

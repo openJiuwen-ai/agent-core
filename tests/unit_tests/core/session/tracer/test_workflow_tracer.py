@@ -19,7 +19,7 @@ from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import ComponentAbility
 from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
 from tests.unit_tests.core.workflow.mock_nodes import AddTenNode, CommonNode, MockStartNode, MockEndNode, StreamCompNode

@@ -3,6 +3,7 @@
 import uuid
 from typing import Any, TYPE_CHECKING
 
+from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session.callback.callback_manager import CallbackManager
 
 if TYPE_CHECKING:
@@ -14,13 +15,13 @@ class Session:
     Session is the main class for managing the workflow of a session.
     """
 
-    def __init__(self, parent: "AgentSession" = None, session_id: str = None, envs: dict[str, Any] = None):
+    def __init__(self, parent: BaseSession = None, session_id: str = None, envs: dict[str, Any] = None):
         self._envs = envs
         self._callback_manager = CallbackManager()
         self._parent = parent
         if parent is not None:
-            self._session_id = parent.get_session_id()
-            self._envs = parent.get_envs()
+            self._session_id = session_id
+            self._envs = parent.config().get_envs()
         elif session_id is not None:
             self._session_id = session_id
         else:

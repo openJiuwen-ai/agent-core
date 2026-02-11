@@ -9,7 +9,7 @@ from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow import WorkflowComponent
 from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import BaseStreamMode, OutputSchema
 from openjiuwen.core.workflow import Workflow

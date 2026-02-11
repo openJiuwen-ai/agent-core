@@ -26,7 +26,7 @@ from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules.event_queue import EventQueue
 from openjiuwen.core.controller.modules.task_manager import TaskManager, TaskFilter
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.controller.schema import (EventType, TaskCompletionEvent, TaskInteractionEvent, TaskFailedEvent,
                                                TaskStatus, ControllerOutputChunk, ControllerOutputPayload,
                                                TextDataFrame, Task)
@@ -356,7 +356,7 @@ class TaskScheduler:
 
             # Critical: Check if all tasks are done and send completion signal
             # This MUST succeed, otherwise Controller will hang forever
-            await self._ensure_session_completion_signal(session.session_id())
+            await self._ensure_session_completion_signal(session.get_session_id())
 
     async def execute_task(self, task_id: str, session: Session):
         """Execute task

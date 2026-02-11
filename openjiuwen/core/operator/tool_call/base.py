@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, AsyncIterator, Callable, Awaitable, List, Tuple
 
 from openjiuwen.core.operator.base import Operator, TunableSpec
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 
 
 class ToolCallOperator(Operator):

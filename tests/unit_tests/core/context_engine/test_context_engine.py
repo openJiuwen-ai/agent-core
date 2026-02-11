@@ -108,7 +108,7 @@ class TestContextEngine:
     async def test_context_save_and_load(self, session, same_session):
         check_pointer = CheckpointerFactory.get_checkpointer()
         await check_pointer.pre_agent_execute(
-            session=getattr(session, "_inner").get_inner_session(), inputs=None
+            session=getattr(session, "_inner"), inputs=None
         )
         ce_1 = ContextEngine(ContextEngineConfig(default_window_message_num=5))
         context_1 = await ce_1.create_context(
@@ -128,7 +128,7 @@ class TestContextEngine:
         await session.post_run()
 
         await check_pointer.pre_agent_execute(
-            session=getattr(same_session, "_inner").get_inner_session(), inputs=None
+            session=getattr(same_session, "_inner"), inputs=None
         )
         ce_2 = ContextEngine(ContextEngineConfig(default_window_message_num=5))
         context_2 = await ce_2.create_context(
@@ -142,7 +142,7 @@ class TestContextEngine:
     async def test_context_save_and_load_with_invalid_context_id(self, session, same_session):
         check_pointer = CheckpointerFactory.get_checkpointer()
         await check_pointer.pre_agent_execute(
-            session=getattr(session, "_inner").get_inner_session(), inputs=None
+            session=getattr(session, "_inner"), inputs=None
         )
         ce_1 = ContextEngine(ContextEngineConfig(default_window_message_num=5))
         context_1 = await ce_1.create_context(
@@ -162,7 +162,7 @@ class TestContextEngine:
         await session.post_run()
 
         await check_pointer.pre_agent_execute(
-            session=getattr(same_session, "_inner").get_inner_session(), inputs=None
+            session=getattr(same_session, "_inner"), inputs=None
         )
         ce_2 = ContextEngine(ContextEngineConfig(default_window_message_num=5))
         context_2 = await ce_2.create_context(
@@ -315,7 +315,7 @@ class TestContextEngine:
         await engine.create_context(context_id="c1", session=session)
         await engine.create_context(context_id="c2", session=session)
         await engine.save_contexts(session=session)
-        states = getattr(session, "_inner").get_state("context")
+        states = session.get_state("context")
         assert states is not None
         assert "c1" in states and "c2" in states
 
@@ -360,7 +360,7 @@ class TestContextEngine:
     async def test_save_context_001(self, session, request):
         check_pointer = CheckpointerFactory.get_checkpointer()
         await check_pointer.pre_agent_execute(
-            session=getattr(session, "_inner").get_inner_session(), inputs=None
+            session=getattr(session, "_inner"), inputs=None
         )
         case_id = request.node.name
 
@@ -450,7 +450,7 @@ class TestContextEngine:
         session = create_agent_session(session_id=case_id, card=AgentCard(id=case_id))
         check_pointer = CheckpointerFactory.get_checkpointer()
         await check_pointer.pre_agent_execute(
-            session=getattr(session, "_inner").get_inner_session(), inputs=None
+            session=getattr(session, "_inner"), inputs=None
         )
 
         engine = ContextEngine()
