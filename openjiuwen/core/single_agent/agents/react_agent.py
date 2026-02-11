@@ -39,6 +39,7 @@ from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
+
 class ReActAgentConfig(BaseModel):
     """ReActAgent Configuration Class
 
@@ -335,7 +336,7 @@ class ReActAgent(BaseAgent):
 
         # Reset sys operation id if changed
         if old_config.sys_operation_id != config.sys_operation_id:
-            self._skill_util.set_sys_operation_id(config.sys_operation_id)
+            self.lazy_init_skill()
 
         return self
 
@@ -449,7 +450,7 @@ class ReActAgent(BaseAgent):
             if msg.get("role") == "system"
         ]
 
-        if len(system_messages) > 0 and hasattr(self, "_skill_util") and self._skill_util.has_skill():
+        if len(system_messages) > 0 and self._skill_util is not None and self._skill_util.has_skill():
             skill_prompt = self._skill_util.get_skill_prompt()
             last_msg = system_messages[-1]
             last_msg.content = (last_msg.content or "") + "\n" + skill_prompt

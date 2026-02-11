@@ -75,9 +75,28 @@ class BaseAgent(ABC):
         self.card = card
         self._ability_manager = AbilityManager()
         self._agent_callback_manager = AgentCallbackManager()
-        # 延迟导入以避免循环依赖：skills -> runner -> single_agent -> skills
+        self._skill_util = None
+        self.lazy_init_skill()
+
+    def lazy_init_skill(self) -> None:
+        """Lazy init SkillUtil
+
+        Note:
+            - If sys_operation_id is not configured, do nothing
+            - If already initialized, update sys_operation_id when supported
+        """
+        if not hasattr(self._config, "sys_operation_id") or self._config.sys_operation_id is None:
+            return
+
         from openjiuwen.core.single_agent.skills import SkillUtil
-        if hasattr(self._config, "sys_operation_id") and self._config.sys_operation_id is not None:
+
+        if self._skill_util is None:
+            self._skill_util = SkillUtil(self._config.sys_operation_id)
+            return
+
+        if hasattr(self._skill_util, "set_sys_operation_id"):
+            self._skill_util.set_sys_operation_id(self._config.sys_operation_id)
+        else:
             self._skill_util = SkillUtil(self._config.sys_operation_id)
 
     # ========== Configuration Interface ==========
@@ -102,10 +121,12 @@ class BaseAgent(ABC):
 
     async def register_skill(self, skill_path: Union[str, List[str]]):
         """Register a skill"""
+        self.lazy_init_skill()
         await self._skill_util.register_skills(skill_path, self)
 
     async def register_remote_skills(self, skills_dir: str, github_tree: GitHubTree, token: str = ""):
         """Register remote skills"""
+        self.lazy_init_skill()
         await self._skill_util.register_remote_skills(skills_dir, github_tree, token=token)
 
     def register_callback(
