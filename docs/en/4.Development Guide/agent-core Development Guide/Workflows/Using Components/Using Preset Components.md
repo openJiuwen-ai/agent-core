@@ -218,10 +218,8 @@ The `End` component is the built-in end component of the openJiuwen workflow, de
   
   ```python
   from typing import AsyncIterator
-
-  from openjiuwen.core.workflow import ComponentAbility, WorkflowComponent, Workflow
-  from openjiuwen.core.workflow.components.component import Input, Output
-  from openjiuwen.core.workflow.components import Session
+  from openjiuwen.core.workflow import  WorkflowComponent, Input, Output
+  from openjiuwen.core.session import Session
   from openjiuwen.core.context_engine import ModelContext
 
   class MockStreamCmp(WorkflowComponent):
@@ -321,10 +319,8 @@ The `End` component is the built-in end component of the openJiuwen workflow, de
   
    ```python
   from typing import AsyncIterator
-
-  from openjiuwen.core.workflow import ComponentAbility, WorkflowComponent, Workflow
-  from openjiuwen.core.workflow.components.component import Input, Output
-  from openjiuwen.core.workflow.components import Session
+  from openjiuwen.core.workflow import  WorkflowComponent, Input, Output
+  from openjiuwen.core.session import Session
   from openjiuwen.core.context_engine import ModelContext
 
   class MockStreamCmp(WorkflowComponent):
@@ -924,16 +920,15 @@ After adding the condition judgment logic, add the Branch Component to a workflo
 import asyncio
 import os
 
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
+from openjiuwen.core.common.exception.errors import ExecutionError
 from openjiuwen.core.workflow import ExpressionCondition
-from openjiuwen.core.common.exception.exception import JiuWenBaseException
-from openjiuwen.core.workflow import ExpressionCondition
-from openjiuwen.core.workflow import ComponentAbility, WorkflowComponent, Workflow
-from openjiuwen.core.workflow.components.component import Input, Output
-from openjiuwen.core.workflow.components import Session
+from openjiuwen.core.workflow import WorkflowComponent
+from openjiuwen.core.workflow import Input, Output
+from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.workflow import Workflow, WorkflowOutput
+
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import BranchComponent
@@ -986,7 +981,7 @@ async def run_workflow(num: int) -> tuple[WorkflowOutput | str, bool]:
     try:
         workflow_output = await workflow.invoke(inputs, session)
         return workflow_output, True
-    except JiuWenBaseException as e:
+    except ExecutionError as e:
         print(f"workflow execute error: {e}")
         return e.message, False
 
@@ -1077,10 +1072,9 @@ The Array Loop is the most common loop type, used to iterate through each elemen
 Create a loop body. Adding components within the loop body is consistent with adding components to a workflow. Specify the start and end components via the `start_nodes` and `end_nodes` methods, respectively.
 
 ```python
-from openjiuwen.core.workflow import LoopGroup, LoopComponent
-from openjiuwen.core.workflow import ComponentAbility, WorkflowComponent, Workflow
-from openjiuwen.core.workflow.components.component import Input, Output
-from openjiuwen.core.workflow.components import Session
+from openjiuwen.core.workflow import LoopGroup, LoopComponent, Input, Output
+from openjiuwen.core.workflow import WorkflowComponent
+from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine import ModelContext
 
 # Common node component that returns input value
@@ -1108,6 +1102,8 @@ loop_group.add_connection("b", "c")
 Create the Loop Component, specifying the loop body and output mode. The output mode defines how data is extracted from the loop results.
 
 ```python
+from openjiuwen.core.workflow import LoopComponent
+
 # 创建LoopComponent
 # 第一个参数是循环体(LoopGroup实例)，第二个参数定义了循环组件的输出模式
 loop_component = LoopComponent(
@@ -1127,11 +1123,11 @@ from openjiuwen.core.workflow import End
 workflow = Workflow()
 
 # 添加开始组件，定义输入参数
-workflow.set_start_comp("s", Start({}),
+workflow.set_start_comp("s", Start(),
                         inputs_schema={"query": "${user_input}"})
 
 # 添加结束组件，引用loop组件的输出结果
-workflow.set_end_comp("e", End({}),
+workflow.set_end_comp("e", End(),
                    inputs_schema={"user_var": "${loop.output}"})
 
 
@@ -1171,10 +1167,9 @@ The Number Loop is used to execute loop operations a fixed number of times, suit
 Configure `loop_type` as "number" in `LoopComponent`, and specify the number of iterations via `loop_number`. Inside the loop body, the current loop index (starting from 0) can be obtained via `${loop.index}`:
 
 ```python
-from openjiuwen.core.workflow import LoopGroup, LoopComponent
-from openjiuwen.core.workflow import ComponentAbility, WorkflowComponent, Workflow
-from openjiuwen.core.workflow.components.component import Input, Output
-from openjiuwen.core.workflow.components import Session
+from openjiuwen.core.workflow import LoopGroup, Input, Output
+from openjiuwen.core.workflow import WorkflowComponent
+from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine import ModelContext
 
 # Add 3 workflow components to LoopGroup, each component input is the current loop index
@@ -1210,11 +1205,11 @@ from openjiuwen.core.workflow import End
 workflow = Workflow()
 
 # 添加开始组件，定义输入参数
-workflow.set_start_comp("s", Start({}),
+workflow.set_start_comp("s", Start(),
                         inputs_schema={"query": "${user_input}"})
 
 # 添加结束组件，引用loop组件的输出结果
-workflow.set_end_comp("e", End({}),
+workflow.set_end_comp("e", End(),
                     inputs_schema={"user_var": "${loop.output}"})
 
 
@@ -1255,16 +1250,14 @@ First, create the loop body and related components. Expression loops usually nee
 
 ```python
 import asyncio
-from openjiuwen.core.workflow import LoopComponent, LoopGroup
+from openjiuwen.core.workflow import  LoopGroup
 from openjiuwen.core.workflow import LoopSetVariableComponent
-from openjiuwen.core.workflow import ComponentAbility, WorkflowComponent, Workflow, ComponentExecutable
-from openjiuwen.core.workflow.components.component import Input, Output
-from openjiuwen.core.workflow.components import Session
+from openjiuwen.core.workflow import  WorkflowComponent, Input, Output
+from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.workflow import create_workflow_session
 
-# Simple addition component that adds 10 to the input value
-class AddTenNode(ComponentExecutable, WorkflowComponent):
+# 简单的加法组件，将输入值加10
+class AddTenNode(WorkflowComponent):
     def __init__(self, node_id: str = None):
         super().__init__()
         self.node_id = node_id
@@ -1298,6 +1291,8 @@ loop_group.add_connection("2", "3")
 Create the Loop Component, specifying the loop body and output mode:
 
 ```python
+from openjiuwen.core.workflow import  LoopComponent
+
 # 创建LoopComponent
 loop_component = LoopComponent(loop_group, {"results": "${1.result}", "user_var": "${loop.user_var}"})
 ```
@@ -1313,12 +1308,12 @@ from openjiuwen.core.workflow import End
 workflow = Workflow()
 
 # 添加开始组件
-workflow.set_start_comp("s", Start({}),
+workflow.set_start_comp("s", Start(),
                         inputs_schema={"input_number": "${input_number}",
                                        "loop_number": "${loop_number}"})
 
 # 添加结束组件，引用loop组件的输出结果
-workflow.set_end_comp("e", End({}),
+workflow.set_end_comp("e", End(),
                       inputs_schema={"array_result": "${loop.results}", "user_var": "${loop.user_var}"})
 
 # 添加循环组件，设置表达式循环类型、循环条件和中间变量
@@ -1375,26 +1370,23 @@ The process within the loop body is shown below:
 Create the loop body, registering custom components, branch components, variable setting components, and the break component.
 
 ```python
-from openjiuwen.core.workflow import ComponentAbility, WorkflowComponent, Workflow
-from openjiuwen.core.workflow.components.component import Input, Output
-from openjiuwen.core.workflow.components import Session
+from openjiuwen.core.workflow import  LoopGroup, BranchComponent
+from openjiuwen.core.workflow import LoopSetVariableComponent, LoopBreakComponent
+from openjiuwen.core.workflow import  WorkflowComponent, Input, Output
+from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.workflow import LoopGroup
-from openjiuwen.core.workflow import LoopBreakComponent
-from openjiuwen.core.workflow import LoopSetVariableComponent
-from openjiuwen.core.workflow import BranchComponent
 
 # Create LoopGroup
 loop_group = LoopGroup()
 
 # Create common node as the core component of the loop body
-class CommonNode(ComponentExecutable, WorkflowComponent):
+class CommonNode(WorkflowComponent):
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         # Simulate the work of the loop body and return result
         return {"output": True}
 
 # Create increment component for incrementing loop variable
-class IncrementNode(ComponentExecutable, WorkflowComponent):
+class IncrementNode(WorkflowComponent):
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         # 从输入中获取当前值并递增
         current_value = inputs.get("value", 0)
@@ -1446,17 +1438,17 @@ loop_component = LoopComponent(loop_group, {"user_var": "${loop.user_var}", "loo
 Add to the workflow:
 
 ```python
-from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import End, Workflow
 from openjiuwen.core.workflow import Start
 
 # 创建工作流实例
 workflow = Workflow()
 
 # 添加开始组件
-workflow.set_start_comp("s", Start({}))
+workflow.set_start_comp("s", Start())
 
 # 添加结束组件，引用loop组件的输出结果
-workflow.set_end_comp("e", End({}),
+workflow.set_end_comp("e", End(),
                       inputs_schema={"user_var": "${loop.user_var}", "loop_count": "${loop.loop_count}", "results": "${loop.results}"})
 
 # 添加循环组件，设置为always_true循环类型和中间变量初始值
@@ -1495,9 +1487,8 @@ The following example introduces how to use `SubWorkflowComponent` to implement 
 First, define the `CustomComponent` component:
 
 ```python
-from openjiuwen.core.workflow import ComponentAbility, WorkflowComponent, Workflow
-from openjiuwen.core.workflow.components.component import Input, Output
-from openjiuwen.core.workflow.components import Session
+from openjiuwen.core.workflow import WorkflowComponent, Input, Output
+from openjiuwen.core.session import Session
 from openjiuwen.core.context_engine import ModelContext
 
 class CustomComponent(WorkflowComponent):
@@ -1537,7 +1528,7 @@ sub_workflow.add_connection("sub_custom_comp", "sub_end")
 Finally, define the main workflow and add the sub-workflow to it:
 
 ```python
-from openjiuwen.core.workflow import SubWorkflowComponent
+from openjiuwen.core.workflow import SubWorkflowComponent,Workflow,Start,End
 
 # 初始化主工作流
 main_workflow = Workflow()
@@ -1546,9 +1537,9 @@ main_workflow = Workflow()
 sub_workflow_comp = SubWorkflowComponent(sub_workflow)
 
 # 添加以start、sub_workflow_comp、end为ID的3个组件到主工作流
-main_workflow.set_start_comp("start", Start({}), inputs_schema={"query": "${user_inputs.query}"})
+main_workflow.set_start_comp("start", Start(), inputs_schema={"query": "${user_inputs.query}"})
 main_workflow.add_workflow_comp("sub_workflow_comp", sub_workflow_comp, inputs_schema={"query": "${start.query}"})
-main_workflow.set_end_comp("end", End({}), inputs_schema={"result": "${sub_workflow_comp.output.result}"})
+main_workflow.set_end_comp("end", End(), inputs_schema={"result": "${sub_workflow_comp.output.result}"})
 
 # 设置主工作流拓扑连接，start -> sub_workflow_comp -> end
 main_workflow.add_connection("start", "sub_workflow_comp")
