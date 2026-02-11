@@ -11,6 +11,7 @@ from openjiuwen.core.runner.callback import AsyncCallbackFramework
 from openjiuwen.core.security.guardrail import (
     BaseGuardrail,
     GuardrailBackend,
+    GuardrailError,
     GuardrailResult,
     RiskAssessment,
     RiskLevel,
@@ -74,13 +75,28 @@ def blocked_guardrail_result():
 
 
 @pytest.fixture
+def risky_backend_with_details():
+    """Mock guardrail backend that returns risky results with details."""
+    class RiskyBackendWithDetails(GuardrailBackend):
+        async def analyze(self, data):
+            return RiskAssessment(
+                has_risk=True,
+                risk_level=RiskLevel.CRITICAL,
+                risk_type="prompt_injection",
+                details={"matched_pattern": "ignore previous instructions", "confidence": 0.95}
+            )
+
+    return RiskyBackendWithDetails()
+
+
+@pytest.fixture
 def simple_guardrail():
     """Simple guardrail implementation for testing."""
 
     class SimpleGuardrail(BaseGuardrail):
         DEFAULT_EVENTS = ["test_event"]
 
-        async def detect(self, event_name, **event_data):
+        async def detect(self, event_name, *args, **kwargs):
             return GuardrailResult.pass_()
 
     return SimpleGuardrail()

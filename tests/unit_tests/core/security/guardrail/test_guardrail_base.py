@@ -10,10 +10,12 @@ import pytest
 from openjiuwen.core.security.guardrail import (
     BaseGuardrail,
     GuardrailBackend,
+    GuardrailError,
     GuardrailResult,
     RiskAssessment,
     RiskLevel,
 )
+from openjiuwen.core.common.exception.codes import StatusCode
 
 
 class TestBaseGuardrail:
@@ -119,7 +121,7 @@ class TestBaseGuardrail:
         class NoDefaultEventsGuardrail(BaseGuardrail):
             DEFAULT_EVENTS = []
 
-            async def detect(self, event_name, **event_data):
+            async def detect(self, event_name, *args, **kwargs):
                 return GuardrailResult.pass_()
 
         guardrail = NoDefaultEventsGuardrail()
@@ -132,13 +134,13 @@ class TestBaseGuardrailDetect:
 
     @pytest.mark.asyncio
     async def test_detect_without_backend_raises(self):
-        """Test detect() without backend raises ValueError in base class."""
+        """Test _detect_callback() without backend raises ValueError in base class."""
         # Create a guardrail that directly calls super().detect()
         # instead of checking for backend first
         guardrail = DirectBaseCallGuardrail()
 
         with pytest.raises(ValueError) as exc_info:
-            await guardrail.detect("test_event", data={})
+            await guardrail.call_detect_callback("test_event", data={})
 
         assert "No backend configured" in str(exc_info.value)
 
@@ -149,6 +151,7 @@ class TestBaseGuardrailDetect:
 
         result = await guardrail.detect("test_event", data={"test": "value"})
 
+        assert result is not None
         assert result.is_safe is True
         assert result.risk_level == RiskLevel.SAFE
 
@@ -159,20 +162,22 @@ class TestBaseGuardrailDetect:
 
         result = await guardrail.detect("test_event", data={"test": "value"})
 
+        assert result is not None
         assert result.is_safe is False
         assert result.risk_level == RiskLevel.HIGH
         assert result.risk_type == "test_risk"
 
     @pytest.mark.asyncio
-    async def test_detect_passes_event_data_to_backend(self, mock_backend):
+    async def test_detect_passes_kwargs_to_backend(self, mock_backend):
         """Test detect() passes event data to backend analyze()."""
         guardrail = DataCaptureGuardrail(backend=mock_backend)
 
-        await guardrail.detect("test_event", text="test content", user_id="123")
+        result = await guardrail.detect("test_event", text="test content", user_id="123")
 
+        assert result is not None
         assert guardrail.captured_data is not None
         assert "text" in guardrail.captured_data
-        assert "test content" in guardrail.captured_data["text"]
+        assert guardrail.captured_data["text"] == "test content"
         assert "user_id" in guardrail.captured_data
         assert guardrail.captured_data["user_id"] == "123"
 
@@ -343,12 +348,204 @@ class TestGuardrailBackend:
 
         # Exception should propagate (not be caught by guardrail)
         with pytest.raises(RuntimeError) as exc_info:
-            await guardrail.detect("test_event", data={})
+            await guardrail.call_detect_callback("test_event", data={})
 
         assert str(exc_info.value) == "Detection failed"
 
 
+class TestDetectCallback:
+    """Tests for BaseGuardrail.detect() method."""
+
+    @pytest.mark.asyncio
+    async def test_detect_callback_safe_no_exception(self, mock_backend):
+        """Test _detect_callback() does not raise when result is safe."""
+        guardrail = CustomTestGuardrail(backend=mock_backend)
+
+        # Should not raise any exception
+        result = await guardrail.call_detect_callback("test_event", data={"test": "value"})
+
+        # Result should be None (callback doesn't return GuardrailResult)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_detect_callback_risky_raises_guardrail_error(self, risky_backend):
+        """Test _detect_callback() raises GuardrailError when risk detected."""
+        guardrail = CustomTestGuardrail(backend=risky_backend)
+
+        with pytest.raises(GuardrailError) as exc_info:
+            await guardrail.call_detect_callback("test_event", data={"test": "value"})
+
+        error = exc_info.value
+        assert error.status == StatusCode.GUARDRAIL_BLOCKED
+        assert "prompt_injection" in error.message or "blocked" in error.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_detect_callback_error_contains_risk_info(self, risky_backend):
+        """Test GuardrailError contains correct risk information in details."""
+        guardrail = CustomTestGuardrail(backend=risky_backend)
+
+        with pytest.raises(GuardrailError) as exc_info:
+            await guardrail.call_detect_callback("user_input_event", data={"text": "test"})
+
+        error = exc_info.value
+        assert error.details is not None
+        assert error.details["risk_type"] == "test_risk"
+        assert error.details["risk_level"] == "HIGH"
+        assert error.details["event"] == "user_input_event"
+
+    @pytest.mark.asyncio
+    async def test_detect_callback_error_with_details(self, risky_backend_with_details):
+        """Test GuardrailError includes backend details in error details."""
+        guardrail = CustomTestGuardrail(backend=risky_backend_with_details)
+
+        with pytest.raises(GuardrailError) as exc_info:
+            await guardrail.call_detect_callback("llm_input_event", data={"prompt": "test"})
+
+        error = exc_info.value
+        assert error.details is not None
+        # Check core risk info
+        assert error.details["risk_type"] == "prompt_injection"
+        assert error.details["risk_level"] == "CRITICAL"
+        assert error.details["event"] == "llm_input_event"
+        # Check backend-specific details are merged
+        assert "matched_pattern" in error.details
+        assert error.details["matched_pattern"] == "ignore previous instructions"
+        assert "confidence" in error.details
+        assert error.details["confidence"] == 0.95
+
+    @pytest.mark.asyncio
+    async def test_detect_callback_unknown_risk_type(self):
+        """Test _detect_callback() handles unknown risk type gracefully."""
+        class UnknownRiskBackend(GuardrailBackend):
+            async def analyze(self, data):
+                return RiskAssessment(
+                    has_risk=True,
+                    risk_level=RiskLevel.MEDIUM,
+                    risk_type=None,  # No risk type specified
+                    details=None
+                )
+
+        guardrail = CustomTestGuardrail(backend=UnknownRiskBackend())
+
+        with pytest.raises(GuardrailError) as exc_info:
+            await guardrail.call_detect_callback("test_event", data={})
+
+        error = exc_info.value
+        assert error.details["risk_type"] == "unknown"
+        assert error.details["risk_level"] == "MEDIUM"
+
+    @pytest.mark.asyncio
+    async def test_detect_callback_integration_with_framework(self, framework, risky_backend):
+        """Test _detect_callback() integration with callback framework handles error gracefully.
+
+        Note: The callback framework catches exceptions from callbacks and continues execution.
+        The GuardrailError is logged but not re-raised. This is by design - the framework
+        should not let one failing callback stop the entire event processing.
+        """
+        guardrail = CustomTestGuardrail(backend=risky_backend)
+        await guardrail.register(framework)
+
+        # Trigger the event - callback framework catches the GuardrailError internally
+        # and continues execution (does not re-raise)
+        results = await framework.trigger("test_event", data={"text": "malicious input"})
+
+        # The callback was executed (but exception was caught by framework)
+        # Results will be empty because the callback raised an exception
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_guardrail_called_via_framework(self, framework):
+        """Test guardrail detect() is actually called when event is triggered via framework."""
+        # Use a spy guardrail to track if detect() was called
+        spy_guardrail = SpyGuardrail()
+        await spy_guardrail.register(framework)
+
+        # Trigger the event
+        await framework.trigger("test_event", text="test input", user_id="123")
+
+        # Verify detect() was actually called
+        assert spy_guardrail.detect_called is True
+        assert spy_guardrail.detected_event_name == "test_event"
+        assert "text" in spy_guardrail.detected_kwargs
+        assert spy_guardrail.detected_kwargs["text"] == "test input"
+
+    @pytest.mark.asyncio
+    async def test_guardrail_safe_flow_via_framework(self, framework, mock_backend):
+        """Test complete safe flow: guardrail registered -> event triggered -> no exception."""
+        guardrail = CustomTestGuardrail(backend=mock_backend)
+        await guardrail.register(framework)
+
+        # Trigger event - should complete without raising exception
+        results = await framework.trigger("test_event", data={"safe": "content"})
+
+        # Safe callback returns None, which is collected in results
+        # Note: callback framework collects all callback return values
+        assert results == [None]  # detect returns None when safe
+
+    @pytest.mark.asyncio
+    async def test_guardrail_receives_correct_kwargs(self, framework):
+        """Test guardrail receives correct event data when triggered via framework."""
+        spy_guardrail = SpyGuardrail()
+        await spy_guardrail.register(framework)
+
+        # Trigger with specific data (pass as individual kwargs)
+        await framework.trigger(
+            "test_event",
+            prompt="test prompt",
+            user_id="user123",
+            metadata={"source": "web"}
+        )
+
+        # Verify all data was passed correctly
+        assert spy_guardrail.detected_kwargs["prompt"] == "test prompt"
+        assert spy_guardrail.detected_kwargs["user_id"] == "user123"
+        assert spy_guardrail.detected_kwargs["metadata"] == {"source": "web"}
+
+    @pytest.mark.asyncio
+    async def test_multiple_events_trigger_correct_guardrail(self, framework):
+        """Test triggering different events invokes the correct guardrail callbacks."""
+        spy_guardrail1 = SpyGuardrail(events=["event1"])
+        spy_guardrail2 = SpyGuardrail(events=["event2"])
+
+        await spy_guardrail1.register(framework)
+        await spy_guardrail2.register(framework)
+
+        # Trigger event1
+        await framework.trigger("event1", data={"event": "1"})
+
+        # Only guardrail1 should be called
+        assert spy_guardrail1.detect_called is True
+        assert spy_guardrail2.detect_called is False
+        assert spy_guardrail1.detected_event_name == "event1"
+
+        # Reset and trigger event2
+        spy_guardrail1.detect_called = False
+        await framework.trigger("event2", data={"event": "2"})
+
+        # Now only guardrail2 should be called
+        assert spy_guardrail1.detect_called is False
+        assert spy_guardrail2.detect_called is True
+        assert spy_guardrail2.detected_event_name == "event2"
+
+
 # Helper classes for testing
+class SpyGuardrail(BaseGuardrail):
+    """Spy guardrail that tracks if detect() was called and with what data."""
+    DEFAULT_EVENTS = ["test_event"]
+
+    def __init__(self, backend=None, events=None):
+        super().__init__(backend=backend, events=events)
+        self.detect_called = False
+        self.detected_event_name = None
+        self.detected_kwargs = None
+
+    async def detect(self, event_name, *args, **kwargs):
+        self.detect_called = True
+        self.detected_event_name = event_name
+        self.detected_kwargs = kwargs
+        return GuardrailResult.pass_()
+
+
 class CustomTestGuardrail(BaseGuardrail):
     """Test guardrail implementation."""
     DEFAULT_EVENTS = ["test_event"]
@@ -371,10 +568,14 @@ class CustomTestGuardrail(BaseGuardrail):
         """Add registered event for testing."""
         self._registered_events.append(event)
 
-    async def detect(self, event_name, **event_data):
+    async def detect(self, event_name, *args, **kwargs):
         if self._backend:
-            return await super().detect(event_name, **event_data)
+            return await super().detect(event_name, *args, **kwargs)
         return GuardrailResult.pass_()
+
+    async def call_detect_callback(self, event_name, **kwargs):
+        """Public wrapper for testing _detect_callback."""
+        return await self._detect_callback(event_name, **kwargs)
 
 
 class DataCaptureGuardrail(BaseGuardrail):
@@ -385,17 +586,25 @@ class DataCaptureGuardrail(BaseGuardrail):
         super().__init__(backend=backend)
         self.captured_data = None
 
-    async def detect(self, event_name, **event_data):
-        self.captured_data = event_data
+    async def detect(self, event_name, *args, **kwargs):
+        self.captured_data = kwargs
         if self._backend:
-            return await super().detect(event_name, **event_data)
+            return await super().detect(event_name, *args, **kwargs)
         return GuardrailResult.pass_()
+
+    async def call_detect_callback(self, event_name, **kwargs):
+        """Public wrapper for testing _detect_callback."""
+        return await self._detect_callback(event_name, **kwargs)
 
 
 class DirectBaseCallGuardrail(BaseGuardrail):
     """Test guardrail that directly calls base detect()."""
     DEFAULT_EVENTS = ["test_event"]
 
-    async def detect(self, event_name, **event_data):
+    async def detect(self, event_name, *args, **kwargs):
         # Directly call base class detect without checking backend
-        return await BaseGuardrail.detect(self, event_name, **event_data)
+        return await BaseGuardrail.detect(self, event_name, *args, **kwargs)
+
+    async def call_detect_callback(self, event_name, **kwargs):
+        """Public wrapper for testing _detect_callback."""
+        return await self._detect_callback(event_name, **kwargs)

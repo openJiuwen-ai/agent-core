@@ -256,6 +256,16 @@ class SysOperationError(ExecutionError):
     pass
 
 
+class GuardrailError(ValidationError):
+    """
+    Guardrail security check blocked error.
+
+    Raised when guardrail detects a security risk and blocks the execution.
+    Contains detailed risk information for logging and reporting.
+    """
+    pass
+
+
 STATUS_TO_EXCEPTION = build_status_exception_map()
 
 

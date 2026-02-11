@@ -613,6 +613,14 @@ class StatusCode(Enum):
     SCHEMA_FORMAT_INVALID = (189002, "format data with schema failed, error='{reason}', data={data}")
 
     # =========================
+    # Security / Guardrail 190000 - 190999
+    # =========================
+
+    GUARDRAIL_BLOCKED = (
+        190000,
+        "guardrail blocked: risk_type='{risk_type}', risk_level='{risk_level}', event='{event}'")
+
+    # =========================
     # SysOperation 199000–199999
     # =========================
 

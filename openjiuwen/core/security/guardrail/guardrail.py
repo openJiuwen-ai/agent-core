@@ -8,12 +8,15 @@ Provides the foundation for building guardrail implementations.
 Integrates with the callback framework for event-driven detection.
 """
 
+import logging
 from abc import (
     ABC,
     abstractmethod,
 )
+from functools import partial
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Optional,
@@ -24,6 +27,9 @@ from openjiuwen.core.security.guardrail.models import (
     RiskAssessment,
 )
 from openjiuwen.core.security.guardrail.backends import GuardrailBackend
+from openjiuwen.core.runner.callback.enums import HookType
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import GuardrailError
 
 
 class BaseGuardrail(ABC):
@@ -55,7 +61,8 @@ class BaseGuardrail(ABC):
     def __init__(
             self,
             backend: Optional[GuardrailBackend] = None,
-            events: Optional[List[str]] = None
+            events: Optional[List[str]] = None,
+            enable_logging: bool = True
     ):
         """Initialize the guardrail.
 
@@ -64,6 +71,7 @@ class BaseGuardrail(ABC):
                 set_backend().
             events: Optional list of event names to listen to. If not provided,
                 uses DEFAULT_EVENTS from subclass.
+            enable_logging: Enable logging output.
         """
         self._backend: Optional[GuardrailBackend] = backend
 
@@ -76,7 +84,17 @@ class BaseGuardrail(ABC):
             self._events: List[str] = []
 
         self._registered_events: List[str] = []
+        self._registered_callbacks: Dict[str, Callable] = {}  # Store wrapper callbacks for unregister
         self._framework: Optional[Any] = None
+
+        # Logging
+        self.enable_logging = enable_logging
+        self.logger = logging.getLogger(__name__)
+        if enable_logging:
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
 
     @property
     def listen_events(self) -> List[str]:
@@ -122,7 +140,12 @@ class BaseGuardrail(ABC):
         """
         return self._backend
 
-    async def detect(self, event_name: str, **event_data) -> GuardrailResult:
+    async def detect(
+        self,
+        event_name: str,
+        *args,
+        **kwargs
+    ) -> GuardrailResult:
         """Perform security detection for the triggered event.
 
         This method is called when a subscribed event is triggered. The default
@@ -131,8 +154,10 @@ class BaseGuardrail(ABC):
 
         Args:
             event_name: The name of the triggered event.
-            **event_data: Event-specific data containing all information
-                needed for detection.
+            *args: Positional arguments passed from the callback framework
+                when the event is triggered.
+            **kwargs: Keyword arguments (event data) passed from the callback
+                framework when the event is triggered.
 
         Returns:
             GuardrailResult indicating whether the content is safe.
@@ -141,12 +166,44 @@ class BaseGuardrail(ABC):
             ValueError: If no backend is configured and detect is not overridden.
         """
         if not self._backend:
+            if self.enable_logging:
+                self.logger.error(
+                    f"No backend configured for {self.__class__.__name__}"
+                )
             raise ValueError(
                 f"No backend configured for {self.__class__.__name__}. "
                 "Either provide a backend via set_backend() or override detect()."
             )
 
-        assessment = await self._backend.analyze(event_data)
+        if self.enable_logging:
+            self.logger.info(
+                f"Guardrail detection started for event '{event_name}'"
+            )
+
+        # Combine args and kwargs into a single data dict for backend analysis
+        analysis_data = {
+            "event": event_name,
+            "args": args,
+            **kwargs
+        }
+        
+        if self.enable_logging:
+            self.logger.debug(
+                f"Analyzing data with backend: {self._backend.__class__.__name__}"
+            )
+        
+        assessment = await self._backend.analyze(analysis_data)
+
+        if self.enable_logging:
+            if assessment.has_risk:
+                self.logger.warning(
+                    f"Guardrail detected risk: {assessment.risk_type} "
+                    f"(level: {assessment.risk_level}) for event '{event_name}'"
+                )
+            else:
+                self.logger.info(
+                    f"Guardrail passed for event '{event_name}'"
+                )
 
         return GuardrailResult(
             is_safe=not assessment.has_risk,
@@ -166,41 +223,114 @@ class BaseGuardrail(ABC):
         """
         self._framework = framework
 
+        if self.enable_logging:
+            self.logger.info(
+                f"Registering guardrail {self.__class__.__name__} "
+                f"for events: {self.listen_events}"
+            )
+
+        # Register ERROR hook to re-throw GuardrailError after it's caught by callback framework
+        async def rethrow_error_hook(e, *hook_args, **hook_kwargs):
+            """Re-throw the caught exception to propagate it to agent execution layer."""
+            raise e
+
         for event in self.listen_events:
+            # Register ERROR hook for this event (one-time registration)
+            framework.add_hook(event, HookType.ERROR, rethrow_error_hook)
+            
+            if self.enable_logging:
+                self.logger.info(f"Registered ERROR hook for event '{event}'")
+
+            # Create a wrapper that binds event_name via closure
+            # This ensures each callback knows which event triggered it
+            def make_callback(evt):
+                async def callback_wrapper(*args, **kwargs):
+                    return await self._detect_callback(evt, *args, **kwargs)
+                callback_wrapper.__name__ = f"_detect_callback_{evt}"
+                return callback_wrapper
+
+            callback_with_event = make_callback(event)
             await framework.register(
                 event=event,
-                callback=self._detect_callback,
+                callback=callback_with_event,
                 priority=100,
                 namespace="guardrail",
                 tags={"guardrail", self.__class__.__name__}
             )
             self._registered_events.append(event)
+            self._registered_callbacks[event] = callback_with_event
+            
+            if self.enable_logging:
+                self.logger.info(
+                    f"Registered callback for event '{event}' "
+                    f"-> {callback_with_event.__name__}"
+                )
 
     async def unregister(self) -> None:
         """Unregister this guardrail from the callback framework.
 
         Removes all registered callbacks. Safe to call even if not registered.
         """
+        if self.enable_logging:
+            self.logger.info(
+                f"Unregistering guardrail {self.__class__.__name__}"
+            )
+        
         if self._framework:
             for event in self._registered_events:
-                try:
-                    await self._framework.unregister(event, self._detect_callback)
-                except Exception:
-                    # Ignore unregister errors (callback might not exist)
-                    pass
+                callback = self._registered_callbacks.get(event)
+                if callback:
+                    try:
+                        await self._framework.unregister(event, callback)
+                        if self.enable_logging:
+                            self.logger.info(
+                                f"Unregistered callback for event '{event}'"
+                            )
+                    except Exception:
+                        # Ignore unregister errors (callback might not exist)
+                        pass
         self._registered_events.clear()
+        self._registered_callbacks.clear()
 
-    async def _detect_callback(self, event_name: str, **kwargs) -> GuardrailResult:
+    async def _detect_callback(self, event_name: str, *args, **kwargs) -> None:
         """Internal callback wrapper for the callback framework.
 
-        The callback framework passes the event name as event_name parameter.
-        This method unpacks it and calls the subclass detect() method.
+        This method is called by the callback framework when a subscribed event
+        is triggered. It performs security detection and raises GuardrailError
+        if a risk is detected.
 
         Args:
-            event_name: Event name (injected by callback framework).
-            **kwargs: Event data.
+            event_name: Event name (bound via closure during registration).
+            *args: Positional arguments from callback framework.
+            **kwargs: Event data from callback framework.
 
-        Returns:
-            GuardrailResult from detect().
+        Raises:
+            GuardrailError: If detection result indicates a security risk.
         """
-        return await self.detect(event_name, **kwargs)
+        if self.enable_logging:
+            self.logger.info(
+                f"Guardrail callback triggered for event '{event_name}'"
+            )
+        
+        result = await self.detect(event_name, *args, **kwargs)
+
+        if not result.is_safe:
+            risk_info = {
+                "risk_type": result.risk_type or "unknown",
+                "risk_level": result.risk_level.name if result.risk_level else "UNKNOWN",
+                "event": event_name,
+            }
+            if result.details:
+                risk_info.update(result.details)
+
+            if self.enable_logging:
+                self.logger.warning(
+                    f"Guardrail blocked event '{event_name}': "
+                    f"{result.risk_type or 'unknown'} risk detected"
+                )
+
+            raise GuardrailError(
+                StatusCode.GUARDRAIL_BLOCKED,
+                msg=f"Guardrail blocked: {result.risk_type or 'unknown'} risk detected",
+                details=risk_info
+            )
