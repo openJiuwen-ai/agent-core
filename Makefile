@@ -112,7 +112,7 @@ help:
 	@echo $(START)  View the profile at https://www.speedscope.app$(END)$(BLANK)
 	@echo Available targets:
 	@echo $(START)    help       - Show this help message$(END)
-	@echo $(START)    install    - Install dependencies via uv or pip: ruff, pylint, mypy, codespell, pipdeptree, pyinstrument$(END)
+	@echo $(START)    install    - Install dependencies via uv or pip$(END)
 	@echo $(START)    update     - Download latest version of this Makefile from gitcode.com/openJiuwen/agent-core$(END)
 	@echo $(START)    test       - Execute pytest, you can supply arguments via TESTFLAGS=$(DQ)...$(DQ)$(END)
 	@echo $(START)    format     - Check formatting of selected Python files via ruff$(END)

@@ -23,8 +23,11 @@ This project provides a cross‑platform `Makefile` to standardize common develo
   - [7. Variables \& Configuration](#7-variables--configuration)
     - [Common variables](#common-variables)
   - [8. Dependency inspection (`DEP`)](#8-dependency-inspection-dep)
-  - [9. Self‑updating the Makefile](#9-selfupdating-the-makefile)
-  - [10. Design Notes](#10-design-notes)
+  - [9. Performance Profiling](#9-performance-profiling)
+    - [Flame graph (`FLAME`)](#flame-graph-flame)
+    - [Speedscope profiling (`SPEEDSCOPE`)](#speedscope-profiling-speedscope)
+  - [10. Self‑updating the Makefile](#10-selfupdating-the-makefile)
+  - [11. Design Notes](#11-design-notes)
     - [Cross‑platform compatibility](#crossplatform-compatibility)
     - [Why only changed files?](#why-only-changed-files)
     - [Why Python for filtering files?](#why-python-for-filtering-files)
@@ -51,6 +54,7 @@ It supports the following tools:
 - `codespell`
 - `pytest`
 - `pipdeptree`
+- `pyinstrument` (performance profiling)
 
 It can run them either via:
 
@@ -107,9 +111,18 @@ Usage: make [target] [COMMITS=N] [UV=yes|no]
   Example: make DEP=pydantic-core
   Syntax:  make DEP=<package-name>
 
+- This Makefile can be used to create a flame graph for a Python script
+  Example: make FLAME=test-openai-emb.py
+  Syntax:  make FLAME=<script-name>
+
+- This Makefile can be used to create a speedscope flame graph profile for a Python script
+  Example: make SPEEDSCOPE=test-openai-emb.py
+  Syntax:  make SPEEDSCOPE=<script-name>
+  View the profile at https://www.speedscope.app
+
 Available targets:
     help       - Show this help message
-    install    - Install dependencies via uv or pip: ruff, pylint, mypy, codespell, pipdeptree
+    install    - Install dependencies via uv or pip
     update     - Download latest version of this Makefile from gitcode.com/openJiuwen/agent-core
     test       - Execute pytest, you can supply arguments via TESTFLAGS="..."
     format     - Check formatting of selected Python files via ruff
@@ -188,13 +201,15 @@ make check UV=no
 
 ### General
 
-| Target    | Description                                               |
-| --------- | --------------------------------------------------------- |
-| `help`    | Show usage and available commands                         |
-| `install` | Install required tooling (`ruff`, `pylint`, `mypy`, etc.) |
-| `update`  | Download latest version of this Makefile                  |
-| `test`    | Run pytest                                                |
-| `dep`     | Show reverse dependency tree for a package                |
+| Target      | Description                                               |
+| ----------- | --------------------------------------------------------- |
+| `help`      | Show usage and available commands                         |
+| `install`   | Install required tooling (`ruff`, `pylint`, `mypy`, etc.) |
+| `update`    | Download latest version of this Makefile                  |
+| `test`      | Run pytest                                                |
+| `dep`       | Show reverse dependency tree for a package                |
+| `flame`     | Generate HTML flame graph for a Python script             |
+| `speedscope`| Generate Speedscope-format profile for a Python script    |
 
 ---
 
@@ -241,14 +256,16 @@ make check COMMITS=1 PYTHON=python3.12
 
 ### Common variables
 
-| Variable    | Default  | Description                   |
-| ----------- | -------- | ----------------------------- |
-| `PYTHON`    | `python` | Python executable             |
-| `TESTFLAGS` | `.`      | Arguments passed to pytest    |
-| `COMMITS`   | `0`      | Number of commits to inspect  |
-| `UV`        | auto     | Force uv usage (`yes` / `no`) |
-| `DEP`       | empty    | Package name for `make dep`   |
-| `CURL`      | auto     | Path to curl binary           |
+| Variable     | Default  | Description                              |
+| ------------ | -------- | ---------------------------------------- |
+| `PYTHON`     | `python` | Python executable                        |
+| `TESTFLAGS`  | `.`      | Arguments passed to pytest               |
+| `COMMITS`    | `0`      | Number of commits to inspect             |
+| `UV`         | auto     | Force uv usage (`yes` / `no`)            |
+| `DEP`        | empty    | Package name for `make dep`              |
+| `FLAME`      | empty    | Script name for flame graph generation   |
+| `SPEEDSCOPE` | empty    | Script name for speedscope profiling    |
+| `CURL`       | auto     | Path to curl binary                      |
 
 ---
 
@@ -294,7 +311,58 @@ If `DEP` is set, it becomes the default target automatically.
 
 ---
 
-## 9. Self‑updating the Makefile
+## 9. Performance Profiling
+
+The Makefile supports performance profiling of Python scripts using the `pyinstrument` tool, generating performance reports in two formats.
+
+### Flame graph (`FLAME`)
+
+Use the `FLAME` variable to generate an HTML flame graph for a specified Python script:
+
+```bash
+make FLAME=test-openai-emb.py
+```
+
+This runs:
+
+```
+pyinstrument -r html -o test-openai-emb.py.html test-openai-emb.py
+```
+
+The generated HTML file can be opened directly in a browser to view the performance analysis results interactively. Flame graphs help you:
+
+- Identify performance bottlenecks in your code
+- View function call stacks and time distribution
+- Analyze hot paths in program execution
+
+### Speedscope profiling (`SPEEDSCOPE`)
+
+Use the `SPEEDSCOPE` variable to generate a Speedscope-format performance profile for a specified Python script:
+
+```bash
+make SPEEDSCOPE=test-openai-emb.py
+```
+
+This runs:
+
+```
+pyinstrument -r speedscope -o test-openai-emb.py.json test-openai-emb.py
+```
+
+The generated JSON file can be uploaded to [https://www.speedscope.app](https://www.speedscope.app) for visualization. Speedscope provides richer interactive analysis features, including:
+
+- Timeline view
+- Flame graph view
+- Left-heavy view
+- Function call frequency analysis
+
+**Note**: Before using performance profiling features, ensure that `pyinstrument` is installed. You can install all dependencies, including `pyinstrument`, by running `make install`.
+
+If `FLAME` or `SPEEDSCOPE` is set, it becomes the default target automatically.
+
+---
+
+## 10. Self‑updating the Makefile
 
 ```bash
 make update
@@ -304,7 +372,7 @@ Downloads the latest version from the upstream repository.
 
 ---
 
-## 10. Design Notes
+## 11. Design Notes
 
 ### Cross‑platform compatibility
 

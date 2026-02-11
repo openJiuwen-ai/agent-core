@@ -26,8 +26,11 @@
   - [7. 变量与配置](#7-变量与配置)
     - [常用变量](#常用变量)
   - [8. 依赖检查（`DEP`）](#8-依赖检查dep)
-  - [9. Makefile 自更新](#9-makefile-自更新)
-  - [10. 设计说明](#10-设计说明)
+  - [9. 性能分析](#9-性能分析)
+    - [火焰图（`FLAME`）](#火焰图flame)
+    - [Speedscope 分析（`SPEEDSCOPE`）](#speedscope-分析speedscope)
+  - [10. Makefile 自更新](#10-makefile-自更新)
+  - [11. 设计说明](#11-设计说明)
     - [跨平台兼容性](#跨平台兼容性)
     - [为什么只处理变更文件？](#为什么只处理变更文件)
     - [为什么用 Python 过滤文件？](#为什么用-python-过滤文件)
@@ -54,6 +57,7 @@
 - `codespell`
 - `pytest`
 - `pipdeptree`
+- `pyinstrument`（性能分析）
 
 这些工具可以通过以下方式运行：
 
@@ -107,13 +111,20 @@ Usage: make [Target] [COMMITS=N] [UV=yes|no]
 - 如果指定了 COMMITS=N 且 N > 0，则检查最近 N 次提交中发生变化的 Python 文件
   否则将检查当前已暂存（staged）的变更
 - 如果设置了 UV，则其值必须为 yes 或 no；否则 make 会自动检测是否安装了 uv
-- 你也可以用这个 Makefile 查看“哪些包依赖某个包”
+- 你也可以用这个 Makefile 查看"哪些包依赖某个包"
   例: make DEP=pydantic-core
   语法: make DEP=<包名>
+- 这个 Makefile 可以用来为 Python 脚本创建火焰图
+  例: make FLAME=test-openai-emb.py
+  语法: make FLAME=<脚本名>
+- 这个 Makefile 可以用来为 Python 脚本创建 speedscope 火焰图性能分析
+  例: make SPEEDSCOPE=test-openai-emb.py
+  语法: make SPEEDSCOPE=<脚本名>
+  在 https://www.speedscope.app 查看分析结果
 
 可用的 Target: 
     help       - 显示此帮助信息
-    install    - 通过 uv 或 pip 安装依赖: ruff、pylint、mypy、codespell、pipdeptree
+    install    - 通过 uv 或 pip 安装依赖
     update     - 从 gitcode.com/openJiuwen/agent-core 下载该 Makefile 的最新版本
     test       - 运行 pytest，你可以通过 TESTFLAGS="..." 传入参数
     format     - 使用 ruff 检查所选 Python 文件的格式
@@ -199,6 +210,8 @@ make check UV=no
 | `update` | 下载该 Makefile 的最新版本 |
 | `test` | 运行 pytest |
 | `dep` | 查看某个包的反向依赖树（谁依赖它） |
+| `flame` | 为 Python 脚本生成 HTML 格式的火焰图 |
+| `speedscope` | 为 Python 脚本生成 Speedscope 格式的性能分析文件 |
 
 ### 代码质量检查
 
@@ -246,6 +259,8 @@ make check COMMITS=1 PYTHON=python3.12
 | `COMMITS` | `0` | 检查最近多少次提交 |
 | `UV` | 自动检测 | 强制是否使用 uv（`yes` / `no`） |
 | `DEP` | 空 | `make dep` 要查询的包名 |
+| `FLAME` | 空 | 要生成火焰图的脚本名 |
+| `SPEEDSCOPE` | 空 | 要生成 speedscope 分析的脚本名 |
 | `CURL` | 自动检测 | curl 的路径 |
 
 ---
@@ -294,7 +309,58 @@ pydantic_core==2.41.5
 
 ---
 
-## 9. Makefile 自更新
+## 9. 性能分析
+
+Makefile 支持使用 `pyinstrument` 工具对 Python 脚本进行性能分析，生成两种格式的性能分析报告。
+
+### 火焰图（`FLAME`）
+
+使用 `FLAME` 变量可以为指定的 Python 脚本生成 HTML 格式的火焰图：
+
+```bash
+make FLAME=test-openai-emb.py
+```
+
+这会执行：
+
+```
+pyinstrument -r html -o test-openai-emb.py.html test-openai-emb.py
+```
+
+生成的 HTML 文件可以直接在浏览器中打开，以交互式的方式查看性能分析结果。火焰图可以帮助你：
+
+- 识别代码中的性能瓶颈
+- 查看函数调用栈和耗时分布
+- 分析程序执行的热点路径
+
+### Speedscope 分析（`SPEEDSCOPE`）
+
+使用 `SPEEDSCOPE` 变量可以为指定的 Python 脚本生成 Speedscope 格式的性能分析文件：
+
+```bash
+make SPEEDSCOPE=test-openai-emb.py
+```
+
+这会执行：
+
+```
+pyinstrument -r speedscope -o test-openai-emb.py.json test-openai-emb.py
+```
+
+生成的 JSON 文件可以上传到 [https://www.speedscope.app](https://www.speedscope.app) 进行可视化分析。Speedscope 提供了更丰富的交互式分析功能，包括：
+
+- 时间线视图
+- 火焰图视图
+- 左侧重视图
+- 函数调用频率分析
+
+**注意**：使用性能分析功能前，需要确保已安装 `pyinstrument`。可以通过运行 `make install` 来安装所有依赖，包括 `pyinstrument`。
+
+如果设置了 `FLAME` 或 `SPEEDSCOPE`，它们会自动成为默认 target。
+
+---
+
+## 10. Makefile 自更新
 
 ```bash
 make update
@@ -304,7 +370,7 @@ make update
 
 ---
 
-## 10. 设计说明
+## 11. 设计说明
 
 ### 跨平台兼容性
 
