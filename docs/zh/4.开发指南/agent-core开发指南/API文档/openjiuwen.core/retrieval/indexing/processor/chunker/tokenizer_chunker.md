@@ -6,7 +6,7 @@
 
 
 ```python
-TokenizerChunker(chunk_size: int, chunk_overlap: int, tokenizer: Any, **kwargs: Any)
+TokenizerChunker(chunk_size: int, chunk_overlap: int, tokenizer: Any, language: str = "auto", splitter_config: dict | None = None, **kwargs)
 ```
 
 初始化基于tokenizer的分块器。
@@ -16,7 +16,9 @@ TokenizerChunker(chunk_size: int, chunk_overlap: int, tokenizer: Any, **kwargs: 
 * **chunk_size**(int)：分块大小（token数）。
 * **chunk_overlap**(int)：分块重叠大小（token数）。
 * **tokenizer**(Any)：分词器，必须具有encode和decode方法。
-* **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
+* **language**(str, 可选)：语言代码，默认为 "auto"（自动检测）。默认值："auto"。
+* **splitter_config**(dict, 可选)：传递给 SentenceSplitter 的其他参数。默认值：None。
+* **kwargs**：可变参数，用于传递其他额外的配置参数。
 
 ### chunk_text
 

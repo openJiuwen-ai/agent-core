@@ -28,7 +28,7 @@ class TripleExtractor(Extractor):
         model_name: str,
         temperature: float = 0.0,
         max_concurrent: int = 50,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize triple extractor
@@ -47,7 +47,7 @@ class TripleExtractor(Extractor):
     async def extract(
         self,
         chunks: List[TextChunk],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[Triple]:
         """
         Extract triples

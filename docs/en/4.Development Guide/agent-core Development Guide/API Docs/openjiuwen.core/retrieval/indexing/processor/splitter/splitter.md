@@ -6,7 +6,7 @@ Sentence-level text splitter, uses pysbd for sentence segmentation, then chunks 
 
 
 ```python
-SentenceSplitter(tokenizer: Callable, chunk_size: int, chunk_overlap: int, lan: str = "zh")
+SentenceSplitter(tokenizer: Callable, chunk_size: int, chunk_overlap: int, lan: str = "auto")
 ```
 
 Initialize sentence splitter.
@@ -16,7 +16,7 @@ Initialize sentence splitter.
 * **tokenizer**(Callable): Tokenizer (e.g., an object with encode and decode methods), must have encode and decode methods.
 * **chunk_size**(int): Chunk size (number of tokens).
 * **chunk_overlap**(int): Chunk overlap size (number of tokens).
-* **lan**(str, optional): Language code, defaults to "zh" (Chinese). Default: "zh".
+* **lan**(str, optional): Language code, defaults to "auto" (auto-detect). Default: "auto".
 
 ### __call__
 

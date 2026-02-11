@@ -224,7 +224,7 @@ class GraphRetriever(Retriever):
         embed_model: Optional[Any] = None,
         chunk_collection: Optional[str] = None,
         triple_collection: Optional[str] = None,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize graph retriever
@@ -368,7 +368,7 @@ class GraphRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (graph retrieval)
@@ -424,7 +424,7 @@ class GraphRetriever(Retriever):
         triples: Optional[List[RetrievalResult]] = None,
         topk: Optional[int] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """
         Graph expansion using beam search
@@ -762,7 +762,7 @@ class GraphRetriever(Retriever):
         self,
         queries: List[str],
         top_k: int = 5,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[RetrievalResult]]:
         """Batch retrieval"""
         # Execute multiple retrievals concurrently

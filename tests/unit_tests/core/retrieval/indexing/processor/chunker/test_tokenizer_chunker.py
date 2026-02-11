@@ -56,6 +56,8 @@ class TestTokenizerChunker:
             tokenizer=mock_tokenizer,
             chunk_size=512,
             chunk_overlap=50,
+            splitter_config=None,
+            language="auto",
         )
 
     @classmethod

@@ -37,7 +37,7 @@ class MilvusIndexer(Indexer):
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
         doc_index_callback: type[BaseCallback] = TqdmCallback,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize Milvus index manager
@@ -106,7 +106,7 @@ class MilvusIndexer(Indexer):
         chunks: List[TextChunk],
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Build index"""
         try:
@@ -191,7 +191,7 @@ class MilvusIndexer(Indexer):
         doc_id: str,
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Update index"""
         try:
@@ -208,7 +208,7 @@ class MilvusIndexer(Indexer):
         self,
         doc_id: str,
         index_name: str,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete index"""
         try:

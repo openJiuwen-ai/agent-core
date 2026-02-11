@@ -8,7 +8,7 @@ Implementation of Ollama embedding model.
 
 import asyncio
 from itertools import chain
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import requests
 
@@ -121,7 +121,7 @@ class OllamaEmbedding(Embedding):
                 self._dimension = 768
         return self._dimension
 
-    async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
+    async def embed_query(self, text: str, **kwargs) -> List[float]:
         if not text.strip():
             raise build_error(
                 StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text provided for embedding"
@@ -134,7 +134,7 @@ class OllamaEmbedding(Embedding):
         self,
         texts: List[str],
         batch_size: Optional[int] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[float]]:
         if not texts:
             raise build_error(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty texts list provided")

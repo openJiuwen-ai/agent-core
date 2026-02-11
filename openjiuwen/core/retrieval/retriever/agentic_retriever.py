@@ -249,7 +249,7 @@ class AgenticRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Optional[Literal["vector", "sparse", "hybrid"]] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         if top_k is None:
             raise build_error(
@@ -396,7 +396,7 @@ class AgenticRetriever(Retriever):
         self,
         queries: List[str],
         top_k: int = 5,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[RetrievalResult]]:
         tasks = [self.retrieve(query, top_k=top_k, **kwargs) for query in queries]
         return await asyncio.gather(*tasks)

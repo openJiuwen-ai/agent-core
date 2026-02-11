@@ -6,7 +6,7 @@ Fixed size chunker based on tokenizer.
 
 
 ```python
-TokenizerChunker(chunk_size: int, chunk_overlap: int, tokenizer: Any, **kwargs: Any)
+TokenizerChunker(chunk_size: int, chunk_overlap: int, tokenizer: Any, language: str = "auto", splitter_config: dict | None = None, **kwargs)
 ```
 
 Initialize tokenizer-based chunker.
@@ -16,7 +16,9 @@ Initialize tokenizer-based chunker.
 * **chunk_size**(int): Chunk size (number of tokens).
 * **chunk_overlap**(int): Chunk overlap size (number of tokens).
 * **tokenizer**(Any): Tokenizer, must have encode and decode methods.
-* **kwargs**(Any): Variable arguments for passing additional configuration parameters.
+* **language**(str, optional): Language code, defaults to "auto" (auto-detect). Default: "auto".
+* **splitter_config**(dict, optional): Other arguments to SentenceSplitter. Default: None.
+* **kwargs**: Variable arguments for passing additional configuration parameters.
 
 ### chunk_text
 

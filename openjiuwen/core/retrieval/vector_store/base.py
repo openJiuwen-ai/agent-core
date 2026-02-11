@@ -58,7 +58,7 @@ class VectorStore(ABC):
         self,
         data: dict | List[dict],
         batch_size: int | None = 128,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
         """Add vectors"""
 
@@ -68,7 +68,7 @@ class VectorStore(ABC):
         query_vector: List[float],
         top_k: int = 5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Vector search
@@ -89,7 +89,7 @@ class VectorStore(ABC):
         query_text: str,
         top_k: int = 5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Sparse search (BM25)
@@ -112,7 +112,7 @@ class VectorStore(ABC):
         top_k: int = 5,
         alpha: float = 0.5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Hybrid search (sparse retrieval + vector retrieval)
@@ -134,7 +134,7 @@ class VectorStore(ABC):
         self,
         ids: Optional[List[str]] = None,
         filter_expr: str | QueryExpr | None = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete vectors"""
 

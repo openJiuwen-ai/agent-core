@@ -6,7 +6,7 @@ Vector Retriever Implementation
 Retriever implementation based on vector store.
 """
 
-from typing import Any, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -23,7 +23,7 @@ class VectorRetriever(Retriever):
         self,
         vector_store: VectorStore,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize vector retriever
@@ -41,7 +41,7 @@ class VectorRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "vector",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (vector retrieval)
@@ -109,7 +109,7 @@ class VectorRetriever(Retriever):
         self,
         queries: List[str],
         top_k: int = 5,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[RetrievalResult]]:
         """Batch retrieval"""
         import asyncio
@@ -124,7 +124,7 @@ class VectorRetriever(Retriever):
         query: str,
         top_k: int = 5,
         mode: Literal["vector", "sparse", "hybrid"] = "vector",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Retrieve documents (vector retrieval)

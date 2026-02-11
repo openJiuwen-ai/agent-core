@@ -7,7 +7,7 @@ Inherits from Processor, provides text chunking interface.
 """
 
 import uuid
-from typing import Any, Callable, List, Optional
+from typing import Callable, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -23,7 +23,7 @@ class Chunker(Processor):
         chunk_size: int = 512,
         chunk_overlap: int = 50,
         length_function: Optional[Callable[[str], int]] = None,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize text chunker
@@ -102,7 +102,7 @@ class Chunker(Processor):
                 chunks.append(chunk)
         return chunks
 
-    async def process(self, documents: List[Document], **kwargs: Any) -> List[TextChunk]:
+    async def process(self, documents: List[Document], **kwargs) -> List[TextChunk]:
         """
         Process documents (implements Processor's process method)
 

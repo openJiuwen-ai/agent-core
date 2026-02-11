@@ -6,7 +6,7 @@ Hybrid Retriever Implementation
 Hybrid retriever combining vector retrieval and sparse retrieval.
 """
 
-from typing import Any, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -24,7 +24,7 @@ class HybridRetriever(Retriever):
         vector_store: VectorStore,
         embed_model: Optional[Embedding] = None,
         alpha: float = 0.5,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize hybrid retriever
@@ -44,7 +44,7 @@ class HybridRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (hybrid retrieval)
@@ -133,7 +133,7 @@ class HybridRetriever(Retriever):
         self,
         queries: List[str],
         top_k: int = 5,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[RetrievalResult]]:
         """Batch retrieval"""
         import asyncio
@@ -148,7 +148,7 @@ class HybridRetriever(Retriever):
         query: str,
         top_k: int = 5,
         mode: Literal["vector", "sparse", "hybrid"] = "hybrid",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Retrieve documents (hybrid retrieval)

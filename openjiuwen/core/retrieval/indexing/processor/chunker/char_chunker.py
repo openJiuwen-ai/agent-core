@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Any, List
+from typing import List
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import Document
@@ -16,7 +16,7 @@ class CharChunker(Chunker):
         self,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize fixed size chunker

@@ -60,12 +60,17 @@ class CharSplitter(TextSplitter):
 
 
 class IndexSentenceSplitter(TextSplitter):
+    """
+    SentenceSplitter wrapper with sentence splitting capabilities.
+    """
+
     def __init__(
         self,
         tokenizer: Union["PreTrainedTokenizerBase", Any] = None,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         splitter_config: dict | None = None,
+        language: str = "auto",
     ) -> None:
         """Wrapper with sentence splitting capabilities.
 
@@ -77,23 +82,23 @@ class IndexSentenceSplitter(TextSplitter):
             chunk_overlap (int | None, optional): Window size for passage overlap. Defaults to None.
                 If None, set to `chunk_size // 5`.
             splitter_config (dict, optional): Other arguments to SentenceSplitter. Defaults to None.
-
+            language: Language code, defaults to "auto" (auto-detect)
         """
         super().__init__()
         self._tokenizer = tokenizer
 
         if not isinstance(splitter_config, dict):
-            splitter_config = {
-                "paragraph_separator": "\n",
-            }
+            splitter_config = {}
 
-        tokenizer_fn, max_token_length = self._resolve_tokenizer(self._tokenizer)
+        _, max_token_length = self._resolve_tokenizer(self._tokenizer)
         chunk_size = self._resolve_chunk_size(chunk_size, max_token_length)
 
         self._splitter = SentenceSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap or chunk_size // 5,
             tokenizer=tokenizer,
+            lan=language,
+            **splitter_config,
         )
 
     @staticmethod

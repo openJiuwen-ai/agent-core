@@ -14,7 +14,7 @@ class SentenceSplitter(Splitter):
         tokenizer: Callable,
         chunk_size: int,
         chunk_overlap: int,
-        lan: str = "zh",
+        lan: str = "auto",
     ):
         """
         Initialize sentence splitter
@@ -23,7 +23,7 @@ class SentenceSplitter(Splitter):
             tokenizer: Tokenizer, must have encode and decode methods
             chunk_size: Chunk size (number of tokens)
             chunk_overlap: Chunk overlap size (number of tokens)
-            lan: Language code, defaults to "zh" (Chinese)
+            lan: Language code, defaults to "auto" (auto-detect)
         """
         super().__init__(
             tokenizer=tokenizer,
@@ -31,35 +31,55 @@ class SentenceSplitter(Splitter):
             chunk_overlap=chunk_overlap,
         )
 
-        self.default_lan = lan
+        self.default_lan = lan if lan != "auto" else ""
         self.seg = None  # Initialized per document
         self._span_recovery_failures = {}
 
     @staticmethod
-    def _detect_chinese(text: str) -> str:
+    def _detect_chinese(text: str, threshold: float = 0.1) -> str:
         """
         Detect if text is primarily Chinese or English based on character distribution.
 
         Args:
             text: Text to analyze
+            threshold: Detection threhold, defaults to 0.1 (10%+ Chinese chars -> "zh")
 
         Returns:
             "zh" if more than 10% of characters are Chinese, otherwise "en"
         """
+        import numpy as np
+
         if not text:
             return "en"
 
-        chinese_count = 0
+        # Check character ratio
         total_chars = len(text)
+        threshold_val = int(threshold * total_chars)
+        chinese_count = 0
 
-        for char in text:
-            code_point = ord(char)
-            # Chinese Unicode ranges: 0x4E00-0x9FFF
-            if 0x4E00 <= code_point <= 0x9FFF:
-                chinese_count += 1
+        # Convert chunk to UTF-32 and count codepoints in range
+        mem_threshold = 50_000_000
+        if total_chars <= mem_threshold:
+            # If mem alloc < ~200MB, count in one go
+            char_arr = np.frombuffer(text.encode("utf-32-le"), dtype="<u4")
+            chinese_count = int(np.sum((char_arr >= 0x4E00) & (char_arr <= 0x9FFF)))
+        else:
+            # If mem alloc > ~200MB, count chunk by chunk, we will still outspeed regex or ord :-)
+            for start in range(0, total_chars, mem_threshold):
+                end = min(start + mem_threshold, total_chars)
+                char_arr = np.frombuffer(text[start:end].encode("utf-32-le"), dtype="<u4")
+                chinese_count += int(np.sum((char_arr >= 0x4E00) & (char_arr <= 0x9FFF)))
+                # Early decision: already met threshold
+                if chinese_count >= threshold_val:
+                    return "zh"
 
-        chinese_ratio = chinese_count / total_chars if total_chars > 0 else 0
-        return "zh" if chinese_ratio > 0.1 else "en"
+        # Fallback: use punctuation types as heuristics
+        is_chinese = int(chinese_count) >= threshold_val
+        if is_chinese is False:
+            using_chinese_puncs = text.count("？") > text.count("?") and text.count("！") > text.count("!")
+            # using_chinese_puncs |= text.count("，") > text.count(",") or text.count("。") > text.count(".")
+            is_chinese = using_chinese_puncs
+        return "zh" if is_chinese else "en"
 
     def __call__(self, doc: str) -> List[Tuple[str, int, int]]:
         """
@@ -75,7 +95,8 @@ class SentenceSplitter(Splitter):
             return []
 
         # Auto-detect language based on Chinese character ratio
-        detected_lan = self._detect_chinese(doc)
+
+        detected_lan = self.default_lan or self._detect_chinese(doc)
         self.seg = Segmenter(language=detected_lan, clean=False)
 
         sentences_with_spans = self._sentences_with_spans(doc)

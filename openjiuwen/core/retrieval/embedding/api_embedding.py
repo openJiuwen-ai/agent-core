@@ -10,7 +10,7 @@ import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import chain
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import requests
 
@@ -148,7 +148,7 @@ class APIEmbedding(Embedding):
             )
         return non_empty
 
-    async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
+    async def embed_query(self, text: str, **kwargs) -> List[float]:
         if not text.strip():
             raise build_error(
                 StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty text provided for embedding"
@@ -156,7 +156,7 @@ class APIEmbedding(Embedding):
         embeddings = await self._get_embeddings(text, **kwargs)
         return embeddings[0]
 
-    def embed_query_sync(self, text: str, **kwargs: Any) -> List[float]:
+    def embed_query_sync(self, text: str, **kwargs) -> List[float]:
         """Embed a single query text (sync version)."""
         if not text.strip():
             raise build_error(
@@ -169,7 +169,7 @@ class APIEmbedding(Embedding):
         self,
         texts: List[str],
         batch_size: Optional[int] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[float]]:
         non_empty = self.validate_embed_docs(texts, kwargs)
 
@@ -201,7 +201,7 @@ class APIEmbedding(Embedding):
         self,
         texts: List[str],
         batch_size: Optional[int] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[float]]:
         """Embed document texts"""
         non_empty = self.validate_embed_docs(texts, kwargs)

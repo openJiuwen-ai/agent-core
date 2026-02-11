@@ -9,7 +9,7 @@ Supports vector search, sparse search (text matching), and hybrid search.
 import asyncio
 import json
 import uuid
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import chromadb
 from chromadb.config import DEFAULT_DATABASE, Settings
@@ -42,7 +42,7 @@ class ChromaVectorStore(VectorStore):
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize ChromaDB vector store (persistent mode)
@@ -136,7 +136,7 @@ class ChromaVectorStore(VectorStore):
         self,
         data: dict | List[dict],
         batch_size: int | None = 128,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
         """Add vector data"""
         if batch_size is None or batch_size <= 0:
@@ -251,7 +251,7 @@ class ChromaVectorStore(VectorStore):
         query_vector: List[float],
         top_k: int = 5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """Vector search"""
         # Re-fetch collection to ensure using the latest collection reference
@@ -288,7 +288,7 @@ class ChromaVectorStore(VectorStore):
         query_text: str,
         top_k: int = 5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """Sparse search (text matching)"""
         # Re-fetch collection to ensure using the latest collection reference
@@ -334,7 +334,7 @@ class ChromaVectorStore(VectorStore):
         top_k: int = 5,
         alpha: float = 0.5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """Hybrid search (text retrieval + vector retrieval)"""
         try:
@@ -414,7 +414,7 @@ class ChromaVectorStore(VectorStore):
         self,
         ids: Optional[List[str]] = None,
         filter_expr: Optional[str | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete vectors"""
         try:

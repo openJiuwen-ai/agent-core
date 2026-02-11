@@ -8,7 +8,7 @@ Uses plugin architecture, supports registering new file format parsers via decor
 """
 
 import os
-from typing import Any, Callable, Dict, List, Type
+from typing import Callable, Dict, List, Type
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -52,7 +52,7 @@ class AutoFileParser(Parser):
     Supports registering new parsers via @register_parser decorator.
     """
 
-    def __init__(self, **kwargs: Any):
+    def __init__(self, **kwargs):
         # Import all parsers to trigger registration
         self._ensure_parsers_loaded()
         super().__init__(**kwargs)
@@ -68,7 +68,7 @@ class AutoFileParser(Parser):
         except ImportError as e:
             logger.warning(f"Failed to import some parser modules: {e}")
 
-    async def parse(self, doc: str, doc_id: str = "", **kwargs: Any) -> List[Document]:
+    async def parse(self, doc: str, doc_id: str = "", **kwargs) -> List[Document]:
         """
         Automatically select appropriate parser based on file format
 

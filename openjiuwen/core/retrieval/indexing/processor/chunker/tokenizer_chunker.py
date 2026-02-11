@@ -15,14 +15,16 @@ from openjiuwen.core.retrieval.indexing.processor.chunker.text_splitter import I
 
 
 class TokenizerChunker(Chunker):
-    """Fixed size chunker based on character length"""
+    """Fixed size chunker based on tokens"""
 
     def __init__(
         self,
         chunk_size: int,
         chunk_overlap: int,
         tokenizer: Any,
-        **kwargs: Any,
+        language: str = "auto",
+        splitter_config: dict | None = None,
+        **kwargs,
     ):
         """
         Initialize fixed size chunker
@@ -31,6 +33,8 @@ class TokenizerChunker(Chunker):
             chunk_size: Chunk size (number of characters)
             chunk_overlap: Chunk overlap size (number of characters)
             length_function: Length calculation function (defaults to character count)
+            language: Language code, defaults to "auto" (auto-detect)
+            splitter_config: Other arguments to SentenceSplitter. Defaults to None.
         """
         super().__init__(
             chunk_size=chunk_size,
@@ -42,6 +46,8 @@ class TokenizerChunker(Chunker):
             tokenizer=self.tokenizer,
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
+            splitter_config=splitter_config,
+            language=language,
         )
 
     def chunk_text(self, text: str) -> List[str]:

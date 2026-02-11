@@ -40,7 +40,7 @@ class MilvusVectorStore(VectorStore):
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize Milvus vector store
@@ -149,7 +149,7 @@ class MilvusVectorStore(VectorStore):
         self,
         data: dict | List[dict],
         batch_size: int | None = 128,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
         if batch_size is None or batch_size <= 0:
             batch_size = 128
@@ -197,7 +197,7 @@ class MilvusVectorStore(VectorStore):
         query_vector: List[float],
         top_k: int = 5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """Vector search"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field, "chunk_id"]
@@ -237,7 +237,7 @@ class MilvusVectorStore(VectorStore):
         query_text: str,
         top_k: int = 5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """Sparse search (BM25)"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
@@ -283,7 +283,7 @@ class MilvusVectorStore(VectorStore):
         top_k: int = 5,
         alpha: float = 0.5,
         filters: Optional[dict | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """Hybrid search (sparse retrieval + vector retrieval)"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
@@ -375,7 +375,7 @@ class MilvusVectorStore(VectorStore):
         self,
         ids: Optional[List[str]] = None,
         filter_expr: Optional[str | QueryExpr] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete vectors"""
         try:

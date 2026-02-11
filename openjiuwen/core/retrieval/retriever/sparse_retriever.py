@@ -6,7 +6,7 @@ Sparse Retriever Implementation
 Sparse retriever based on BM25.
 """
 
-from typing import Any, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -21,7 +21,7 @@ class SparseRetriever(Retriever):
     def __init__(
         self,
         vector_store: VectorStore,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize sparse retriever
@@ -37,7 +37,7 @@ class SparseRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "sparse",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (sparse retrieval)
@@ -83,7 +83,7 @@ class SparseRetriever(Retriever):
         self,
         queries: List[str],
         top_k: int = 5,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[RetrievalResult]]:
         """Batch retrieval"""
         import asyncio
@@ -98,7 +98,7 @@ class SparseRetriever(Retriever):
         query: str,
         top_k: int = 5,
         mode: Literal["vector", "sparse", "hybrid"] = "sparse",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Retrieve documents (sparse retrieval)

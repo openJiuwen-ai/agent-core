@@ -39,7 +39,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
         index_manager: Optional[Indexer] = None,
         retriever: Optional[Retriever] = None,
         llm_client: Optional[Any] = None,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize the knowledge base
@@ -71,7 +71,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     async def parse_files(
         self,
         file_paths: List[str],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[Document]:
         """Parse files from file paths into a list of Document objects"""
         if not self.parser:
@@ -98,7 +98,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     async def add_documents(
         self,
         documents: List[Document],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[str]:
         """Add documents to the knowledge base"""
         if not self.chunker:
@@ -145,7 +145,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
         self,
         query: str,
         config: Optional[RetrievalConfig] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """Retrieve relevant documents"""
         if not self.retriever:
@@ -201,7 +201,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     async def delete_documents(
         self,
         doc_ids: List[str],
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete documents"""
         if not self.index_manager:
@@ -228,7 +228,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
     async def update_documents(
         self,
         documents: List[Document],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[str]:
         """Update documents"""
         if not self.chunker:

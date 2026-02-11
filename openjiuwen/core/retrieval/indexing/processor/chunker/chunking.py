@@ -30,7 +30,7 @@ class TextChunker(Chunker):
         chunk_unit: str = "char",
         embed_model: Optional[Any] = None,
         preprocess_options: Optional[Dict] = None,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize fixed size chunker

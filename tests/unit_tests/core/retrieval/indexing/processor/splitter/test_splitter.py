@@ -44,11 +44,12 @@ class TestSentenceSplitter:
             tokenizer=mock_tokenizer,
             chunk_size=512,
             chunk_overlap=50,
+            lan="auto",
         )
         assert splitter.chunk_size == 512
         assert splitter.chunk_overlap == 50
         assert splitter.tokenizer == mock_tokenizer
-        assert splitter.default_lan == "zh"
+        assert splitter.default_lan == ""
         assert splitter.seg is None  # Segmenter is initialized lazily in __call__
 
     @classmethod

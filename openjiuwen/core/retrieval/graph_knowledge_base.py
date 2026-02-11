@@ -45,7 +45,7 @@ class GraphKnowledgeBase(KnowledgeBase):
         triple_retriever: Optional[Retriever] = None,
         llm_client: Optional[Any] = None,
         llm_model_name: Optional[Any] = None,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize GraphRAG knowledge base
@@ -81,7 +81,7 @@ class GraphKnowledgeBase(KnowledgeBase):
     async def parse_files(
         self,
         file_paths: List[str],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[Document]:
         """Parse files from file paths into a list of Document objects"""
         if not self.parser:
@@ -108,7 +108,7 @@ class GraphKnowledgeBase(KnowledgeBase):
     async def add_documents(
         self,
         documents: List[Document],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[str]:
         """Add documents to the knowledge base (including chunk index and triple index)"""
         if not self.chunker:
@@ -205,7 +205,7 @@ class GraphKnowledgeBase(KnowledgeBase):
         self,
         query: str,
         config: Optional[RetrievalConfig] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """Retrieve relevant documents (supports graph retrieval)"""
         retrieval_config = config or RetrievalConfig()
@@ -275,7 +275,7 @@ class GraphKnowledgeBase(KnowledgeBase):
     async def delete_documents(
         self,
         doc_ids: List[str],
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete documents (including chunk index and triple index)"""
         if not self.index_manager:
@@ -316,7 +316,7 @@ class GraphKnowledgeBase(KnowledgeBase):
     async def update_documents(
         self,
         documents: List[Document],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[str]:
         """Update documents (including chunk index and triple index)"""
         if self.strict_validation and self.vector_store:

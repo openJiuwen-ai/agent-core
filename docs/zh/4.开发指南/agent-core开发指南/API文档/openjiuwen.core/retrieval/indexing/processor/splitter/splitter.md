@@ -6,7 +6,7 @@
 
 
 ```python
-SentenceSplitter(tokenizer: Callable, chunk_size: int, chunk_overlap: int, lan: str = "zh")
+SentenceSplitter(tokenizer: Callable, chunk_size: int, chunk_overlap: int, lan: str = "auto")
 ```
 
 初始化句子分割器。
@@ -16,7 +16,7 @@ SentenceSplitter(tokenizer: Callable, chunk_size: int, chunk_overlap: int, lan: 
 * **tokenizer**(Callable)：分词器（比如具有 encode 和 decode 方法的对象），必须具有 encode 和 decode 方法。
 * **chunk_size**(int)：分块大小（token 数量）。
 * **chunk_overlap**(int)：分块重叠大小（token 数量）。
-* **lan**(str, 可选)：语言代码，默认为 "zh"（中文）。默认值："zh"。
+* **lan**(str, 可选)：语言代码，默认为 "auto"（自动检测）。默认值："auto"。
 
 ### __call__
 

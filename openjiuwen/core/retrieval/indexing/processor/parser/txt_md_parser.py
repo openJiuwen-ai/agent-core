@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Any, Optional
+from typing import Optional
 
 import aiofiles
 from charset_normalizer import detect
@@ -15,7 +15,7 @@ from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 class TxtMdParser(Parser):
     """Local file parser for TXT/MD format"""
 
-    def __init__(self, **kwargs: Any):
+    def __init__(self, **kwargs):
         pass
 
     async def _parse(self, file_path: str) -> Optional[str]:
