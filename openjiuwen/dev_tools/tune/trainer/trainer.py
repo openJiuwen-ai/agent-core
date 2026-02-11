@@ -13,7 +13,7 @@ from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.operator.llm_call import LLMCall
+from openjiuwen.core.operator.legacy.llm_call.base import LLMCall
 from openjiuwen.dev_tools.tune.base import EvaluatedCase, TuneConstant, Case
 from openjiuwen.dev_tools.tune.dataset.case_loader import CaseLoader
 from openjiuwen.dev_tools.tune.evaluator.evaluator import BaseEvaluator

@@ -12,7 +12,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import agent_logger, LogEventType
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.operator.llm_call import LLMCall
+from openjiuwen.core.operator.legacy.llm_call.base import LLMCall
 from openjiuwen.core.session.agent import Session
 from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.dev_tools.tune.base import EvaluatedCase
