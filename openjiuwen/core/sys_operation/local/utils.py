@@ -18,6 +18,7 @@ from typing import (
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
 )
 
@@ -69,8 +70,7 @@ class InvokeData(BaseModel):
         description="Record exception during subprocess execution"
     )
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class AsyncProcessHandler:

@@ -3,6 +3,8 @@
 
 from typing import Any
 
+from pydantic import ConfigDict
+
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, ToolMessage
 
 
@@ -127,9 +129,8 @@ def merge_pydantic_models(left: Any, right: Any) -> Any:
 
 
 class BaseMessageChunk(BaseMessage):
-    class Config:
-        arbitrary_types_allowed = True
-        json_encoders = {type(None): lambda _: None}
+    model_config = ConfigDict(arbitrary_types_allowed=True, json_encoders={type(None): lambda _: None})
+
 
     def __add__(self, other: "BaseMessageChunk") -> "BaseMessageChunk":
         if not isinstance(other, BaseMessageChunk):
