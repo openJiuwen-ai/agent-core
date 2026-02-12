@@ -5,18 +5,17 @@ import asyncio
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.operator import Operator, LLMCallOperator, ToolCallOperator, MemoryCallOperator
+from openjiuwen.core.operator import Operator, LLMCallOperator, ToolCallOperator
 from openjiuwen.core.context_engine import ContextEngine, ModelContext
 from openjiuwen.core.foundation.llm import AssistantMessage, Model, UserMessage, SystemMessage
-from openjiuwen.core.foundation.llm import AssistantMessage, Model, UserMessage, SystemMessage
 from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
-from openjiuwen.core.single_agent import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
-from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
 
 
 class ReActAgentEvolve(BaseAgent):
@@ -53,7 +52,6 @@ class ReActAgentEvolve(BaseAgent):
         # LLM Operator uses lazy init: model_client_config/model_config_obj may only be ready after configure()
         self._llm_op: Optional[LLMCallOperator] = None
         self._tool_op: Optional[ToolCallOperator] = None
-        self._memory_op: Optional[MemoryCallOperator] = None
         self._init_memory_scope()
         # Lazy import to avoid circular dependency: skills -> runner -> single_agent -> skills
         from openjiuwen.core.single_agent.skills import SkillUtil
@@ -66,11 +64,6 @@ class ReActAgentEvolve(BaseAgent):
             tool_call_id="react_tool",
             tool_executor=self.ability_manager.execute,
             tool_registry=self.ability_manager,
-        )
-        self._memory_op = MemoryCallOperator(
-            memory=None,
-            memory_call_id="react_memory",
-            memory_invoke=self._memory_invoke,
         )
 
     def _init_memory_scope(self) -> None:
@@ -116,7 +109,7 @@ class ReActAgentEvolve(BaseAgent):
 
         # Reset sys operation id if changed
         if old_config.sys_operation_id != config.sys_operation_id:
-            self._skill_util.set_sys_operation_id(config.sys_operation_id)
+            self.lazy_init_skill()
 
         return self
 
@@ -139,23 +132,6 @@ class ReActAgentEvolve(BaseAgent):
             else:
                 content = [{"role": "system", "content": str(value)}]
             self._config.prompt_template = content
-
-    async def _memory_invoke(self, inputs: Dict[str, Any]) -> List[str]:
-        """MemoryCallOperator callback: adapts LongTermMemory.search_user_mem.
-
-        Soft fail returns empty when uninitialized.
-        """
-        query = str(inputs.get("query", ""))
-        scope_id = str(inputs.get("scope_id", ""))
-        user_id = str(inputs.get("user_id", LongTermMemory.DEFAULT_VALUE))
-        top_k = int(inputs.get("top_k", 3))
-        if not query or not scope_id:
-            return []
-        mem = LongTermMemory()
-        if getattr(mem, "search_manager", None) is None:
-            return []
-        results = await mem.search_user_mem(query=query, num=top_k, user_id=user_id, scope_id=scope_id)
-        return [r.mem_info.content for r in results if r and r.mem_info and r.mem_info.content]
 
     def _resolve_llm_model_name(self) -> str:
         """Single source of truth: prefer model_name from ModelRequestConfig.
@@ -192,26 +168,9 @@ class ReActAgentEvolve(BaseAgent):
             self._llm_op.update_system_prompt(getattr(self._config, "prompt_template", []))
         return self._llm_op
 
-    async def _get_memory_messages(
-        self, *, user_input: str, session: Optional[Session], iteration: int
-    ) -> List[SystemMessage]:
-        # Memory: once on first round; empty when unconfigured/uninitialized
-        if iteration != 0:
-            return []
-        mem_op = self._memory_op
-        if mem_op is None:
-            return []
-        mem_hits = await mem_op.invoke(
-            {"query": user_input, "scope_id": self._config.mem_scope_id, "top_k": 3},
-            session=session,
-        )
-        if not mem_hits:
-            return []
-        return [SystemMessage(content="Relevant memory:\n" + "\n".join(f"- {m}" for m in mem_hits))]
-
     def _get_skill_messages(self) -> List[SystemMessage]:
         # Skill prompt: injected as additional system message (not written to evolvable system_prompt)
-        if not self._skill_util.has_skill():
+        if self._skill_util is None or not self._skill_util.has_skill():
             return []
         return [SystemMessage(content=self._skill_util.get_skill_prompt())]
 
@@ -220,8 +179,6 @@ class ReActAgentEvolve(BaseAgent):
         ops: Dict[str, Operator] = {}
         if self._tool_op is not None:
             ops[self._tool_op.operator_id] = self._tool_op
-        if self._memory_op is not None:
-            ops[self._memory_op.operator_id] = self._memory_op
         try:
             llm_op = self._get_llm_op()
             ops[llm_op.operator_id] = llm_op
@@ -317,16 +274,13 @@ class ReActAgentEvolve(BaseAgent):
                 messages=context_window.get_messages()
             )
 
-            memory_messages = await self._get_memory_messages(
-                user_input=user_input, session=session, iteration=iteration
-            )
             skill_messages = self._get_skill_messages()
 
             # Call LLM via Operator (react_llm)
             llm_op = self._get_llm_op()
             history_messages = context_window.get_messages()
             ai_message = await llm_op.invoke(
-                inputs={"query": user_input, "messages": [*memory_messages, *skill_messages, *history_messages]},
+                inputs={"query": user_input, "messages": [*skill_messages, *history_messages]},
                 session=session,
                 tools=context_window.get_tools() or None,
             )

@@ -21,7 +21,7 @@ def test_tool_optimizer_base_init_and_default_targets(tmp_path):
         path_save_dir=str(tmp_path),
         tool_name="search",
     )
-    assert optimizer.default_targets() == ["enabled", "max_retries"]
+    assert optimizer.default_targets() == ["tool_description"]
     assert optimizer.config_eg["save_dir"].endswith("examples")
     assert optimizer.config_desc["save_dir"].endswith("descriptions")
     assert optimizer.config_desc["examples_dir"].endswith("examples")
@@ -77,8 +77,8 @@ def make_mock_tool_operator(tunables=None, op_id="tool_op"):
     """Factory for creating mock Tool operators."""
     op = MagicMock()
     op.operator_id = op_id
-    op.get_tunables.return_value = tunables or {"enabled": True, "max_retries": 3}
-    op.get_state.return_value = {"enabled": True, "max_retries": 3}
+    op.get_tunables.return_value = tunables or {"tool_description": "A search tool"}
+    op.get_state.return_value = {"tool_description": "A search tool"}
     return op
 
 
@@ -92,11 +92,11 @@ class TestToolOptimizerBaseInit:
         assert optimizer.domain == "tool"
 
     @staticmethod
-    def test_default_targets_enabled_and_max_retries():
-        """Default targets are enabled and max_retries."""
+    def test_default_targets_tool_description():
+        """Default targets are tool_description."""
         optimizer = ToolOptimizerBase()
         targets = optimizer.default_targets()
-        assert targets == ["enabled", "max_retries"]
+        assert targets == ["tool_description"]
 
 
 class TestToolOptimizerBaseFilterOperators:
@@ -104,13 +104,13 @@ class TestToolOptimizerBaseFilterOperators:
 
     @staticmethod
     def test_filter_matches_tool_targets():
-        """Filter operators with enabled and max_retries tunables."""
+        """Filter operators with tool_description tunable."""
         optimizer = ToolOptimizerBase()
-        op1 = make_mock_tool_operator({"enabled": True, "max_retries": 3})
+        op1 = make_mock_tool_operator({"tool_description": "A search tool"})
         op2 = make_mock_tool_operator({"system_prompt": "prompt"})
         operators = {"op1": op1, "op2": op2}
 
-        result = optimizer.filter_operators(operators, ["enabled", "max_retries"])
+        result = optimizer.filter_operators(operators, ["tool_description"])
 
         assert "op1" in result
         assert "op2" not in result
@@ -133,19 +133,19 @@ class TestToolOptimizerBaseFilterOperators:
         op.get_tunables.return_value = {}
         operators = {"op1": op}
 
-        result = optimizer.filter_operators(operators, targets=["enabled", "max_retries"])
+        result = optimizer.filter_operators(operators, targets=["tool_description"])
 
         assert result == {}
 
     @staticmethod
     def test_filter_multiple_tool_operators():
-        """Filter multiple operators with enabled and max_retries."""
+        """Filter multiple operators with tool_description."""
         optimizer = ToolOptimizerBase()
-        op1 = make_mock_tool_operator({"enabled": True, "max_retries": 3}, op_id="tool1")
-        op2 = make_mock_tool_operator({"enabled": False, "max_retries": 5}, op_id="tool2")
+        op1 = make_mock_tool_operator({"tool_description": "Tool 1"}, op_id="tool1")
+        op2 = make_mock_tool_operator({"tool_description": "Tool 2"}, op_id="tool2")
         operators = {"op1": op1, "op2": op2}
 
-        result = optimizer.filter_operators(operators, ["enabled", "max_retries"])
+        result = optimizer.filter_operators(operators, ["tool_description"])
 
         assert "op1" in result
         assert "op2" in result
@@ -156,9 +156,9 @@ class TestToolOptimizerBaseBind:
 
     @staticmethod
     def test_bind_with_tool_operators():
-        """Bind Tool operators matching enabled and max_retries targets."""
+        """Bind Tool operators matching tool_description target."""
         optimizer = ToolOptimizerBase()
-        op1 = make_mock_tool_operator({"enabled": True, "max_retries": 3})
+        op1 = make_mock_tool_operator({"tool_description": "A search tool"})
         op2 = make_mock_tool_operator({"system_prompt": "prompt"})
         operators = {"op1": op1, "op2": op2}
 
@@ -181,8 +181,8 @@ class TestToolOptimizerBaseBind:
     def test_bind_with_multiple_matching():
         """Bind multiple matching operators."""
         optimizer = ToolOptimizerBase()
-        op1 = make_mock_tool_operator({"enabled": True, "max_retries": 3}, op_id="tool1")
-        op2 = make_mock_tool_operator({"enabled": False, "max_retries": 5}, op_id="tool2")
+        op1 = make_mock_tool_operator({"tool_description": "Tool 1"}, op_id="tool1")
+        op2 = make_mock_tool_operator({"tool_description": "Tool 2"}, op_id="tool2")
         operators = {"op1": op1, "op2": op2}
 
         count = optimizer.bind(operators)
@@ -201,22 +201,15 @@ class TestToolOptimizerBaseDefaultTargets:
         assert isinstance(result, list)
 
     @staticmethod
-    def test_default_targets_contains_enabled():
-        """default_targets contains 'enabled'."""
+    def test_default_targets_contains_tool_description():
+        """default_targets contains 'tool_description'."""
         optimizer = ToolOptimizerBase()
         result = optimizer.default_targets()
-        assert "enabled" in result
-
-    @staticmethod
-    def test_default_targets_contains_max_retries():
-        """default_targets contains 'max_retries'."""
-        optimizer = ToolOptimizerBase()
-        result = optimizer.default_targets()
-        assert "max_retries" in result
+        assert "tool_description" in result
 
     @staticmethod
     def test_default_targets_count():
-        """default_targets has two targets."""
+        """default_targets has one target."""
         optimizer = ToolOptimizerBase()
         result = optimizer.default_targets()
-        assert len(result) == 2
+        assert len(result) == 1

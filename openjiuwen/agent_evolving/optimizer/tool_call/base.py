@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """
-Tool domain optimizer base class: fixes domain=tool, default_targets=[enabled, max_retries],
+Tool domain optimizer base class: fixes domain=tool, default_targets=["tool_description"],
 unifies filtering and logging semantics. Subclasses implement _backward / _update.
 """
 
@@ -18,7 +18,7 @@ from openjiuwen.core.common.logging import logger
 
 class ToolOptimizerBase(BaseOptimizer):
     """
-    Tool dimension optimizer base class: optimizes tunables exposed by ToolCallOperator (e.g., enabled, max_retries).
+    Tool dimension optimizer base class: optimizes tunables exposed by ToolCallOperator (e.g., tool_description).
     """
 
     domain: str = "tool"
@@ -39,7 +39,7 @@ class ToolOptimizerBase(BaseOptimizer):
         )
 
     def default_targets(self) -> List[str]:
-        return ["enabled", "max_retries"]
+        return ["tool_description"]
 
     def optimize_tool(self, tool, tool_callable):
         """Optimize tool given its description and callable."""
