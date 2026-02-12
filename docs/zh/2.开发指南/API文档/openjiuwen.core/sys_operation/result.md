@@ -22,9 +22,9 @@ class BaseResult(Generic[T])
 
 * **code_content**(str)：执行的原始代码。
 * **language**(str)：原始代码的编程语言。
-* **exit_code**(int, 可选)：执行退出码。默认值：0。
-* **stdout**(str, 可选)：标准输出流。默认值：""。
-* **stderr**(str, 可选)：标准错误流。默认值：""。
+* **exit_code**(int, 可选)：执行退出码。默认值：`None`。
+* **stdout**(str, 可选)：标准输出流。默认值：`""`。
+* **stderr**(str, 可选)：标准错误流。默认值：`""`。
 
 ## class ExecuteCodeChunkData
 
@@ -32,10 +32,10 @@ class BaseResult(Generic[T])
 
 **参数**：
 
-* **text**(str, 可选)：输出分片的原始内容。默认值：""。
-* **type**(Literal["stdout", "stderr"])：输出分片的类型。
-* **chunk_index**(int)：当前分片的索引。从0开始。
-* **exit_code**(int, 可选)：执行退出码。默认值：0。
+* **text**(str, 可选)：输出分片的原始内容。默认值：`""`。
+* **type**(Literal["stdout", "stderr"])：输出分片的类型。默认值：`None`。
+* **chunk_index**(int)：当前分片的索引。从`0`开始。
+* **exit_code**(int, 可选)：执行退出码。默认值：`None`。
 * **metadata**(Dict[str, Any], 可选)：执行数据。默认值：`None`。
 
 ## class ExecuteCodeResult
@@ -61,10 +61,10 @@ Shell命令执行结果数据。
 **参数**：
 
 * **command**(str)：执行的原始Shell命令。
-* **cwd**(str, 可选)：当前工作目录。默认值："."。
-* **exit_code**(int, 可选)：命令退出码。默认值：0。
-* **stdout**(str, 可选)：标准输出流。默认值：""。
-* **stderr**(str, 可选)：标准错误流。默认值：""。
+* **cwd**(str, 可选)：当前工作目录。默认值：`"."`。
+* **exit_code**(int, 可选)：命令退出码。默认值：`None`。
+* **stdout**(str, 可选)：标准输出流。默认值：`""`。
+* **stderr**(str, 可选)：标准错误流。默认值：`""`。
 
 ## class ExecuteCmdChunkData
 
@@ -72,10 +72,10 @@ Shell流式执行分片数据。
 
 **参数**：
 
-* **text**(str, 可选)：输出分片的原始内容。默认值：""。
-* **type**(Literal["stdout", "stderr"])：输出分片的类型。
-* **chunk_index**(int)：当前分片的索引。从0开始。
-* **exit_code**(int, 可选)：命令退出码。默认值：0。
+* **text**(str, 可选)：输出分片的原始内容。默认值：`""`。
+* **type**(Literal["stdout", "stderr"])：输出分片的类型。默认值：`None`。
+* **chunk_index**(int)：当前分片的索引。从`0`开始。
+* **exit_code**(int, 可选)：命令退出码。默认值：`None`。
 * **metadata**(Dict[str, Any], 可选)：命令数据。默认值：`None`。
 
 ## class ExecuteCmdResult
@@ -116,7 +116,7 @@ class ExecuteCmdStreamResult(BaseResult[ExecuteCmdChunkData])
 * **total_count**(int)：项目总数。
 * **list_items**(List[FileSystemItem])：文件/目录详情列表。
 * **root_path**(str)：原始输入目录路径。
-* **recursive**(bool)：是否递归列出子目录中的文件。`True`表示递归列出子目录中的文件，`False`表示不递归列出子目录中的文件。。
+* **recursive**(bool)：是否递归列出子目录中的文件。`True`表示递归列出子目录中的文件，`False`表示不递归列出子目录中的文件。
 * **max_depth**(int, 可选)：最大递归深度。默认值：`None`。
 
 ## class SearchFilesData
@@ -286,4 +286,4 @@ class ListDirsResult(BaseResult[FileSystemData])
 class SearchFilesResult(BaseResult[SearchFilesData])
 ```
 
-`SearchFilesResult`是搜索文件结果的数据类，继承于[BaseResult](#class-baseresult)。
+`SearchFilesResult`是搜索文件结果的数据类，继承于[BaseResult](#class-baseresult)。 

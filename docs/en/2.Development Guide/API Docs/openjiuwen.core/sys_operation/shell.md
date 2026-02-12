@@ -24,10 +24,11 @@ Asynchronously execute Shell command.
 **Parameters**:
 
 * **command** (str): Command to execute.
-* **cwd** (str, optional): Working directory for command execution. Default value: current directory.
-* **timeout** (int, optional): Command execution timeout. Unit: seconds. Default value: 300.
+* **cwd** (str, optional): Working directory for command execution. Default value: `None`. When set to `None`, the current directory is treated as the working directory.
+* **timeout** (int, optional): Command execution timeout. Unit: seconds. Default value: `300`.
 * **environment** (Dict[str, str], optional): Custom environment variables.
-* **options** (Dict[str, Any], optional): Extended configuration options, such as `encoding` (output encoding, default utf-8).
+* **options** (Dict[str, Any], optional): Extended configuration options. Supports the following keys:
+  * **encoding** (str, optional): Character encoding for the output stream. Default value: `"utf-8"`.
 
 **Returns**:
 
@@ -49,10 +50,12 @@ Asynchronously execute Shell command in streaming mode.
 **Parameters**:
 
 * **command** (str): Command to execute.
-* **cwd** (str, optional): Working directory for command execution. Default value: current directory.
-* **timeout** (int, optional): Command execution timeout. Unit: seconds. Default value: 300.
+* **cwd** (str, optional): Working directory for command execution. Default value: `None`. When set to `None`, the current directory is treated as the working directory.
+* **timeout** (int, optional): Command execution timeout. Unit: seconds. Default value: `300`.
 * **environment** (Dict[str, str], optional): Custom environment variables.
-* **options** (Dict[str, Any], optional): Extended configuration options, such as `encoding` (output encoding) and `chunk_size` (chunk size for streaming output).
+* **options** (Dict[str, Any], optional): Extended configuration options. Supports the following keys:
+  * **encoding** (str, optional): Character encoding for the output stream. Default value: `"utf-8"`.
+  * **chunk_size** (int, optional): Chunk size for streaming output. Unit: bytes. Default value: `1024`.
 
 **Returns**:
 

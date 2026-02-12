@@ -22,9 +22,9 @@ Code execution result data.
 
 * **code_content** (str): Original code executed.
 * **language** (str): Programming language of the original code.
-* **exit_code** (int, optional): Execution exit code. Default value: 0.
-* **stdout** (str, optional): Standard output stream. Default value: "".
-* **stderr** (str, optional): Standard error stream. Default value: "".
+* **exit_code** (int, optional): Execution exit code. Default value: `None`.
+* **stdout** (str, optional): Standard output stream. Default value: `""`.
+* **stderr** (str, optional): Standard error stream. Default value: `""`.
 
 ## class ExecuteCodeChunkData
 
@@ -32,10 +32,10 @@ Chunk data during streaming execution.
 
 **Parameters**:
 
-* **text** (str, optional): Original content of the output chunk. Default value: "".
-* **type** (Literal["stdout", "stderr"]): Type of the output chunk.
-* **chunk_index** (int): Index of the current chunk. Starts from 0.
-* **exit_code** (int, optional): Execution exit code. Default value: 0.
+* **text** (str, optional): Original content of the output chunk. Default value: `""`.
+* **type** (Literal["stdout", "stderr"]): Type of the output chunk. Default value: `None`.
+* **chunk_index** (int): Index of the current chunk. Starts from `0`.
+* **exit_code** (int, optional): Execution exit code. Default value: `None`.
 * **metadata** (Dict[str, Any], optional): Execution data. Default value: `None`.
 
 ## class ExecuteCodeResult
@@ -61,10 +61,10 @@ Shell command execution result data.
 **Parameters**:
 
 * **command** (str): Original Shell command executed.
-* **cwd** (str, optional): Current working directory. Default value: ".".
-* **exit_code** (int, optional): Command exit code. Default value: 0.
-* **stdout** (str, optional): Standard output stream. Default value: "".
-* **stderr** (str, optional): Standard error stream. Default value: "".
+* **cwd** (str, optional): Current working directory. Default value: `"."`.
+* **exit_code** (int, optional): Command exit code. Default value: `None`.
+* **stdout** (str, optional): Standard output stream. Default value: `""`.
+* **stderr** (str, optional): Standard error stream. Default value: `""`.
 
 ## class ExecuteCmdChunkData
 
@@ -72,10 +72,10 @@ Shell streaming execution chunk data.
 
 **Parameters**:
 
-* **text** (str, optional): Original content of the output chunk. Default value: "".
-* **type** (Literal["stdout", "stderr"]): Type of the output chunk.
-* **chunk_index** (int): Index of the current chunk. Starts from 0.
-* **exit_code** (int, optional): Command exit code. Default value: 0.
+* **text** (str, optional): Original content of the output chunk. Default value: `""`.
+* **type** (Literal["stdout", "stderr"]): Type of the output chunk. Default value: `None`.
+* **chunk_index** (int): Index of the current chunk. Starts from `0`.
+* **exit_code** (int, optional): Command exit code. Default value: `None`.
 * **metadata** (Dict[str, Any], optional): Command data. Default value: `None`.
 
 ## class ExecuteCmdResult

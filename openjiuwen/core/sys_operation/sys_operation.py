@@ -14,6 +14,22 @@ from openjiuwen.core.sys_operation.registry import OperationRegistry
 from openjiuwen.core.sys_operation.shell import BaseShellOperation
 
 
+class ToolIdProxy:
+    """A helper for generating tool IDs via attribute access.
+
+    Tool ID format: "{card.id}.{op_type}.{method}"
+
+    Example: card.fs.read_file -> "sys_op.fs.read_file"
+    """
+
+    def __init__(self, card_id: str, op_type: str):
+        self._card_id = card_id
+        self._op_type = op_type
+
+    def __getattr__(self, name: str) -> str:
+        return SysOperationCard.generate_tool_id(self._card_id, self._op_type, name)
+
+
 class SysOperationCard(BaseCard):
     """Configuration card for system operations
 
@@ -69,18 +85,18 @@ class SysOperationCard(BaseCard):
         return v
 
     @property
-    def fs(self):
+    def fs(self) -> ToolIdProxy:
         return ToolIdProxy(self.id, "fs")
 
     @property
-    def shell(self):
+    def shell(self) -> ToolIdProxy:
         return ToolIdProxy(self.id, "shell")
 
     @property
-    def code(self):
+    def code(self) -> ToolIdProxy:
         return ToolIdProxy(self.id, "code")
 
-    def __getattr__(self, name):
+    def __getattr__(self, name) -> ToolIdProxy:
         """Dynamic access to operation proxies.
         
         Example: card.browser.navigate -> "card_id.browser.navigate"
@@ -95,22 +111,6 @@ class SysOperationCard(BaseCard):
         Format: "{card_id}.{op_type}.{method_name}"
         """
         return f"{card_id}.{op_type}.{method_name}"
-
-
-class ToolIdProxy:
-    """A helper for generating tool IDs via attribute access.
-
-    Tool ID format: "{card.id}.{op_type}.{method}"
-
-    Example: card.fs.read_file -> "sys_op.fs.read_file"
-    """
-
-    def __init__(self, card_id: str, op_type: str):
-        self._card_id = card_id
-        self._op_type = op_type
-
-    def __getattr__(self, name: str) -> str:
-        return SysOperationCard.generate_tool_id(self._card_id, self._op_type, name)
 
 
 class SysOperation:
@@ -150,7 +150,7 @@ class SysOperation:
         operation_def = OperationRegistry.get_operation_info(name, self.mode)
         if operation_def is None:
             return None
-            
+
         instance = operation_def.create_instance(self._run_config)
         self._instances[name] = instance
         return instance

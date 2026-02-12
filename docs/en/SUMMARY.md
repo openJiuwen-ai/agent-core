@@ -39,7 +39,7 @@
     - [Knowledge Retrieval](2.Development%20Guide/Advanced%20Usage/Knowledge%20Retrieval.md)
     - [Prompt Generation and Optimization](2.Development%20Guide/Advanced%20Usage/Prompt%20Generation%20and%20Optimization.md)
     - [Skills and System Operations](2.Development%20Guide/Advanced%20Usage/Skills%20and%20System%20Operations.md)
-    - [System Operation (SysOperation)](2.Development%20Guide/Advanced%20Usage/System%20Operation%20(SysOperation).md)
+    - [System Operation](2.Development%20Guide/Advanced%20Usage/System%20Operation.md)
     - [Agent Skills](2.Development%20Guide/Advanced%20Usage/Agent%20Skills.md)
     - [Self-optimizing Agent](2.Development%20Guide/Advanced%20Usage/Self-optimizing%20Agent.md)
     - [WorkflowAgent With Multi-workflow Switching](2.Development%20Guide/Advanced%20Usage/WorkflowAgent%20With%20Multi-workflow%20Switching.md)

@@ -15,8 +15,46 @@ Represents the local work environment configuration used when system operations 
 
 **Parameters**:
 
-* **shell_allowlist** (List[str], optional): Whitelist of allowed Shell command prefixes. Default value: `["echo", "ls", "dir", "cd", "pwd", "python", "python3", "pip", "pip3", "npm", "node", "git", "cat", "type", "mkdir", "md", "rm", "rd", "cp", "copy", "mv", "move", "grep", "find", "curl", "wget", "ps", "df", "ping"]`. If the value is `None`, it means all Shell commands are allowed. Note that this does not meet security requirements, so it is not recommended to set it to `None`.
+* **shell_allowlist** (List[str], optional): Whitelist of allowed Shell command prefixes. Default value: `["echo", "ls", "dir", "cd", "pwd", "python", "python3", "pip", "pip3", "npm", "node", "git", "cat", "type", "mkdir", "md", "rm", "rd", "cp", "copy", "mv", "move", "grep", "find", "curl", "wget", "ps", "df", "ping"]`. If value is `None`, it means all Shell commands are allowed. Note that this does not meet security requirements, so it is not recommended to set it to `None`.
 * **work_dir** (str, optional): Local working directory path. Default value: `None`.
+
+## class ToolIdProxy
+
+```python
+class ToolIdProxy(card_id: str, op_type: str)
+```
+
+Tool ID proxy class, an auxiliary class for dynamically generating tool IDs through attribute access.
+
+**Parameters**:
+
+* **card_id** (str): The ID of the operation card.
+* **op_type** (str): Operation type, such as `"fs"`, `"shell"`, `"code"`, etc.
+
+### __getattr__
+
+```python
+__getattr__(name: str) -> str
+```
+
+Dynamically generate tool IDs through attribute access.
+
+**Parameters**:
+
+* **name** (str): Method name.
+
+**Returns**:
+
+**str**, the tool ID string in the format `"{card_id}.{op_type}.{name}"`.
+
+**Example**:
+
+```python
+>>> proxy = ToolIdProxy("sys_op", "shell")
+>>> tool_id = proxy.execute_cmd  # equivalent to proxy.__getattr__("execute_cmd")
+>>> print(tool_id)
+'sys_op.shell.execute_cmd'
+```
 
 ## class SysOperationCard
 
@@ -31,44 +69,118 @@ class SysOperationCard(BaseCard)
 * **mode** ([OperationMode](#class-operationmode), optional): Execution mode. Default value: `OperationMode.LOCAL`.
 * **work_config** ([LocalWorkConfig](#class-localworkconfig), optional): Local work configuration. Default value: `None`.
 * **gateway_config** (SandboxGatewayConfig, optional): Sandbox gateway configuration. Default value: `None`.
-* **fs**: Shorthand for getting file system tool IDs.
-* **shell**: Shorthand for getting Shell tool IDs.
-* **code**: Shorthand for getting code execution tool IDs.
-* **Others**: Supports dynamic access to other operation tool IDs. For example, `card.browser.navigate`.
+
+### __getattr__
+
+```python
+__getattr__(name: str) -> ToolIdProxy
+```
+
+Dynamically get the unique ID of the corresponding operation type tool.
+
+**Parameters**:
+
+* **name** (str): Dynamic attribute name, for example `"browser"`.
+
+**Returns**:
+
+**[ToolIdProxy](#class-toolidproxy)**, an auxiliary instance that dynamically generates tool IDs through attribute access.
 
 **Example**:
 
 ```python
 >>> card = SysOperationCard(id="sys_op")
->>> print(card.fs.read_file)  # Quickly get the Tool ID
-'sys_op.fs.read_file'
+>>> proxy = card.browser   # equivalent to card.__getattr__("browser")
+>>> print(proxy.navigate)  # quickly get tool ID
+'sys_op.browser.navigate'
 ```
 
-**Methods**:
-
-### generate_tool_id
+### property fs
 
 ```python
-@staticmethod
-generate_tool_id(card_id: str, op_type: str, method_name: str) -> str
+property fs() -> ToolIdProxy
 ```
 
-Static method. Generates a unique identifier (Tool ID) for a system operation tool.
-
-**Parameters**:
-
-* **card_id** (str): The ID of the operation card.
-* **op_type** (str): The type of operation, such as `fs`, `shell`, `code`, etc.
-* **method_name** (str): The specific method name.
+Quickly get the unique ID of the file system tool.
 
 **Returns**:
 
-**str**, the Tool ID string in the format `{card_id}.{op_type}.{method_name}`.
+**[ToolIdProxy](#class-toolidproxy)**, an auxiliary instance that dynamically generates tool IDs through attribute access.
 
 **Example**:
 
 ```python
->>> SysOperationCard.generate_tool_id("sys_op", "fs", "read_file")
+>>> card = SysOperationCard(id="sys_op")
+>>> proxy = card.fs         # equivalent to card.__getattr__("fs")
+>>> print(proxy.read_file)  # quickly get tool ID
+'sys_op.fs.read_file'
+```
+
+### property shell
+
+```python
+property shell() -> ToolIdProxy
+```
+
+Quickly get the unique ID of the command line execution tool.
+
+**Returns**:
+
+**[ToolIdProxy](#class-toolidproxy)**, an auxiliary instance that dynamically generates tool IDs through attribute access.
+
+**Example**:
+
+```python
+>>> card = SysOperationCard(id="sys_op")
+>>> proxy = card.shell             # equivalent to card.__getattr__("shell")
+>>> print(card.shell.execute_cmd)  # quickly get tool ID
+'sys_op.shell.execute_cmd'
+```
+
+### property code
+
+```python
+property code() -> ToolIdProxy
+```
+
+Quickly get the unique ID of the code execution tool.
+
+**Returns**:
+
+**[ToolIdProxy](#class-toolidproxy)**, an auxiliary instance that dynamically generates tool IDs through attribute access.
+
+**Example**:
+
+```python
+>>> card = SysOperationCard(id="sys_op")
+>>> proxy = card.code          # equivalent to card.__getattr__("code")
+>>> print(proxy.execute_code)  # quickly get tool ID
+'sys_op.code.execute_code'
+```
+
+### staticmethod generate_tool_id
+
+```python
+staticmethod generate_tool_id(card_id: str, op_type: str, method_name: str) -> str
+```
+
+Generates a unique identifier for a system operation tool.
+
+**Parameters**:
+
+* **card_id** (str): The ID of the operation card.
+* **op_type** (str): Operation type, such as `"fs"`, `"shell"`, `"code"`, etc.
+* **method_name** (str): The specific method name.
+
+**Returns**:
+
+**str**, the tool ID string in the format `"{card_id}.{op_type}.{method_name}"`.
+
+**Example**:
+
+```python
+>>> tool_id = SysOperationCard.generate_tool_id("sys_op", "fs", "read_file")
+>>> print(tool_id)
 'sys_op.fs.read_file'
 ```
 
@@ -124,61 +236,71 @@ Get Shell execution operation instance.
 
 ```python
 >>> import asyncio
->>> from openjiuwen.core.sys_operation.sys_operation import SysOperation, >>> SysOperationCard, OperationMode, LocalWorkConfig
+>>> from openjiuwen.core.sys_operation.sys_operation import SysOperation,
+... SysOperationCard, OperationMode, LocalWorkConfig
 >>> 
->>> async def main():
->>>     # 1. Initialize configuration (local mode)
->>>     # Set working directory and configure allowed Shell command whitelist
->>>     config = LocalWorkConfig(
->>>         work_dir="./workspace",
->>>         shell_allowlist=["echo", "ls", "dir", "python"]
->>>     )
->>>     
->>>     # 2. Create SysOperation instance
->>>     card = SysOperationCard(mode=OperationMode.LOCAL, work_config=config)
->>>     sys_op = SysOperation(card)
-
->>>     # 3. File system operations (FS)
->>>     print("--- File System Operations ---")
->>>     fs = sys_op.fs()
->>>     
->>>     # Write file
->>>     # Note: If directory does not exist, write_file will try to automatically create parent directories
->>>     write_res = await fs.write_file("test.txt", "Hello OpenJiuwen!", mode="text")
->>>     if write_res.code == 0:
->>>         print(f"Write successful: {write_res.data.path}")
->>>     else:
->>>         print(f"Write failed: {write_res.message}")
->>>     
->>>     # Read file
->>>     read_res = await fs.read_file("test.txt", mode="text")
->>>     if read_res.code == 0:
->>>         print(f"File content: {read_res.data.content}")
-
->>>     # 4. Code execution operations (Code)
->>>     print("\n--- Code Execution Operations ---")
->>>     code_op = sys_op.code()
->>>     
->>>     # Execute Python code
->>>     code = "print('Hello from Code Operation')"
->>>     code_res = await code_op.execute_code(code, language="python")
->>>     if code_res.code == 0:
->>>         print(f"Code output: {code_res.data.stdout.strip()}")
->>>     else:
->>>         print(f"Code execution failed: {code_res.message}")
-
->>>     # 5. Shell command operations (Shell)
->>>     print("\n--- Shell Command Operations ---")
->>>     shell_op = sys_op.shell()
->>>     
->>>     # Execute Shell command
->>>     # Note: Command must be allowed in shell_allowlist
->>>     shell_res = await shell_op.execute_cmd("echo Hello from Shell Operation")
->>>     if shell_res.code == 0:
->>>         print(f"Shell output: {shell_res.data.stdout.strip()}")
->>>     else:
->>>         print(f"Shell execution failed: {shell_res.message}")
-
+>>> async def main() -> None:
+...     # 1. Initialize configuration (local mode)
+...     # Set working directory and configure allowed Shell command whitelist
+...     config = LocalWorkConfig(
+...         work_dir="./workspace",
+...         shell_allowlist=["echo", "ls", "dir", "python"]
+...     )
+...     
+...     # 2. Create SysOperation instance
+...     card = SysOperationCard(mode=OperationMode.LOCAL, work_config=config)
+...     sys_op = SysOperation(card)
+... 
+...     # 3. File system operations (FS)
+...     print("--- File System Operations ---")
+...     fs = sys_op.fs()
+...     
+...     # Write file
+...     # Note: If directory does not exist, write_file will try to automatically create parent directories
+...     write_res = await fs.write_file("test.txt", "Hello openJiuwen!",
+...         mode="text")
+...     if write_res.code == 0:
+...         print(f"Write successful: {write_res.data.path}")
+...     else:
+...         print(f"Write failed: {write_res.message}")
+...     
+...     # Read file
+...     read_res = await fs.read_file("test.txt", mode="text")
+...     if read_res.code == 0:
+...         print(f"File content: {read_res.data.content}")
+... 
+...     # 4. Code execution operations (Code)
+...     print("\n--- Code Execution Operations ---")
+...     code_op = sys_op.code()
+...     
+...     # Execute Python code
+...     code = "print('Hello from Code Operation')"
+...     code_res = await code_op.execute_code(code, language="python")
+...     if code_res.code == 0:
+...         print(f"Code output: {code_res.data.stdout.strip()}")
+...     else:
+...         print(f"Code execution failed: {code_res.message}")
+... 
+...     # 5. Shell command operations (Shell)
+...     print("\n--- Shell Command Operations ---")
+...     shell_op = sys_op.shell()
+...     
+...     # Execute Shell command
+...     # Note: Command must be allowed in shell_allowlist
+...     shell_res = await shell_op.execute_cmd(
+...         "echo Hello from Shell Operation")
+...     if shell_res.code == 0:
+...         print(f"Shell output: {shell_res.data.stdout.strip()}")
+...     else:
+...         print(f"Shell execution failed: {shell_res.message}")
+... 
 >>> if __name__ == "__main__":
->>>     asyncio.run(main())
+...     asyncio.run(main())
+--- File System Operations ---
+Write successful: <actual file path>
+File content: Hello openJiuwen!
+--- Code Execution Operations ---
+Code output: Hello from Code Operation
+--- Shell Command Operations ---
+Shell output: Hello from Shell Operation
 ```

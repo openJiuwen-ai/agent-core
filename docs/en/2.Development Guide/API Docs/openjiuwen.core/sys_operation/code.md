@@ -24,14 +24,14 @@ Asynchronously execute code.
 **Parameters**:
 
 * **code** (str): Source code string to execute.
-* **language** (Literal['python', 'javascript'], optional): Programming language. Default value: "python".
-* **timeout** (int, optional): Maximum execution time. Unit: seconds. Default value: 300.
+* **language** (Literal['python', 'javascript'], optional): Programming language. Default value: `"python"`.
+* **timeout** (int, optional): Maximum execution time. Unit: seconds. Default value: `300`.
 * **environment** (Dict[str, str], optional): Custom environment variables.
 * **options** (Dict[str, Any], optional): Extended configuration options. Supports the following keys:
-    * **encoding** (str): Character encoding for the output stream. Default value: "utf-8".
-    * **force_file** (bool): Whether to force code execution via a temporary file.
+    * **encoding** (str, optional): Character encoding for the output stream. Default value: `"utf-8"`.
+    * **force_file** (bool, optional): Whether to force code execution via a temporary file. Default value: `False`.
         * `True`: Always write the code to a temporary file and execute it.
-        * `False` (default): Automatically select based on code length. Short code is executed via CLI; long code exceeding the limit is automatically switched to temporary file execution.
+        * `False`: Automatically select based on code length. Short code is executed via CLI; long code exceeding the limit is automatically switched to temporary file execution.
 
 **Returns**:
 
@@ -53,15 +53,15 @@ Asynchronously execute code in streaming mode.
 **Parameters**:
 
 * **code** (str): Source code string to execute.
-* **language** (Literal['python', 'javascript'], optional): Programming language. Default value: "python".
-* **timeout** (int, optional): Maximum execution time. Unit: seconds. Default value: 300.
+* **language** (Literal['python', 'javascript'], optional): Programming language. Default value: `"python"`.
+* **timeout** (int, optional): Maximum execution time. Unit: seconds. Default value: `300`.
 * **environment** (Dict[str, str], optional): Custom environment variables.
 * **options** (Dict[str, Any], optional): Extended configuration options. Supports the following keys:
-    * **encoding** (str): Character encoding for the output stream. Default value: "utf-8".
-    * **chunk_size** (int): Chunk size for streaming output. Unit: bytes.
-    * **force_file** (bool): Whether to force code execution via a temporary file.
+    * **encoding** (str, optional): Character encoding for the output stream. Default value: `"utf-8"`.
+    * **chunk_size** (int, optional): Chunk size for streaming output. Unit: bytes. Default value: `1024`.
+    * **force_file** (bool, optional): Whether to force code execution via a temporary file. Default value: `False`.
         * `True`: Always write the code to a temporary file and execute it.
-        * `False` (default): Automatically select based on code length. Short code is executed via CLI; long code exceeding the limit is automatically switched to temporary file execution.
+        * `False`: Automatically select based on code length. Short code is executed via CLI; long code exceeding the limit is automatically switched to temporary file execution.
 
 **Returns**:
 

@@ -24,10 +24,11 @@ abstractmethod async execute_cmd(
 **参数**：
 
 * **command**(str)：要执行的命令。
-* **cwd**(str, 可选)：命令执行的工作目录。默认值：当前目录。
-* **timeout**(int, 可选)：命令执行超时时间。单位：秒。默认值：300。
+* **cwd**(str, 可选)：命令执行的工作目录。默认值：`None`。设置为`None`，则认为当前目录为工作目录。
+* **timeout**(int, 可选)：命令执行超时时间。单位：秒。默认值：`300`。
 * **environment**(Dict[str, str], 可选)：自定义环境变量。
-* **options**(Dict[str, Any], 可选)：扩展配置选项，如 `encoding`（输出编码，默认 utf-8）。
+* **options**(Dict[str, Any], 可选)：扩展配置选项。支持以下键值：
+  * **encoding**(str, 可选)：输出流的字符编码。默认值：`"utf-8"`。
 
 **返回**：
 
@@ -49,10 +50,12 @@ abstractmethod async execute_cmd_stream(
 **参数**：
 
 * **command**(str)：要执行的命令。
-* **cwd**(str, 可选)：命令执行的工作目录。默认值：当前目录。
-* **timeout**(int, 可选)：命令执行超时时间。单位：秒。默认值：300。
+* **cwd**(str, 可选)：命令执行的工作目录。默认值：`None`。设置为`None`，则认为当前目录为工作目录。
+* **timeout**(int, 可选)：命令执行超时时间。单位：秒。默认值：`300`。
 * **environment**(Dict[str, str], 可选)：自定义环境变量。
-* **options**(Dict[str, Any], 可选)：扩展配置选项，如 `encoding`（输出编码）及 `chunk_size`（流式输出的分块大小）。
+* **options**(Dict[str, Any], 可选)：扩展配置选项。支持以下键值：
+  * **encoding**(str, 可选)：输出流的字符编码。默认值：`"utf-8"`。
+  * **chunk_size**(int, 可选)：流式输出的分块大小。单位：字节。默认值：`1024`。
 
 **返回**：
 
