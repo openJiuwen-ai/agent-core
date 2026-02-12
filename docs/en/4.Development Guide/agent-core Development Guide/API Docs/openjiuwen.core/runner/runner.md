@@ -2,7 +2,7 @@
 
 ## class openjiuwen.core.runner
 
-Runner provides a unified execution interface for Workflow, Agent, Tool, and Group.
+Runner provides a unified execution interface for Workflow, Agent.
 
 Runner is a singleton class. All method calls and property accesses are automatically proxied to the global Runner instance (`GLOBAL_RUNNER`). You don't need to instantiate Runner; simply call methods directly through the class name.
 
@@ -11,7 +11,7 @@ Runner is a singleton class. All method calls and property accesses are automati
 
 ```python
 @classmethod
-async def start(cls) -> bool
+async start(cls) -> bool
 ```
 
 Start the Runner.
@@ -29,7 +29,7 @@ Start the Runner.
 
 ```python
 @classmethod
-async def stop(cls)
+async stop(cls)
 ```
 
 Stop the Runner.
@@ -65,13 +65,13 @@ callback_framework: AsyncCallbackFramework
 
 Get the async callback framework instance for registering event callbacks, chaining, filtering, and metrics. See [callback module](callback/callback.README.md).
 
-**Returns**: **AsyncCallbackFramework**, the async callback framework instance.
+**Returns**: [**AsyncCallbackFramework**](./callback/framework.md), the async callback framework instance.
 
 ### set_config
 
 ```python
 @classmethod
-def set_config(cls, config: RunnerConfig) -> None
+set_config(cls, config: RunnerConfig) -> None
 ```
 
 Set the Runner configuration.
@@ -82,7 +82,7 @@ Set the Runner configuration.
 
 ```python
 @classmethod
-def get_config(cls) -> RunnerConfig
+get_config(cls) -> RunnerConfig
 ```
 
 Get the current Runner configuration.
@@ -93,7 +93,7 @@ Get the current Runner configuration.
 
 ```python
 @classmethod
-async def run_agent(
+async run_agent(
     cls,
     agent: str | BaseAgent | LegacyBaseAgent,
     inputs: Any,
@@ -178,7 +178,7 @@ Execute an agent and return its result.
 
 ```python
 @classmethod
-async def run_workflow(
+async run_workflow(
     cls,
     workflow: str | Workflow,
     inputs: Any,
@@ -253,7 +253,7 @@ result={'output': {'result': 'query workflow'}} state=<WorkflowExecutionState.CO
 
 ```python
 @classmethod
-async def release(cls, session_id: str)
+async release(cls, session_id: str)
 ```
 
 Clean up cached data for the specified `session_id`, such as interruption state data.

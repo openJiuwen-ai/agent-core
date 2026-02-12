@@ -5,7 +5,7 @@
 ### add_agent
 
 ```python
-def add_agent(self,
+add_agent(self,
               card: AgentCard,
               agent: AgentProvider | RemoteAgent,
               *,
@@ -17,13 +17,13 @@ Add a single agent to the resource manager.
 
 **Parameters:**
 
-* **card(AgentCard)**: The agent's metadata card, containing configuration and identification information.
-* **agent(AgentProvider | RemoteAgent)**: Callable provider for creating or returning an agent instance.
-* **tag(Optional[Tag | list[Tag]], optional)**: Tags for categorizing and filtering agents.
+* **card**(AgentCard): The agent's metadata card, containing configuration and identification information.
+* **agent**(AgentProvider | RemoteAgent): Callable provider for creating or returning an agent instance.
+* **tag**(Optional[Tag | list[Tag]], optional): Tags for categorizing and filtering agents.
 
 **Returns:**
 
-**Result[AgentCard, Exception]**, Result object containing the added agent card or an exception.
+**Result[[AgentCard](../single_agent/single_agent.md), Exception]**, Result object containing the added agent card or an exception.
 
 **Example:**
 
@@ -42,7 +42,7 @@ Add a single agent to the resource manager.
 ### add_agents
 
 ```python
-def add_agents(self,
+add_agents(self,
                agents: list[Tuple[AgentCard, AgentProvider]],
                *,
                tag: Optional[Tag | list[Tag]] = None
@@ -53,12 +53,12 @@ Batch add multiple agents.
 
 **Parameters:**
 
-* **agents(list[Tuple[AgentCard, AgentProvider]])**: List of tuples, each containing (AgentCard, AgentProvider).
-* **tag(Optional[Tag | list[Tag]], optional)**: Optional tags to apply to all added agents. These tags are applied in addition to any tags on individual AgentCards.
+* **agents**(list[Tuple[AgentCard, AgentProvider]]): List of tuples, each containing (AgentCard, AgentProvider).
+* **tag**(Optional[Tag | list[Tag]], optional): Optional tags to apply to all added agents. These tags are applied in addition to any tags on individual AgentCards.
 
 **Returns:**
 
-**Result[AgentCard, Exception]|list[Result[AgentCard, Exception]]**, Result object or list containing the added agent cards or exceptions.
+**Result[[AgentCard](../single_agent/single_agent.md), Exception]|list[Result[[AgentCard](../single_agent/single_agent.md), Exception]]**, Result object or list containing the added agent cards or exceptions.
 
 **Example:**
 
@@ -77,7 +77,7 @@ Batch add multiple agents.
 ### remove_agent
 
 ```python
-def remove_agent(self,
+remove_agent(self,
                  agent_id: str | list[str] = None,
                  *,
                  tag: Optional[Tag | list[Tag]] = GLOBAL,
@@ -90,14 +90,14 @@ Remove an agent by ID or tag.
 
 **Parameters:**
 
-* **agent_id(str | list[str], optional)**: Single ID or list of IDs of agents to remove.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; remove all agents matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent resources.
+* **agent_id**(str | list[str], optional): Single ID or list of IDs of agents to remove.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; remove all agents matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent resources.
 
 **Returns:**
 
-**Result[Optional[AgentCard], Exception]|list[Result[Optional[AgentCard], Exception]]**, Result object or list containing the removed agent cards or exceptions.
+**Result**[Optional[[AgentCard](../single_agent/single_agent.md)], Exception]|list[Result[Optional[[AgentCard](../single_agent/single_agent.md)], Exception]], Result object or list containing the removed agent cards or exceptions.
 
 **Example:**
 
@@ -109,27 +109,27 @@ Remove an agent by ID or tag.
 ### get_agent
 
 ```python
-async def get_agent(self,
-                    agent_id: str | list[str] = None,
-                    *,
-                    tag: Optional[Tag | list[Tag]] = None,
-                    tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                    session: Optional[Session] = None
-                    ) -> Optional[BaseAgent] | list[Optional[BaseAgent]]
+async get_agent(self,
+              agent_id: str | list[str] = None,
+              *,
+              tag: Optional[Tag | list[Tag]] = None,
+              tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+              session: Optional[Session] = None
+             ) -> Optional[BaseAgent] | list[Optional[BaseAgent]]
 ```
 
 Get an agent instance by ID or tag.
 
 **Parameters:**
 
-* **agent_id(str | list[str], optional)**: Single ID or list of IDs of agents to retrieve.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; return all agents matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **session(Optional[Session], optional)**: Optional session context for the agent.
+* **agent_id**(str | list[str], optional): Single ID or list of IDs of agents to retrieve.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; return all agents matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **session**(Optional[Session], optional): Optional session context for the agent.
 
 **Returns:**
 
-**BaseAgent|list[BaseAgent]**, agent instance if found, otherwise None.
+**[BaseAgent](../single_agent/single_agent.md)|list[[BaseAgent](../single_agent/single_agent.md)]**, agent instance if found, otherwise None.
 
 **Example:**
 
@@ -141,7 +141,7 @@ Get an agent instance by ID or tag.
 ### add_workflow
 
 ```python
-def add_workflow(self,
+add_workflow(self,
                  card: WorkflowCard,
                  workflow: WorkflowProvider,
                  *,
@@ -153,13 +153,13 @@ Add a single workflow to the resource manager.
 
 **Parameters:**
 
-* **card(WorkflowCard)**: The workflow's metadata card, containing configuration and identification information.
-* **workflow(WorkflowProvider)**: Callable provider for creating or returning a workflow instance.
-* **tag(Optional[Tag | list[Tag]], optional)**: Tags for categorizing and filtering workflows.
+* **card**(WorkflowCard): The workflow's metadata card, containing configuration and identification information.
+* **workflow**(WorkflowProvider): Callable provider for creating or returning a workflow instance.
+* **tag**(Optional[Tag | list[Tag]], optional): Tags for categorizing and filtering workflows.
 
 **Returns:**
 
-**Result**[WorkflowCard, Exception], Result object containing the added workflow card or an exception.
+**Result**[[WorkflowCard](../workflow/workflow.md), Exception], Result object containing the added workflow card or an exception.
 
 **Example:**
 
@@ -175,7 +175,7 @@ Add a single workflow to the resource manager.
 ### add_workflows
 
 ```python
-def add_workflows(self,
+add_workflows(self,
                   workflows: list[Tuple[WorkflowCard, WorkflowProvider]],
                   *,
                   tag: Optional[Tag | list[Tag]] = None
@@ -186,12 +186,12 @@ Batch add multiple workflows.
 
 **Parameters:**
 
-* **workflows(list[Tuple[WorkflowCard, WorkflowProvider]])**: List of tuples, each containing (WorkflowCard, WorkflowProvider).
+* **workflows**(list[Tuple[WorkflowCard, WorkflowProvider]]): List of tuples, each containing (WorkflowCard, WorkflowProvider).
 * **tag**(Optional[Tag | list[Tag]], optional): Optional tags to apply to all added workflows.
 
 **Returns:**
 
-**Result[WorkflowCard, Exception]|list[Result[WorkflowCard, Exception]]**, Result object or list containing the added workflow cards or exceptions.
+**Result**[[WorkflowCard](../workflow/workflow.md), Exception]|list[Result[[WorkflowCard](../workflow/workflow.md), Exception]], Result object or list containing the added workflow cards or exceptions.
 
 **Example:**
 
@@ -206,7 +206,7 @@ Batch add multiple workflows.
 ### remove_workflow
 
 ```python
-def remove_workflow(self,
+remove_workflow(self,
                     workflow_id: str | list[str] = None,
                     *,
                     tag: Optional[Tag | list[Tag]] = None,
@@ -219,14 +219,14 @@ Remove a workflow by ID or tag.
 
 **Parameters:**
 
-* **workflow_id(str | list[str], optional)**: Single ID or list of IDs of workflows to remove.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; remove all workflows matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent workflows.
+* **workflow_id**(str | list[str], optional): Single ID or list of IDs of workflows to remove.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; remove all workflows matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent workflows.
 
 **Returns:**
 
-**Result[Optional[WorkflowCard], Exception]|list[Result[Optional[WorkflowCard], Exception]]**, Result object or list containing the removed workflow cards or exceptions.
+**Result**[Optional[[WorkflowCard](../workflow/workflow.md)], Exception]|list[Result[Optional[[WorkflowCard](../workflow/workflow.md)], Exception]], Result object or list containing the removed workflow cards or exceptions.
 
 **Example:**
 
@@ -238,7 +238,7 @@ Remove a workflow by ID or tag.
 ### get_workflow
 
 ```python
-async def get_workflow(self,
+async get_workflow(self,
                        workflow_id: str | list[str] = None,
                        *,
                        tag: Optional[Tag | list[Tag]] = None,
@@ -251,10 +251,10 @@ Get a workflow instance by ID or tag.
 
 **Parameters:**
 
-* **workflow_id(str | list[str], optional)**: Single ID or list of IDs of workflows to retrieve.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; return all workflows matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **session(Optional[Session], optional)**: Optional session context for the workflow.
+* **workflow_id**(str | list[str], optional): Single ID or list of IDs of workflows to retrieve.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; return all workflows matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **session**(Optional[Session], optional): Optional session context for the workflow.
 
 **Returns:**
 
@@ -270,7 +270,7 @@ Get a workflow instance by ID or tag.
 ### add_tool
 
 ```python
-def add_tool(self,
+add_tool(self,
              tool: Tool | list[Tool],
              *,
              tag: Optional[Tag | list[Tag]] = None
@@ -281,12 +281,12 @@ Add a tool to the resource manager.
 
 **Parameters:**
 
-* **tool(Tool | list[Tool])**: Single Tool instance or list of Tool instances to add.
-* **tag(Optional[Tag | list[Tag]], optional)**: Optional tags for categorizing and filtering tools.
+* **tool**(Tool | list[Tool]): Single Tool instance or list of Tool instances to add.
+* **tag**(Optional[Tag | list[Tag]], optional): Optional tags for categorizing and filtering tools.
 
 **Returns:**
 
-**Result[ToolCard, Exception]|list[Result[ToolCard, Exception]]**, Result object or list containing the added tool cards or exceptions.
+**Result**[[ToolCard](../foundation/tool/tool.md), Exception]|list[Result[[ToolCard](../foundation/tool/tool.md), Exception]], Result object or list containing the added tool cards or exceptions.
 
 **Example:**
 
@@ -301,7 +301,7 @@ Add a tool to the resource manager.
 ### get_tool
 
 ```python
-def get_tool(self,
+get_tool(self,
              tool_id: str | list[str] = None,
              *,
              tag: Optional[Tag | list[Tag]] = None,
@@ -314,10 +314,10 @@ Get a tool by ID or tag.
 
 **Parameters:**
 
-* **tool_id(str | list[str], optional)**: Single ID or list of IDs of tools to retrieve.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; return all tools matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **session(Optional[Session], optional)**: Optional session context for the tool.
+* **tool_id**(str | list[str], optional): Single ID or list of IDs of tools to retrieve.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; return all tools matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **session**(Optional[Session], optional): Optional session context for the tool.
 
 **Returns:**
 
@@ -333,7 +333,7 @@ Get a tool by ID or tag.
 ### remove_tool
 
 ```python
-def remove_tool(self,
+remove_tool(self,
                 tool_id: str | list[str] = None,
                 *,
                 tag: Optional[Tag | list[Tag]] = None,
@@ -346,14 +346,14 @@ Remove a tool by ID or tag.
 
 **Parameters:**
 
-* **tool_id(str | list[str], optional)**: Single ID or list of IDs of tools to remove.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; remove all tools matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent tags.
+* **tool_id**(str | list[str], optional): Single ID or list of IDs of tools to remove.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; remove all tools matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent tags.
 
 **Returns:**
 
-**Result[Optional[ToolCard], Exception]|list[Result[Optional[ToolCard], Exception]]**, Result object or list containing the removed tool cards or exceptions.
+**Result**[Optional[[ToolCard](../foundation/tool/tool.md)], Exception]|list[Result[Optional[[ToolCard](../foundation/tool/tool.md)], Exception]], Result object or list containing the removed tool cards or exceptions.
 
 **Example:**
 
@@ -365,7 +365,7 @@ Remove a tool by ID or tag.
 ### add_model
 
 ```python
-def add_model(self,
+add_model(self,
               model_id: str,
               model: ModelProvider,
               *,
@@ -377,13 +377,13 @@ Add a model to the resource manager.
 
 **Parameters:**
 
-* **model_id(str)**: Unique identifier for the model.
-* **model(ModelProvider)**: Callable provider for creating or returning a model instance.
-* **tag(Optional[Tag | list[Tag]], optional)**: Tags for categorizing and filtering models.
+* **model_id**(str): Unique identifier for the model.
+* **model**(ModelProvider): Callable provider for creating or returning a model instance.
+* **tag**(Optional[Tag | list[Tag]], optional): Tags for categorizing and filtering models.
 
 **Returns:**
 
-**Result[str, Exception]**, Result object containing the model ID or an exception.
+**Result**[str, Exception], Result object containing the model ID or an exception.
 
 **Example:**
 
@@ -397,7 +397,7 @@ Add a model to the resource manager.
 ### add_models
 
 ```python
-def add_models(self,
+add_models(self,
                models: list[Tuple[str, ModelProvider]],
                *,
                tag: Optional[Tag | list[Tag]] = None
@@ -408,12 +408,12 @@ Batch add multiple models.
 
 **Parameters:**
 
-* **models(list[Tuple[str, ModelProvider]])**: List of tuples, each containing (model_id, ModelProvider).
-* **tag(Optional[Tag | list[Tag]], optional)**: Optional tags to apply to all added models.
+* **models**(list[Tuple[str, ModelProvider]]): List of tuples, each containing (model_id, ModelProvider).
+* **tag**(Optional[Tag | list[Tag]], optional): Optional tags to apply to all added models.
 
 **Returns:**
 
-**Result[str, Exception]|list[Result[str, Exception]]**, Result object or list containing the model IDs or exceptions.
+**Result**[str, Exception]|list[Result[str, Exception]], Result object or list containing the model IDs or exceptions.
 
 **Example:**
 
@@ -428,7 +428,7 @@ Batch add multiple models.
 ### remove_model
 
 ```python
-def remove_model(self,
+remove_model(self,
                  *,
                  model_id: str | list[str] = None,
                  tag: Optional[Tag | list[Tag]] = None,
@@ -441,14 +441,14 @@ Remove a model by ID or tag.
 
 **Parameters:**
 
-* **model_id(str | list[str], optional)**: Single ID or list of IDs of models to remove.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; remove all models matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent models.
+* **model_id**(str | list[str], optional): Single ID or list of IDs of models to remove.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; remove all models matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent models.
 
 **Returns:**
 
-**Result[str, Exception]|list[Result[str, Exception]]**, Result object or list containing the model IDs or exceptions.
+**Result**[str, Exception]|list[Result[str, Exception]], Result object or list containing the model IDs or exceptions.
 
 **Example:**
 
@@ -460,23 +460,23 @@ Remove a model by ID or tag.
 ### get_model
 
 ```python
-async def get_model(self,
-                    model_id: str | list[str] = None,
-                    *,
-                    tag: Optional[Tag | list[Tag]] = None,
-                    tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                    session: Optional[Session] = None) \
-        -> Optional[BaseModel] | list[Optional[BaseModel]]
+async get_model(self,
+          model_id: str | list[str] = None,
+          *,
+          tag: Optional[Tag | list[Tag]] = None,
+          tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+          session: Optional[Session] = None) \
+-> Optional[BaseModel] | list[Optional[BaseModel]]
 ```
 
 Get a model instance by ID or tag.
 
 **Parameters:**
 
-* **model_id(str | list[str], optional)**: Single ID or list of IDs of models to retrieve.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; return all models matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **session(Optional[Session], optional)**: Optional session context for the model.
+* **model_id**(str | list[str], optional): Single ID or list of IDs of models to retrieve.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; return all models matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **session**(Optional[Session], optional): Optional session context for the model.
 
 **Returns:**
 
@@ -492,7 +492,7 @@ Get a model instance by ID or tag.
 ### add_prompt
 
 ```python
-def add_prompt(self,
+add_prompt(self,
                prompt_id: str,
                template: PromptTemplate,
                *,
@@ -504,13 +504,13 @@ Add a prompt template to the resource manager.
 
 **Parameters:**
 
-* **prompt_id(str)**: Unique identifier for the prompt template.
-* **template(PromptTemplate)**: PromptTemplate instance containing prompt content and configuration.
-* **tag(Optional[Tag | list[Tag]], optional)**: Tags for categorizing and filtering prompts.
+* **prompt_id**(str): Unique identifier for the prompt template.
+* **template**(PromptTemplate): PromptTemplate instance containing prompt content and configuration.
+* **tag**(Optional[Tag | list[Tag]], optional): Tags for categorizing and filtering prompts.
 
 **Returns:**
 
-**Result[str, Exception]**, Result object containing the prompt ID or an exception.
+**Result**[str, Exception], Result object containing the prompt ID or an exception.
 
 **Example:**
 
@@ -524,7 +524,7 @@ Add a prompt template to the resource manager.
 ### add_prompts
 
 ```python
-def add_prompts(self,
+add_prompts(self,
                 prompts: list[Tuple[str, PromptTemplate]],
                 *,
                 tag: Optional[Tag | list[Tag]] = None
@@ -535,12 +535,12 @@ Batch add multiple prompt templates.
 
 **Parameters:**
 
-* **prompts(list[Tuple[str, PromptTemplate]])**: List of tuples, each containing (prompt_id, PromptTemplate).
-* **tag(Optional[Tag | list[Tag]], optional)**: Optional tags to apply to all added prompts.
+* **prompts**(list[Tuple[str, PromptTemplate]]): List of tuples, each containing (prompt_id, PromptTemplate).
+* **tag**(Optional[Tag | list[Tag]], optional): Optional tags to apply to all added prompts.
 
 **Returns:**
 
-**Result[str, Exception]|list[Result[str, Exception]]**, Result object or list containing the prompt IDs or exceptions.
+**Result**[str, Exception]|list[Result[str, Exception]], Result object or list containing the prompt IDs or exceptions.
 
 **Example:**
 
@@ -555,7 +555,7 @@ Batch add multiple prompt templates.
 ### remove_prompt
 
 ```python
-def remove_prompt(self,
+remove_prompt(self,
                   prompt_id: str | list[str] = None,
                   *,
                   tag: Optional[Tag | list[Tag]] = None,
@@ -568,14 +568,14 @@ Remove a prompt template by ID or tag.
 
 **Parameters:**
 
-* **prompt_id(str | list[str], optional)**: Single ID or list of IDs of prompts to remove.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; remove all prompts matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent prompts.
+* **prompt_id**(str | list[str], optional): Single ID or list of IDs of prompts to remove.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; remove all prompts matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent prompts.
 
 **Returns:**
 
-**Result[str, Exception]|list[Result[str, Exception]]**, Result object or list containing the prompt IDs or exceptions.
+**Result**[str, Exception]|list[Result[str, Exception]], Result object or list containing the prompt IDs or exceptions.
 
 **Example:**
 
@@ -587,7 +587,7 @@ Remove a prompt template by ID or tag.
 ### get_prompt
 
 ```python
-def get_prompt(self,
+get_prompt(self,
                prompt_id: str | list[str] = None,
                *,
                tag: Optional[Tag | list[Tag]] = None,
@@ -599,13 +599,13 @@ Get a prompt template by ID or tag.
 
 **Parameters:**
 
-* **prompt_id(str | list[str], optional)**: Single ID or list of IDs of prompts to retrieve.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; return all prompts matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
+* **prompt_id**(str | list[str], optional): Single ID or list of IDs of prompts to retrieve.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; return all prompts matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
 
 **Returns:**
 
-**PromptTemplate|list[PromptTemplate]**, prompt template instance if found, otherwise None.
+**[PromptTemplate](../foundation/prompt/template.md)|list[[PromptTemplate](../foundation/prompt/template.md)]**, prompt template instance if found, otherwise None.
 
 **Example:**
 
@@ -617,7 +617,7 @@ Get a prompt template by ID or tag.
 ### add_sys_operation
 
 ```python
-def add_sys_operation(self,
+add_sys_operation(self,
                       card: SysOperationCard | List[SysOperationCard],
                       *,
                       tag: Optional[Tag | List[Tag]] = None
@@ -628,12 +628,12 @@ Add a system operation via SysOperationCard (optional tags). Supports batch addi
 
 **Parameters:**
 
-* **card(SysOperationCard | List[SysOperationCard])**: Single SysOperationCard or list of SysOperationCards (required).
-* **tag(Optional[Tag | List[Tag]], optional)**: Optional single tag or list of tags for categorization.
+* **card**(SysOperationCard | List[SysOperationCard]): Single SysOperationCard or list of SysOperationCards (required).
+* **tag**(Optional[Tag | List[Tag]], optional): Optional single tag or list of tags for categorization.
 
 **Returns:**
 
-**Result[SysOperationCard, Exception] | List[Result[SysOperationCard, Exception]]**, single result object or list of result objects containing the successfully added card(s) or error(s).
+**Result**[[SysOperationCard](../sys_operation/sys_operation.md), Exception] | List[Result[[SysOperationCard](../sys_operation/sys_operation.md), Exception]], single result object or list of result objects containing the successfully added card(s) or error(s).
 
 **Example:**
 
@@ -655,7 +655,7 @@ Add a system operation via SysOperationCard (optional tags). Supports batch addi
 ### remove_sys_operation
 
 ```python
-def remove_sys_operation(self,
+remove_sys_operation(self,
                          sys_operation_id: str | List[str],
                          *,
                          tag: Optional[Tag | List[Tag]] = GLOBAL,
@@ -668,14 +668,14 @@ Remove a system operation by ID/tag (supports batch). When removing a system ope
 
 **Parameters:**
 
-* **sys_operation_id(str | List[str])**: Single operation ID or list of IDs to remove (required).
-* **tag(Optional[Tag | List[Tag]], optional)**: Single tag or list of tags filter (default: GLOBAL).
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy (default: ALL).
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent tags (default: False).
+* **sys_operation_id**(str | List[str]): Single operation ID or list of IDs to remove (required).
+* **tag**(Optional[Tag | List[Tag]], optional): Single tag or list of tags filter (default: GLOBAL).
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy (default: ALL).
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent tags (default: False).
 
 **Returns:**
 
-**Result[Optional[SysOperationCard], Exception] | List[Result[Optional[SysOperationCard], Exception]]**, single result object or list of result objects containing the removed card(s) or error(s).
+**Result**[Optional[[SysOperationCard](../sys_operation/sys_operation.md)], Exception] | List[Result[Optional[[SysOperationCard](../sys_operation/sys_operation.md)], Exception]], single result object or list of result objects containing the removed card(s) or error(s).
 
 **Example:**
 
@@ -693,27 +693,27 @@ Remove a system operation by ID/tag (supports batch). When removing a system ope
 ### get_sys_operation
 
 ```python
-def get_sys_operation(self,
-                      sys_operation_id: str | List[str] = None,
-                      *,
-                      tag: Optional[Tag | List[Tag]] = None,
-                      tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                      session: Optional[Session] = None
-                      ) -> Optional[SysOperation] | List[Optional[SysOperation]]
+get_sys_operation(self,
+                  sys_operation_id: str | List[str] = None,
+                  *,
+                  tag: Optional[Tag | List[Tag]] = None,
+                  tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+                  session: Optional[Session] = None
+                 ) -> Optional[SysOperation] | List[Optional[SysOperation]]
 ```
 
 Get a system operation instance by ID/tag.
 
 **Parameters:**
 
-* **sys_operation_id(str | List[str], optional)**: Single operation ID or list of IDs.
-* **tag(Optional[Tag | List[Tag]], optional)**: Single tag or list of tags filter.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy (default: ALL).
-* **session(Optional[Session], optional)**: Optional context session.
+* **sys_operation_id**(str | List[str], optional): Single operation ID or list of IDs.
+* **tag**(Optional[Tag | List[Tag]], optional): Single tag or list of tags filter.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy (default: ALL).
+* **session**(Optional[Session], optional): Optional context session.
 
 **Returns:**
 
-**SysOperation | List[SysOperation]**, single system operation instance or list of instances, returns None if not found.
+**SysOperation | List[[SysOperation](../sys_operation/sys_operation.md)]**, single system operation instance or list of instances, returns None if not found.
 
 **Example:**
 
@@ -731,29 +731,29 @@ Get a system operation instance by ID/tag.
 ### get_tool_infos
 
 ```python
-async def get_tool_infos(self,
-                         tool_id: str | list[str] = None,
-                         *,
-                         tool_type: str | list[str] = None,
-                         tag: Optional[Tag | list[Tag]] = None,
-                         tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                         ignore_exception: bool = False,
-                         ) -> Optional[ToolInfo] | list[Optional[ToolInfo]]
+async get_tool_infos(self,
+               tool_id: str | list[str] = None,
+               *,
+               tool_type: str | list[str] = None,
+               tag: Optional[Tag | list[Tag]] = None,
+               tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+               ignore_exception: bool = False,
+              ) -> Optional[ToolInfo] | list[Optional[ToolInfo]]
 ```
 
 Get tool information/metadata by ID, type, or tag.
 
 **Parameters:**
 
-* **tool_id(str | list[str], optional)**: Single ID or list of IDs of tools to get information for.
-* **tool_type(str | list[str], optional)**: Single type or list of types for filtering tools. Common types: ["function", "mcp", "workflow", "agent", "group"].
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; return information for all tools matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **ignore_exception(bool, optional)**: If True, ignore exceptions and return None for failed items.
+* **tool_id**(str | list[str], optional): Single ID or list of IDs of tools to get information for.
+* **tool_type**(str | list[str], optional): Single type or list of types for filtering tools. Common types: ["function", "mcp", "workflow", "agent", "group"].
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; return information for all tools matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **ignore_exception**(bool, optional): If True, ignore exceptions and return None for failed items.
 
 **Returns:**
 
-**ToolInfo|list[ToolInfo]**, tool information instance if found, otherwise None.
+**[ToolInfo](../foundation/tool/tool.md)|list[[ToolInfo](../foundation/tool/tool.md)]**, tool information instance if found, otherwise None.
 
 **Example:**
 
@@ -765,25 +765,25 @@ Get tool information/metadata by ID, type, or tag.
 ### add_mcp_server
 
 ```python
-async def add_mcp_server(self,
-                         server_config: McpServerConfig | list[McpServerConfig],
-                         *,
-                         tag: Optional[Tag | list[Tag]] = None,
-                         expiry_time: Optional[float] = None
-                         ) -> Result[str, Exception] | list[Result[str, Exception]]
+async add_mcp_server(self,
+               server_config: McpServerConfig | list[McpServerConfig],
+               *,
+               tag: Optional[Tag | list[Tag]] = None,
+               expiry_time: Optional[float] = None
+              ) -> Result[str, Exception] | list[Result[str, Exception]]
 ```
 
 Add MCP (Model Context Protocol) server configuration.
 
 **Parameters:**
 
-* **server_config(McpServerConfig | list[McpServerConfig])**: Single or list of McpServerConfig instances.
-* **tag(Optional[Tag | list[Tag]], optional)**: Optional tags for categorizing servers.
-* **expiry_time(Optional[float], optional)**: Optional Unix timestamp for server configuration expiration. If None, the configuration never expires.
+* **server_config**(McpServerConfig | list[McpServerConfig]): Single or list of McpServerConfig instances.
+* **tag**(Optional[Tag | list[Tag]], optional): Optional tags for categorizing servers.
+* **expiry_time**(Optional[float], optional): Optional Unix timestamp for server configuration expiration. If None, the configuration never expires.
 
 **Returns:**
 
-**Result[str, Exception]|list[Result[str, Exception]]**, Result object or list containing the server name or exceptions.
+**Result**[str, Exception]|list[Result[str, Exception]], Result object or list containing the server name or exceptions.
 
 **Example:**
 
@@ -797,27 +797,27 @@ Add MCP (Model Context Protocol) server configuration.
 ### refresh_mcp_server
 
 ```python
-async def refresh_mcp_server(self,
-                             server_id: Optional[str | list[str]] = None,
-                             *,
-                             server_name: Optional[str | list[str]] = None,
-                             tag: Optional[Tag | list[Tag]] = None,
-                             tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                             ignore_exception: bool = False,
-                             skip_if_tag_not_exists: bool = False,
-                             ) -> Result[str, Exception] | list[Result[str, Exception]]
+async refresh_mcp_server(self,
+                   server_id: Optional[str | list[str]] = None,
+                   *,
+                   server_name: Optional[str | list[str]] = None,
+                   tag: Optional[Tag | list[Tag]] = None,
+                   tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+                   ignore_exception: bool = False,
+                   skip_if_tag_not_exists: bool = False,
+                  ) -> Result[str, Exception] | list[Result[str, Exception]]
 ```
 
 Refresh MCP server tool cards by name.
 
 **Parameters:**
 
-* **server_id(Optional[str | list[str]], optional)**: Single or list of MCP server IDs to refresh.
-* **server_name(Optional[str | list[str]], optional)**: Single or list of MCP server names to refresh.
-* **tag(Optional[Tag | list[Tag]], optional)**: Optional tags for filtering servers to refresh.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **ignore_exception(bool, optional)**: If True, continue refreshing other servers if one fails.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent servers.
+* **server_id**(Optional[str | list[str]], optional): Single or list of MCP server IDs to refresh.
+* **server_name**(Optional[str | list[str]], optional): Single or list of MCP server names to refresh.
+* **tag**(Optional[Tag | list[Tag]], optional): Optional tags for filtering servers to refresh.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **ignore_exception**(bool, optional): If True, continue refreshing other servers if one fails.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent servers.
 
 **Returns:**
 
@@ -832,31 +832,31 @@ Refresh MCP server tool cards by name.
 ### remove_mcp_server
 
 ```python
-async def remove_mcp_server(self,
-                            server_id: Optional[str | list[str]] = None,
-                            *,
-                            server_name: Optional[str | list[str]] = None,
-                            tag: Optional[Tag | list[Tag]] = None,
-                            tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                            skip_if_tag_not_exists: bool = False,
-                            ignore_exception: bool = False,
-                            ) -> Result[str, Exception] | list[Result[str, Exception]]
+async remove_mcp_server(self,
+                  server_id: Optional[str | list[str]] = None,
+                  *,
+                  server_name: Optional[str | list[str]] = None,
+                  tag: Optional[Tag | list[Tag]] = None,
+                  tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+                  skip_if_tag_not_exists: bool = False,
+                  ignore_exception: bool = False,
+                 ) -> Result[str, Exception] | list[Result[str, Exception]]
 ```
 
 Remove MCP servers by name or tag.
 
 **Parameters:**
 
-* **server_id(Optional[str | list[str]], optional)**: Single or list of MCP server IDs to remove.
-* **server_name(Optional[str | list[str]], optional)**: Single or list of MCP server names to remove.
-* **tag(Optional[Tag | list[Tag]], optional)**: Single tag or list of tags; remove all servers matching the tags.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent servers.
-* **ignore_exception(bool, optional)**: If True, continue removing other servers if one fails.
+* **server_id**(Optional[str | list[str]], optional): Single or list of MCP server IDs to remove.
+* **server_name**(Optional[str | list[str]], optional): Single or list of MCP server names to remove.
+* **tag**(Optional[Tag | list[Tag]], optional): Single tag or list of tags; remove all servers matching the tags.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent servers.
+* **ignore_exception**(bool, optional): If True, continue removing other servers if one fails.
 
 **Returns:**
 
-**Result[str, Exception]|list[Result[str, Exception]]**, Result object or list containing the server name or exceptions.
+**Result**[str, Exception]|list[Result[str, Exception]], Result object or list containing the server name or exceptions.
 
 **Example:**
 
@@ -868,31 +868,31 @@ Remove MCP servers by name or tag.
 ### get_mcp_tool
 
 ```python
-async def get_mcp_tool(self,
-                       name: str | list[str] = None,
-                       server_id: str | list[str] = None,
-                       *,
-                       server_name: str | list[str] = None,
-                       tag: Optional[Tag | list[Tag]] = None,
-                       tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                       skip_if_tag_not_exists: bool = False,
-                       ignore_exception: bool = False,
-                       session: Optional[Session] = None
-                       ) -> Optional[Tool] | list[Optional[Tool]]
+async get_mcp_tool(self,
+             name: str | list[str] = None,
+             server_id: str | list[str] = None,
+             *,
+             server_name: str | list[str] = None,
+             tag: Optional[Tag | list[Tag]] = None,
+             tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+             skip_if_tag_not_exists: bool = False,
+             ignore_exception: bool = False,
+             session: Optional[Session] = None
+            ) -> Optional[Tool] | list[Optional[Tool]]
 ```
 
 Get an MCP tool by name and server.
 
 **Parameters:**
 
-* **name(str | list[str], optional)**: Single or list of MCP tool names to retrieve.
-* **server_id(str | list[str], optional)**: Single or list of MCP server IDs containing the tools.
-* **server_name(str | list[str], optional)**: Single or list of MCP server names containing the tools.
-* **tag([Tag | list[Tag]], optional)**: Optional tags for filtering servers/tools.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent servers.
-* **ignore_exception(bool, optional)**: If True, ignore exceptions required for refreshing MCP servers (if needed).
-* **session(Optional[Session], optional)**: Optional session context for the tool.
+* **name**(str | list[str], optional): Single or list of MCP tool names to retrieve.
+* **server_id**(str | list[str], optional): Single or list of MCP server IDs containing the tools.
+* **server_name**(str | list[str], optional): Single or list of MCP server names containing the tools.
+* **tag**([Tag | list[Tag]], optional): Optional tags for filtering servers/tools.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent servers.
+* **ignore_exception**(bool, optional): If True, ignore exceptions required for refreshing MCP servers (if needed).
+* **session**(Optional[Session], optional): Optional session context for the tool.
 
 **Returns:**
 
@@ -908,33 +908,33 @@ Get an MCP tool by name and server.
 ### get_mcp_tool_infos
 
 ```python
-async def get_mcp_tool_infos(self,
-                             name: str | list[str] = None,
-                             server_id: str | list[str] = None,
-                             *,
-                             server_name: str | list[str] = None,
-                             tag: Optional[Tag | list[Tag]] = None,
-                             tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                             skip_if_tag_not_exists: bool = False,
-                             ignore_exception: bool = False,
-                             ) -> Optional[ToolInfo] | list[Optional[ToolInfo]]
+async get_mcp_tool_infos(self,
+                   name: str | list[str] = None,
+                   server_id: str | list[str] = None,
+                   *,
+                   server_name: str | list[str] = None,
+                   tag: Optional[Tag | list[Tag]] = None,
+                   tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+                   skip_if_tag_not_exists: bool = False,
+                   ignore_exception: bool = False,
+                  ) -> Optional[ToolInfo] | list[Optional[ToolInfo]]
 ```
 
 Get MCP tool information/metadata by name and server.
 
 **Parameters:**
 
-* **name(str | list[str], optional)**: Single or list of MCP tool names to get information for. If None, returns information for all tools in the specified server.
-* **server_name(str | list[str], optional)**: Single or list of MCP server names containing the tools. If name is None, this must be provided.
-* **server_id(str | list[str], optional)**: Single or list of MCP server IDs containing the tools.
-* **tag(Optional[Tag | list[Tag]], optional)**: Optional tags for filtering servers/tools.
-* **tag_match_strategy(TagMatchStrategy, optional)**: Tag matching strategy when using tag parameter.
-* **skip_if_tag_not_exists(bool, optional)**: If True, skip non-existent servers.
-* **ignore_exception(bool, optional)**: If True, ignore exceptions required for refreshing MCP servers.
+* **name**(str | list[str], optional): Single or list of MCP tool names to get information for. If None, returns information for all tools in the specified server.
+* **server_name**(str | list[str], optional): Single or list of MCP server names containing the tools. If name is None, this must be provided.
+* **server_id**(str | list[str], optional): Single or list of MCP server IDs containing the tools.
+* **tag**(Optional[Tag | list[Tag]], optional): Optional tags for filtering servers/tools.
+* **tag_match_strategy**(TagMatchStrategy, optional): Tag matching strategy when using tag parameter.
+* **skip_if_tag_not_exists**(bool, optional): If True, skip non-existent servers.
+* **ignore_exception**(bool, optional): If True, ignore exceptions required for refreshing MCP servers.
 
 **Returns:**
 
-**ToolInfo|list[ToolInfo]**, MCP tool information instance if found, otherwise None.
+**[ToolInfo](../foundation/tool/tool.md)|list[[ToolInfo](../foundation/tool/tool.md)]**, MCP tool information instance if found, otherwise None.
 
 **Example:**
 
@@ -946,15 +946,14 @@ Get MCP tool information/metadata by name and server.
 ### get_resource_by_tag
 
 ```python
-def get_resource_by_tag(self,
-                        tag: Tag) -> Optional[list[BaseCard]]
+get_resource_by_tag(self, tag: Tag) -> Optional[list[BaseCard]]
 ```
 
 Retrieve all resources associated with a specific tag.
 
 **Parameters:**
 
-* **tag(Tag)**: The tag to search for.
+* **tag**(Tag): The tag to search for.
 
 **Returns:**
 
@@ -972,7 +971,7 @@ Retrieve all resources associated with a specific tag.
 ### list_tags
 
 ```python
-def list_tags(self) -> list[Tag]
+list_tags(self) -> list[Tag]
 ```
 
 List all tags currently used across all resources.
@@ -991,14 +990,14 @@ List all tags currently used across all resources.
 ### has_tag
 
 ```python
-def has_tag(self, tag: str) -> bool
+has_tag(self, tag: str) -> bool
 ```
 
 Check if the specified tag exists in the resource_mgr.
 
 **Parameters:**
 
-* **tag(str)**: The tag to check for existence.
+* **tag**(str): The tag to check for existence.
 
 **Returns:**
 
@@ -1014,23 +1013,23 @@ Check if the specified tag exists in the resource_mgr.
 ### remove_tag
 
 ```python
-async def remove_tag(self,
-                     tag: Tag | list[Tag],
-                     *,
-                     skip_if_tag_not_exists: bool = False,
-                     ) -> Result[Tag, Exception] | list[Result[Tag, Exception]]
+async remove_tag(self,
+           tag: Tag | list[Tag],
+           *,
+           skip_if_tag_not_exists: bool = False,
+          ) -> Result[Tag, Exception] | list[Result[Tag, Exception]]
 ```
 
 Remove tags from all resources.
 
 **Parameters:**
 
-* **tag(Tag | list[Tag])**: Single tag or list of tags to remove from all resources.
-* **skip_if_tag_not_exists(bool, optional)**: If True, ignore non-existent tags.
+* **tag**(Tag | list[Tag]): Single tag or list of tags to remove from all resources.
+* **skip_if_tag_not_exists**(bool, optional): If True, ignore non-existent tags.
 
 **Returns:**
 
-**Result[Tag, Exception]|list[Result[Tag, Exception]]**, Result object or list containing the tags or exceptions.
+**Result**[Tag, Exception]|list[Result[Tag, Exception]], Result object or list containing the tags or exceptions.
 
 **Example:**
 
@@ -1042,7 +1041,7 @@ Remove tags from all resources.
 ### update_resource_tag
 
 ```python
-def update_resource_tag(self,
+update_resource_tag(self,
                         resource_id: str,
                         tag: Tag | list[Tag]
                         ) -> Result[list[Tag], Exception]
@@ -1052,12 +1051,12 @@ Replace all tags on a resource with new tags.
 
 **Parameters:**
 
-* **resource_id(str)**: Resource identifier.
-* **tag(Tag | list[Tag])**: New tags to set on the resource.
+* **resource_id**(str): Resource identifier.
+* **tag**(Tag | list[Tag]): New tags to set on the resource.
 
 **Returns:**
 
-**Result[list[Tag], Exception]**, Result object containing the new list of tags or an exception.
+**Result**[list[Tag], Exception], Result object containing the new list of tags or an exception.
 
 **Example:**
 
@@ -1070,7 +1069,7 @@ Replace all tags on a resource with new tags.
 ### add_resource_tag
 
 ```python
-def add_resource_tag(self,
+add_resource_tag(self,
                      resource_id: str,
                      tag: Tag | list[Tag]
                      ) -> Result[list[Tag], Exception]
@@ -1080,12 +1079,12 @@ Add tags to a resource.
 
 **Parameters:**
 
-* **resource_id(str)**: Resource identifier.
-* **tag(Tag | list[Tag])**: Tags to add to the resource.
+* **resource_id**(str): Resource identifier.
+* **tag**(Tag | list[Tag]): Tags to add to the resource.
 
 **Returns:**
 
-**Result[list[Tag], Exception]**, Result object containing all tags now associated with the resource.
+**Result**[list[Tag], Exception], Result object containing all tags now associated with the resource.
 
 **Example:**
 
@@ -1098,7 +1097,7 @@ Add tags to a resource.
 ### remove_resource_tag
 
 ```python
-def remove_resource_tag(self,
+remove_resource_tag(self,
                         resource_id: str,
                         tag: Tag | list[Tag],
                         *,
@@ -1110,13 +1109,13 @@ Remove specific tags from a resource.
 
 **Parameters:**
 
-* **resource_id(str)**: Resource identifier.
-* **tag(Tag | list[Tag])**: Tags to remove from the resource.
-* **skip_if_tag_not_exists(bool, optional)**: If True, ignore non-existent tags.
+* **resource_id**(str): Resource identifier.
+* **tag**(Tag | list[Tag]): Tags to remove from the resource.
+* **skip_if_tag_not_exists**(bool, optional): If True, ignore non-existent tags.
 
 **Returns:**
 
-**Result[list[Tag], Exception]**, Result object containing the remaining tags on the resource.
+**Result**[list[Tag], Exception], Result object containing the remaining tags on the resource.
 
 **Example:**
 
@@ -1127,14 +1126,14 @@ Remove specific tags from a resource.
 ### get_resource_tag
 
 ```python
-def get_resource_tag(self, resource_id: str) -> Optional[list[Tag]]
+get_resource_tag(self, resource_id: str) -> Optional[list[Tag]]
 ```
 
 Get all tags associated with a resource.
 
 **Parameters:**
 
-* **resource_id(str)**: Resource identifier.
+* **resource_id**(str): Resource identifier.
 
 **Returns:**
 
@@ -1150,15 +1149,15 @@ Get all tags associated with a resource.
 ### resource_has_tag
 
 ```python
->>> def resource_has_tag(self, resource_id: str, tag: Tag) -> bool
+>>> resource_has_tag(self, resource_id: str, tag: Tag) -> bool
 ```
 
 Check if a specific resource is associated with a given tag.
 
 **Parameters:**
 
-* **resource_id(str)**: Unique identifier of the resource to check.
-* **tag(Tag)**: Tag to verify association with the resource.
+* **resource_id**(str): Unique identifier of the resource to check.
+* **tag**(Tag): Tag to verify association with the resource.
 
 **Returns:**
 
@@ -1175,7 +1174,7 @@ Check if a specific resource is associated with a given tag.
 ### release
 
 ```python
->>> async def release(self)
+async release(self)
 ```
 
 Release all resources and perform cleanup.
