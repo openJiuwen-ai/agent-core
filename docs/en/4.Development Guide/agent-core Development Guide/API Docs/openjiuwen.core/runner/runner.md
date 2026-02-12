@@ -57,6 +57,38 @@ This is a class property that can be accessed directly via `Runner.resource_mgr`
 
 [**ResourceMgr**](./resource_manager/resource_manager.md), resource manager instance.
 
+### callback_framework
+
+```python
+callback_framework: AsyncCallbackFramework
+```
+
+Get the async callback framework instance for registering event callbacks, chaining, filtering, and metrics. See [callback module](callback/callback.README.md).
+
+**Returns**: **AsyncCallbackFramework**, the async callback framework instance.
+
+### set_config
+
+```python
+@classmethod
+def set_config(cls, config: RunnerConfig) -> None
+```
+
+Set the Runner configuration.
+
+**Parameters**: **config** (RunnerConfig): Configuration object.
+
+### get_config
+
+```python
+@classmethod
+def get_config(cls) -> RunnerConfig
+```
+
+Get the current Runner configuration.
+
+**Returns**: **RunnerConfig**, current configuration object.
+
 ### run_agent
 
 ```python

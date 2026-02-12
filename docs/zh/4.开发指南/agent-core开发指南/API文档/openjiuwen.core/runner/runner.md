@@ -57,6 +57,38 @@ resource_mgr: ResourceMgr
 
 [**ResourceMgr**](./resource_manager/resource_manager.md)，资源管理器实例。
 
+### callback_framework
+
+```python
+callback_framework: AsyncCallbackFramework
+```
+
+获取异步回调框架实例，用于注册事件回调、链式执行、过滤与指标等。详见 [callback 模块](./callback/callback.README.md)。
+
+**返回**：**AsyncCallbackFramework**，异步回调框架实例。
+
+### set_config
+
+```python
+@classmethod
+def set_config(cls, config: RunnerConfig) -> None
+```
+
+设置 Runner 的配置。
+
+**参数**：**config**(RunnerConfig)：包含配置项的对象。
+
+### get_config
+
+```python
+@classmethod
+def get_config(cls) -> RunnerConfig
+```
+
+获取当前 Runner 的配置。
+
+**返回**：**RunnerConfig**，当前配置对象。
+
 ### run_agent
 
 ```python
