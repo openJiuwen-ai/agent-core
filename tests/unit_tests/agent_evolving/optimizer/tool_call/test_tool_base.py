@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from openjiuwen.agent_evolving.optimizer.tool.base import ToolOptimizerBase
-from openjiuwen.agent_evolving.optimizer.tool import base as tool_base
+from openjiuwen.agent_evolving.optimizer.tool_call.base import ToolOptimizerBase
+from openjiuwen.agent_evolving.optimizer.tool_call import base as tool_base
 
 
 def test_tool_optimizer_base_init_and_default_targets(tmp_path):

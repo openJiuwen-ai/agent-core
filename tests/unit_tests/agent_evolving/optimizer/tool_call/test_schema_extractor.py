@@ -1,7 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from openjiuwen.agent_evolving.optimizer.tool.utils.schema_extractor import extract_schema
+import pytest
+
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.schema_extractor import extract_schema
 
 
 def test_extract_schema_with_dict_and_nested_values():

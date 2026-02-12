@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from openjiuwen.agent_evolving.optimizer.tool.utils.customized_reviewer import ToolDescriptionReviewer
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.customized_reviewer import ToolDescriptionReviewer
 
 
 def test_format_clean_cross_check_translate(monkeypatch):
@@ -24,7 +24,7 @@ def test_format_clean_cross_check_translate(monkeypatch):
         return verify_output(payload) if verify_output else payload
 
     monkeypatch.setattr(
-        "openjiuwen.agent_evolving.optimizer.tool.utils.customized_reviewer.get_rits_response",
+        "openjiuwen.agent_evolving.optimizer.tool_call.utils.customized_reviewer.get_rits_response",
         fake_get_rits_response,
     )
 

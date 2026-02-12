@@ -6,9 +6,9 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Union
 
-from openjiuwen.agent_evolving.optimizer.tool.utils.base_method import BaseMethod
-from openjiuwen.agent_evolving.optimizer.tool.utils.format import format_prompt_llama, parse_json
-from openjiuwen.agent_evolving.optimizer.tool.utils.rits import get_rits_response
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.base_method import BaseMethod
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.format import format_prompt_llama, parse_json
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import get_rits_response
 from openjiuwen.core.common.logging import logger
 
 

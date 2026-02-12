@@ -65,7 +65,7 @@ def test_make_sync_mcp_caller(monkeypatch):
     fake_client = _install_fake_fastmcp(monkeypatch)
 
     mod = importlib.import_module(
-        "openjiuwen.agent_evolving.optimizer.tool.utils.callable_fortest"
+        "openjiuwen.agent_evolving.optimizer.tool_call.utils.callable_fortest"
     )
     mod = importlib.reload(mod)
 

@@ -3,7 +3,9 @@
 
 import json
 
-from openjiuwen.agent_evolving.optimizer.tool.utils.description_example_method import ToolDescriptionMethod
+import pytest
+
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.description_example_method import ToolDescriptionMethod
 
 
 def _config(tmp_path):
@@ -105,7 +107,7 @@ def test_critique_methods_and_generate_description(monkeypatch, tmp_path):
         return verify_fn(next(outputs))
 
     monkeypatch.setattr(
-        "openjiuwen.agent_evolving.optimizer.tool.utils.description_example_method.get_rits_response",
+        "openjiuwen.agent_evolving.optimizer.tool_call.utils.description_example_method.get_rits_response",
         fake_get_rits_response,
     )
 

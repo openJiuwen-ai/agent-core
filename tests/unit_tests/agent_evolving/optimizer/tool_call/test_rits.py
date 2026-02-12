@@ -1,7 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from openjiuwen.agent_evolving.optimizer.tool.utils import rits
+import pytest
+
+from openjiuwen.agent_evolving.optimizer.tool_call.utils import rits
 
 
 class _FakeResponse:

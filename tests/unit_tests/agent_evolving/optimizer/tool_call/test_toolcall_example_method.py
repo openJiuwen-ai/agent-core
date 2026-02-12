@@ -1,11 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import json
-
 import pytest
 
-from openjiuwen.agent_evolving.optimizer.tool.utils.toolcall_example_method import APICallToExampleMethod
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.toolcall_example_method import APICallToExampleMethod
 
 
 def _config():
@@ -40,7 +38,7 @@ def test_generate_api_call_from_description(monkeypatch):
         return verify_fn('{"name":"search","arguments":{"q":"x"}}')
 
     monkeypatch.setattr(
-        "openjiuwen.agent_evolving.optimizer.tool.utils.toolcall_example_method.get_rits_response",
+        "openjiuwen.agent_evolving.optimizer.tool_call.utils.toolcall_example_method.get_rits_response",
         fake_get_rits_response,
     )
     out = method.generate_api_call_from_description(
@@ -54,7 +52,7 @@ def test_generate_api_call_from_description_validation_error(monkeypatch):
     method = APICallToExampleMethod(_config(), api_call_fn=lambda *_: None, eval_fn=lambda *_: None)
 
     monkeypatch.setattr(
-        "openjiuwen.agent_evolving.optimizer.tool.utils.toolcall_example_method.get_rits_response",
+        "openjiuwen.agent_evolving.optimizer.tool_call.utils.toolcall_example_method.get_rits_response",
         lambda model, prompt, key, verify_fn, **kwargs: verify_fn('{"name":"other","arguments":{}}'),
     )
     with pytest.raises(ValueError):
@@ -77,7 +75,7 @@ def test_critique_and_instruction_and_batch_methods(monkeypatch):
         return verify_fn(next(payloads))
 
     monkeypatch.setattr(
-        "openjiuwen.agent_evolving.optimizer.tool.utils.toolcall_example_method.get_rits_response",
+        "openjiuwen.agent_evolving.optimizer.tool_call.utils.toolcall_example_method.get_rits_response",
         fake_get_rits_response,
     )
 

@@ -5,7 +5,7 @@ import re
 import json
 from typing import Callable, Optional, List
 
-from openjiuwen.agent_evolving.optimizer.tool.utils.rits import get_rits_response
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import get_rits_response
 
 
 class ToolDescriptionReviewer:

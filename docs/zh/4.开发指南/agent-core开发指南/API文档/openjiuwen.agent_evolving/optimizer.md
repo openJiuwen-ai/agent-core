@@ -90,7 +90,7 @@ class TextualParameter(operator_id: str)
 
 ---
 
-## class openjiuwen.agent_evolving.optimizer.llm.base.LLMCallOptimizerBase
+## class openjiuwen.agent_evolving.optimizer.llm_call.base.LLMCallOptimizerBase
 
 LLM 调用维度优化器基类：仅优化暴露 system_prompt / user_prompt 的算子；domain 为 `"llm"`，default_targets 为 `["system_prompt", "user_prompt"]`。子类实现 _backward / _step 完成提示词优化逻辑。
 
@@ -112,7 +112,7 @@ LLM 调用维度优化器基类：仅优化暴露 system_prompt / user_prompt �
 
 ---
 
-## class openjiuwen.agent_evolving.optimizer.llm.instruction_optimizer.InstructionOptimizer
+## class openjiuwen.agent_evolving.optimizer.llm_call.instruction_optimizer.InstructionOptimizer
 
 基于 LLM 的指令（提示词）优化器：backward 阶段用 LLM 对 bad cases 生成文本梯度写入 TextualParameter；step 阶段用 LLM 生成优化后的 system/user 提示词，返回 Updates。
 

@@ -90,7 +90,7 @@ Gets description.
 
 ---
 
-## class openjiuwen.agent_evolving.optimizer.llm.base.LLMCallOptimizerBase
+## class openjiuwen.agent_evolving.optimizer.llm_call.base.LLMCallOptimizerBase
 
 LLM call dimension optimizer base class: only optimizes operators exposing system_prompt / user_prompt; domain is `"llm"`, default_targets is `["system_prompt", "user_prompt"]`. Subclasses implement _backward / _step to complete prompt optimization logic.
 
@@ -112,7 +112,7 @@ Gets target content from op.get_state() and wraps as PromptTemplate.
 
 ---
 
-## class openjiuwen.agent_evolving.optimizer.llm.instruction_optimizer.InstructionOptimizer
+## class openjiuwen.agent_evolving.optimizer.llm_call.instruction_optimizer.InstructionOptimizer
 
 LLM-based instruction (prompt) optimizer: backward stage uses LLM to generate text gradients for bad cases and writes to TextualParameter; step stage uses LLM to generate optimized system/user prompts, returns Updates.
 

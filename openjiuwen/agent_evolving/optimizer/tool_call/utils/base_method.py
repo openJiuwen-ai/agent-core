@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional, Union
 import ast
 import json
 
-from openjiuwen.agent_evolving.optimizer.tool.utils.rits import get_rits_response
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import get_rits_response
 
 
 def parse_json(output, header=None):

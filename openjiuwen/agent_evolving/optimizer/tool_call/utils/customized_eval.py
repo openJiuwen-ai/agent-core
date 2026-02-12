@@ -6,9 +6,8 @@ from typing import Any, Dict, List, Tuple
 import anyio
 
 import numpy as np
-# from openai import OpenAI
 
-from openjiuwen.agent_evolving.optimizer.tool.utils.rits import rits_response
+from openjiuwen.agent_evolving.optimizer.tool_call.utils.rits import rits_response
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
