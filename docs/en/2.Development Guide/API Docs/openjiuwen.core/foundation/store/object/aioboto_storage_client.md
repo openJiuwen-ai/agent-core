@@ -32,7 +32,7 @@ Create and return an S3 client instance.
 ### async create_bucket
 
 ```python
-async def create_bucket(bucket_name: str, location: str)
+async def create_bucket(bucket_name: str, location: str) -> bool
 ```
 
 Create a new object storage bucket.
@@ -42,10 +42,14 @@ Create a new object storage bucket.
 - `bucket_name: str`: Name of the bucket to be created.
 - `location: str`: Region/location where the bucket will be created.
 
+**Returns**:
+
+- `bool`: Returns `True` if creation succeeded, `False` otherwise.
+
 ### async delete_bucket
 
 ```python
-async def delete_bucket(bucket_name: str)
+async def delete_bucket(bucket_name: str) -> bool
 ```
 
 Delete an existing object storage bucket.
@@ -54,10 +58,14 @@ Delete an existing object storage bucket.
 
 - `bucket_name: str`: Name of the bucket to be deleted.
 
+**Returns**:
+
+- `bool`: Returns `True` if deletion succeeded, `False` otherwise.
+
 ### async upload_file
 
 ```python
-async def upload_file(bucket_name: str, object_name: str, file_path: str | Path)
+async def upload_file(bucket_name: str, object_name: str, file_path: str | Path) -> bool
 ```
 
 Upload a local file to an object storage bucket.
@@ -68,10 +76,14 @@ Upload a local file to an object storage bucket.
 - `object_name: str`: Object key (path/name).
 - `file_path: str | Path`: Local file path to upload.
 
+**Returns**:
+
+- `bool`: Returns `True` if upload succeeded, `False` otherwise.
+
 ### async download_file
 
 ```python
-async def download_file(bucket_name: str, object_name: str, file_path: str | Path)
+async def download_file(bucket_name: str, object_name: str, file_path: str | Path) -> bool
 ```
 
 Download an object from Object Storage server.
@@ -82,10 +94,14 @@ Download an object from Object Storage server.
 - `object_name: str`: Object key to download.
 - `file_path: str | Path`: Local file path where the object will be saved.
 
+**Returns**:
+
+- `bool`: Returns `True` if download succeeded, `False` otherwise.
+
 ### async delete_object
 
 ```python
-async def delete_object(bucket_name: str, object_name: str)
+async def delete_object(bucket_name: str, object_name: str) -> bool
 ```
 
 Delete an object from an object storage bucket.
@@ -94,6 +110,10 @@ Delete an object from an object storage bucket.
 
 - `bucket_name: str`: Name of the bucket.
 - `object_name: str`: Object key to delete.
+
+**Returns**:
+
+- `bool`: Returns `True` if deletion succeeded, `False` otherwise.
 
 ### async list_objects
 
@@ -136,19 +156,27 @@ async def main():
     object_name = "test/file.txt"
     local_file = Path("/path/to/local/file.txt")
     
-    # Upload file
-    await client.upload_file(bucket_name, object_name, local_file)
+    # Upload file and check return value
+    success = await client.upload_file(bucket_name, object_name, local_file)
+    if not success:
+        print("Upload failed")
+        return
     
     # List objects
     objects = await client.list_objects(bucket_name, "test/")
     print(f"Found {len(objects) if objects else 0} objects")
     
-    # Download file
+    # Download file and check return value
     download_path = Path("/path/to/downloaded/file.txt")
-    await client.download_file(bucket_name, object_name, download_path)
+    success = await client.download_file(bucket_name, object_name, download_path)
+    if not success:
+        print("Download failed")
+        return
     
-    # Delete object
-    await client.delete_object(bucket_name, object_name)
+    # Delete object and check return value
+    success = await client.delete_object(bucket_name, object_name)
+    if not success:
+        print("Delete failed")
 
 
 if __name__ == "__main__":

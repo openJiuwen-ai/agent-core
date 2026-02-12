@@ -32,7 +32,7 @@ def create_client(self)
 ### async create_bucket
 
 ```python
-async def create_bucket(bucket_name: str, location: str)
+async def create_bucket(bucket_name: str, location: str) -> bool
 ```
 
 创建新的对象存储桶。
@@ -42,10 +42,14 @@ async def create_bucket(bucket_name: str, location: str)
 - `bucket_name: str`：要创建的桶名称。
 - `location: str`：创建桶的区域/位置。
 
+**返回**：
+
+- `bool`：创建成功返回 `True`，否则返回 `False`。
+
 ### async delete_bucket
 
 ```python
-async def delete_bucket(bucket_name: str)
+async def delete_bucket(bucket_name: str) -> bool
 ```
 
 删除现有的对象存储桶。
@@ -54,10 +58,14 @@ async def delete_bucket(bucket_name: str)
 
 - `bucket_name: str`：要删除的桶名称。
 
+**返回**：
+
+- `bool`：删除成功返回 `True`，否则返回 `False`。
+
 ### async upload_file
 
 ```python
-async def upload_file(bucket_name: str, object_name: str, file_path: str | Path)
+async def upload_file(bucket_name: str, object_name: str, file_path: str | Path) -> bool
 ```
 
 将本地文件上传到对象存储桶。
@@ -68,10 +76,14 @@ async def upload_file(bucket_name: str, object_name: str, file_path: str | Path)
 - `object_name: str`：对象键（路径/名称）。
 - `file_path: str | Path`：要上传的本地文件路径。
 
+**返回**：
+
+- `bool`：上传成功返回 `True`，否则返回 `False`。
+
 ### async download_file
 
 ```python
-async def download_file(bucket_name: str, object_name: str, file_path: str | Path)
+async def download_file(bucket_name: str, object_name: str, file_path: str | Path) -> bool
 ```
 
 从对象存储服务器下载对象。
@@ -82,10 +94,14 @@ async def download_file(bucket_name: str, object_name: str, file_path: str | Pat
 - `object_name: str`：要下载的对象键。
 - `file_path: str | Path`：保存对象的本地文件路径。
 
+**返回**：
+
+- `bool`：下载成功返回 `True`，否则返回 `False`。
+
 ### async delete_object
 
 ```python
-async def delete_object(bucket_name: str, object_name: str)
+async def delete_object(bucket_name: str, object_name: str) -> bool
 ```
 
 从对象存储桶中删除对象。
@@ -94,6 +110,10 @@ async def delete_object(bucket_name: str, object_name: str)
 
 - `bucket_name: str`：桶名称。
 - `object_name: str`：要删除的对象键。
+
+**返回**：
+
+- `bool`：删除成功返回 `True`，否则返回 `False`。
 
 ### async list_objects
 
@@ -136,19 +156,27 @@ async def main():
     object_name = "test/file.txt"
     local_file = Path("/path/to/local/file.txt")
     
-    # 上传文件
-    await client.upload_file(bucket_name, object_name, local_file)
+    # 上传文件并检查返回值
+    success = await client.upload_file(bucket_name, object_name, local_file)
+    if not success:
+        print("上传失败")
+        return
     
     # 列出对象
     objects = await client.list_objects(bucket_name, "test/")
     print(f"Found {len(objects) if objects else 0} objects")
     
-    # 下载文件
+    # 下载文件并检查返回值
     download_path = Path("/path/to/downloaded/file.txt")
-    await client.download_file(bucket_name, object_name, download_path)
+    success = await client.download_file(bucket_name, object_name, download_path)
+    if not success:
+        print("下载失败")
+        return
     
-    # 删除对象
-    await client.delete_object(bucket_name, object_name)
+    # 删除对象并检查返回值
+    success = await client.delete_object(bucket_name, object_name)
+    if not success:
+        print("删除失败")
 
 
 if __name__ == "__main__":

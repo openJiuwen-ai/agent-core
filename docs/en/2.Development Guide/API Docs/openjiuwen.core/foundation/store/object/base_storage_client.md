@@ -13,7 +13,7 @@ Corresponding source code: `openjiuwen.core.foundation.store.object.base_storage
 ### abstractmethod async upload_file
 
 ```python
-async def upload_file(bucket_name, object_name, file_path)
+async def upload_file(bucket_name, object_name, file_path) -> bool
 ```
 
 Upload a local file to an object storage bucket.
@@ -24,10 +24,14 @@ Upload a local file to an object storage bucket.
 - `object_name`: Object key (path/name).
 - `file_path`: Local file path to upload.
 
+**Returns**:
+
+- `bool`: Returns `True` if upload succeeded, `False` otherwise.
+
 ### abstractmethod async download_file
 
 ```python
-async def download_file(bucket_name: str, object_name: str, file_path: str | Path)
+async def download_file(bucket_name: str, object_name: str, file_path: str | Path) -> bool
 ```
 
 Download an object from Object Storage server.
@@ -38,10 +42,14 @@ Download an object from Object Storage server.
 - `object_name: str`: Object key to download.
 - `file_path: str | Path`: Local file path where the object will be saved.
 
+**Returns**:
+
+- `bool`: Returns `True` if download succeeded, `False` otherwise.
+
 ### abstractmethod async delete_object
 
 ```python
-async def delete_object(bucket_name: str, object_name: str)
+async def delete_object(bucket_name: str, object_name: str) -> bool
 ```
 
 Delete an object from an object storage bucket.
@@ -51,10 +59,14 @@ Delete an object from an object storage bucket.
 - `bucket_name: str`: Name of the bucket.
 - `object_name: str`: Object key to delete.
 
+**Returns**:
+
+- `bool`: Returns `True` if deletion succeeded, `False` otherwise.
+
 ### abstractmethod async create_bucket
 
 ```python
-async def create_bucket(bucket_name: str, location: str)
+async def create_bucket(bucket_name: str, location: str) -> bool
 ```
 
 Create a new object storage bucket.
@@ -64,10 +76,14 @@ Create a new object storage bucket.
 - `bucket_name: str`: Name of the bucket to be created.
 - `location: str`: Region/location where the bucket will be created.
 
+**Returns**:
+
+- `bool`: Returns `True` if creation succeeded, `False` otherwise.
+
 ### abstractmethod async delete_bucket
 
 ```python
-async def delete_bucket(bucket_name: str)
+async def delete_bucket(bucket_name: str) -> bool
 ```
 
 Deletes an existing object storage bucket.
@@ -75,6 +91,10 @@ Deletes an existing object storage bucket.
 **Parameters**:
 
 - `bucket_name: str`: Name of the bucket to be deleted.
+
+**Returns**:
+
+- `bool`: Returns `True` if deletion succeeded, `False` otherwise.
 
 ### abstractmethod async list_objects
 
@@ -105,34 +125,49 @@ from openjiuwen.core.foundation.store.object.aioboto_storage_client import AioBo
 
 # Custom implementation of BaseObjectStorageClient
 class MyObjectStorageClient(BaseObjectStorageClient):
-    async def upload_file(self, bucket_name, object_name, file_path):
+    async def upload_file(self, bucket_name, object_name, file_path) -> bool:
         # Implement upload logic
-        pass
+        # Return True on success, False on failure
+        return True
     
-    async def download_file(self, bucket_name: str, object_name: str, file_path: str | Path):
+    async def download_file(self, bucket_name: str, object_name: str, file_path: str | Path) -> bool:
         # Implement download logic
-        pass
+        # Return True on success, False on failure
+        return True
     
-    async def delete_object(self, bucket_name: str, object_name: str):
+    async def delete_object(self, bucket_name: str, object_name: str) -> bool:
         # Implement delete logic
-        pass
+        # Return True on success, False on failure
+        return True
     
-    async def create_bucket(self, bucket_name: str, location: str):
+    async def create_bucket(self, bucket_name: str, location: str) -> bool:
         # Implement create bucket logic
-        pass
+        # Return True on success, False on failure
+        return True
     
-    async def delete_bucket(self, bucket_name: str):
+    async def delete_bucket(self, bucket_name: str) -> bool:
         # Implement delete bucket logic
-        pass
+        # Return True on success, False on failure
+        return True
     
     async def list_objects(self, bucket_name: str, object_prefix: str, max_objects: int = 100) -> list[dict] | None:
         # Implement list objects logic
-        pass
+        # Return list of objects on success, None on failure
+        return []
 
 
 # Use built-in implementation AioBotoClient
 client = AioBotoClient()
-await client.upload_file("my-bucket", "test/file.txt", "/path/to/local/file.txt")
+
+# Upload file and check return value
+success = await client.upload_file("my-bucket", "test/file.txt", "/path/to/local/file.txt")
+if not success:
+    print("Upload failed")
+
+# Download file and check return value
+success = await client.download_file("my-bucket", "test/file.txt", "/path/to/downloaded/file.txt")
+if not success:
+    print("Download failed")
 ```
 
 > **Reference Examples**: For more usage examples, please refer to the example code in the `examples/store/` directory of the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository, including:

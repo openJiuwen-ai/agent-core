@@ -58,7 +58,7 @@ class AioBotoClient(BaseObjectStorageClient):
     def create_client(self):
         return self._session.client(**self._client_kwargs)
 
-    async def create_bucket(self, bucket_name: str, location: str):
+    async def create_bucket(self, bucket_name: str, location: str) -> bool:
         try:
             params = {
                 "Bucket": bucket_name,
@@ -68,27 +68,31 @@ class AioBotoClient(BaseObjectStorageClient):
             async with self.create_client() as s3:
                 await s3.create_bucket(**params)
 
-            logger.info(f'Bucket "{bucket_name}" created successfully in region "{location}"')
+            logger.info('Bucket "%s" created successfully in region "%s"', bucket_name, location)
+            return True
 
         except ClientError as e:
-            logger.error(f'Create Bucket "{bucket_name}" failed: {e.response["Error"]}')
+            logger.error('Create Bucket "%s" failed: %r', bucket_name, e.response.get("Error"))
+            return False
 
-    async def delete_bucket(self, bucket_name: str):
+    async def delete_bucket(self, bucket_name: str) -> bool:
         try:
             async with self.create_client() as s3:
                 await s3.delete_bucket(Bucket=bucket_name)
 
-            logger.info(f'Bucket "{bucket_name}" deleted successfully')
+            logger.info('Bucket "%s" deleted successfully', bucket_name)
+            return True
 
         except ClientError as e:
-            logger.error(f'Delete Bucket "{bucket_name}" failed: {e.response["Error"]}')
+            logger.error('Delete Bucket "%s" failed: %r', bucket_name, e.response.get("Error"))
+            return False
 
     async def upload_file(
         self,
         bucket_name: str,
         object_name: str,
         file_path: str | Path,
-    ):
+    ) -> bool:
         try:
             async with self.create_client() as s3:
                 with open(file_path, "rb") as f:
@@ -98,17 +102,19 @@ class AioBotoClient(BaseObjectStorageClient):
                         Fileobj=f,
                     )
 
-            logger.info(f'Upload "{object_name}" file "{file_path}" to bucket "{bucket_name}" succeeded')
+            logger.info('Upload "%s" file "%s" to bucket "%s" succeeded', object_name, file_path, bucket_name)
+            return True
 
         except ClientError as e:
-            logger.error(f'Upload "{object_name}" failed: {e.response["Error"]}')
+            logger.error('Upload "%s" failed: %r', object_name, e.response.get("Error"))
+            return False
 
     async def download_file(
         self,
         bucket_name: str,
         object_name: str,
         file_path: str | Path,
-    ):
+    ) -> bool:
         try:
             async with self.create_client() as s3:
                 with open(file_path, "wb") as f:
@@ -118,12 +124,14 @@ class AioBotoClient(BaseObjectStorageClient):
                         Fileobj=f,
                     )
 
-            logger.info(f'Download "{object_name}" from bucket "{bucket_name}" saved to "{file_path}"')
+            logger.info('Download "%s" from bucket "%s" saved to "%s"', object_name, bucket_name, file_path)
+            return True
 
         except ClientError as e:
-            logger.error(f'Download "{object_name}" failed: {e.response["Error"]}')
+            logger.error('Download "%s" failed: %r', object_name, e.response.get("Error"))
+            return False
 
-    async def delete_object(self, bucket_name: str, object_name: str):
+    async def delete_object(self, bucket_name: str, object_name: str) -> bool:
         try:
             async with self.create_client() as s3:
                 await s3.delete_object(
@@ -131,10 +139,12 @@ class AioBotoClient(BaseObjectStorageClient):
                     Key=object_name,
                 )
 
-            logger.info(f'Delete file "{object_name}" in bucket "{bucket_name}" succeeded')
+            logger.info('Delete file "%s" in bucket "%s" succeeded', object_name, bucket_name)
+            return True
 
         except ClientError as e:
-            logger.error(f'Delete file "{object_name}" failed: {e.response["Error"]}')
+            logger.error('Delete file "%s" failed: %r', object_name, e.response.get("Error"))
+            return False
 
     async def list_objects(
         self,
@@ -154,10 +164,10 @@ class AioBotoClient(BaseObjectStorageClient):
             for obj in contents:
                 logger.info(json.dumps(obj, indent=2, default=str))
 
-            logger.info(f'Successfully listed {len(contents)} objects in "{bucket_name}".')
+            logger.info('Successfully listed %d objects in "%s".', len(contents), bucket_name)
 
             return contents
 
         except ClientError as e:
-            logger.error(f'List objects in "{bucket_name}" failed: {e.response["Error"]}')
+            logger.error('List objects in "%s" failed: %r', bucket_name, e.response.get("Error"))
             return None

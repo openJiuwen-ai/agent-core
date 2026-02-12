@@ -34,8 +34,9 @@ def client(mock_s3_client, mock_env):
 
 @pytest.mark.asyncio
 async def test_create_bucket_success(client, mock_s3_client):
-    await client.create_bucket("test-bucket", "ap-southeast-1")
+    result = await client.create_bucket("test-bucket", "ap-southeast-1")
 
+    assert result is True
     mock_s3_client.create_bucket.assert_awaited_once_with(
         Bucket="test-bucket",
         CreateBucketConfiguration={"LocationConstraint": "ap-southeast-1"},
@@ -50,11 +51,12 @@ async def test_create_bucket_error(client, mock_s3_client, caplog):
     )
 
     with caplog.at_level("ERROR"):
-        await client.create_bucket(
+        result = await client.create_bucket(
             bucket_name="test-bucket",
             location="ap-southeast-1",
         )
 
+    assert result is False
     # create was attempted
     mock_s3_client.create_bucket.assert_awaited_once_with(
         Bucket="test-bucket",
@@ -62,16 +64,14 @@ async def test_create_bucket_error(client, mock_s3_client, caplog):
     )
 
     # error was logged
-    assert any(
-        'Create Bucket "test-bucket" failed' in record.message
-        for record in caplog.records
-    )
+    assert any('Create Bucket "test-bucket" failed' in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_delete_bucket_success(client, mock_s3_client):
-    await client.delete_bucket("test-bucket")
+    result = await client.delete_bucket("test-bucket")
 
+    assert result is True
     mock_s3_client.delete_bucket.assert_awaited_once_with(Bucket="test-bucket")
 
 
@@ -83,16 +83,14 @@ async def test_delete_bucket_error(client, mock_s3_client, caplog):
     )
 
     with caplog.at_level("ERROR"):
-        await client.delete_bucket("test-bucket")
+        result = await client.delete_bucket("test-bucket")
 
+    assert result is False
     # delete was attempted
     mock_s3_client.delete_bucket.assert_awaited_once_with(Bucket="test-bucket")
 
     # error was logged
-    assert any(
-        'Delete Bucket "test-bucket" failed' in record.message
-        for record in caplog.records
-    )
+    assert any('Delete Bucket "test-bucket" failed' in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -100,12 +98,13 @@ async def test_upload_file_success(client, mock_s3_client, tmp_path):
     file_path = tmp_path / "test.txt"
     file_path.write_text("hello")
 
-    await client.upload_file(
+    result = await client.upload_file(
         bucket_name="bucket",
         object_name="obj",
         file_path=file_path,
     )
 
+    assert result is True
     mock_s3_client.upload_fileobj.assert_awaited_once()
 
 
@@ -120,12 +119,13 @@ async def test_upload_file_error(client, mock_s3_client, tmp_path, caplog):
     )
 
     with caplog.at_level("ERROR"):
-        await client.upload_file(
+        result = await client.upload_file(
             bucket_name="bucket",
             object_name="obj",
             file_path=file_path,
         )
 
+    assert result is False
     # upload was attempted
     mock_s3_client.upload_fileobj.assert_awaited_once()
 
@@ -143,16 +143,41 @@ async def test_download_file_success(client, mock_s3_client, tmp_path):
 
     mock_s3_client.download_fileobj.side_effect = mock_download_fileobj
 
-    await client.download_file(
+    result = await client.download_file(
         bucket_name="bucket",
         object_name="obj",
         file_path=file_path,
     )
 
+    assert result is True
     mock_s3_client.download_fileobj.assert_awaited_once()
 
     assert os.path.isfile(file_path)
     assert os.path.getsize(file_path) > 0
+
+
+@pytest.mark.asyncio
+async def test_download_file_error(client, mock_s3_client, tmp_path, caplog):
+    file_path = tmp_path / "out.txt"
+
+    mock_s3_client.download_fileobj.side_effect = ClientError(
+        {"Error": {"Code": "Error", "Message": "download failed"}},
+        "DownloadFile",
+    )
+
+    with caplog.at_level("ERROR"):
+        result = await client.download_file(
+            bucket_name="bucket",
+            object_name="obj",
+            file_path=file_path,
+        )
+
+    assert result is False
+    # download was attempted
+    mock_s3_client.download_fileobj.assert_awaited_once()
+
+    # error was logged
+    assert any('Download "obj" failed' in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -163,11 +188,12 @@ async def test_delete_object_error(client, mock_s3_client, caplog):
     )
 
     with caplog.at_level("ERROR"):
-        await client.delete_object(
+        result = await client.delete_object(
             bucket_name="bucket",
             object_name="obj",
         )
 
+    assert result is False
     # delete was attempted
     mock_s3_client.delete_object.assert_awaited_once_with(
         Bucket="bucket",
@@ -175,15 +201,14 @@ async def test_delete_object_error(client, mock_s3_client, caplog):
     )
 
     # error was logged
-    assert any(
-        'Delete file "obj" failed' in record.message for record in caplog.records
-    )
+    assert any('Delete file "obj" failed' in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_delete_object_success(client, mock_s3_client):
-    await client.delete_object("bucket", "obj")
+    result = await client.delete_object("bucket", "obj")
 
+    assert result is True
     mock_s3_client.delete_object.assert_awaited_once_with(
         Bucket="bucket",
         Key="obj",
