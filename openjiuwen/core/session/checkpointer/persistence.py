@@ -916,7 +916,7 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
                 kv_store = DbBasedKVStore(engine)
         elif db_type == "shelve":
             if db_path.endswith(".db"):
-                db_path.removesuffix(".db")
+                db_path = db_path.removesuffix(".db")
             kv_store = ShelveStore(db_path)
         else:
             raise build_error(StatusCode.CHECKPOINTER_CONFIG_ERROR, reason=f"db type[{db_type}] is not supported")
