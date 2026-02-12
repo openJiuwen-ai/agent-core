@@ -30,7 +30,6 @@ from openjiuwen.core.retrieval.common.triple_memory import TripleMemory
 # Embedding related
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.retrieval.embedding.base import Embedding
-from openjiuwen.core.retrieval.embedding.ollama_embedding import OllamaEmbedding
 
 # Indexer related
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
@@ -132,7 +131,6 @@ _NON_LAZY_ATTRIBUTES = [
     # Embedding / Reranker / Vector Store / Indexer classes
     "Embedding",
     "APIEmbedding",
-    "OllamaEmbedding",
     "Reranker",
     "VectorStore",
     "Indexer",

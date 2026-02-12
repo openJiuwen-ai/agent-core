@@ -25,7 +25,6 @@
 | [MilvusVectorStore](./retrieval/vector_store/milvus_store.md)| Milvus vector store implementation.     |
 | [Embedding](./retrieval/embedding/base.md)                     | Embedding model abstract base class.       |
 | [APIEmbedding](./retrieval/embedding/api_embedding.md)        | API embedding model implementation.        |
-| [OllamaEmbedding](./retrieval/embedding/ollama_embedding.md)  | Ollama embedding model implementation.     |
 | [OpenAIEmbedding](./retrieval/embedding/openai_embedding.md) | OpenAI embedding model implementation.     |
 | [VLLMEmbedding](./retrieval/embedding/vllm_embedding.md)      | vLLM embedding model implementation.        |
 | [Reranker](./retrieval/reranker/base.md)                       | Reranker abstract base class.       |

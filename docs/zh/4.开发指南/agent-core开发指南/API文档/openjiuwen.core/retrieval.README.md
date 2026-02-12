@@ -25,7 +25,6 @@
 | [MilvusVectorStore](./retrieval/vector_store/milvus_store.md)| Milvus向量存储实现。     |
 | [Embedding](./retrieval/embedding/base.md)                     | 嵌入模型抽象基类。       |
 | [APIEmbedding](./retrieval/embedding/api_embedding.md)        | API嵌入模型实现。        |
-| [OllamaEmbedding](./retrieval/embedding/ollama_embedding.md)  | Ollama嵌入模型实现。     |
 | [OpenAIEmbedding](./retrieval/embedding/openai_embedding.md) | OpenAI嵌入模型实现。     |
 | [VLLMEmbedding](./retrieval/embedding/vllm_embedding.md)      | vLLM嵌入模型实现。        |
 | [Reranker](./retrieval/reranker/base.md)                       | 重排序器抽象基类。       |
