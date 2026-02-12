@@ -156,7 +156,7 @@ class SessionModelContext(ModelContext):
                 error_msg="dialogue round should be larger than 0"
             )
 
-        system_messages = system_messages or []
+        system_messages = (system_messages or [])[:]
         if self._enable_reload:
             system_messages.append(SystemMessage(content=_RELOADER_SYSTEM_PROMPT))
 

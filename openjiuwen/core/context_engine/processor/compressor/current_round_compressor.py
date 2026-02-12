@@ -23,23 +23,35 @@ Your sole task: compress the conversation history below into **≤ 500 tokens** 
 
 ---
 
-📌 Rules (mandatory):
+📌 Input Format Explanation:
+Each message follows the format: "role:<role_type>, content:<actual_content>"
+- role=assistant: The actual content is the AI's response/answer
+- role=tool: The actual content is the result of a tool execution
 
-2. Output requirements:
-   - Use natural language; preserve business data structures (categories, differences, features).
-   - Keep **all task-relevant specific points** (e.g., "AI Agent will execute tasks more autonomously").
-   - Do not omit any content that answers sub-questions.
-   - If tool calls occurred, prefix the final text with: "Through <tool_name> tool, obtained: <compressed_text>".
+Your task is to:
+1. Identify the actual content within each message (ignore the "role:" prefix)
+2. Compress and summarize the actual content only
+
+---
+
+📌 Compression Rules (mandatory):
+- Use natural language; preserve business data structures (categories, differences, features)
+- Keep **all task-relevant specific points** 
+- Do not omit any content that answers sub-questions
+- For assistant messages: Preserve the key information, conclusions, decisions, and answers
+- For tool messages: Preserve the tool name, input parameters, and the result/output
 
 ---
 
 📌 Strict output format:
-- Valid JSON wrapped in ```json```:
+- Valid JSON wrapped in ```json``` code block:
 ```json
 {
     "summary": "<refined_text>"
 }
 ```
+- The <refined_text> should be in natural language, NOT include any JSON syntax or markdown
+- Output MUST be exactly in the format above, no extra text outside the JSON
 """
 
 
@@ -107,13 +119,18 @@ class CurrentRoundCompressor(ContextProcessor):
     ) -> Tuple[ContextEvent | None, List[BaseMessage]]:
         context_messages = context.get_messages() + messages_to_add
         last_user_idx = await self.get_compress_idx(context_messages)
-        end_idx = len(context_messages) - 1
         if last_user_idx == -1:
             return None, messages_to_add
+        if self._messages_to_keep:
+            messages = context_messages[:-self._messages_to_keep]
+        else:
+            messages = context_messages
+        end_idx = len(messages) - 1
+
         event = ContextEvent(event_type=self.processor_type())
         if self._single_multi_config:
             compressed_context = await self.multi_compress(
-                context_messages,
+                messages,
                 last_user_idx,
                 end_idx,
                 context
@@ -127,7 +144,7 @@ class CurrentRoundCompressor(ContextProcessor):
         else:
             try:
                 compressed_context = await self.single_compress(
-                    context_messages,
+                    messages,
                     last_user_idx,
                     end_idx,
                     context
@@ -169,8 +186,7 @@ class CurrentRoundCompressor(ContextProcessor):
             return True
         return False
 
-    @staticmethod
-    async def get_compress_idx(messages: List[BaseMessage]) -> int:
+    async def get_compress_idx(self, messages: List[BaseMessage]) -> int:
         compressed_idx = -1
         for i in range(len(messages) - 1, 0, -1):
             if isinstance(messages[i], UserMessage):
@@ -180,6 +196,15 @@ class CurrentRoundCompressor(ContextProcessor):
             return -1
 
         if compressed_idx < 0:
+            return -1
+
+        keep_index = (
+            len(messages)
+            if not self._messages_to_keep
+            else len(messages) - self._messages_to_keep
+        )
+
+        if compressed_idx > keep_index:
             return -1
 
         return compressed_idx
@@ -197,8 +222,8 @@ class CurrentRoundCompressor(ContextProcessor):
             if isinstance(context_messages[end_idx], AssistantMessage):
                 if context_messages[end_idx].tool_calls:
                     end_idx = end_idx - 1
-                    if end_idx < start_idx:
-                        return None
+            if end_idx < start_idx:
+                return None
         messages_to_compress = context_messages[start_idx:end_idx]
         compressed_context = await self.compress(messages_to_compress, context)
         if compressed_context:
@@ -221,7 +246,7 @@ class CurrentRoundCompressor(ContextProcessor):
         start_idx = last_user_idx + 1
         end_idx = end_idx
         token_counter = context.token_counter()
-        for idx in range(start_idx, end_idx):
+        for idx in range(start_idx, end_idx + 1):
             msg = context_messages[idx]
 
             context_token = token_counter.count_messages([msg])
@@ -256,7 +281,7 @@ class CurrentRoundCompressor(ContextProcessor):
         if summary and isinstance(summary, dict):
             summary = summary.get("summary", "")
             offload_message = await self.offload_messages(
-                role="assistant",
+                role="user",
                 content=summary,
                 messages=messages_to_compress,
                 context=context

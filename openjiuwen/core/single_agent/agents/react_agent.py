@@ -251,8 +251,9 @@ class ReActAgentConfig(BaseModel):
     def configure_context_processors(
             self,
             processors: List[Tuple[str, BaseModel]]
-    ):
+    ) -> 'ReActAgentConfig':
         self.context_processors = processors
+        return self
 
 
 class ReActAgent(BaseAgent):
