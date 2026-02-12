@@ -219,7 +219,7 @@ The `End` component is the built-in end component of the openJiuwen workflow, de
   ```python
   from typing import AsyncIterator
   from openjiuwen.core.workflow import  WorkflowComponent, Input, Output
-  from openjiuwen.core.session import Session
+  from openjiuwen.core.workflow.components import Session
   from openjiuwen.core.context_engine import ModelContext
 
   class MockStreamCmp(WorkflowComponent):
@@ -320,7 +320,7 @@ The `End` component is the built-in end component of the openJiuwen workflow, de
    ```python
   from typing import AsyncIterator
   from openjiuwen.core.workflow import  WorkflowComponent, Input, Output
-  from openjiuwen.core.session import Session
+  from openjiuwen.core.workflow.components import Session
   from openjiuwen.core.context_engine import ModelContext
 
   class MockStreamCmp(WorkflowComponent):
@@ -924,7 +924,7 @@ from openjiuwen.core.common.exception.errors import ExecutionError
 from openjiuwen.core.workflow import ExpressionCondition
 from openjiuwen.core.workflow import WorkflowComponent
 from openjiuwen.core.workflow import Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.workflow import Workflow, WorkflowOutput
@@ -1074,7 +1074,7 @@ Create a loop body. Adding components within the loop body is consistent with ad
 ```python
 from openjiuwen.core.workflow import LoopGroup, LoopComponent, Input, Output
 from openjiuwen.core.workflow import WorkflowComponent
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.context_engine import ModelContext
 
 # Common node component that returns input value
@@ -1169,7 +1169,7 @@ Configure `loop_type` as "number" in `LoopComponent`, and specify the number of 
 ```python
 from openjiuwen.core.workflow import LoopGroup, Input, Output
 from openjiuwen.core.workflow import WorkflowComponent
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.context_engine import ModelContext
 
 # Add 3 workflow components to LoopGroup, each component input is the current loop index
@@ -1253,7 +1253,7 @@ import asyncio
 from openjiuwen.core.workflow import  LoopGroup
 from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import  WorkflowComponent, Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.context_engine import ModelContext
 
 # 简单的加法组件，将输入值加10
@@ -1373,7 +1373,7 @@ Create the loop body, registering custom components, branch components, variable
 from openjiuwen.core.workflow import  LoopGroup, BranchComponent
 from openjiuwen.core.workflow import LoopSetVariableComponent, LoopBreakComponent
 from openjiuwen.core.workflow import  WorkflowComponent, Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.context_engine import ModelContext
 
 # Create LoopGroup
@@ -1488,7 +1488,7 @@ First, define the `CustomComponent` component:
 
 ```python
 from openjiuwen.core.workflow import WorkflowComponent, Input, Output
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.context_engine import ModelContext
 
 class CustomComponent(WorkflowComponent):
