@@ -13,7 +13,14 @@ import os
 import unittest
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import ModelClientConfig, Model, UserMessage, ModelRequestConfig
+from openjiuwen.core.foundation.llm import (
+    ModelClientConfig,
+    Model,
+    UserMessage,
+    SystemMessage,
+    AssistantMessage,
+    ModelRequestConfig
+)
 from openjiuwen.core.foundation.llm.schema.generation_response import (
     ImageGenerationResponse,
     AudioGenerationResponse,
@@ -256,6 +263,80 @@ class TestDashScopeImageGeneration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("at most 3", str(context.exception))
         logger.info(f"Validation error caught as expected: {context.exception}")
 
+    async def test_generate_image_non_user_message_validation(self):
+        """Test validation error when messages are not UserMessage"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("qwen-image-max")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        # Use SystemMessage instead of UserMessage
+        messages = [
+            SystemMessage(content="生成一张图片")
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_image(messages=messages)
+
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_image_mixed_string_and_dict_content(self):
+        """Test image generation with mixed string and dict content in messages"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-image")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        # Messages with multiple text strings and dicts
+        messages = [
+            UserMessage(content="第一段文本描述"),
+            UserMessage(content="第二段文本描述"),
+            UserMessage(content=[
+                {"text": "带图片的文本1", "image": "https://cdn.wanx.aliyuncs.com/tmp/pressure/umbrella1.png"}
+            ]),
+            UserMessage(content=[
+                {"text": "带图片的文本2", "image": "https://img.alicdn.com/imgextra/i3/O1CN01SfG4J41UYn9WNt4X1"
+                                                   "_!!6000000002530-49-tps-1696-960.webp"}
+            ])
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_image(messages=messages)
+
+        logger.info(f"Validation error for mixed content: {context.exception}")
+
+    async def test_generate_image_extra_keys_in_dict_validation(self):
+        """Test validation when dict in messages contains extra keys"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-image")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        # Content with extra keys in dict
+        messages = [
+            UserMessage(content=[
+                {"text": "生成图片", "image": "https://cdn.wanx.aliyuncs.com/tmp/pressure/umbrella1.png",
+                 "extra_key": "extra_value", "another_key": 123}
+            ])
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_image(messages=messages)
+
+        logger.info(f"Validation error for extra keys: {context.exception}")
+
 
 class TestDashScopeSpeechGeneration(unittest.IsolatedAsyncioTestCase):
     """Test cases for DashScope generate_speech method"""
@@ -402,6 +483,73 @@ class TestDashScopeSpeechGeneration(unittest.IsolatedAsyncioTestCase):
             await model.generate_speech(messages=messages)
 
         self.assertIn("non-empty", str(context.exception))
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_speech_non_user_message_validation(self):
+        """Test validation error when messages are not UserMessage"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("qwen3-tts-flash")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        # Use AssistantMessage instead of UserMessage
+        messages = [
+            AssistantMessage(content="你好，我是通义千问语音合成服务。")
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_speech(messages=messages)
+
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_speech_invalid_voice_validation(self):
+        """Test validation error when voice is not in DASHSCOPE_VOICE"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("qwen3-tts-flash")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = [
+            UserMessage(content="这是一段测试文本")
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_speech(
+                messages=messages,
+                voice="InvalidVoiceName"  # Not in DASHSCOPE_VOICE
+            )
+
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_speech_invalid_language_type_validation(self):
+        """Test validation error when language_type is not in DASHSCOPE_LANGUAGE_TYPE"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("qwen3-tts-flash")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = [
+            UserMessage(content="这是一段测试文本")
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_speech(
+                messages=messages,
+                language_type="InvalidLanguage"  # Not in DASHSCOPE_LANGUAGE_TYPE
+            )
+
         logger.info(f"Validation error caught as expected: {context.exception}")
 
 
@@ -626,6 +774,76 @@ class TestDashScopeVideoGeneration(unittest.IsolatedAsyncioTestCase):
             await model.generate_video(messages=messages)
 
         self.assertIn("non-empty", str(context.exception))
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_video_non_user_message_validation(self):
+        """Test validation error when messages are not UserMessage"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-t2v")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        # Use SystemMessage instead of UserMessage
+        messages = [
+            SystemMessage(content="生成一个小白兔在草地上奔跑的视频")
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_video(messages=messages)
+
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_video_text_to_video_with_resolution_instead_of_size(self):
+        """Test validation when using resolution parameter for text-to-video (should use size)"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-t2v")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = [
+            UserMessage(content="夕阳下的海边，海浪轻轻拍打沙滩")
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_video(
+                messages=messages,
+                resolution="720P",  # Should use size instead for t2v
+                duration=5
+            )
+
+        logger.info(f"Validation error caught as expected: {context.exception}")
+
+    async def test_generate_video_image_to_video_with_size_instead_of_resolution(self):
+        """Test validation when using size parameter for image-to-video (should use resolution)"""
+        model_client_config = self._create_model_client_config()
+        model_config = self._create_model_config("wan2.6-i2v-flash")
+
+        model = Model(
+            model_config=model_config,
+            model_client_config=model_client_config
+        )
+
+        messages = [
+            UserMessage(content="让图片中的伞改成五颜六色的黑")
+        ]
+
+        from openjiuwen.core.common.exception.errors import ModelError
+        with self.assertRaises(ModelError) as context:
+            await model.generate_video(
+                messages=messages,
+                img_url="https://cdn.wanx.aliyuncs.com/tmp/pressure/umbrella1.png",
+                size="1280*720",  # Should use resolution instead for i2v
+                duration=5
+            )
+
         logger.info(f"Validation error caught as expected: {context.exception}")
 
 
