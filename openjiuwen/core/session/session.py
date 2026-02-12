@@ -78,3 +78,26 @@ class ProxySession(BaseSession):
 
     def checkpointer(self):
         return self._stub.checkpointer()
+
+
+class Session:
+    """
+    DEPRECATED.
+
+    `openjiuwen.core.session.session.Session` is deprecated and will be removed in a future release.
+
+    Please import `Session` from the corresponding module instead:
+    - openjiuwen.core.workflow.Session
+    - openjiuwen.core.workflow.components.Session
+    - openjiuwen.core.single_agent.Session
+    - openjiuwen.core.multi_agent.Session
+    """
+
+    def __init__(self):
+        import warnings
+        warnings.warn(
+            "`openjiuwen.core.session.Session` is deprecated and will be removed "
+            "in a future release. Use `openjiuwen.core.[module].Session` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )

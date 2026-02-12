@@ -46,6 +46,10 @@ from openjiuwen.core.session.utils import (
     NESTED_PATH_SPLIT,
 )
 
+from openjiuwen.core.session.session import Session
+
+deprecated = ["Session"]
+
 __all__ = [
     # session
     "BaseSession",
@@ -91,4 +95,4 @@ __all__ = [
     "extract_origin_key",
     "is_ref_path",
     "Transformer",
-]
+] + deprecated
