@@ -10,6 +10,7 @@ for persistent storage, supporting any KV store implementation (shelve, database
 
 import base64
 from abc import ABC
+from pathlib import Path
 from typing import (
     Any,
     Optional,
@@ -912,6 +913,9 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
             else:
                 if not db_path.endswith(".db"):
                     db_path = f"{db_path}.db"
+                # Ensure parent directory exists; SQLite cannot create it.
+                if db_path and not db_path.strip().startswith(":memory:"):
+                    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
                 engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
                 kv_store = DbBasedKVStore(engine)
         elif db_type == "shelve":
