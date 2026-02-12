@@ -29,7 +29,7 @@
 | [VLLMEmbedding](./retrieval/embedding/vllm_embedding.md)      | vLLM嵌入模型实现。        |
 | [Reranker](./retrieval/reranker/base.md)                       | 重排序器抽象基类。       |
 | [StandardReranker](./retrieval/reranker/standard_reranker.md) | 标准重排序器实现。       |
-| [ChatReranker](./retrieval/reranker/chat_reranker.md)         | 聊天重排序器实现。       |
+| [ChatReranker](./retrieval/reranker/chat_reranker.md)         | LLM重排序器实现。       |
 | [Indexer](./retrieval/indexing/indexer/base.md)               | 索引管理器抽象基类。     |
 | [ChromaIndexer](./retrieval/indexing/indexer/chroma_indexer.md)| ChromaDB索引管理器实现。 |
 | [MilvusIndexer](./retrieval/indexing/indexer/milvus_indexer.md)| Milvus索引管理器实现。   |
