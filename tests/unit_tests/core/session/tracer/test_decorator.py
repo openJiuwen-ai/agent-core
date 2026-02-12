@@ -265,8 +265,10 @@ class TestDecator:
 
         mock_agent_span = MagicMock()
         mock_session = MagicMock()
-        mock_session.tracer.return_value = mock_tracer
-        mock_session.span.return_value = mock_agent_span
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = mock_agent_span
 
         wrapped_tool = decorate_tool_with_trace(tool, mock_session)
         await wrapped_tool.invoke({"a": "a"}, context=3)
@@ -297,8 +299,10 @@ class TestDecator:
 
         mock_agent_span = MagicMock()
         mock_session = MagicMock()
-        mock_session.tracer.return_value = mock_tracer
-        mock_session.span.return_value = mock_agent_span
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = mock_agent_span
 
         wrapped_workflow = decorate_workflow_with_trace(workflow, mock_session)
 
@@ -336,8 +340,10 @@ class TestDecator:
 
         mock_agent_span = MagicMock()
         mock_session = MagicMock()
-        mock_session.tracer.return_value = mock_tracer
-        mock_session.span.return_value = mock_agent_span
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = mock_agent_span
 
         mocked_model = decorate_model_with_trace(model, mock_session)
 
