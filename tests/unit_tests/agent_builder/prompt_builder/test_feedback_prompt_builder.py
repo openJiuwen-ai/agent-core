@@ -9,9 +9,11 @@ import pytest
 
 from openjiuwen.core.foundation.llm import (
     ModelRequestConfig, ModelClientConfig, AssistantMessage, Model, BaseModelClient,
-    BaseMessage, BaseOutputParser, AssistantMessageChunk
+    BaseMessage, BaseOutputParser, AssistantMessageChunk, UserMessage
 )
 from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
+    AudioGenerationResponse
 from openjiuwen.core.foundation.tool import ToolInfo
 
 from openjiuwen.dev_tools.prompt_builder import FeedbackPromptBuilder
@@ -69,6 +71,51 @@ class MockModelClient(BaseModelClient):
     ) -> AsyncIterator[AssistantMessageChunk]:
         result = self._get_next_response()
         yield result
+
+    async def generate_image(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            size: Optional[str] = "1664*928",
+            negative_prompt: Optional[str] = None,
+            n: Optional[int] = 1,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            seed: int = 0,
+            **kwargs
+    ) -> ImageGenerationResponse:
+        pass
+
+    async def generate_video(
+            self,
+            messages: List[UserMessage],
+            *,
+            img_url: Optional[str] = None,
+            audio_url: Optional[str] = None,
+            model: Optional[str] = None,
+            size: Optional[str] = None,
+            resolution: Optional[str] = None,
+            duration: Optional[int] = 5,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            negative_prompt: Optional[str] = None,
+            seed: Optional[int] = None,
+            **kwargs
+    ) -> VideoGenerationResponse:
+        pass
+
+    async def generate_speech(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            voice: Optional[str] = "Cherry",
+            language_type: Optional[str] = "Auto",
+            **kwargs
+    ) -> AudioGenerationResponse:
+        pass
+
 
 _CLIENT_TYPE_REGISTRY["MocKFeedbackLLM"] = MockModelClient
 

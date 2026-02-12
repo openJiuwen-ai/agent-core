@@ -450,6 +450,7 @@ class StatusCode(Enum):
 
     # KnowledgeBase Retrieval - Vector Store 155400 - 155499
     RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND = (155400, "retrieval vector_store_path not found, reason: {error_msg}")
+    RETRIEVAL_VECTOR_STORE_QUERY_INVALID = (155400, "retrieval vector_store_query not valid, reason: {error_msg}")
 
     # KnowledgeBase Retrieval - Knowledge Base 155500 - 155599
     RETRIEVAL_KB_PARSER_NOT_FOUND = (155500, "retrieval kb_parser not found, reason: {error_msg}")
@@ -595,19 +596,9 @@ class StatusCode(Enum):
     # Foundation - Support Mcp Tool 185000 - 185999
 
     # Foundation - Store supporting 186000 - 186100
-    STORE_VECTOR_FIELD_DIM_INVALID = (186000, "dim of vector field is invalid, field={field}, dim={dim}")
-    STORE_VECTOR_FIELD_DIM_MISSING = (186001, "dim of vector field is missing, field={field}, dim={dim}")
-    STORE_VECTOR_PRIMARY_KEY_FIELD_DUPLICATED = (
-        186002,
-        "collection can have at most one primary key field, primary_field={primary_field}, field={field}"
-    )
-    STORE_VECTOR_FIELD_NAME_DUPLICATED = (186003, "field name already exists, field={field}")
-    STORE_VECTOR_COLLECTION_NOT_EXIST = (186004, "collection does not exist, collection_name={collection_name}")
-    STORE_VECTOR_SCHEMA_MISSING_PRIMARY_KEY = (
-        186005, "schema must contain a primary key field (is_primary=True)")
-    STORE_VECTOR_SCHEMA_MISSING_VECTOR_FIELD = (186006, "schema must contain at least one FLOAT_VECTOR field")
-    STORE_VECTOR_DOC_MISSING_PRIMARY_KEY = (186007, "document must have '{field}' field")
-    STORE_VECTOR_DOC_MISSING_VECTOR_FIELD = (186008, "document must have '{field}' field")
+    STORE_VECTOR_SCHEMA_INVALID = (186000, "store vector_schema is invalid, reason: {error_msg}")
+    STORE_VECTOR_DOC_INVALID = (186001, "store vector_doc is invalid, reason: {error_msg}")
+    STORE_VECTOR_COLLECTION_NOT_FOUND = (186002, "store vector_collection not found, collection_name={collection_name}")
 
     # Foundation - Common Utility 188000 - 188999
     COMMON_SSL_CONTEXT_INIT_FAILED = (188000, "common ssl_context initialization failed, reason: {error_msg}")
@@ -620,6 +611,14 @@ class StatusCode(Enum):
     # Foundation - Schema 189000 - 189999
     SCHEMA_VALIDATE_INVALID = (189001, "validate data with schema failed, error='{reason}', data={data}")
     SCHEMA_FORMAT_INVALID = (189002, "format data with schema failed, error='{reason}', data={data}")
+
+    # =========================
+    # Security / Guardrail 190000 - 190999
+    # =========================
+
+    GUARDRAIL_BLOCKED = (
+        190000,
+        "guardrail blocked: risk_type='{risk_type}', risk_level='{risk_level}', event='{event}'")
 
     # =========================
     # SysOperation 199000–199999

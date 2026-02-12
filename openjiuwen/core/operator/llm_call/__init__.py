@@ -1,8 +1,14 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+"""
+LLM invocation operators: LLMCallOperator with prompt tunables.
 
-from openjiuwen.core.operator.llm_call.base import LLMCall
+LLMCall: Backward compatible alias for LLMCallOperator.
+"""
+
+from openjiuwen.core.operator.llm_call.base import LLMCallOperator, LLMCall
 
 __all__ = [
-    "LLMCall",
+    "LLMCallOperator",
+    "LLMCall",  # backward compatible alias
 ]

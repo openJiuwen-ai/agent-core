@@ -17,7 +17,7 @@ from openjiuwen.core.memory.manage.mem_model.memory_unit import UserProfileUnit,
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
-from openjiuwen.core.foundation.store.in_memory_kv_store import InMemoryKVStore
+from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
 
 
 class ContextStoreColumnType(StrEnum):

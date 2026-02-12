@@ -6,11 +6,11 @@ Sparse Retriever Implementation
 Sparse retriever based on BM25.
 """
 
-from typing import Any, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
@@ -21,7 +21,7 @@ class SparseRetriever(Retriever):
     def __init__(
         self,
         vector_store: VectorStore,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize sparse retriever
@@ -37,7 +37,7 @@ class SparseRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "sparse",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (sparse retrieval)
@@ -83,7 +83,7 @@ class SparseRetriever(Retriever):
         self,
         queries: List[str],
         top_k: int = 5,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[RetrievalResult]]:
         """Batch retrieval"""
         import asyncio
@@ -92,6 +92,39 @@ class SparseRetriever(Retriever):
         tasks = [self.retrieve(query, top_k=top_k, **kwargs) for query in queries]
         results = await asyncio.gather(*tasks)
         return results
+
+    async def retrieve_search_results(
+        self,
+        query: str,
+        top_k: int = 5,
+        mode: Literal["vector", "sparse", "hybrid"] = "sparse",
+        **kwargs,
+    ) -> List[SearchResult]:
+        """
+        Retrieve documents (sparse retrieval)
+
+        Args:
+            query: Query string
+            top_k: Number of results to return
+            mode: Retrieval mode (this retriever only supports sparse)
+            **kwargs: Additional parameters
+
+        Returns:
+            List of search results
+        """
+        if mode != "sparse":
+            raise build_error(
+                StatusCode.RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT,
+                error_msg=f"SparseRetriever only supports 'sparse' mode, got {mode}",
+            )
+
+        # Execute sparse search
+        search_results = await self.vector_store.sparse_search(
+            query_text=query,
+            top_k=top_k,
+            filters=None,
+        )
+        return search_results
 
     async def close(self) -> None:
         """Close the retriever"""

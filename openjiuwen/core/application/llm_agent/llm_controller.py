@@ -18,7 +18,7 @@ from openjiuwen.core.common.constants.enums import TaskType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.json_utils import JsonUtils
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.common.constants import constant as const
@@ -261,7 +261,7 @@ class LLMController(BaseController):
         if output and len(output) > 0:
             if output[0].type in ("plugin_final", "workflow_final"):
                 temp_event = Event.create_task_completed(
-                    conversation_id=session.session_id(),
+                    conversation_id=session.get_session_id(),
                     task_id=task.task_id,
                     task_result=task.result,
                     workflow_id=workflow_id,
@@ -295,7 +295,7 @@ class LLMController(BaseController):
         """
         # Create temporary Event for LLM reasoning (maintain compatibility)
         temp_event = Event.create_task_completed(
-            conversation_id=session.session_id(),
+            conversation_id=session.get_session_id(),
             task_id=task.task_id,
             task_result=task.result,
             workflow_id=workflow_id,
@@ -363,7 +363,7 @@ class LLMController(BaseController):
             tool_call_id=interruption_state.task.task_id
         )
         agent_context = self._context_engine.get_context(
-            session_id=interruption_state.session.session_id()
+            session_id=interruption_state.session.get_session_id()
         )
         await agent_context.add_messages(mock_tool_msg)
 
@@ -399,7 +399,7 @@ class LLMController(BaseController):
             content=error_content,
             tool_call_id=task.task_id
         )
-        agent_context = self._context_engine.get_context(session_id=session.session_id())
+        agent_context = self._context_engine.get_context(session_id=session.get_session_id())
         await agent_context.add_messages(mock_tool_msg)
         logger.info(f"Added tool_message for failed task: {task.task_id}")
 
@@ -623,7 +623,7 @@ class LLMController(BaseController):
         tool = None
         tool_id = self._find_plugin_id_by_name(task.input.target_name)
         if tool_id:
-            tool = Runner.resource_mgr.get_tool(tool_id)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=self.config.id)
         if not tool:
             logger.error("Tool not found")
             raise build_error(
@@ -667,7 +667,7 @@ class LLMController(BaseController):
         """Call LLM to generate plan - ReAct core method"""
         inputs = event.get_display_content()
         user_id = event.source.user_id
-        tools = await Runner.resource_mgr.get_tool_infos()
+        tools = await Runner.resource_mgr.get_tool_infos(tag=self.config.id)
         logger.info(f"Loaded {len(tools)} Tool(s) for generating plans")
         system_prompt_keywords = await self._get_system_prompt_keywords(inputs, user_id)
         chat_history = MessageUtils.get_chat_history(self._context_engine, session, self.config)
@@ -679,7 +679,7 @@ class LLMController(BaseController):
             logger.info(f"React llm inputs: {llm_inputs}")
 
         try:
-            model = await self._get_model(session=session.get_inner_session())
+            model = await self._get_model(session=session)
             llm_output = await self._call_llm_get_output(
                 model,
                 self.config.model.model_info.model_name,
@@ -687,14 +687,16 @@ class LLMController(BaseController):
                 tools,
                 session
             )
-            tasks = MessageHandlerUtils.parse_llm_output(llm_output, self.config)
-            # Add LLM output to CE conversation history
-            await MessageUtils.add_ai_message(llm_output, self._context_engine, session)
 
             if UserConfig.is_sensitive():
                 logger.info(f"React llm output")
             else:
                 logger.info(f"React llm output: {llm_output}")
+
+            tasks = MessageHandlerUtils.parse_llm_output(llm_output, self.config)
+            # Add LLM output to CE conversation history
+            await MessageUtils.add_ai_message(llm_output, self._context_engine, session)
+
         except Exception as e:
             logger.error(f"Failed to invoke model, {e}")
             if isinstance(e, BaseError):
@@ -973,7 +975,7 @@ class LLMController(BaseController):
             Workflow object, None if not found
         """
         try:
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.config.id)
             return workflow
         except Exception as e:
             logger.error(f"Failed to find workflow {workflow_id}: {e}")

@@ -335,6 +335,127 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
                 print(f"[PASS] da an nei rong jiao yan tong guo")
 
 
+class TestLLMAgentToolAndWorkflowTagIsolation(unittest.IsolatedAsyncioTestCase):
+    """Test tool/workflow tag isolation for LLMAgent.
+    Covers commit: fix(controller): use agent_id as tag to get tool
+
+    Core logic:
+    - LLMAgent registers tools via Runner.resource_mgr.add_tools(tools, tag=self.agent_config.id)
+    - LLMController retrieves tools via Runner.resource_mgr.get_tool_infos(tag=self.config.id)
+    - LLMAgent.add_workflows registers workflows via Runner.resource_mgr.add_workflow(..., tag=self.agent_config.id)
+    """
+
+    async def asyncSetUp(self):
+        await Runner.start()
+
+    async def asyncTearDown(self):
+        await Runner.stop()
+
+    @pytest.mark.asyncio
+    async def test_llm_agent_workflow_tagged_with_agent_id(self):
+        """After LLMAgent add_workflows, workflow is tagged with agent_config.id in resource_mgr"""
+        from openjiuwen.core.runner.resources_manager.base import GLOBAL
+
+        os.environ.setdefault("LLM_SSL_VERIFY", "false")
+
+        model_config = ModelConfig(
+            model_provider="OpenAI",
+            model_info=BaseModelInfo(
+                model="gpt-3.5-turbo",
+                api_base="mock_url",
+                api_key="mock_key",
+                temperature=0.7,
+            )
+        )
+
+        workflow_schema = WorkflowSchema(
+            id="test_wf",
+            name="test_wf",
+            version="1.0",
+            description="test workflow",
+            inputs={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+            }
+        )
+
+        agent_config = create_llm_agent_config(
+            agent_id="llm_agent_tag_test",
+            agent_version="0.0.1",
+            description="Tag Test",
+            plugins=[],
+            workflows=[workflow_schema],
+            model=model_config,
+            prompt_template=[{"role": "system", "content": "test"}]
+        )
+
+        # Build a simple workflow instance
+        flow = Workflow(card=WorkflowCard(id="test_wf", name="test_wf", version="1.0"))
+        start = Start()
+        end = End({"responseTemplate": "{{output}}"})
+        flow.set_start_comp("s", start, inputs_schema={"query": "${query}"})
+        flow.set_end_comp("e", end, inputs_schema={"output": "${s.query}"})
+        flow.add_connection("s", "e")
+
+        with patch(
+            "openjiuwen.core.memory.long_term_memory."
+            "LongTermMemory.set_scope_config",
+            return_value=MagicMock()
+        ):
+            agent = create_llm_agent(agent_config=agent_config, workflows=[flow], tools=[])
+
+        # Verify: workflow is tagged with agent_config.id, not GLOBAL
+        workflow_key = generate_workflow_key("test_wf", "1.0")
+        assert Runner.resource_mgr.resource_has_tag(workflow_key, "llm_agent_tag_test")
+        assert not Runner.resource_mgr.resource_has_tag(workflow_key, GLOBAL)
+
+    @pytest.mark.asyncio
+    async def test_llm_agent_two_agents_workflow_isolated(self):
+        """Workflows registered by two LLMAgents are isolated via tag query"""
+        os.environ.setdefault("LLM_SSL_VERIFY", "false")
+
+        def make_agent_with_workflow(agent_id, wf_id):
+            model_config = ModelConfig(
+                model_provider="OpenAI",
+                model_info=BaseModelInfo(
+                    model="gpt-3.5-turbo", api_base="mock", api_key="mock"
+                )
+            )
+            wf_schema = WorkflowSchema(
+                id=wf_id, name=wf_id, version="1.0", description="wf"
+            )
+            config = create_llm_agent_config(
+                agent_id=agent_id, agent_version="1.0", description="test",
+                plugins=[], workflows=[wf_schema], model=model_config,
+                prompt_template=[{"role": "system", "content": "test"}]
+            )
+            flow = Workflow(card=WorkflowCard(id=wf_id, name=wf_id, version="1.0"))
+            s, e = Start(), End({"responseTemplate": "ok"})
+            flow.set_start_comp("s", s, inputs_schema={"q": "${query}"})
+            flow.set_end_comp("e", e, inputs_schema={"r": "${s.q}"})
+            flow.add_connection("s", "e")
+            return config, flow
+
+        with patch(
+            "openjiuwen.core.memory.long_term_memory."
+            "LongTermMemory.set_scope_config",
+            return_value=MagicMock()
+        ):
+            cfg_a, flow_a = make_agent_with_workflow("agent_A", "wf_a")
+            create_llm_agent(agent_config=cfg_a, workflows=[flow_a], tools=[])
+
+            cfg_b, flow_b = make_agent_with_workflow("agent_B", "wf_b")
+            create_llm_agent(agent_config=cfg_b, workflows=[flow_b], tools=[])
+
+        # agent_A can only retrieve its own workflow via tag
+        wf_list_a = await Runner.resource_mgr.get_workflow(tag="agent_A")
+        assert len(wf_list_a) == 1
+
+        # agent_B can only retrieve its own workflow via tag
+        wf_list_b = await Runner.resource_mgr.get_workflow(tag="agent_B")
+        assert len(wf_list_b) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
 

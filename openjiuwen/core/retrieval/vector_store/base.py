@@ -12,6 +12,7 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.store.query import QueryExpr
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 
 
@@ -57,7 +58,7 @@ class VectorStore(ABC):
         self,
         data: dict | List[dict],
         batch_size: int | None = 128,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
         """Add vectors"""
 
@@ -66,8 +67,8 @@ class VectorStore(ABC):
         self,
         query_vector: List[float],
         top_k: int = 5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Vector search
@@ -87,8 +88,8 @@ class VectorStore(ABC):
         self,
         query_text: str,
         top_k: int = 5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Sparse search (BM25)
@@ -110,8 +111,8 @@ class VectorStore(ABC):
         query_vector: Optional[List[float]] = None,
         top_k: int = 5,
         alpha: float = 0.5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """
         Hybrid search (sparse retrieval + vector retrieval)
@@ -132,8 +133,8 @@ class VectorStore(ABC):
     async def delete(
         self,
         ids: Optional[List[str]] = None,
-        filter_expr: Optional[str] = None,
-        **kwargs: Any,
+        filter_expr: str | QueryExpr | None = None,
+        **kwargs,
     ) -> bool:
         """Delete vectors"""
 

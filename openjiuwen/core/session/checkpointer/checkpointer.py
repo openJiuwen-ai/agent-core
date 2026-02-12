@@ -46,6 +46,7 @@ class CheckpointerFactory:
 
     @classmethod
     async def create(cls, checkpointer_conf: CheckpointerConfig) -> Checkpointer:
+        import openjiuwen.core.session.checkpointer.persistence as _  # noqa: F401
         provider = cls._registry.get(checkpointer_conf.type)
         if provider is None:
             raise Exception()

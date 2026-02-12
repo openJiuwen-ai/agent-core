@@ -51,88 +51,6 @@ class BaseSession(ABC):
         pass
 
 
-class Session(ABC):
-    @abstractmethod
-    def executable_id(self) -> str:
-        pass
-
-    @abstractmethod
-    def session_id(self) -> str:
-        pass
-
-    def user_id(self) -> str:
-        return ''
-
-    @abstractmethod
-    def update_state(self, data: dict):
-        pass
-
-    @abstractmethod
-    def get_state(self, key: Union[str, list, dict] = None) -> Any:
-        pass
-
-    @abstractmethod
-    def update_global_state(self, data: dict):
-        pass
-
-    @abstractmethod
-    def get_global_state(self, key: Union[str, list, dict] = None) -> Any:
-        pass
-
-    @abstractmethod
-    def stream_writer(self) -> Optional[StreamWriter]:
-        pass
-
-    @abstractmethod
-    def custom_writer(self) -> Optional[StreamWriter]:
-        pass
-
-    @abstractmethod
-    async def write_stream(self, data: Union[dict, OutputSchema]):
-        pass
-
-    @abstractmethod
-    async def write_custom_stream(self, data: dict):
-        pass
-
-    @abstractmethod
-    async def trace(self, data: dict):
-        pass
-
-    @abstractmethod
-    async def trace_error(self, error: Exception):
-        pass
-
-    @abstractmethod
-    async def interact(self, value):
-        pass
-
-    @abstractmethod
-    def get_workflow_config(self, workflow_id):
-        pass
-
-    @abstractmethod
-    def get_agent_config(self):
-        pass
-
-    @abstractmethod
-    def get_env(self, key) -> Optional[Any]:
-        pass
-
-    @abstractmethod
-    def base(self) -> BaseSession:
-        pass
-
-    async def post_run(self):
-        pass
-
-    async def pre_run(self, **kwargs):
-        pass
-
-    async def release(self, session_id: str):
-        pass
-
-
 class ProxySession(BaseSession):
     def __init__(self, stub: BaseSession = None):
         self._stub = stub
@@ -160,3 +78,26 @@ class ProxySession(BaseSession):
 
     def checkpointer(self):
         return self._stub.checkpointer()
+
+
+class Session:
+    """
+    DEPRECATED.
+
+    `openjiuwen.core.session.session.Session` is deprecated and will be removed in a future release.
+
+    Please import `Session` from the corresponding module instead:
+    - openjiuwen.core.workflow.Session
+    - openjiuwen.core.workflow.components.Session
+    - openjiuwen.core.single_agent.Session
+    - openjiuwen.core.multi_agent.Session
+    """
+
+    def __init__(self):
+        import warnings
+        warnings.warn(
+            "`openjiuwen.core.session.Session` is deprecated and will be removed "
+            "in a future release. Use `openjiuwen.core.[module].Session` instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )

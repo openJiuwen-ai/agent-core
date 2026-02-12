@@ -9,7 +9,7 @@ from pydantic import ValidationError, Field, BaseModel
 
 from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import workflow_logger, LogEventType
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
@@ -390,6 +390,7 @@ class LLMCompConfig(ComponentConfig):
     response_format: Dict[str, Any] = field(default_factory=dict)
     output_config: Dict[str, Any] = field(default_factory=dict)
     enable_history: bool = False
+    cache_stream: bool = False
 
 
 class ResponseFormatConfig(BaseModel):
@@ -402,6 +403,33 @@ class OutputParamConfig(BaseModel):
     param_required: bool = Field(default=False, alias="required")
 
 
+class LLMExecutableState:
+    """State maintained by LLMExecutable for caching stream results"""
+    
+    def __init__(self):
+        self.final_result: Dict[str, Any] = {}
+        self._accumulated_content: str = ""
+    
+    def accumulate_content(self, content: str):
+        """Accumulate stream content chunks"""
+        self._accumulated_content += content
+    
+    def build_final_result(self, response_format: Dict[str, Any], output_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Build final result from accumulated content"""
+        if not self._accumulated_content:
+            return {}
+        return OutputFormatter.format_response(
+            self._accumulated_content,
+            response_format,
+            output_config
+        )
+    
+    def clear(self):
+        """Clear state"""
+        self.final_result = {}
+        self._accumulated_content = ""
+
+
 class LLMExecutable(ComponentExecutable):
     def __init__(self, component_config: LLMCompConfig):
         super().__init__()
@@ -411,45 +439,42 @@ class LLMExecutable(ComponentExecutable):
         self._initialized: bool = False
         self._session = None
         self._context = None
+        self._state = LLMExecutableState()
 
     @property
     def config(self) -> LLMCompConfig:
         return self._config
 
     @staticmethod
-    def _validate_template_content(template_content):
-        if len(template_content) >= 1:
-            try:
-                for element in template_content:
-                    if element.get(_ROLE, "") == "system":
-                        SystemMessage.model_validate(element)
-            except ValidationError as e:
-                raise build_error(
-                    StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
-                    error_msg="system message is invalid",
-                    cause=e
-                ) from e
-
-            if_contain_user_message = False
+    def _validate_template(template_content, system_prompt_template, user_prompt_template):
+        if system_prompt_template or user_prompt_template or not template_content:
+            return
+        try:
             for element in template_content:
-                if element.get(_ROLE, "") == "user":
-                    UserMessage.model_validate(element)
-                    if_contain_user_message = True
-                if if_contain_user_message and element.get(_ROLE, "") == "system":
+                if element.get(_ROLE, "") == "system":
                     SystemMessage.model_validate(element)
-                    raise build_error(
-                        StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
-                        error_msg="system message must be before user message"
-                    )
-            if not if_contain_user_message:
-                raise build_error(
-                    StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
-                    error_msg="user message is required"
-                )
-        else:
+        except ValidationError as e:
             raise build_error(
                 StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
-                error_msg="template content is empty"
+                error_msg="system message is invalid",
+                cause=e
+            ) from e
+
+        if_contain_user_message = False
+        for element in template_content:
+            if element.get(_ROLE, "") == "user":
+                UserMessage.model_validate(element)
+                if_contain_user_message = True
+            if if_contain_user_message and element.get(_ROLE, "") == "system":
+                SystemMessage.model_validate(element)
+                raise build_error(
+                    StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
+                    error_msg="system message must be before user message"
+                )
+        if not if_contain_user_message:
+            raise build_error(
+                StatusCode.COMPONENT_LLM_TEMPLATE_CONFIG_ERROR,
+                error_msg="user message is required"
             )
 
     @staticmethod
@@ -506,10 +531,18 @@ class LLMExecutable(ComponentExecutable):
         self._set_session(session)
         self._set_context(context)
         model_inputs = await self._prepare_model_inputs(inputs)
-        if UserConfig.is_sensitive():
-            logger.info("[%s] model inputs", self._session.get_executable_id())
-        else:
-            logger.info("[%s] model inputs %s", self._session.get_executable_id(), model_inputs)
+        workflow_logger.info(
+            "LLM component invoke started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=self._session.get_executable_id(),
+            component_type_str="LLMComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "model_name": self._config.model_config.model_name if self._config.model_config else None,
+                "has_inputs": bool(model_inputs),
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
         response = ""
         try:
             llm_response = await self._llm.invoke(messages=model_inputs)
@@ -528,15 +561,26 @@ class LLMExecutable(ComponentExecutable):
                     cause=e
                 ) from e
 
-        if UserConfig.is_sensitive():
-            logger.info("[%s] model outputs", self._session.get_executable_id())
-        else:
-            logger.info("[%s] model outputs %s", self._session.get_executable_id(), response)
+        workflow_logger.info(
+            "LLM component invoke completed",
+            event_type=LogEventType.WORKFLOW_COMPONENT_END,
+            component_id=self._session.get_executable_id(),
+            component_type_str="LLMComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "has_response": bool(response),
+                "response_length": len(response) if response else 0,
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
         return self._create_output(response)
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         self._set_session(session)
         self._set_context(context)
+        # Reset state for new stream
+        if self._config.cache_stream:
+            self._state.clear()
         response_format_type = self._config.response_format.get(_TYPE, "")
         try:
             if response_format_type == WorkflowLLMResponseType.JSON.value:
@@ -558,6 +602,16 @@ class LLMExecutable(ComponentExecutable):
                     error_msg=str(e),
                     cause=e
                 ) from e
+
+    def get_stream_output(self) -> Optional[dict]:
+        output = None
+        if self._config.cache_stream and self._session:
+            final_result = self._state.build_final_result(
+                self._config.response_format,
+                self._config.output_config
+            )
+            output = final_result if final_result else output
+        return output
 
     async def _initialize_if_needed(self):
         if not self._initialized:
@@ -592,12 +646,12 @@ class LLMExecutable(ComponentExecutable):
                 return [UserMessage(content="")]
             return PromptTemplate(content=[user_prompt_template]).format(inputs).to_messages()
 
-        template_content_list = self._config.template_content
-        if not template_content_list:
-            return []
+        template_content = self._config.template_content
+        if not template_content:
+            return [UserMessage(content="")]
 
         user_prompt = [
-            element for element in template_content_list
+            element for element in template_content
             if element.get(_ROLE, "") == MessageRole.USER.value
         ]
 
@@ -656,24 +710,48 @@ class LLMExecutable(ComponentExecutable):
 
     async def _invoke_for_json_format(self, inputs: Input) -> AsyncIterator[Output]:
         model_inputs = await self._prepare_model_inputs(inputs)
-        if UserConfig.is_sensitive():
-            logger.info("[%s] model inputs", self._session.get_executable_id())
-        else:
-            logger.info("[%s] model inputs %s", self._session.get_executable_id(), model_inputs)
+        workflow_logger.info(
+            "LLM component JSON format invoke started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=self._session.get_executable_id(),
+            component_type_str="LLMComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "response_format": "json",
+                "has_inputs": bool(model_inputs),
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
         llm_output = await self._llm.invoke(messages=model_inputs) # Add await if invoke is async
         llm_output_content = llm_output.content
-        yield self._create_output(llm_output_content)
+
+        if self._config.cache_stream:
+            self._state.accumulate_content(llm_output_content)
+
+        output = self._create_output(llm_output_content)
+        
+        yield output
 
     async def _stream_with_chunks(self, inputs: Input) -> AsyncIterator[Output]:
         model_inputs = await self._prepare_model_inputs(inputs)
-        async for chunk in self._llm.stream(messages=model_inputs):
-            content = WorkflowLLMUtils.extract_content(chunk)
-            if content:
-                formatted_res = OutputFormatter.format_response(content,
-                                                                self._config.response_format,
-                                                                self._config.output_config)
-                stream_out = formatted_res
-                yield stream_out
+        try:
+            async for chunk in self._llm.stream(messages=model_inputs):
+                content = WorkflowLLMUtils.extract_content(chunk)
+                if content:
+                    # Accumulate content if cache_stream is enabled
+                    if self._config.cache_stream:
+                        self._state.accumulate_content(content)
+                    
+                    formatted_res = OutputFormatter.format_response(content,
+                                                                    self._config.response_format,
+                                                                    self._config.output_config)
+                    stream_out = formatted_res
+                    yield stream_out
+        except Exception:
+            # Clear state on error
+            if self._config.cache_stream:
+                self._state.clear()
+            raise
 
     def _build_system_prompt(self, inputs: dict):
         system_prompt_template = getattr(self._config, "system_prompt_template", None)
@@ -693,7 +771,7 @@ class LLMExecutable(ComponentExecutable):
         return PromptTemplate(content=system_prompt).format(inputs).to_messages()
 
     def _validate_config(self, config: LLMCompConfig):
-        self._validate_template_content(config.template_content)
+        self._validate_template(config.template_content, config.system_prompt_template, config.user_prompt_template)
         self._validate_response_format(config.response_format, config.output_config)
         self._validate_output_config(config.output_config)
 

@@ -156,7 +156,7 @@ class SessionModelContext(ModelContext):
                 error_msg="dialogue round should be larger than 0"
             )
 
-        system_messages = system_messages or []
+        system_messages = (system_messages or [])[:]
         if self._enable_reload:
             system_messages.append(SystemMessage(content=_RELOADER_SYSTEM_PROMPT))
 
@@ -187,7 +187,7 @@ class SessionModelContext(ModelContext):
 
         self._validate_and_fix_context_window(window)
         if self._kv_cache_manager:
-            self._kv_cache_manager.release(window, **kwargs)
+            await self._kv_cache_manager.release(window, **kwargs)
         window.statistic = self._stat_context_window(window)
         return window
 
@@ -218,7 +218,7 @@ class SessionModelContext(ModelContext):
             )
 
             system_messages_size = min(len(system_messages), window_size)
-            system_messages = system_messages[:system_messages_size]
+            system_messages = system_messages[-system_messages_size:]
 
             context_messages_size = window_size - system_messages_size
             context_messages = (
@@ -241,6 +241,7 @@ class SessionModelContext(ModelContext):
         stat = ContextStats()
         self._stat_messages(stat, messages)
         self._stat_tools(stat, tools)
+        stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
         return stat
 
     def _stat_tools(self, stat: ContextStats, tools: List[ToolInfo]):
@@ -279,6 +280,7 @@ class SessionModelContext(ModelContext):
             stat.system_message_tokens +
             stat.tool_message_tokens
         )
+        stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
 
     @staticmethod
     def _validate_and_init_messages(messages: BaseMessage | List[BaseMessage]):
@@ -339,11 +341,9 @@ class SessionModelContext(ModelContext):
         }
 
     def load_state(self, state: Dict[str, Any]):
-        messages = state.get(self._context_id, {}).get("messages")
-        self._message_buffer.pop_back()
-        if messages:
-            self._validate_and_init_messages(messages)
-            self._message_buffer.add_back(messages)
+        messages = state.get(self._context_id, {}).get("messages", [])
+        self._validate_and_init_messages(messages)
+        self._message_buffer.rebulid(messages)
         offload_messages = state.get(self._context_id, {}).get("offload_messages")
         self._offload_message_buffer = OffloadMessageBuffer()
         if offload_messages:

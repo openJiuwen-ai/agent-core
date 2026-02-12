@@ -21,7 +21,7 @@ from openjiuwen.core.controller.schema import (
     TextDataFrame
 )
 from openjiuwen.core.controller.config import ControllerConfig
-from openjiuwen.core.session.internal.wrapper import TaskSession
+from openjiuwen.core.single_agent import Session
 
 
 class TestEventHandlerWithIntentRecognition(unittest.IsolatedAsyncioTestCase):
@@ -38,7 +38,7 @@ class TestEventHandlerWithIntentRecognition(unittest.IsolatedAsyncioTestCase):
         self.mock_task_scheduler = AsyncMock()
         self.mock_context_engine = AsyncMock()
         self.mock_ability_manager = MagicMock()
-        self.mock_session = AsyncMock(spec=TaskSession)
+        self.mock_session = AsyncMock(spec=Session)
         self.mock_session.get_session_id.return_value = "test_session_id"
         
         # Create handler instance

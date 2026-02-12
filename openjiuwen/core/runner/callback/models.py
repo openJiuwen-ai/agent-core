@@ -211,6 +211,7 @@ class CallbackInfo:
         retry_delay: Delay between retries in seconds
         timeout: Execution timeout in seconds
         created_at: Timestamp when callback was registered
+        wrapper: Optional wrapper function returned by decorator (for unregistering)
     """
     callback: Callable[..., Awaitable[Any]]
     priority: int
@@ -222,6 +223,7 @@ class CallbackInfo:
     retry_delay: float = 0.0
     timeout: Optional[float] = None
     created_at: float = field(default_factory=time.time)
+    wrapper: Optional[Callable[..., Awaitable[Any]]] = None
 
     def __hash__(self) -> int:
         """Hash based on callback identity.

@@ -10,9 +10,12 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
+    AudioGenerationResponse
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage,
     AssistantMessage,
+    UserMessage,
     UsageMetadata
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -196,7 +199,7 @@ class SiliconFlowModelClient(BaseModelClient):
                 assistant_message = await self._parse_response(data, output_parser)
 
                 return assistant_message
-                    
+
         except Exception as e:
             llm_logger.error(
                 "SiliconFlow API async invoke error.",
@@ -277,7 +280,7 @@ class SiliconFlowModelClient(BaseModelClient):
                             parsed_chunk = self._parse_stream_chunk(line)
                             if parsed_chunk:
                                 yield parsed_chunk
-                                    
+
         except Exception as e:
             llm_logger.error(
                 "SiliconFlow API async stream error.",
@@ -297,6 +300,50 @@ class SiliconFlowModelClient(BaseModelClient):
                 error_msg=f"siliconFlow API async stream error: {str(e)}"
             ) from e
 
+    async def generate_image(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            size: Optional[str] = "1664*928",
+            negative_prompt: Optional[str] = None,
+            n: Optional[int] = 1,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            seed: int = 0,
+            **kwargs
+    ) -> ImageGenerationResponse:
+        pass
+
+    async def generate_video(
+            self,
+            messages: List[UserMessage],
+            *,
+            img_url: Optional[str] = None,
+            audio_url: Optional[str] = None,
+            model: Optional[str] = None,
+            size: Optional[str] = None,
+            resolution: Optional[str] = None,
+            duration: Optional[int] = 5,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            negative_prompt: Optional[str] = None,
+            seed: Optional[int] = None,
+            **kwargs
+    ) -> VideoGenerationResponse:
+        pass
+
+    async def generate_speech(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            voice: Optional[str] = "Cherry",
+            language_type: Optional[str] = "Auto",
+            **kwargs
+    ) -> AudioGenerationResponse:
+        pass
+
     async def _astream_with_parser(
             self,
             response_stream,
@@ -312,7 +359,7 @@ class SiliconFlowModelClient(BaseModelClient):
         5. When parsing fails, parser_content is None, continue accumulating
         """
         accumulated_content = ""
-        
+
         async for line in response_stream.content:
             if line:
                 parsed_chunk = self._parse_stream_chunk(line)
@@ -320,7 +367,7 @@ class SiliconFlowModelClient(BaseModelClient):
                     # Accumulate content
                     if parsed_chunk.content:
                         accumulated_content += parsed_chunk.content
-                    
+
                     # Attempt to parse accumulated content every time
                     parser_content = None
                     if accumulated_content and output_parser:
@@ -340,7 +387,7 @@ class SiliconFlowModelClient(BaseModelClient):
                                 exception=str(e)
                             )
                             parser_content = None
-                    
+
                     # Create new chunk with original content and parser_content
                     chunk_with_parser = AssistantMessageChunk(
                         content=parsed_chunk.content,  # Keep original content increment unchanged
@@ -350,7 +397,7 @@ class SiliconFlowModelClient(BaseModelClient):
                         finish_reason=parsed_chunk.finish_reason,
                         parser_content=parser_content  # Has value when parsing succeeds, otherwise None
                     )
-                    
+
                     yield chunk_with_parser
 
     async def _parse_response(
@@ -374,13 +421,13 @@ class SiliconFlowModelClient(BaseModelClient):
         """
         choice = response.get("choices", [{}])[0]
         message = choice.get("message", {})
-        
+
         # Get content
         content = "" if message.get("content") is None else message.get("content")
-        
+
         # Get reasoning_content (if exists)
         reasoning_content = message.get("reasoning_content", None)
-        
+
         # Parse tool_calls
         tool_calls = []
         if message.get("tool_calls"):
@@ -394,7 +441,7 @@ class SiliconFlowModelClient(BaseModelClient):
                     index=tc.get("index", idx)
                 )
                 tool_calls.append(tool_call)
-        
+
         # Build UsageMetadata
         usage_metadata = None
         usage = response.get("usage")
@@ -403,13 +450,13 @@ class SiliconFlowModelClient(BaseModelClient):
             input_tokens = usage.get("prompt_tokens", 0) or 0
             output_tokens = usage.get("completion_tokens", 0) or 0
             total_tokens = usage.get("total_tokens", 0) or 0
-            
+
             # Extract cached token information
             cache_tokens = 0
             prompt_tokens_details = usage.get("prompt_tokens_details")
             if prompt_tokens_details:
                 cache_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
-            
+
             usage_metadata = UsageMetadata(
                 model_name=self.model_config.model_name,
                 input_tokens=input_tokens,
@@ -417,7 +464,7 @@ class SiliconFlowModelClient(BaseModelClient):
                 total_tokens=total_tokens,
                 cache_tokens=cache_tokens,
             )
-        
+
         # Apply output parser (only parse content field)
         parser_content = None
         llm_logger.info(
@@ -457,7 +504,7 @@ class SiliconFlowModelClient(BaseModelClient):
                     exception=str(e)
                 )
                 parser_content = None
-        
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
@@ -477,24 +524,24 @@ class SiliconFlowModelClient(BaseModelClient):
             AssistantMessageChunk or None
         """
         import json
-        
+
         # Handle SSE format: data: {...}
         if chunk.startswith(b"data: "):
             chunk = chunk[6:]
-        
+
         # Handle [DONE] marker
         if chunk.strip() == b"[DONE]":
             return None
-        
+
         try:
             data = json.loads(chunk.decode("utf-8"))
             choice = data.get("choices", [{}])[0]
             delta = choice.get("delta", {})
-            
+
             # Extract content
             content = delta.get("content", None) or ""
             reasoning_content = delta.get("reasoning_content", None)
-            
+
             # Parse tool_calls delta
             tool_calls = []
             tool_calls_delta = delta.get("tool_calls")
@@ -505,7 +552,7 @@ class SiliconFlowModelClient(BaseModelClient):
                     function_delta = tc_delta.get("function", {})
                     name_delta = function_delta.get("name", "")
                     args_delta = function_delta.get("arguments", "")
-                    
+
                     tool_call = ToolCall(
                         id=tool_call_id or "",
                         type="function",
@@ -514,7 +561,7 @@ class SiliconFlowModelClient(BaseModelClient):
                         index=index
                     )
                     tool_calls.append(tool_call)
-            
+
             # Build usage_metadata (usually only in the last chunk)
             usage_metadata = None
             usage = data.get("usage")
@@ -526,11 +573,11 @@ class SiliconFlowModelClient(BaseModelClient):
                     output_tokens=usage.get("completion_tokens", 0) or 0,
                     total_tokens=usage.get("total_tokens", 0) or 0,
                 )
-            
+
             # Skip empty chunks
             if not content and not reasoning_content and not tool_calls:
                 return None
-            
+
             return AssistantMessageChunk(
                 content=content,
                 reasoning_content=reasoning_content,
@@ -569,7 +616,7 @@ class SiliconFlowModelClient(BaseModelClient):
             tool_calls = msg.get("tool_calls")
             if not isinstance(tool_calls, list):
                 continue
-            
+
             cleaned = []
             for tc in tool_calls:
                 if not isinstance(tc, dict):

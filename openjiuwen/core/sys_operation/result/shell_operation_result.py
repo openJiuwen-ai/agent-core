@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 from typing import Optional, Literal, Dict, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from openjiuwen.core.sys_operation.result import BaseResult
 
@@ -16,8 +16,7 @@ class ExecuteCmdData(BaseModel):
     stdout: str = Field(default="", description="The command's standard output (stdout) stream")
     stderr: str = Field(default="", description="The command's standard error (stderr) stream")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ExecuteCmdChunkData(BaseModel):
@@ -29,8 +28,7 @@ class ExecuteCmdChunkData(BaseModel):
     exit_code: Optional[int] = Field(default=None, description="Command exit code")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Data for command")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ExecuteCmdResult(BaseResult[ExecuteCmdData]):

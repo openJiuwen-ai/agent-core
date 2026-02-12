@@ -14,7 +14,7 @@ class Processor(ABC):
     """Processor abstract base class, base class for all processors (Parser, Chunker, Extractor)"""
 
     @abstractmethod
-    async def process(self, *args: Any, **kwargs: Any) -> Any:
+    async def process(self, *args: Any, **kwargs) -> Any:
         """
         Process data (abstract method, must be implemented by subclasses)
 

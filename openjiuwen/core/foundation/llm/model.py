@@ -4,11 +4,17 @@ from typing import Union, List, Optional, AsyncIterator, Type, Dict
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage
+from openjiuwen.core.foundation.llm.model_clients.dashscope_model_client import DashScopeModelClient
+from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema.generation_response import (
+    ImageGenerationResponse,
+    AudioGenerationResponse,
+    VideoGenerationResponse
+)
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
@@ -16,6 +22,7 @@ from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client impor
 _CLIENT_TYPE_REGISTRY: Dict[str, Type[BaseModelClient]] = {
     "OpenAI": OpenAIModelClient,
     "SiliconFlow": SiliconFlowModelClient,
+    "DashScope": DashScopeModelClient,
 }
 
 
@@ -175,3 +182,124 @@ class Model:
                 **kwargs
         ):
             yield chunk
+
+    async def generate_image(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            size: Optional[str] = "1664*928",
+            negative_prompt: Optional[str] = None,
+            n: Optional[int] = 1,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            seed: int = 0,
+            **kwargs
+    ) -> ImageGenerationResponse:
+        """Generate image from text prompt (text-to-image or text+image-to-image)
+
+        Args:
+            messages: List of UserMessage containing text descriptions and optional image URLs
+            model: Model to use for generation
+            size: Size of the generated image (e.g., "1664*928", "1024*1024")
+            negative_prompt: Optional negative prompt to guide what not to generate
+            n: Number of images to generate
+            prompt_extend: Whether to automatically extend/enhance the prompt
+            watermark: Whether to add watermark to generated images
+            seed: Random seed for reproducible generation (0 for random)
+            **kwargs: Additional parameters
+
+        Returns:
+            ImageGenerationResponse: Generated image response
+        """
+        return await self._client.generate_image(
+            messages=messages,
+            model=model,
+            negative_prompt=negative_prompt,
+            size=size,
+            n=n,
+            prompt_extend=prompt_extend,
+            watermark=watermark,
+            seed=seed,
+            **kwargs
+        )
+
+    async def generate_speech(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            voice: Optional[str] = "Cherry",
+            language_type: Optional[str] = "Auto",
+            **kwargs
+    ) -> AudioGenerationResponse:
+        """Generate speech audio from text
+
+        Args:
+            messages: List of UserMessage containing text to convert to speech
+            model: Model to use for generation
+            voice: Voice to use for speech synthesis (required), refer to supported voices
+            language_type: Language type for synthesized audio, defaults to "Auto" for automatic detection
+            **kwargs: Additional parameters
+
+        Returns:
+            AudioGenerationResponse: Generated audio response
+        """
+        return await self._client.generate_speech(
+            messages=messages,
+            model=model,
+            voice=voice,
+            language_type=language_type,
+            **kwargs
+        )
+
+    async def generate_video(
+            self,
+            messages: List[UserMessage],
+            *,
+            img_url: Optional[str] = None,
+            audio_url: Optional[str] = None,
+            model: Optional[str] = None,
+            size: Optional[str] = None,
+            resolution: Optional[str] = None,
+            duration: Optional[int] = 5,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            negative_prompt: Optional[str] = None,
+            seed: Optional[int] = None,
+            **kwargs
+    ) -> VideoGenerationResponse:
+        """Generate video from text prompt (text-to-video or image-to-video)
+
+        Args:
+            messages: List of UserMessage containing text description of the video to generate
+            img_url: Optional URL/path of the first frame image for image-to-video generation.
+                     Supports: public URL, local file path (file:// prefix), or base64 encoded image
+            audio_url: Optional URL of audio to add to the video
+            model: Model to use for generation
+            size: Video size (e.g., "1280*720"). Use '*' as separator.
+            resolution: Video resolution (e.g., "720P", "1080P")
+            duration: Duration of the video in seconds (default: 5)
+            prompt_extend: Whether to automatically extend/enhance the prompt (default: True)
+            watermark: Whether to add watermark to generated video (default: False)
+            negative_prompt: Negative prompt to guide what not to generate
+            seed: Random seed for reproducible generation
+            **kwargs: Additional parameters
+
+        Returns:
+            VideoGenerationResponse: Generated video response
+        """
+        return await self._client.generate_video(
+            messages=messages,
+            img_url=img_url,
+            audio_url=audio_url,
+            model=model,
+            size=size,
+            resolution=resolution,
+            duration=duration,
+            prompt_extend=prompt_extend,
+            watermark=watermark,
+            negative_prompt=negative_prompt,
+            seed=seed,
+            **kwargs
+        )

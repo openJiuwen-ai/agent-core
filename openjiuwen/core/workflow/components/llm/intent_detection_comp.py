@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import workflow_logger, LogEventType
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
@@ -182,10 +182,18 @@ class IntentDetectionExecutable(ComponentExecutable):
         chat_history = self._get_chat_history_from_context(context)
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
         llm_output = await self._invoke_llm_and_get_result(current_inputs)
-        if UserConfig.is_sensitive():
-            logger.info(f"[%s] intent detection", self._session.get_executable_id())
-        else:
-            logger.info(f"[%s] intent detection output_inputs: %s", self._session.get_executable_id(), llm_output)
+        workflow_logger.info(
+            "Intent detection completed",
+            event_type=LogEventType.WORKFLOW_COMPONENT_END,
+            component_id=self._session.get_executable_id(),
+            component_type_str="IntentDetectionComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "has_output": bool(llm_output),
+                "output_length": len(llm_output) if llm_output else 0,
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
         intent_res = self._parse_detection_result(llm_output)
         return intent_res
 
@@ -287,16 +295,19 @@ class IntentDetectionExecutable(ComponentExecutable):
     async def _invoke_llm_and_get_result(self, current_inputs):
         """invoke llm and get result"""
         llm_inputs = self._default_config.intent_detection_template.format(current_inputs).to_messages()
-        if UserConfig.is_sensitive():
-            logger.info(f"[%s] intent detection", self._session.get_executable_id())
-        else:
-            logger.info(f"[%s] intent detection llm_inputs: %s", self._session.get_executable_id(), llm_inputs)
+        workflow_logger.info(
+            "Intent detection LLM invoke started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_id=self._session.get_executable_id(),
+            component_type_str="IntentDetectionComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "has_inputs": bool(llm_inputs),
+                "input_count": len(llm_inputs) if llm_inputs else 0,
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
         llm_output_content = ""
-
-        if UserConfig.is_sensitive():
-            logger.info("Invoke llm for intent detection")
-        else:
-            logger.info(f"Invoke llm for intent detection, inputs = {llm_inputs}")
 
         try:
             llm_output = await self._llm.invoke(messages=llm_inputs)
@@ -307,10 +318,18 @@ class IntentDetectionExecutable(ComponentExecutable):
                 error_msg="failed to invoke llm and get result",
                 cause=e
             ) from e
-        if UserConfig.is_sensitive():
-            logger.info("Success to invoke llm for intent detection")
-        else:
-            logger.info(f"Success to invoke llm for intent detection, outputs = {llm_output_content}")
+        workflow_logger.info(
+            "Intent detection LLM invoke completed",
+            event_type=LogEventType.WORKFLOW_COMPONENT_END,
+            component_id=self._session.get_executable_id(),
+            component_type_str="IntentDetectionComponent",
+            session_id=self._session.get_session_id(),
+            metadata={
+                "has_output": bool(llm_output_content),
+                "output_length": len(llm_output_content) if llm_output_content else 0,
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
 
 
         return llm_output_content

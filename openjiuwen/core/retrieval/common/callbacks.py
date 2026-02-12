@@ -11,7 +11,6 @@ import warnings
 from typing import Optional, Sequence
 
 import tqdm
-import tqdm.rich
 
 warnings.filterwarnings("ignore", category=tqdm.TqdmExperimentalWarning)
 
@@ -39,7 +38,14 @@ class TqdmCallback(BaseCallback):
 
     def __init__(self, seq: Sequence, use_rich: bool = False, desc: str = "Indexing", **kwargs) -> None:
         super().__init__(seq=seq, **kwargs)
-        tqdm_cls = tqdm.rich.tqdm if use_rich else tqdm.tqdm
+        if use_rich:
+            from tqdm import rich
+
+            tqdm_cls = rich.tqdm
+        else:
+            from tqdm import auto
+
+            tqdm_cls = auto.tqdm
         self.__length = len(seq)
         self.__progress_bar = tqdm_cls(total=self.__length, desc=desc, **kwargs)
 

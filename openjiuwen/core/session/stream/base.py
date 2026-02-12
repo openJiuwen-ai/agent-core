@@ -4,7 +4,7 @@
 from enum import Enum
 from typing import Dict, Any, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class StreamMode(Enum):
@@ -43,9 +43,8 @@ class CustomSchema(BaseModel):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-    class Config:
-        arbitrary_types_allowed = True
-        extra = "allow"
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
 
 
 StreamSchemas = Union[OutputSchema, CustomSchema, TraceSchema]

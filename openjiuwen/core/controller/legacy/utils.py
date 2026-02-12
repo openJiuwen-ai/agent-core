@@ -16,7 +16,7 @@ from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.foundation.llm import ModelConfig, BaseMessage, AssistantMessage, UserMessage, ToolMessage, \
     ModelClientConfig, ModelRequestConfig, Model
@@ -177,7 +177,7 @@ class MessageHandlerUtils:
 
     @staticmethod
     def should_add_user_message(query: str, context_engine: ContextEngine, session: Session) -> bool:
-        agent_context = context_engine.get_context(session_id=session.session_id())
+        agent_context = context_engine.get_context(session_id=session.get_session_id())
         last_message = agent_context.get_messages(size=1)
 
         if not last_message:
@@ -197,7 +197,7 @@ class MessageHandlerUtils:
     @staticmethod
     async def add_user_message(query: Any, context_engine: ContextEngine, session: Session):
         if MessageHandlerUtils.should_add_user_message(query, context_engine, session):
-            agent_context = context_engine.get_context(session_id=session.session_id())
+            agent_context = context_engine.get_context(session_id=session.get_session_id())
             user_message = UserMessage(content=query)
             await agent_context.add_messages(user_message)
             if UserConfig.is_sensitive():
@@ -208,13 +208,13 @@ class MessageHandlerUtils:
     @staticmethod
     async def add_ai_message(ai_message: AssistantMessage, context_engine: ContextEngine, session: Session):
         if ai_message:
-            agent_context = context_engine.get_context(session_id=session.session_id())
+            agent_context = context_engine.get_context(session_id=session.get_session_id())
             await agent_context.add_messages(ai_message)
 
     @staticmethod
     async def add_tool_result(event: Event, context_engine: ContextEngine, session: Session):
         if event:
-            agent_context = context_engine.get_context(session_id=session.session_id())
+            agent_context = context_engine.get_context(session_id=session.get_session_id())
             tool_result = event.content.task_result.output
             if isinstance(tool_result, OutputSchema):
                 payload = tool_result.payload
@@ -229,7 +229,7 @@ class MessageHandlerUtils:
 
     @staticmethod
     def get_chat_history(context_engine: ContextEngine, session: Session, config: AgentConfig) -> List[BaseMessage]:
-        agent_context = context_engine.get_context(session_id=session.session_id())
+        agent_context = context_engine.get_context(session_id=session.get_session_id())
         chat_history = agent_context.get_messages()
         max_rounds = config.constrain.reserved_max_chat_rounds
         return chat_history[-2 * max_rounds:]
@@ -261,7 +261,7 @@ class MessageHandlerUtils:
         """Add message to workflow chat history"""
         workflow_context = context_engine.get_context(
             context_id=workflow_id,
-            session_id=session.session_id()
+            session_id=session.get_session_id()
         )
         workflow_context.add_messages(message)
 
@@ -271,7 +271,7 @@ class ReasonerUtils:
     def get_chat_history(context_engine: ContextEngine, session: Session,
                          chat_history_max_turn: int) -> List[BaseMessage]:
         """Get history by max conversation rounds"""
-        agent_context = context_engine.get_context(session_id=session.session_id())
+        agent_context = context_engine.get_context(session_id=session.get_session_id())
         chat_history = agent_context.get_messages()
         return chat_history[-2 * chat_history_max_turn:]
 

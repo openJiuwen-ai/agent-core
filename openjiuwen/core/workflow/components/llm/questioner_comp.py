@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, ConfigDict, ValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import workflow_logger, LogEventType
 from openjiuwen.core.common.security.exception_utils import ExceptionUtils
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.workflow.components.base import ComponentConfig
@@ -491,10 +491,16 @@ class QuestionerDirectReplyHandler:
     async def _invoke_llm_for_extraction(self, llm_inputs: List[BaseMessage]):
         response = ""
 
-        if UserConfig.is_sensitive():
-            logger.info("Invoke llm for extraction")
-        else:
-            logger.info(f"Invoke llm for extraction, inputs = {llm_inputs}")
+        workflow_logger.info(
+            "Questioner LLM extraction started",
+            event_type=LogEventType.WORKFLOW_COMPONENT_START,
+            component_type_str="QuestionerComponent",
+            metadata={
+                "has_inputs": bool(llm_inputs),
+                "input_count": len(llm_inputs) if llm_inputs else 0,
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
 
         try:
             response = (await self._model.invoke(messages=llm_inputs)).content
@@ -505,10 +511,16 @@ class QuestionerDirectReplyHandler:
                 cause=e
             ) from e
 
-        if UserConfig.is_sensitive():
-            logger.info("Success to invoke llm for extraction")
-        else:
-            logger.info(f"Success to invoke llm for extraction, outputs = {response}")
+        workflow_logger.info(
+            "Questioner LLM extraction completed",
+            event_type=LogEventType.WORKFLOW_COMPONENT_END,
+            component_type_str="QuestionerComponent",
+            metadata={
+                "has_response": bool(response),
+                "response_length": len(response) if response else 0,
+                "sensitive_mode": UserConfig.is_sensitive()
+            }
+        )
 
         result = dict()
         try:
@@ -516,7 +528,12 @@ class QuestionerDirectReplyHandler:
             cleaned = re.sub(r"^\s*'''json\s*|\s*'''\s*$", '', cleaned, flags=re.IGNORECASE)
             result = json.loads(cleaned, strict=False)
         except json.JSONDecodeError as _:
-            logger.error(f"Failed to parse json from llm response")
+            workflow_logger.error(
+                "Questioner JSON parse failed",
+                event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,
+                component_type_str="QuestionerComponent",
+                metadata={"error": "Failed to parse JSON from LLM response"}
+            )
             return result
 
         if not isinstance(result, dict):
@@ -557,9 +574,15 @@ class QuestionerDirectReplyHandler:
                 validated_result[field_name] = converted_value
             else:
                 # Log warning and skip this field (treated as not extracted)
-                logger.warning(
-                    f"Field '{field_name}' failed type validation: "
-                    f"value={value}, expected_type={expected_type}"
+                workflow_logger.warning(
+                    "Questioner field validation failed",
+                    event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,
+                    component_type_str="QuestionerComponent",
+                    metadata={
+                        "field_name": field_name,
+                        "value": str(value) if not UserConfig.is_sensitive() else None,
+                        "expected_type": expected_type
+                    }
                 )
         
         return validated_result

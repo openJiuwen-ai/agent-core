@@ -4,8 +4,6 @@ from contextlib import AsyncExitStack
 from typing import Any, List, Optional, Dict, AsyncGenerator
 
 import httpx
-from mcp import ClientSession
-from mcp.client.sse import sse_client
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
@@ -37,6 +35,9 @@ class SseClient(McpClient):
             self._auth_provider = None
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
+        from mcp import ClientSession
+        from mcp.client.sse import sse_client
+        
         try:
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
             self._client = sse_client(self._server_path, timeout=actual_timeout, auth=self._auth_provider)

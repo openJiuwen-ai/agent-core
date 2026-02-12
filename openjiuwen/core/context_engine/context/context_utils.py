@@ -87,29 +87,22 @@ class ContextUtils:
         return formatted_content
 
     @staticmethod
-    def find_last_n_dialogue_round(
-            messages: List[BaseMessage],
-            n: int
-    ) -> int:
+    def find_all_dialogue_round(messages: List[BaseMessage]) -> List[List[Optional[int]]]:
         """
-        Find the starting index of the n-th conversation round from the end.
+        Build all dialogue round boundaries by scanning messages from end to start.
 
         A round is defined as: user message → next assistant message without tool_calls.
         Incomplete rounds (no final assistant) still count as one round.
 
         Args:
             messages: List of BaseMessage objects
-            n: Which round from the end (1 = last round, 2 = second-to-last, etc.)
 
         Returns:
-            Starting index of the target round in the messages list
-
-        Raises:
-            ValueError: If n <= 0 or fewer than n rounds exist
+            List of rounds, each round is [user_idx, assistant_idx].
+            assistant_idx may be None for incomplete rounds.
+            Order is from newest round to oldest (index 0 = last round).
         """
-        # Build round boundaries by scanning from end to start
-        # Each round: [user_idx, assistant_idx] (assistant_idx may be None for incomplete)
-        rounds: List[List[int]] = []
+        rounds: List[List[Optional[int]]] = []
         i = len(messages) - 1
 
         while i >= 0:
@@ -127,7 +120,7 @@ class ContextUtils:
                 has_tool_calls = (
                     msg.role == "assistant"
                     and hasattr(msg, "tool_calls")
-                    and not msg.tool_calls
+                    and msg.tool_calls
                 )
 
                 if not has_tool_calls:
@@ -156,7 +149,30 @@ class ContextUtils:
             rounds.append([user_idx, assistant_idx])
             i -= 1  # Continue to previous round
 
-        # Return start index of n-th round from end
+        return rounds
+
+    @staticmethod
+    def find_last_n_dialogue_round(
+            messages: List[BaseMessage],
+            n: int
+    ) -> int:
+        """
+        Find the starting index of the n-th conversation round from the end.
+
+        A round is defined as: user message → next assistant message without tool_calls.
+        Incomplete rounds (no final assistant) still count as one round.
+
+        Args:
+            messages: List of BaseMessage objects
+            n: Which round from the end (1 = last round, 2 = second-to-last, etc.)
+
+        Returns:
+            Starting index of the target round in the messages list
+
+        Raises:
+            ValueError: If n <= 0 or fewer than n rounds exist
+        """
+        rounds = ContextUtils.find_all_dialogue_round(messages)
         if not rounds:
             return -1
         target_round = rounds[min(n, len(rounds)) - 1]

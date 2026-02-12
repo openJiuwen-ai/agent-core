@@ -10,7 +10,7 @@ from openjiuwen.core.workflow import LoopGroup, LoopComponent
 from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.workflow import Workflow

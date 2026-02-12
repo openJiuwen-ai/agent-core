@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import (
@@ -18,7 +19,7 @@ from typing import (
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.base import (
     ExecutableGraph,
     Graph,
@@ -37,6 +38,7 @@ from openjiuwen.core.graph.pregel import (
     PregelConfig,
     START,
 )
+from openjiuwen.core.graph.pregel.constants import SESSION_ID
 from openjiuwen.core.graph.store import GraphStore
 from openjiuwen.core.graph.vertex import Vertex
 from openjiuwen.core.session import (
@@ -135,7 +137,17 @@ class PregelGraph(Graph):
         def after_step(loop):
             if self._session:
                 self._session.state().commit()
-            logger.debug(f"ns: {loop.config['ns']}, step: {loop.step}, active_nodes: {list(loop.active_nodes)}")
+            graph_logger.debug(
+                f"Finished to run graph super-step [{loop.step}]",
+                event_type=LogEventType.GRAPH_SUPER_STEP_END,
+                graph_id=loop.config['ns'],
+                session_id=loop.config.get(SESSION_ID),
+                metadata={
+                    "ns": loop.config['ns'],
+                    "step": loop.step,
+                    "active_nodes": list(loop.active_nodes)
+                }
+            )
 
         if self.pregel is None:
             self.checkpointer = session.checkpointer()
@@ -192,23 +204,35 @@ class CompiledGraph(ExecutableGraph):
             is_main = True
             config = PregelConfig(session_id=session_id, ns=workflow_id, recursion_limit=MAX_RECURSIVE_LIMIT)
 
-        if is_main:
-            await self._checkpointer.pre_workflow_execute(session, inputs)
-        if not isinstance(inputs, InteractiveInput):
-            session.state().commit_user_inputs(inputs)
-
-        result = None
-        exception = None
-
         try:
-            result = await self._pregel.run(config=config)
-        except Exception as e:
-            exception = e
+            if is_main:
+                await self._checkpointer.pre_workflow_execute(session, inputs)
+            if not isinstance(inputs, InteractiveInput):
+                session.state().commit_user_inputs(inputs)
 
-        if is_main:
-            await self._checkpointer.post_workflow_execute(session, result, exception)
-        elif exception is not None:
-            raise exception
+            result = None
+            exception = None
+
+            try:
+                result = await self._pregel.run(config=config)
+            except asyncio.CancelledError:
+                graph_logger.debug(
+                    "Pregel execution cancelled",
+                    event_type=LogEventType.GRAPH_END,
+                    metadata={"session_id": session_id, "workflow_id": workflow_id, "cancelled": True}
+                )
+                raise
+            except Exception as e:
+                exception = e
+
+            if is_main:
+                await self._checkpointer.post_workflow_execute(session, result, exception)
+            elif exception is not None:
+                raise exception
+        except asyncio.CancelledError:
+            if is_main:
+                await self._checkpointer.post_workflow_execute(session, {}, None)
+            raise
 
     async def stream(self, inputs: Input, session: Session) -> AsyncIterator[Output]:
         pass

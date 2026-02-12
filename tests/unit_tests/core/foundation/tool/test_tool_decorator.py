@@ -86,6 +86,50 @@ def read_write_tool(
     return f"Verified: path={path}, mode={mode}, head={head}, tail={tail}, line_range={line_range}"
 
 
+@tool
+def tool_with_only_with_var_positional(*args):
+    result = 0
+    for item in args:
+        result += item
+    return result
+
+
+@tool
+def tool_with_var_positional(a: int, b: int, *args):
+    result = a + b
+    for item in args:
+        result += item
+    return result
+
+
+@tool
+def tool_with_middle_with_var_positional(a: int, b: int, *args, d: int):
+    result = a + b
+    for item in args:
+        result += item
+    return result + d
+
+
+@tool
+def tool_with_var_keywords(a: int, b: int, **kwargs):
+    return {'a': a, 'b': b, **kwargs}
+
+
+@tool
+def tool_with_only_with_var_keywords(**kwargs):
+    return {**kwargs}
+
+
+@tool
+def tool_with_mix_var(a: int, *args, b: int, **kwargs):
+    result = a + b
+    for item in args:
+        result += item
+    for key, val in kwargs.items():
+        result += val
+    return result
+
+
 @pytest.mark.asyncio
 class TestToolDecorator:
     def assertEqual(self, left, right):
@@ -98,6 +142,27 @@ class TestToolDecorator:
     @staticmethod
     def assert_not_in(member, container):
         assert member not in container
+
+    async def test_tool_with_var_positional(self):
+        result = await tool_with_only_with_var_positional.invoke(inputs={'args': [1, 2, 3]})
+        assert result == 6
+
+        result = await tool_with_var_positional.invoke(inputs={'a': 1, 'b': 2, 'args': [1, 2, 3]})
+        assert result == 9
+
+        result = await tool_with_middle_with_var_positional.invoke(inputs={'a': 1, 'b': 2, 'args': [1, 2, 3], 'd': 4})
+        assert result == 13
+
+    async def test_tool_with_var_keywords(self):
+        result = await tool_with_var_keywords.invoke(inputs={'a': 1, 'b': 2, 'c': 3})
+        assert result == {'a': 1, 'b': 2, 'c': 3}
+
+        result = await tool_with_only_with_var_keywords.invoke(inputs={'a': 1, 'b': 2, 'c': 3})
+        assert result == {'a': 1, 'b': 2, 'c': 3}
+
+    async def test_tool_with_mix_var(self):
+        result = await tool_with_mix_var.invoke(inputs={'a': 1, 'args': [1, 2, 3], 'b': 2, 'c': 3, 'd': 4})
+        assert result == 16
 
     async def test_tool(self):
         # invoke

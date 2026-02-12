@@ -6,11 +6,11 @@ Vector Retriever Implementation
 Retriever implementation based on vector store.
 """
 
-from typing import Any, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
@@ -23,7 +23,7 @@ class VectorRetriever(Retriever):
         self,
         vector_store: VectorStore,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize vector retriever
@@ -41,7 +41,7 @@ class VectorRetriever(Retriever):
         top_k: int = 5,
         score_threshold: Optional[float] = None,
         mode: Literal["vector", "sparse", "hybrid"] = "vector",
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """
         Retrieve documents (vector retrieval)
@@ -109,7 +109,7 @@ class VectorRetriever(Retriever):
         self,
         queries: List[str],
         top_k: int = 5,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[RetrievalResult]]:
         """Batch retrieval"""
         import asyncio
@@ -118,6 +118,47 @@ class VectorRetriever(Retriever):
         tasks = [self.retrieve(query, top_k=top_k, **kwargs) for query in queries]
         results = await asyncio.gather(*tasks)
         return results
+
+    async def retrieve_search_results(
+        self,
+        query: str,
+        top_k: int = 5,
+        mode: Literal["vector", "sparse", "hybrid"] = "vector",
+        **kwargs,
+    ) -> List[SearchResult]:
+        """
+        Retrieve documents (vector retrieval)
+
+        Args:
+            query: Query string
+            top_k: Number of results to return
+            mode: Retrieval mode (only supports vector=vector retrieval)
+            **kwargs: Additional parameters
+
+        Returns:
+            List of search results
+        """
+        # Vector retrieval
+        if self.embed_model is None:
+            raise build_error(
+                StatusCode.RETRIEVAL_RETRIEVER_EMBED_MODEL_NOT_FOUND,
+                error_msg="embed_model is required for vector search",
+            )
+
+        query_vector = await self.embed_model.embed_query(query)
+        search_results = await self.vector_store.search(
+            query_vector=query_vector,
+            top_k=top_k,
+        )
+        # If vector retrieval returns no results, fallback to BM25
+        if not search_results:
+            search_results = await self.vector_store.sparse_search(
+                query_text=query,
+                top_k=top_k,
+                filters=None,
+            )
+
+        return search_results
 
     async def close(self) -> None:
         """Close the retriever"""

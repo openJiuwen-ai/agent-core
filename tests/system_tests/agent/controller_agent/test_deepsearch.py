@@ -41,8 +41,8 @@ from openjiuwen.core.controller.schema import ControllerOutputChunk, ControllerO
 from openjiuwen.core.controller.schema import Event
 from openjiuwen.core.controller.schema.task import Task, TaskStatus
 from openjiuwen.core.controller.schema import TextDataFrame
-from openjiuwen.core.session import Session
-from openjiuwen.core.session.internal.wrapper import TaskSession
+from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.base import AbilityManager, ControllerAgent
 from openjiuwen.core.common.logging import logger
@@ -588,7 +588,7 @@ class DeepSearchEventHandler(EventHandler):
         tasks = []
         for i, task_info in enumerate(planning_task["data_collect_tasks"]):
             task = Task(
-                session_id=session.session_id(),
+                session_id=session.get_session_id(),
                 task_id="task_DC_id{}_{}".format(i, self.round),
                 task_type="data_collect",
                 priority=1,
@@ -625,7 +625,7 @@ class DeepSearchEventHandler(EventHandler):
         tasks = []
         for i, task_info in enumerate(planning_task["data_analysis_tasks"]):
             task = Task(
-                session_id=session.session_id(),
+                session_id=session.get_session_id(),
                 task_id="task_DA_id{}_{}".format(i, self.round),
                 task_type="data_analysis",
                 priority=2,
@@ -662,7 +662,7 @@ class DeepSearchEventHandler(EventHandler):
         tasks = []
         for i, task_info in enumerate(planning_task["report_generate_tasks"]):
             task = Task(
-                session_id=session.session_id(),
+                session_id=session.get_session_id(),
                 task_id="task_RG_id{}_{}".format(i, self.round),
                 task_type="report_generate",
                 priority=3,
@@ -885,7 +885,7 @@ class DeepSearchAgentTest(unittest.IsolatedAsyncioTestCase):
             description="Arxiv研究报告智能体，可以通过收集、分析数据生成Arxiv研究报告",
         )
         agent = await build_deepsearch_agent(agent_card)
-        session = TaskSession(session_id="example_deepsearch")
+        session = create_agent_session(session_id="example_deepsearch")
         output_texts: List[str] = []
 
         async for chunk in agent.stream("帮我查找芯片相关研究论文", session):
@@ -918,7 +918,7 @@ class DeepSearchAgentTest(unittest.IsolatedAsyncioTestCase):
             description="Arxiv研究报告智能体，可以通过收集、分析数据生成Arxiv研究报告",
         )
         agent = await build_deepsearch_agent(agent_card)
-        session = TaskSession(session_id="example_deepsearch")
+        session = create_agent_session(session_id="example_deepsearch")
 
         result = await agent.invoke("帮我查找芯片相关研究论文", session)
         full_output = "".join(map(str, result.data))
@@ -949,7 +949,7 @@ class DeepSearchAgentTest(unittest.IsolatedAsyncioTestCase):
             description="Arxiv研究报告智能体，支持多轮对话",
         )
         agent = await build_deepsearch_agent(agent_card)
-        session = TaskSession(session_id="multi_turn_deepsearch")
+        session = create_agent_session(session_id="multi_turn_deepsearch")
 
         # ========== First turn ==========
         logger.info("========== First turn: 查询芯片相关论文 ==========")

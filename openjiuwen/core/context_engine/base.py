@@ -224,6 +224,12 @@ class ContextStats(BaseModel):
     system_messages / user_messages / assistant_messages / tool_messages : int
         Number of messages for each role.
 
+    total_dialogues : int
+        Number of dialogue rounds in the message list. A round is defined as
+        user message(s) followed by an assistant message without tool_calls;
+        assistant messages with tool_calls plus subsequent tool messages do
+        not start a new round until a final assistant reply without tool_calls.
+
     Token counts
     ------------
     system_message_tokens / user_message_tokens /
@@ -237,6 +243,7 @@ class ContextStats(BaseModel):
     """
     total_messages: int = 0
     total_tokens: int = 0
+    total_dialogues: int = 0
 
     system_messages: int = 0
     user_messages: int = 0

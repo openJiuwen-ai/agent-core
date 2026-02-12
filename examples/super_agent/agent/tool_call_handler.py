@@ -11,7 +11,7 @@ from typing import Dict, Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
 

@@ -19,8 +19,10 @@ def _should_decorate(obj, session):
 
 
 def decorate_model_with_trace(model, agent_session):
-    if not _should_decorate(model, agent_session):
+    if not agent_session or not hasattr(agent_session, "_inner") or not _should_decorate(model, getattr(agent_session,
+                                                                                                        "_inner")):
         return model
+    session = getattr(agent_session, "_inner")
     wrapped_model = create_wrapper_class(model, "WrappedModel")
     try:
         model_name = model.config.model_config.model_name
@@ -28,28 +30,33 @@ def decorate_model_with_trace(model, agent_session):
         model_name = type(model).__name__
     instance_info = {"class_name": model_name, "type": "llm"}
     wrapped_model.invoke = MethodType(
-        async_trace(wrapped_model.invoke, agent_session, InvokeType.LLM, instance_info,
+        async_trace(wrapped_model.invoke, session, InvokeType.LLM, instance_info,
                     index=2, inputs_field_name="messages"), wrapped_model)
     wrapped_model.stream = MethodType(
-        async_trace_stream(wrapped_model.stream, agent_session, InvokeType.LLM, instance_info,
+        async_trace_stream(wrapped_model.stream, session, InvokeType.LLM, instance_info,
                            index=2, inputs_field_name="messages"), wrapped_model)
     return wrapped_model
 
 
 def decorate_tool_with_trace(tool, agent_session):
-    if not _should_decorate(tool, agent_session):
+    if not agent_session or not hasattr(agent_session, "_inner") or not _should_decorate(tool, getattr(agent_session,
+                                                                                                       "_inner")):
         return tool
+    session = getattr(agent_session, "_inner")
     wrapped_tool = create_wrapper_class(tool, "WrappedTool")
     instance_info = {"class_name": tool.name if hasattr(tool, "name") else type(tool).__name__, "type": "tool"}
     wrapped_tool.invoke = MethodType(
-        async_trace(wrapped_tool.invoke, agent_session, InvokeType.PLUGIN, instance_info), wrapped_tool
+        async_trace(wrapped_tool.invoke, session, InvokeType.PLUGIN, instance_info), wrapped_tool
     )
     return wrapped_tool
 
 
 def decorate_workflow_with_trace(workflow, agent_session):
-    if not _should_decorate(workflow, agent_session):
+    if not agent_session or not hasattr(agent_session, "_inner") or not _should_decorate(workflow,
+                                                                                         getattr(agent_session,
+                                                                                                 "_inner")):
         return workflow
+    session = getattr(agent_session, "_inner")
     wrapped_workflow = create_wrapper_class(workflow, "WrappedWorkflow")
     metadata = dict(id=wrapped_workflow.card.id, name=wrapped_workflow.card.name,
                     description=wrapped_workflow.card.description,
@@ -60,10 +67,10 @@ def decorate_workflow_with_trace(workflow, agent_session):
         workflow_name = type(workflow).__name__
     instance_info = {"class_name": workflow_name, "type": "workflow", "metadata": dict(metadata)}
     wrapped_workflow.invoke = MethodType(
-        async_trace(wrapped_workflow.invoke, agent_session, InvokeType.WORKFLOW, instance_info),
+        async_trace(wrapped_workflow.invoke, session, InvokeType.WORKFLOW, instance_info),
         wrapped_workflow)
     wrapped_workflow.stream = MethodType(
-        async_trace_stream(wrapped_workflow.stream, agent_session, InvokeType.WORKFLOW, instance_info),
+        async_trace_stream(wrapped_workflow.stream, session, InvokeType.WORKFLOW, instance_info),
         wrapped_workflow)
     return wrapped_workflow
 

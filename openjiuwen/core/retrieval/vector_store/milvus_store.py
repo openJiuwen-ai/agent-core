@@ -14,9 +14,15 @@ from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.store.query import QueryExpr
+from openjiuwen.core.foundation.store.vector.utils import (
+    convert_cosine_similarity,
+    convert_ip_similarity,
+    convert_l2_squared,
+)
+from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
-from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
@@ -34,7 +40,7 @@ class MilvusVectorStore(VectorStore):
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize Milvus vector store
@@ -143,7 +149,7 @@ class MilvusVectorStore(VectorStore):
         self,
         data: dict | List[dict],
         batch_size: int | None = 128,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
         if batch_size is None or batch_size <= 0:
             batch_size = 128
@@ -190,24 +196,25 @@ class MilvusVectorStore(VectorStore):
         self,
         query_vector: List[float],
         top_k: int = 5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """Vector search"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field, "chunk_id"]
 
         # Build filter expression
         filter_expr = None
-        if filters:
-            # Simple filter expression builder (can be extended as needed)
+        if isinstance(filters, dict):
             filter_parts = []
             for key, value in filters.items():
                 if isinstance(value, str):
-                    filter_parts.append(f'{key} == "{value}"')
+                    filter_parts.append(f"{key} == {QueryExpr.sanitize_str(value)}")
                 else:
                     filter_parts.append(f"{key} == {value}")
             if filter_parts:
                 filter_expr = " && ".join(filter_parts)
+        elif isinstance(filters, QueryExpr):
+            filter_expr = filters.to_expr("milvus")
 
         # Execute search
         results = await asyncio.to_thread(
@@ -229,23 +236,25 @@ class MilvusVectorStore(VectorStore):
         self,
         query_text: str,
         top_k: int = 5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """Sparse search (BM25)"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
 
         # Build filter expression
         filter_expr = None
-        if filters:
+        if isinstance(filters, dict):
             filter_parts = []
             for key, value in filters.items():
                 if isinstance(value, str):
-                    filter_parts.append(f'{key} == "{value}"')
+                    filter_parts.append(f"{key} == {QueryExpr.sanitize_str(value)}")
                 else:
                     filter_parts.append(f"{key} == {value}")
             if filter_parts:
                 filter_expr = " && ".join(filter_parts)
+        elif isinstance(filters, QueryExpr):
+            filter_expr = filters.to_expr("milvus")
 
         try:
             # Use native BM25 full-text search
@@ -273,23 +282,25 @@ class MilvusVectorStore(VectorStore):
         query_vector: Optional[List[float]] = None,
         top_k: int = 5,
         alpha: float = 0.5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """Hybrid search (sparse retrieval + vector retrieval)"""
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
 
         # Build filter expression
         filter_expr = None
-        if filters:
+        if isinstance(filters, dict):
             filter_parts = []
             for key, value in filters.items():
                 if isinstance(value, str):
-                    filter_parts.append(f'{key} == "{value}"')
+                    filter_parts.append(f"{key} == {QueryExpr.sanitize_str(value)}")
                 else:
                     filter_parts.append(f"{key} == {value}")
             if filter_parts:
                 filter_expr = " && ".join(filter_parts)
+        elif isinstance(filters, QueryExpr):
+            filter_expr = filters.to_expr("milvus")
 
         try:
             # Build search requests
@@ -302,6 +313,7 @@ class MilvusVectorStore(VectorStore):
                     anns_field=self.vector_field.vector_field,
                     param={"metric_type": self._distance_metric, "params": self.get_search_params(top_k)},
                     limit=top_k,
+                    expr=filter_expr,
                 )
                 search_requests.append(dense_req)
 
@@ -311,6 +323,7 @@ class MilvusVectorStore(VectorStore):
                 anns_field=self.sparse_vector_field,
                 param={"metric_type": "BM25"},
                 limit=top_k,
+                expr=filter_expr,
             )
             search_requests.append(sparse_req)
 
@@ -325,7 +338,6 @@ class MilvusVectorStore(VectorStore):
                 ranker=RRFRanker(k=60),  # RRF with k=60
                 limit=top_k,
                 output_fields=output_fields,
-                filter=filter_expr,
             )
 
             if results and len(results) > 0:
@@ -342,7 +354,7 @@ class MilvusVectorStore(VectorStore):
         query_text: str,
         query_vector: Optional[List[float]],
         top_k: int,
-        filters: Optional[dict],
+        filters: Optional[dict | QueryExpr],
     ) -> List[SearchResult]:
         """Fallback hybrid search: execute searches separately then fuse"""
         # Execute two searches concurrently
@@ -362,11 +374,13 @@ class MilvusVectorStore(VectorStore):
     async def delete(
         self,
         ids: Optional[List[str]] = None,
-        filter_expr: Optional[str] = None,
-        **kwargs: Any,
+        filter_expr: Optional[str | QueryExpr] = None,
+        **kwargs,
     ) -> bool:
         """Delete vectors"""
         try:
+            if isinstance(filter_expr, QueryExpr):
+                filter_expr = filter_expr.to_expr("milvus")
             result = await asyncio.to_thread(
                 self._client.delete,
                 collection_name=self.collection_name,
@@ -420,13 +434,16 @@ class MilvusVectorStore(VectorStore):
                 if raw_score_val is not None:
                     if self._distance_metric == "L2":
                         # Milvus L2 returns squared L2 distance
-                        raw_score_scaled = (4.0 - raw_score_val) / 4.0
+                        # Convert to [0, 1]: (max_dist - distance) / max_dist
+                        raw_score_scaled = convert_l2_squared(raw_score_val)
                     elif self._distance_metric == "COSINE":
                         # Milvus COSINE returns similarity in [-1, 1]
-                        raw_score_scaled = (raw_score_val + 1.0) / 2.0
+                        # Convert to [0, 1]: (distance + 1) / 2
+                        raw_score_scaled = convert_cosine_similarity(raw_score_val)
                     else:
                         # Milvus IP returns raw inner product (unbounded)
-                        raw_score_scaled = raw_score_val
+                        # Convert to [0, 1]: max(0, min(1, (distance + 1) / 2))
+                        raw_score_scaled = convert_ip_similarity(raw_score_val)
                     final_score = raw_score_scaled
             elif mode == "sparse":
                 if raw_score_val is not None:

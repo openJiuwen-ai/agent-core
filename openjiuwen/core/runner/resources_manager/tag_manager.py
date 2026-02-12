@@ -177,7 +177,7 @@ class TagMgr:
 
     def find_resources_by_tags(self, tags: List[Tag] | Tag,
                                tag_match_strategy: TagMatchStrategy,
-                               skip_if_not_exists: bool = False) -> List[str]:
+                               skip_if_not_exists: bool = True) -> List[str]:
         """
         Find resources by tags
         """

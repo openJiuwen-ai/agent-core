@@ -19,7 +19,7 @@ from openjiuwen.core.common.constants.enums import TaskType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm import BaseMessage
 
@@ -61,7 +61,7 @@ class IntentDetector:
         """
         # 1. Detect intent
         llm_inputs = self._prepare_detection_input(event)
-        session_id = self.session.session_id()
+        session_id = self.session.get_session_id()
         if UserConfig.is_sensitive():
             logger.info(f"[%s] <LLM Input>", session_id)
         else:
@@ -95,7 +95,7 @@ class IntentDetector:
         Note: If agent_config has no workflows, use intent_id as target_name
         """
         tasks = []
-        session_id = self.session.session_id()
+        session_id = self.session.get_session_id()
         task_unique_id = f"{session_id}_intent_{intent_id}_{secrets.token_hex(4)}"
         
         if intent_id == IntentDetectionConstants.DEFAULT_CLASS:
@@ -156,7 +156,7 @@ class IntentDetector:
         Note: If agent_config has no workflows, return category name directly
         """
         detected_intent_id = ""
-        session_id = self.session.session_id()
+        session_id = self.session.get_session_id()
         try:
             cleaned = re.sub(
                 r'^\s*```json\s*|\s*```\s*$',

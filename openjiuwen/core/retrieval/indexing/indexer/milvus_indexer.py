@@ -14,12 +14,12 @@ from pymilvus import DataType, Function, FunctionType, MilvusClient, MilvusExcep
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback, TqdmCallback
 from openjiuwen.core.retrieval.common.config import IndexConfig, VectorStoreConfig
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
-from openjiuwen.core.retrieval.indexing.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
 
 
@@ -37,7 +37,7 @@ class MilvusIndexer(Indexer):
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
         doc_index_callback: type[BaseCallback] = TqdmCallback,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize Milvus index manager
@@ -106,7 +106,7 @@ class MilvusIndexer(Indexer):
         chunks: List[TextChunk],
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Build index"""
         try:
@@ -191,7 +191,7 @@ class MilvusIndexer(Indexer):
         doc_id: str,
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Update index"""
         try:
@@ -208,7 +208,7 @@ class MilvusIndexer(Indexer):
         self,
         doc_id: str,
         index_name: str,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete index"""
         try:

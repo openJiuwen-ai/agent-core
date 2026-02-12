@@ -3,7 +3,7 @@
 from abc import ABC
 from typing import Generic, TypeVar, Optional, Type, Dict, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from openjiuwen.core.common.exception.codes import StatusCode
 
@@ -17,8 +17,7 @@ class BaseResult(BaseModel, Generic[T], ABC):
     message: str = Field(..., description="Message details")
     data: Optional[T] = Field(None, description="Business data (returned only on success)")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 def build_operation_error_result(

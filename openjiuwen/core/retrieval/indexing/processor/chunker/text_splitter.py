@@ -2,14 +2,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import uuid
 from abc import ABCMeta, abstractmethod
-from typing import Any, Callable, Tuple
-
-import tiktoken
-from transformers import PreTrainedTokenizerBase
+from typing import TYPE_CHECKING, Any, Callable, Tuple, Union
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
 from openjiuwen.core.retrieval.indexing.processor.splitter.splitter import SentenceSplitter
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
 
 DEFAULT_CHUNK_SIZE = 200
 DEFAULT_CHAR_CHUNK_SIZE = 200
@@ -17,9 +17,11 @@ DEFAULT_CHAR_CHUNK_OVERLAP = 40
 
 
 class TextSplitter(metaclass=ABCMeta):
+    """Abstract base class for text splitters"""
+
     @abstractmethod
-    def split(self, text: TextChunk) -> list[TextChunk]:
-        pass
+    def split(self, doc: TextChunk | Document) -> list[TextChunk]:
+        """Split document into text chunks"""
 
 
 class CharSplitter(TextSplitter):
@@ -34,7 +36,7 @@ class CharSplitter(TextSplitter):
         self.chunk_size = max(1, size)
         self.chunk_overlap = overlap
 
-    def split(self, doc: Document) -> list[TextChunk]:
+    def split(self, doc: TextChunk | Document) -> list[TextChunk]:
         text = doc.text or ""
         # Keep metadata and exclusion fields for subsequent indexing/deletion
         doc_id = doc.id_
@@ -58,12 +60,17 @@ class CharSplitter(TextSplitter):
 
 
 class IndexSentenceSplitter(TextSplitter):
+    """
+    SentenceSplitter wrapper with sentence splitting capabilities.
+    """
+
     def __init__(
         self,
-        tokenizer: PreTrainedTokenizerBase | Any = None,
+        tokenizer: Union["PreTrainedTokenizerBase", Any] = None,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         splitter_config: dict | None = None,
+        language: str = "auto",
     ) -> None:
         """Wrapper with sentence splitting capabilities.
 
@@ -75,28 +82,28 @@ class IndexSentenceSplitter(TextSplitter):
             chunk_overlap (int | None, optional): Window size for passage overlap. Defaults to None.
                 If None, set to `chunk_size // 5`.
             splitter_config (dict, optional): Other arguments to SentenceSplitter. Defaults to None.
-
+            language: Language code, defaults to "auto" (auto-detect)
         """
         super().__init__()
         self._tokenizer = tokenizer
 
         if not isinstance(splitter_config, dict):
-            splitter_config = {
-                "paragraph_separator": "\n",
-            }
+            splitter_config = {}
 
-        tokenizer_fn, max_token_length = self._resolve_tokenizer(self._tokenizer)
+        _, max_token_length = self._resolve_tokenizer(self._tokenizer)
         chunk_size = self._resolve_chunk_size(chunk_size, max_token_length)
 
         self._splitter = SentenceSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap or chunk_size // 5,
             tokenizer=tokenizer,
+            lan=language,
+            **splitter_config,
         )
 
     @staticmethod
     def _resolve_tokenizer(
-        tokenizer: PreTrainedTokenizerBase | Any,
+        tokenizer: Union["PreTrainedTokenizerBase", Any],
     ) -> Tuple[Callable[[str], list], int | None]:
         """
         Return a tokenizer callable and its max token length (if known).
@@ -113,6 +120,8 @@ class IndexSentenceSplitter(TextSplitter):
 
         # Fallback: tiktoken (pulls encoding data from HuggingFace if needed)
         try:
+            import tiktoken
+
             encoding = tiktoken.get_encoding("cl100k_base")
             return encoding.encode, getattr(encoding, "max_token_value", None)
         except Exception as exc:  # pragma: no cover - unexpected failure

@@ -7,7 +7,7 @@ Inherits from Processor, used for extracting triples, etc.
 """
 
 from abc import abstractmethod
-from typing import Any, List
+from typing import List
 
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.common.triple import Triple
@@ -21,7 +21,7 @@ class Extractor(Processor):
     async def extract(
         self,
         chunks: List[TextChunk],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[Triple]:
         """
         Extract information (e.g., triples)
@@ -34,7 +34,7 @@ class Extractor(Processor):
             Extraction result list (e.g., triple list)
         """
 
-    async def process(self, chunks: List[TextChunk], **kwargs: Any) -> List[Triple]:
+    async def process(self, chunks: List[TextChunk], **kwargs) -> List[Triple]:
         """
         Process text chunks (implements Processor's process method)
 

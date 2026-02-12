@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 from typing import Union, Literal, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from openjiuwen.core.sys_operation.result import BaseResult
 
@@ -13,8 +13,7 @@ class ReadFileData(BaseModel):
     content: Union[str, bytes] = Field(..., description="File content (text string or binary bytes)")
     mode: Literal['text', 'bytes'] = Field(..., description="File read mode: 'text' (string) or 'bytes' (binary)")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ReadFileChunkData(BaseModel):
@@ -26,8 +25,7 @@ class ReadFileChunkData(BaseModel):
     chunk_index: int = Field(..., description="Index of current chunk (starting from 0)")
     is_last_chunk: bool = Field(..., description="Whether current chunk is the last one")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class WriteFileData(BaseModel):
@@ -36,8 +34,7 @@ class WriteFileData(BaseModel):
     size: int = Field(..., description="File content size in bytes")
     mode: Literal['text', 'bytes'] = Field(..., description="File write mode: 'text' (string) or 'bytes' (binary)")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class UploadFileData(BaseModel):
@@ -46,8 +43,7 @@ class UploadFileData(BaseModel):
     target_path: str = Field(..., description="File path of the target file")
     size: int = Field(..., description="File content size in bytes")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class UploadFileChunkData(BaseModel):
@@ -58,8 +54,7 @@ class UploadFileChunkData(BaseModel):
     chunk_index: int = Field(..., description="Index of current chunk (starting from 0)")
     is_last_chunk: bool = Field(..., description="Whether current chunk is the last one")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class DownloadFileData(BaseModel):
@@ -68,8 +63,7 @@ class DownloadFileData(BaseModel):
     local_path: str = Field(..., description="File path of the local file")
     size: int = Field(..., description="File content size in bytes")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class DownloadFileChunkData(BaseModel):
@@ -80,8 +74,7 @@ class DownloadFileChunkData(BaseModel):
     chunk_index: int = Field(..., description="Index of current chunk (starting from 0)")
     is_last_chunk: bool = Field(..., description="Whether current chunk is the last one")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class FileSystemItem(BaseModel):
@@ -93,8 +86,7 @@ class FileSystemItem(BaseModel):
     is_directory: bool = Field(..., description="Whether the item is a directory (True) or file (False)")
     type: Optional[str] = Field(default=None, description="File extension (only for files)")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class FileSystemData(BaseModel):
@@ -105,8 +97,7 @@ class FileSystemData(BaseModel):
     recursive: bool = Field(..., description="Actual recursive status used")
     max_depth: Optional[int] = Field(default=None, description="Actual maximum recursion depth used")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class SearchFilesData(BaseModel):
@@ -117,8 +108,7 @@ class SearchFilesData(BaseModel):
     search_pattern: str = Field(..., description="Original search pattern used")
     exclude_patterns: Optional[List[str]] = Field(default=None, description="Original exclude patterns used")
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class ReadFileResult(BaseResult[ReadFileData]):

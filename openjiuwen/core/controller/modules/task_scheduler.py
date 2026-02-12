@@ -26,7 +26,7 @@ from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.modules.event_queue import EventQueue
 from openjiuwen.core.controller.modules.task_manager import TaskManager, TaskFilter
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.controller.schema import (EventType, TaskCompletionEvent, TaskInteractionEvent, TaskFailedEvent,
                                                TaskStatus, ControllerOutputChunk, ControllerOutputPayload,
                                                TextDataFrame, Task)
@@ -356,7 +356,7 @@ class TaskScheduler:
 
             # Critical: Check if all tasks are done and send completion signal
             # This MUST succeed, otherwise Controller will hang forever
-            await self._ensure_session_completion_signal(session.session_id())
+            await self._ensure_session_completion_signal(session.get_session_id())
 
     async def execute_task(self, task_id: str, session: Session):
         """Execute task
@@ -564,7 +564,7 @@ class TaskScheduler:
         await self._event_queue.publish_event(self._card.id, session, event)
         logger.info(f"Published {payload_type} for task {task_id}")
 
-    async def pause_task(self, task_id: str, session: Optional[Session] = None) -> bool:
+    async def pause_task(self, task_id: str) -> bool:
         """Pause task
 
         Can be called directly by EventHandler in callbacks.
@@ -578,7 +578,6 @@ class TaskScheduler:
 
         Args:
             task_id: Task ID
-            session: Session object (optional, if not provided it is obtained from task)
 
         Returns:
             bool: Whether it was successfully paused
@@ -603,33 +602,46 @@ class TaskScheduler:
             # Get task and executor
             executor, exec_task = self._running_tasks[task_id]
 
-            # Check whether it can be paused
-            if executor:
-                try:
-                    can_pause, reason = await executor.can_pause(task_id, session)
-                    if not can_pause:
-                        logger.warning(f"Task {task_id} cannot be paused, reason: {reason}")
-                        return False
-
-                    # Execute executor pause logic
-                    await executor.pause(task_id, session)
-                except Exception as e:
-                    logger.error(f"Error pausing task {task_id}: {e}", exc_info=True)
+        # Check whether it can be paused
+        if executor:
+            try:
+                can_pause, reason = await executor.can_pause(task_id, session)
+                if not can_pause:
+                    logger.warning(f"Task {task_id} cannot be paused, reason: {reason}")
                     return False
 
-            # Cancel asyncio task
+                # Execute executor pause logic
+                await executor.pause(task_id, session)
+            except Exception as e:
+                logger.error(f"Error pausing task {task_id}: {e}", exc_info=True)
+                return False
+
+        async with self._lock:
+            if task_id not in self._running_tasks:
+                logger.warning(f"Task {task_id} was already removed during pause operation")
+                return False
+
+            _, exec_task = self._running_tasks[task_id]
+
             if exec_task and not exec_task.done():
                 exec_task.cancel()
 
-            # Clean up running task records
-            del self._running_tasks[task_id]
-
         # Update task status
         await self._task_manager.update_task_status(task_id, TaskStatus.PAUSED)
+
+        if exec_task:
+            try:
+                await exec_task
+            except asyncio.CancelledError:
+                logger.info(f"Unexpected: CancelledError propagated from {task_id}")
+            except Exception as e:
+                logger.error(f"Error cancelling task {task_id}: {e}", exc_info=True)
+                return False
+
         logger.info(f"Task {task_id} paused successfully")
         return True
 
-    async def cancel_task(self, task_id: str, session: Optional[Session] = None) -> bool:
+    async def cancel_task(self, task_id: str) -> bool:
         """Cancel task
 
         Can be called directly by EventHandler in callbacks.
@@ -643,7 +655,6 @@ class TaskScheduler:
 
         Args:
             task_id: Task ID
-            session: Session object (optional, if not provided it is obtained from task)
 
         Returns:
             bool: Whether it was successfully canceled
@@ -668,29 +679,41 @@ class TaskScheduler:
             # Get task executor
             executor, exec_task = self._running_tasks[task_id]
 
-            # Check whether it can be canceled
-            if executor:
-                try:
-                    can_cancel, reason = await executor.can_cancel(task_id, session)
-                    if not can_cancel:
-                        logger.warning(f"Task {task_id} cannot be cancelled: {reason}")
-                        return False
-
-                    # 5. Execute executor cancel logic
-                    await executor.cancel(task_id, session)
-                except Exception as e:
-                    logger.error(f"Error cancelling task {task_id}: {e}", exc_info=True)
+        # Check whether it can be canceled
+        if executor:
+            try:
+                can_cancel, reason = await executor.can_cancel(task_id, session)
+                if not can_cancel:
+                    logger.warning(f"Task {task_id} cannot be cancelled: {reason}")
                     return False
 
-            # Cancel asyncio task
+                # Execute executor cancel logic
+                await executor.cancel(task_id, session)
+            except Exception as e:
+                logger.error(f"Error cancelling task {task_id}: {e}", exc_info=True)
+                return False
+
+        async with self._lock:
+            if task_id not in self._running_tasks:
+                logger.warning(f"Task {task_id} was already removed during cancel operation")
+                return False
+
+            _, exec_task = self._running_tasks[task_id]
+
             if exec_task and not exec_task.done():
                 exec_task.cancel()
 
-            # Clean up running task records
-            del self._running_tasks[task_id]
-
         # Update task status
         await self._task_manager.update_task_status(task_id, TaskStatus.CANCELED)
+
+        if exec_task:
+            try:
+                await exec_task
+            except asyncio.CancelledError:
+                logger.info(f"Unexpected: CancelledError propagated from {task_id}")
+            except Exception as e:
+                logger.error(f"Error cancelling task {task_id}: {e}", exc_info=True)
+                return False
 
         logger.info(f"Task {task_id} cancelled successfully")
         return True

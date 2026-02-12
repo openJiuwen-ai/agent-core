@@ -18,17 +18,41 @@ if not env_file.exists():
     raise FileNotFoundError("Please supply your .env file based on the .env.example provided")
 dotenv.load_dotenv(str(env_file), override=True)
 
-RERANKER_CONFIG = RerankerConfig(
-    model=os.environ["RERANKER_MODEL"],
-    api_base=os.environ["RERANKER_API_BASE"],
-    api_key=os.environ["RERANKER_API_KEY"],
-)
 
 EMBEDDING_CONFIG = EmbeddingConfig(
     model_name=os.environ["EMBEDDING_MODEL"],
     base_url=os.environ["EMBEDDING_API_BASE"],
     api_key=os.environ["EMBEDDING_API_KEY"],
 )
+
+try:
+    RERANKER_CONFIG = RerankerConfig(
+        model=os.environ["RERANKER_MODEL"],
+        api_base=os.environ["RERANKER_API_BASE"],
+        api_key=os.environ["RERANKER_API_KEY"],
+    )
+except Exception as e:
+    logger.error("Reranker not configured: %r", e)
+    RERANKER_CONFIG = None
+
+try:
+    from utils.find_token import load_tokens_from_huggingface, load_tokens_from_tiktoken
+
+    model_name = os.environ["CHAT_RERANKER_MODEL"]
+    try:
+        yes_no_ids = load_tokens_from_tiktoken(model_name).values()
+    except KeyError:
+        yes_no_ids = load_tokens_from_huggingface(model_name).values()
+
+    CHAT_RERANKER_CONFIG = RerankerConfig(
+        model=model_name,
+        api_base=os.environ["CHAT_RERANKER_API_BASE"],
+        api_key=os.environ["CHAT_RERANKER_API_KEY"],
+        yes_no_ids=yes_no_ids,
+    )
+except Exception as e:
+    logger.error("Chat reranker not configured: %r", e)
+    CHAT_RERANKER_CONFIG = RERANKER_CONFIG
 
 try:
     MULTIMODAL_EMBEDDING_CONFIG = EmbeddingConfig(

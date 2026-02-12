@@ -7,7 +7,7 @@ Provides unified interface for text splitting, subclasses need to implement spec
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -23,7 +23,7 @@ class Splitter(ABC):
         tokenizer: Optional[Callable] = None,
         chunk_size: int = 512,
         chunk_overlap: int = 50,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize text splitter

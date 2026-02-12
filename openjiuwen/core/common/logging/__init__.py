@@ -129,6 +129,9 @@ controller_logger = LazyLogger(lambda: LogManager.get_logger("controller"))
 # Runner module logger - for executor related logs
 runner_logger = LazyLogger(lambda: LogManager.get_logger("runner"))
 
+# SysOperation module logger - for sys_operation related logs
+sys_operation_logger = LazyLogger(lambda: LogManager.get_logger("sys_operation"))
+
 # ========== Foundation Module Loggers ==========
 
 # LLM module logger - for LLM call related logs
@@ -186,6 +189,7 @@ __all__ = [
     "session_logger",
     "controller_logger",
     "runner_logger",
+    "sys_operation_logger",
     # Foundation module loggers
     "llm_logger",
     "tool_logger",

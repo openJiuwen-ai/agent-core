@@ -3,9 +3,10 @@
 import contextvars
 import os
 from abc import ABC
+from copy import deepcopy
 from typing import TypedDict, Any, Optional
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.constants import COMP_STREAM_CALL_TIMEOUT_KEY, STREAM_INPUT_GEN_TIMEOUT_KEY, \
     END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY, END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY, \
     WORKFLOW_EXECUTE_TIMEOUT, WORKFLOW_STREAM_FRAME_TIMEOUT, WORKFLOW_EXECUTE_TIMEOUT_ENV_KEY, \
@@ -48,7 +49,11 @@ def _try_set_env(env_configs: dict, config_key: str, env_key: str, value):
             try:
                 env_configs[config_key] = float(value)
             except (ValueError, TypeError):
-                logger.warning(f"value of env {env_key} is not a number, use default value")
+                session_logger.warning(
+                    "Invalid float value for environment variable, using default",
+                    event_type=LogEventType.SESSION_UPDATE,
+                    metadata={"env_key": env_key, "value": value, "expected_type": "float"}
+                )
         elif env_type == 'int':
             if isinstance(value, int):
                 env_configs[config_key] = value
@@ -56,20 +61,36 @@ def _try_set_env(env_configs: dict, config_key: str, env_key: str, value):
                 try:
                     env_configs[config_key] = int(value)
                 except ValueError:
-                    logger.warning(f"value of env {env_key} is not a integer number, use default value")
+                    session_logger.warning(
+                        "Invalid integer value for environment variable, using default",
+                        event_type=LogEventType.SESSION_UPDATE,
+                        metadata={"env_key": env_key, "value": value, "expected_type": "int"}
+                    )
             else:
-                logger.warning(f"value of env {env_key} is not a integer number, use default value")
+                session_logger.warning(
+                    "Invalid integer value for environment variable, using default",
+                    event_type=LogEventType.SESSION_UPDATE,
+                    metadata={"env_key": env_key, "value": value, "expected_type": "int"}
+                )
         elif env_type == 'bool':
             if isinstance(value, bool):
                 env_configs[config_key] = value
             elif isinstance(value, str):
                 env_value = value.lower()
                 if env_value not in ['true', 'false']:
-                    logger.warning(f"value of env {env_key} is not a boolean value, use default value")
+                    session_logger.warning(
+                        "Invalid boolean value for environment variable, using default",
+                        event_type=LogEventType.SESSION_UPDATE,
+                        metadata={"env_key": env_key, "value": value, "expected_type": "bool"}
+                    )
                 else:
                     env_configs[config_key] = env_value == 'true'
             else:
-                logger.warning(f"value of env {env_key} is not a boolean value, use default value")
+                session_logger.warning(
+                    "Invalid boolean value for environment variable, using default",
+                    event_type=LogEventType.SESSION_UPDATE,
+                    metadata={"env_key": env_key, "value": value, "expected_type": "bool"}
+                )
         else:
             env_configs[config_key] = value
 
@@ -119,6 +140,9 @@ class Config(ABC):
             return self._env[key]
         else:
             return default
+
+    def get_envs(self):
+        return deepcopy(self._env)
 
     def _load_envs_(self) -> None:
         self._load_builtin_configs_()

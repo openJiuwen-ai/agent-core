@@ -34,7 +34,7 @@ from examples.groups.hierarchical_group.agents.main_controller import (
 )
 from openjiuwen.core.controller.legacy import Event
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.multi_agent import Session
 from openjiuwen.core.session.stream.base import OutputSchema
 
 

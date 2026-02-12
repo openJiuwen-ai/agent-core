@@ -23,7 +23,7 @@ from typing import Callable, Awaitable, Optional
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.schema.event import Event, EventType
 from openjiuwen.core.controller.modules.event_handler import EventHandler, EventHandlerInput
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
@@ -247,7 +247,7 @@ class EventQueue:
             - This method waits until the EventHandler finishes processing before
               it returns, ensuring event processing order.
         """
-        session_id = session.session_id()
+        session_id = session.get_session_id()
         topic = self._build_topic(agent_id, session_id, event.event_type)
 
         # Lazy import to avoid circular imports

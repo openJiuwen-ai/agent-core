@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.controller.schema import Event
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.task_manager import TaskManager

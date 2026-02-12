@@ -3,7 +3,7 @@
 
 import asyncio
 import json
-from typing import Any, Optional
+from typing import Optional
 
 import aiofiles
 
@@ -16,7 +16,7 @@ from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 class JSONParser(Parser):
     """Local file parser for JSON format"""
 
-    def __init__(self, **kwargs: Any):
+    def __init__(self, **kwargs):
         pass
 
     async def _parse(self, file_path: str) -> Optional[str]:

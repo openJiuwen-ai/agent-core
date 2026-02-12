@@ -30,7 +30,7 @@ from examples.super_agent.llm.openrouter_llm import (
 from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard

@@ -23,7 +23,6 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.single_agent import AgentCard
-from openjiuwen.core.session.internal.wrapper import TaskSession
 from openjiuwen.core.controller.base import Controller, ControllerConfig
 from openjiuwen.core.controller.modules import (
     EventHandler,
@@ -41,7 +40,7 @@ from openjiuwen.core.controller.schema import (
     InputEvent,
 )
 from openjiuwen.core.single_agent.base import AbilityManager, ControllerAgent
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session, create_agent_session
 from openjiuwen.core.common.logging import logger
 
 
@@ -168,7 +167,7 @@ class MultiTaskEventHandler(EventHandler):
         """Handle input event - create multiple tasks"""
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id=f"trackable_task_{i}",
                 task_type="trackable",
                 priority=1,
@@ -201,7 +200,7 @@ class SimpleEventHandler(EventHandler):
     async def handle_input(self, inputs: EventHandlerInput):
         """Handle input event - create a single task"""
         task = Task(
-            session_id=inputs.session.session_id(),
+            session_id=inputs.session.get_session_id(),
             task_id="simple_task_1",
             task_type="simple",
             priority=1,
@@ -463,7 +462,8 @@ class TestTaskExecutorLifecycle:
             task_executors={"trackable": build_trackable_executor}
         )
 
-        session = TaskSession(session_id="test_executor_instances")
+        session = create_agent_session(session_id="test_executor_instances", card=agent.card)
+        await session.pre_run()
 
         input_event = InputEvent(
             event_type=EventType.INPUT,
@@ -515,7 +515,8 @@ class TestTaskExecutorLifecycle:
             task_executors={"trackable": build_trackable_executor}
         )
 
-        session = TaskSession(session_id="test_executor_cleanup")
+        session = create_agent_session(session_id="test_executor_cleanup", card=agent.card)
+        await session.pre_run()
 
         input_event = InputEvent(
             event_type=EventType.INPUT,
@@ -554,8 +555,8 @@ class TestTaskExecutorLifecycle:
             task_executors={"trackable": build_trackable_executor}
         )
 
-        session = TaskSession(session_id="test_executor_isolation")
-
+        session = create_agent_session(session_id="test_executor_isolation", card=agent.card)
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test executor isolation"}
@@ -606,8 +607,8 @@ class TestTaskExecutorLifecycle:
             "No executor instances should be created until tasks are executed"
 
         # Now create and execute a task (but not trackable type)
-        session = TaskSession(session_id="test_executor_on_demand")
-
+        session = create_agent_session(session_id="test_executor_on_demand", card=agent.card)
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test on demand"}

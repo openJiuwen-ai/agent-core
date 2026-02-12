@@ -463,7 +463,7 @@ class TestModelContext:
         await context.add_messages(message_list)
         window = await context.get_context_window(system_messages=system_messages)
         assert window.context_messages == []
-        assert window.system_messages == system_messages[:1]
+        assert window.system_messages == system_messages[-1:]
         assert window.tools == []
 
     @pytest.mark.asyncio
@@ -497,6 +497,86 @@ class TestModelContext:
         assert stat.assistant_messages == 25
         assert stat.tool_messages == 25
         assert stat.user_messages == 25
+
+    @pytest.mark.asyncio
+    async def test_statistic_total_dialogues(self):
+        """Assert total_dialogues in ContextStats for various message list shapes."""
+        def make_tool_calls(ids: List[str]):
+            return [ToolCall(id=tc, name="test-tool", type="function", arguments="") for tc in ids]
+
+        # Empty messages -> 0 rounds
+        context = await self.create_context()
+        stat = context.statistic()
+        assert stat.total_dialogues == 0
+
+        # Only user messages -> 0 rounds (no closing assistant)
+        context = await self.create_context()
+        await context.add_messages([UserMessage(content="u1"), UserMessage(content="u2")])
+        stat = context.statistic()
+        assert stat.total_dialogues == 0
+
+        # One complete round: user + assistant (no tool_calls)
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 1
+
+        # One round with tool_calls: user + assistant(tool) + tool + assistant(final)
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="", tool_calls=make_tool_calls(["tc-1"])),
+            ToolMessage(content="result", tool_call_id="tc-1"),
+            AssistantMessage(content="a-final"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 1
+
+        # Two complete rounds
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+            UserMessage(content="u2"),
+            AssistantMessage(content="a2"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 2
+
+        # System + user + assistant: system is not a round, one dialogue round
+        context = await self.create_context()
+        await context.add_messages([
+            SystemMessage(content="sys"),
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 1
+
+        # Three full rounds
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+            UserMessage(content="u2"),
+            AssistantMessage(content="a2"),
+            UserMessage(content="u3"),
+            AssistantMessage(content="a3"),
+        ])
+        stat = context.statistic()
+        assert stat.total_dialogues == 3
+
+        # Context window statistic also has total_dialogues
+        context = await self.create_context()
+        await context.add_messages([
+            UserMessage(content="u1"),
+            AssistantMessage(content="a1"),
+        ])
+        window = await context.get_context_window()
+        assert window.statistic.total_dialogues == 1
 
     @pytest.mark.asyncio
     async def test_model_context_window_validation(self):
@@ -631,7 +711,7 @@ class TestModelContext:
     @pytest.mark.asyncio
     async def test_enable_kv_cache_release_calls_release_on_get_window(self):
         context = await self.create_context(enable_kv_cache_release=True)
-        with patch.object(getattr(context, "_kv_cache_manager"), "release", MagicMock()) as mock_release:
+        with patch.object(getattr(context, "_kv_cache_manager"), "release", new_callable=AsyncMock) as mock_release:
             await context.get_context_window()
             await context.get_context_window()
             assert mock_release.call_count >= 1

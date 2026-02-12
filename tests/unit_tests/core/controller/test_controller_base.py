@@ -9,7 +9,6 @@ import pytest
 
 from openjiuwen.core.controller.modules.task_manager import TaskFilter
 from openjiuwen.core.single_agent import AgentCard
-from openjiuwen.core.session.internal.wrapper import TaskSession
 from openjiuwen.core.controller.base import Controller, ControllerConfig
 from openjiuwen.core.controller.modules import (
     EventHandler,
@@ -30,14 +29,14 @@ from openjiuwen.core.controller.schema import (
     InputEvent,
 )
 from openjiuwen.core.single_agent.base import AbilityManager, ControllerAgent
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session, create_agent_session
 from openjiuwen.core.common.logging import logger
 
 
 # ==================== Test TaskExecutor ====================
 
 class CancellableTaskExecutor(TaskExecutor):
-    """Cancelable task executor
+    """Cancelable task executor - OPTIMIZED VERSION
     
     Used to test task cancellation. The task keeps running until it is cancelled.
     """
@@ -60,14 +59,14 @@ class CancellableTaskExecutor(TaskExecutor):
             last_chunk=False
         )
         
-        # Decide execution time based on task ID: task_1 finishes quickly (2 iterations),
-        # task_2 and task_3 run slowly (100 iterations)
+        # OPTIMIZED: Decide execution time based on task ID: task_1 finishes quickly (2 iterations),
+        # task_2 and task_3 run with fewer iterations (from 100 to 8)
         if "task_1" in task_id:
             iterations = 2
-            sleep_time = 0.1
+            sleep_time = 0.01  # OPTIMIZED: from 0.1 to 0.01
         else:
-            iterations = 100
-            sleep_time = 0.1
+            iterations = 8  # OPTIMIZED: from 100 to 8
+            sleep_time = 0.01  # OPTIMIZED: from 0.1 to 0.01
         
         # Simulate a long-running task
         for i in range(iterations):
@@ -123,7 +122,7 @@ class CancellableTaskExecutor(TaskExecutor):
 
 
 class NonCancellableTaskExecutor(TaskExecutor):
-    """Non-cancellable task executor
+    """Non-cancellable task executor - OPTIMIZED VERSION
 
     Used to test attempting to cancel a non-cancellable task.
     """
@@ -140,7 +139,7 @@ class NonCancellableTaskExecutor(TaskExecutor):
             last_chunk=False
         )
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.02)  # OPTIMIZED: from 0.5 to 0.02
 
         yield ControllerOutputChunk(
             index=1,
@@ -166,7 +165,7 @@ class NonCancellableTaskExecutor(TaskExecutor):
 
 
 class FailingTaskExecutor(TaskExecutor):
-    """Task executor that fails
+    """Task executor that fails - OPTIMIZED VERSION
 
     Used to test task execution failure.
     """
@@ -183,7 +182,7 @@ class FailingTaskExecutor(TaskExecutor):
             last_chunk=False
         )
 
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.005)  # OPTIMIZED: from 0.1 to 0.005
 
         # Simulate task failure
         raise RuntimeError(f"Task {task_id} failed intentionally")
@@ -202,7 +201,7 @@ class FailingTaskExecutor(TaskExecutor):
 
 
 class PauseExceptionTaskExecutor(TaskExecutor):
-    """Task executor that throws exception during pause
+    """Task executor that throws exception during pause - OPTIMIZED VERSION
 
     Used to test exception handling when pause() fails.
     """
@@ -219,9 +218,9 @@ class PauseExceptionTaskExecutor(TaskExecutor):
             last_chunk=False
         )
 
-        # Run for a long time
-        for i in range(100):
-            await asyncio.sleep(0.1)
+        # OPTIMIZED: Run for a shorter time (from 100 to 6 iterations)
+        for i in range(6):
+            await asyncio.sleep(0.005)  # OPTIMIZED: from 0.1 to 0.005
             yield ControllerOutputChunk(
                 index=i + 1,
                 type="controller_output",
@@ -233,7 +232,7 @@ class PauseExceptionTaskExecutor(TaskExecutor):
             )
 
         yield ControllerOutputChunk(
-            index=101,
+            index=7,  # Updated to match new iteration count
             type="controller_output",
             payload=ControllerOutputPayload(
                 type=EventType.TASK_COMPLETION,
@@ -257,7 +256,7 @@ class PauseExceptionTaskExecutor(TaskExecutor):
 
 
 class CancelExceptionTaskExecutor(TaskExecutor):
-    """Task executor that throws exception during cancel
+    """Task executor that throws exception during cancel - OPTIMIZED VERSION
 
     Used to test exception handling when cancel() fails.
     """
@@ -274,9 +273,9 @@ class CancelExceptionTaskExecutor(TaskExecutor):
             last_chunk=False
         )
 
-        # Run for a long time
-        for i in range(100):
-            await asyncio.sleep(0.1)
+        # OPTIMIZED: Run for a shorter time (from 100 to 6 iterations)
+        for i in range(6):
+            await asyncio.sleep(0.005)  # OPTIMIZED: from 0.1 to 0.005
             yield ControllerOutputChunk(
                 index=i + 1,
                 type="controller_output",
@@ -288,7 +287,7 @@ class CancelExceptionTaskExecutor(TaskExecutor):
             )
 
         yield ControllerOutputChunk(
-            index=101,
+            index=7,  # Updated to match new iteration count
             type="controller_output",
             payload=ControllerOutputPayload(
                 type=EventType.TASK_COMPLETION,
@@ -371,7 +370,7 @@ class SimpleEventHandler(EventHandler):
     async def handle_input(self, inputs: EventHandlerInput):
         """Handle input event - create a single task"""
         task = Task(
-            session_id=inputs.session.session_id(),
+            session_id=inputs.session.get_session_id(),
             task_id="test_task_1",
             task_type="cancellable",
             priority=1,
@@ -414,7 +413,7 @@ class DynamicTaskEventHandler(EventHandler):
         task_id = f"test_task_{self._task_counter}_{unique_id}"
 
         task = Task(
-            session_id=inputs.session.session_id(),
+            session_id=inputs.session.get_session_id(),
             task_id=task_id,
             task_type="cancellable",
             priority=1,
@@ -446,7 +445,7 @@ class FailureHandlingEventHandler(EventHandler):
     async def handle_input(self, inputs: EventHandlerInput):
         """Handle input event - create a failing task"""
         task = Task(
-            session_id=inputs.session.session_id(),
+            session_id=inputs.session.get_session_id(),
             task_id="failing_task_1",
             task_type="failing",
             priority=1,
@@ -486,7 +485,7 @@ class PauseInHandlerEventHandler(EventHandler):
     async def handle_input(self, inputs: EventHandlerInput):
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="pause_test_task_1",
                 task_type="cancellable",
                 priority=1,
@@ -494,7 +493,7 @@ class PauseInHandlerEventHandler(EventHandler):
                 context_id="pause_test_context_1"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="pause_test_task_2",
                 task_type="cancellable",
                 priority=1,
@@ -502,7 +501,7 @@ class PauseInHandlerEventHandler(EventHandler):
                 context_id="pause_test_context_2"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="pause_test_task_3",
                 task_type="cancellable",
                 priority=1,
@@ -532,7 +531,7 @@ class PauseInHandlerEventHandler(EventHandler):
             logger.info(f"PauseInHandlerEventHandler: Task 1 completed, pausing task 2")
 
             # Call TaskScheduler.pause_task from the EventHandler
-            success = await self.task_scheduler.pause_task(target_task_id, inputs.session)
+            success = await self.task_scheduler.pause_task(target_task_id)
 
             if success:
                 logger.info(f"PauseInHandlerEventHandler: Successfully paused task {target_task_id}")
@@ -545,7 +544,7 @@ class PauseInHandlerEventHandler(EventHandler):
         # because task_2 is paused and not in _running_tasks
         if completed_task_id == "pause_test_task_3":
             logger.info("PauseInHandlerEventHandler: Task 3 completed, cancelling paused task 2")
-            await self.task_scheduler.cancel_task("pause_test_task_2", inputs.session)
+            await self.task_scheduler.cancel_task("pause_test_task_2")
 
         return {"status": "success"}
 
@@ -564,7 +563,7 @@ class PauseNonPausableEventHandler(EventHandler):
     async def handle_input(self, inputs: EventHandlerInput):
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="pausable_task",
                 task_type="cancellable",
                 priority=1,
@@ -572,7 +571,7 @@ class PauseNonPausableEventHandler(EventHandler):
                 context_id="pausable_context"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="non_pausable_task",
                 task_type="non_cancellable",
                 priority=1,
@@ -590,7 +589,7 @@ class PauseNonPausableEventHandler(EventHandler):
         if not self.first_task_completed:
             self.first_task_completed = True
             # Try to pause the non-pausable task
-            success = await self.task_scheduler.pause_task("non_pausable_task", inputs.session)
+            success = await self.task_scheduler.pause_task("non_pausable_task")
             logger.info(f"Attempt to pause non-pausable task: {success}")
             return {"status": "success", "paused": success}
         return {"status": "success"}
@@ -609,7 +608,7 @@ class PauseThenCancelEventHandler(EventHandler):
     async def handle_input(self, inputs: EventHandlerInput):
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id=f"multi_op_task_{i}",
                 task_type="cancellable",
                 priority=1,
@@ -629,12 +628,12 @@ class PauseThenCancelEventHandler(EventHandler):
 
         if self.completed_count == 1:
             # When the first task completes, pause the second task
-            await self.task_scheduler.pause_task("multi_op_task_2", inputs.session)
+            await self.task_scheduler.pause_task("multi_op_task_2")
             logger.info("Paused task 2")
         elif self.completed_count == 2:
             # When the third task completes, cancel the paused second task
             # The paused task is not in running_tasks, so cancellation will fail
-            success = await self.task_scheduler.cancel_task("multi_op_task_2", inputs.session)
+            success = await self.task_scheduler.cancel_task("multi_op_task_2")
             logger.info(f"Attempted to cancel paused task 2: {success}")
 
         return {"status": "success"}
@@ -658,7 +657,7 @@ class CancelInHandlerEventHandler(EventHandler):
         """Handle input event - create two tasks"""
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="cancel_test_task_1",
                 task_type="cancellable",
                 priority=1,
@@ -666,7 +665,7 @@ class CancelInHandlerEventHandler(EventHandler):
                 context_id="cancel_test_context_1"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="cancel_test_task_2",
                 task_type="cancellable",
                 priority=1,
@@ -692,7 +691,7 @@ class CancelInHandlerEventHandler(EventHandler):
             target_task_id = "cancel_test_task_2"
 
             # Call TaskScheduler.cancel_task from the EventHandler
-            success = await self.task_scheduler.cancel_task(target_task_id, inputs.session)
+            success = await self.task_scheduler.cancel_task(target_task_id)
 
             if success:
                 logger.info(f"CancelInHandlerEventHandler: Successfully cancelled task {target_task_id}")
@@ -718,7 +717,7 @@ class CancelNonCancellableEventHandler(EventHandler):
     async def handle_input(self, inputs: EventHandlerInput):
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="cancellable_task",
                 task_type="cancellable",
                 priority=1,
@@ -726,7 +725,7 @@ class CancelNonCancellableEventHandler(EventHandler):
                 context_id="cancellable_context"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="non_cancellable_task",
                 task_type="non_cancellable",
                 priority=1,
@@ -744,7 +743,7 @@ class CancelNonCancellableEventHandler(EventHandler):
         if not self.first_task_completed:
             self.first_task_completed = True
             # Try to cancel the non-cancellable task
-            success = await self.task_scheduler.cancel_task("non_cancellable_task", inputs.session)
+            success = await self.task_scheduler.cancel_task("non_cancellable_task")
             logger.info(f"Attempt to cancel non-cancellable task: {success}")
             return {"status": "success", "cancelled": success}
         return {"status": "success"}
@@ -766,7 +765,7 @@ class InteractionEventHandler(EventHandler):
     async def handle_input(self, inputs: EventHandlerInput):
         """Handle input event - create an interaction task"""
         task = Task(
-            session_id=inputs.session.session_id(),
+            session_id=inputs.session.get_session_id(),
             task_id="interaction_task_1",
             task_type="interaction",
             priority=1,
@@ -808,7 +807,7 @@ class PauseExceptionEventHandler(EventHandler):
         """Handle input event - create two tasks"""
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="pause_exception_task_1",
                 task_type="cancellable",
                 priority=1,
@@ -816,7 +815,7 @@ class PauseExceptionEventHandler(EventHandler):
                 context_id="pause_exception_context_1"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="pause_exception_task_2",
                 task_type="pause_exception",
                 priority=1,
@@ -837,7 +836,7 @@ class PauseExceptionEventHandler(EventHandler):
             self.first_task_completed = True
             # Try to pause task that will throw exception
             try:
-                success = await self.task_scheduler.pause_task("pause_exception_task_2", inputs.session)
+                success = await self.task_scheduler.pause_task("pause_exception_task_2")
                 logger.info(f"Pause attempt result: {success}")
             except Exception as e:
                 logger.error(f"Exception during pause: {e}")
@@ -862,7 +861,7 @@ class CancelExceptionEventHandler(EventHandler):
         """Handle input event - create two tasks"""
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="cancel_exception_task_1",
                 task_type="cancellable",
                 priority=1,
@@ -870,7 +869,7 @@ class CancelExceptionEventHandler(EventHandler):
                 context_id="cancel_exception_context_1"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="cancel_exception_task_2",
                 task_type="cancel_exception",
                 priority=1,
@@ -891,7 +890,7 @@ class CancelExceptionEventHandler(EventHandler):
             self.first_task_completed = True
             # Try to cancel task that will throw exception
             try:
-                success = await self.task_scheduler.cancel_task("cancel_exception_task_2", inputs.session)
+                success = await self.task_scheduler.cancel_task("cancel_exception_task_2")
                 logger.info(f"Cancel attempt result: {success}")
             except Exception as e:
                 logger.error(f"Exception during cancel: {e}")
@@ -923,7 +922,7 @@ class StatePersistenceEventHandler(EventHandler):
             # First round: create 2 tasks (the first completes quickly, the second is paused)
             tasks = [
                 Task(
-                    session_id=inputs.session.session_id(),
+                    session_id=inputs.session.get_session_id(),
                     task_id="persist_task_1",
                     task_type="cancellable",
                     priority=1,
@@ -931,7 +930,7 @@ class StatePersistenceEventHandler(EventHandler):
                     context_id="persist_context_1"
                 ),
                 Task(
-                    session_id=inputs.session.session_id(),
+                    session_id=inputs.session.get_session_id(),
                     task_id="persist_task_2",
                     task_type="cancellable",
                     priority=1,
@@ -966,7 +965,7 @@ class StatePersistenceEventHandler(EventHandler):
 
         if completed_task_id == "persist_task_1":
             # After the first task completes, pause the second task
-            success = await self.task_scheduler.pause_task("persist_task_2", inputs.session)
+            success = await self.task_scheduler.pause_task("persist_task_2")
             logger.info(f"StatePersistenceEventHandler: Paused persist_task_2, result: {success}")
 
         return {"status": "success"}
@@ -994,7 +993,7 @@ class MultiTaskStatePersistenceEventHandler(EventHandler):
             # First round: create 4 tasks
             tasks = [
                 Task(
-                    session_id=inputs.session.session_id(),
+                    session_id=inputs.session.get_session_id(),
                     task_id="multi_task_1",
                     task_type="cancellable",
                     priority=1,
@@ -1002,7 +1001,7 @@ class MultiTaskStatePersistenceEventHandler(EventHandler):
                     context_id="multi_context_1"
                 ),
                 Task(
-                    session_id=inputs.session.session_id(),
+                    session_id=inputs.session.get_session_id(),
                     task_id="multi_task_2",
                     task_type="cancellable",
                     priority=2,
@@ -1010,7 +1009,7 @@ class MultiTaskStatePersistenceEventHandler(EventHandler):
                     context_id="multi_context_2"
                 ),
                 Task(
-                    session_id=inputs.session.session_id(),
+                    session_id=inputs.session.get_session_id(),
                     task_id="multi_task_3",
                     task_type="cancellable",
                     priority=3,
@@ -1038,8 +1037,8 @@ class MultiTaskStatePersistenceEventHandler(EventHandler):
 
         if completed_task_id == "multi_task_1":
             # After the first task completes, pause task_2 and cancel task_3
-            await self.task_scheduler.pause_task("multi_task_2", inputs.session)
-            await self.task_scheduler.cancel_task("multi_task_3", inputs.session)
+            await self.task_scheduler.pause_task("multi_task_2")
+            await self.task_scheduler.cancel_task("multi_task_3")
             logger.info("MultiTaskStatePersistenceEventHandler: Paused task_2 and cancelled task_3")
 
         return {"status": "success"}
@@ -1164,7 +1163,8 @@ class TestEventHandlerTaskControl:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_pause_in_handler")
+        session = create_agent_session(session_id="test_pause_in_handler", card=agent.card)
+        await session.pre_run()
 
         # Create input event
         input_event = InputEvent(
@@ -1215,8 +1215,8 @@ class TestEventHandlerTaskControl:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_cancel_in_handler")
-
+        session = create_agent_session(card=agent.card, session_id="test_cancel_in_handler")
+        await session.pre_run()
         # Create input event
         input_event = InputEvent(
             event_type=EventType.INPUT,
@@ -1259,8 +1259,8 @@ class TestEventHandlerTaskControl:
             }
         )
 
-        session = TaskSession(session_id="test_pause_non_pausable")
-
+        session = create_agent_session(card=agent.card, session_id="test_pause_non_pausable")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test pause non-pausable"}
@@ -1298,8 +1298,8 @@ class TestEventHandlerTaskControl:
             }
         )
 
-        session = TaskSession(session_id="test_cancel_non_cancellable")
-
+        session = create_agent_session(card=agent.card, session_id="test_cancel_non_cancellable")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test cancel non-cancellable"}
@@ -1334,8 +1334,8 @@ class TestEventHandlerTaskControl:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_pause_then_cancel")
-
+        session = create_agent_session(card=agent.card, session_id="test_pause_then_cancel")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test pause then cancel"}
@@ -1369,10 +1369,10 @@ class TestEventHandlerTaskControl:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_pause_non_existent")
-
+        session = create_agent_session(card=agent.card, session_id="test_pause_non_existent")
+        await session.pre_run()
         # Try to pause non-existent task
-        success = await agent.controller.task_scheduler.pause_task("non_existent_task", session)
+        success = await agent.controller.task_scheduler.pause_task("non_existent_task")
 
         assert not success, "Pausing non-existent task should fail"
 
@@ -1394,8 +1394,8 @@ class TestEventHandlerTaskControl:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_pause_completed")
-
+        session = create_agent_session(card=agent.card, session_id="test_pause_completed")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test pause completed"}
@@ -1405,7 +1405,7 @@ class TestEventHandlerTaskControl:
         await collect_stream_output(agent.stream(input_event, session))
 
         # Try to pause completed task
-        success = await agent.controller.task_scheduler.pause_task("test_task_1", session)
+        success = await agent.controller.task_scheduler.pause_task("test_task_1")
 
         assert not success, "Pausing completed task should fail"
 
@@ -1431,8 +1431,8 @@ class TestEventHandlerTaskControl:
             }
         )
 
-        session = TaskSession(session_id="test_pause_exception")
-
+        session = create_agent_session(card=agent.card, session_id="test_pause_exception")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test pause exception"}
@@ -1471,10 +1471,10 @@ class TestEventHandlerTaskControl:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_cancel_non_existent")
-
+        session = create_agent_session(card=agent.card, session_id="test_cancel_non_existent")
+        await session.pre_run()
         # Try to cancel non-existent task
-        success = await agent.controller.task_scheduler.cancel_task("non_existent_task", session)
+        success = await agent.controller.task_scheduler.cancel_task("non_existent_task")
 
         assert not success, "Cancelling non-existent task should fail"
 
@@ -1496,8 +1496,8 @@ class TestEventHandlerTaskControl:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_cancel_completed")
-
+        session = create_agent_session(card=agent.card, session_id="test_cancel_completed")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test cancel completed"}
@@ -1507,7 +1507,7 @@ class TestEventHandlerTaskControl:
         await collect_stream_output(agent.stream(input_event, session))
 
         # Try to cancel completed task
-        success = await agent.controller.task_scheduler.cancel_task("test_task_1", session)
+        success = await agent.controller.task_scheduler.cancel_task("test_task_1")
 
         assert not success, "Cancelling completed task should fail"
 
@@ -1533,8 +1533,8 @@ class TestEventHandlerTaskControl:
             }
         )
 
-        session = TaskSession(session_id="test_cancel_exception")
-
+        session = create_agent_session(card=agent.card, session_id="test_cancel_exception")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test cancel exception"}
@@ -1580,8 +1580,8 @@ class TestStatePersistence:
         )
 
         # Use the same Session
-        session = TaskSession(session_id="test_state_persistence")
-
+        session = create_agent_session(card=agent.card, session_id="test_state_persistence")
+        await session.pre_run()
         # ========== First stream round ==========
         logger.info("========== First stream round starts ==========")
         input_event_1 = InputEvent(
@@ -1646,8 +1646,8 @@ class TestStatePersistence:
         )
 
         # Use the same Session
-        session = TaskSession(session_id="test_multi_state")
-
+        session = create_agent_session(card=agent.card, session_id="test_multi_state")
+        await session.pre_run()
         # ========== First stream round ==========
         logger.info("========== First stream round starts ==========")
         input_event_1 = InputEvent(
@@ -1725,8 +1725,8 @@ class TestStatePersistence:
         )
 
         # Use the same Session
-        session = TaskSession(session_id="test_fallback")
-
+        session = create_agent_session(card=agent.card, session_id="test_fallback")
+        await session.pre_run()
         # ========== First stream round ==========
         logger.info("========== First stream round starts ==========")
         input_event_1 = InputEvent(
@@ -1800,8 +1800,8 @@ class TestLifecycleManagement:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_stop")
-
+        session = create_agent_session(card=agent.card, session_id="test_stop")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test stop"}
@@ -1812,8 +1812,8 @@ class TestLifecycleManagement:
             collect_stream_output(agent.stream(input_event, session))
         )
 
-        # Wait for a while to let tasks start executing
-        await asyncio.sleep(0.3)
+        # OPTIMIZED: Wait for a shorter time to let tasks start executing
+        await asyncio.sleep(0.05)  # OPTIMIZED: from 0.3 to 0.05
 
         # Verify EventQueue and TaskScheduler are both stopped
         try:
@@ -1844,8 +1844,8 @@ class TestLifecycleManagement:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_multiple_start")
-
+        session = create_agent_session(card=agent.card, session_id="test_multiple_start")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test"}
@@ -1900,8 +1900,8 @@ class TestSessionManagement:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="multi_turn")
-
+        session = create_agent_session(card=agent.card, session_id="multi_turn")
+        await session.pre_run()
         # First turn
         input_event_1 = InputEvent(
             event_type=EventType.INPUT,
@@ -1943,8 +1943,8 @@ class TestSessionManagement:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_reg")
-
+        session = create_agent_session(card=agent.card, session_id="test_reg")
+        await session.pre_run()
         # Verify initial state: no sessions
         assert len(agent.controller.task_scheduler.sessions) == 0, \
             "Sessions should be empty initially"
@@ -1962,7 +1962,7 @@ class TestSessionManagement:
         assert first_chunk is not None, "Should be able to read the first chunk"
 
         # Session should be registered at this point
-        assert session.session_id() in agent.controller.task_scheduler.sessions, \
+        assert session.get_session_id() in agent.controller.task_scheduler.sessions, \
             "Session should be registered while stream is running"
 
         # Consume all chunks
@@ -1970,7 +1970,7 @@ class TestSessionManagement:
             pass
 
         # After stream ends, session should be cleaned up
-        assert session.session_id() not in agent.controller.task_scheduler.sessions, \
+        assert session.get_session_id() not in agent.controller.task_scheduler.sessions, \
             "Session should be removed after stream ends"
 
         logger.info("✅ test_session_registration_and_cleanup passed")
@@ -1996,8 +1996,8 @@ class TestEventSystem:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_pub_sub")
-
+        session = create_agent_session(card=agent.card, session_id="test_pub_sub")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test event system"}
@@ -2028,8 +2028,8 @@ class TestEventSystem:
             task_executors={"cancellable": build_cancellable_executor}
         )
 
-        session = TaskSession(session_id="test_unsubscribe")
-
+        session = create_agent_session(card=agent.card, session_id="test_unsubscribe")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test unsubscribe"}
@@ -2040,7 +2040,7 @@ class TestEventSystem:
         assert len(output_1) > 0, "First stream should have output"
 
         # Verify session is cleaned up after stream ends
-        assert session.session_id() not in agent.controller.task_scheduler.sessions, \
+        assert session.get_session_id() not in agent.controller.task_scheduler.sessions, \
             "Session should be removed after stream ends (unsubscribe should be called)"
 
         # Second stream - should work normally without subscription leaks
@@ -2048,7 +2048,7 @@ class TestEventSystem:
         assert len(output_2) > 0, "Second stream should have output"
 
         # Verify session is cleaned up again
-        assert session.session_id() not in agent.controller.task_scheduler.sessions, \
+        assert session.get_session_id() not in agent.controller.task_scheduler.sessions, \
             "Session should be removed after second stream ends"
 
         logger.info("✅ test_unsubscribe_cleanup passed")
@@ -2068,8 +2068,8 @@ class TestEventSystem:
             task_executors={"interaction": build_interaction_executor}
         )
 
-        session = TaskSession(session_id="test_interaction")
-
+        session = create_agent_session(card=agent.card, session_id="test_interaction")
+        await session.pre_run()
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test interaction"}

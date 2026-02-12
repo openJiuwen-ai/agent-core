@@ -24,7 +24,7 @@ from openjiuwen.core.controller.legacy import (
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import InteractionOutput
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.session.stream import CustomSchema, OutputSchema
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
@@ -219,7 +219,7 @@ class WorkflowController(IntentDetectionController):
             dict: Execution result
         """
         workflow_id = task.input.target_id
-        conversation_id = session.session_id()
+        conversation_id = session.get_session_id()
 
         try:
             # 1. Check if there's a running task for this conversation
@@ -1117,7 +1117,8 @@ class WorkflowController(IntentDetectionController):
             from openjiuwen.core.runner import Runner
             logger.info(f"Trying to find workflow from resource_mgr: {workflow_id}")
 
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, session=session.base())
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id,
+                                                              session=session.base())
             logger.info(f"Found workflow from resource_mgr: {workflow is not None}")
             if workflow:
                 return workflow
@@ -1128,7 +1129,7 @@ class WorkflowController(IntentDetectionController):
         try:
             from openjiuwen.core.runner import Runner
             logger.info(f"Trying to find workflow from controller._session: {workflow_id}")
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id)
             logger.info(f"Found workflow from controller._session: {workflow is not None}")
             return workflow
         except Exception as e:
@@ -1148,7 +1149,7 @@ class WorkflowController(IntentDetectionController):
             Workflow object, None if not found
         """
         try:
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id)
             return workflow
         except Exception as e:
             logger.error(f"Failed to find workflow {workflow_id}: {e}")

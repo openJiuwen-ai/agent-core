@@ -9,7 +9,7 @@ Author: huenrui1@huawei.com
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Dict, List, Optional, Union, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from pydantic import Field, BaseModel
 
@@ -35,7 +35,9 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
 
 
 class ReActAgentConfig(BaseModel):
@@ -179,6 +181,7 @@ class ReActAgentConfig(BaseModel):
         )
         return self
 
+
     def configure_mem_scope(self, mem_scope_id: str) -> 'ReActAgentConfig':
         """Configure memory scope ID
 
@@ -248,8 +251,9 @@ class ReActAgentConfig(BaseModel):
     def configure_context_processors(
             self,
             processors: List[Tuple[str, BaseModel]]
-    ):
+    ) -> 'ReActAgentConfig':
         self.context_processors = processors
+        return self
 
 
 class ReActAgent(BaseAgent):
@@ -283,9 +287,6 @@ class ReActAgent(BaseAgent):
         )
         self._llm = None
         self._init_memory_scope()
-        # 延迟导入以避免循环依赖：skills -> runner -> single_agent -> skills
-        from openjiuwen.core.skills.skill_util import SkillUtil
-        self._skill_util = SkillUtil(self._config.sys_operation_id)
         super().__init__(card)
 
     def _init_memory_scope(self) -> None:
@@ -336,7 +337,7 @@ class ReActAgent(BaseAgent):
 
         # Reset sys operation id if changed
         if old_config.sys_operation_id != config.sys_operation_id:
-            self._skill_util.set_sys_operation_id(config.sys_operation_id)
+            self.lazy_init_skill()
 
         return self
 
@@ -360,10 +361,6 @@ class ReActAgent(BaseAgent):
                 model_config=self._config.model_config_obj
             )
         return self._llm
-
-    async def register_skill(self, skill_path: Union[str, List[str]]):
-        """Register a skill"""
-        await self._skill_util.register_skills(skill_path, self)
 
     async def _call_llm(
         self,
@@ -405,8 +402,8 @@ class ReActAgent(BaseAgent):
         if self._config.context_engine_config.enable_reload:
             self.ability_manager.add(context_reloader.card)
             from openjiuwen.core.runner import Runner
-            if not Runner.resource_mgr.get_tool(context_reloader.card.id):
-                Runner.resource_mgr.add_tool(context_reloader)
+            if not Runner.resource_mgr.get_tool(context_reloader.card.id, tag=self.card.id):
+                Runner.resource_mgr.add_tool(context_reloader, tag=self.card.id)
         else:
             self.ability_manager.remove(context_reloader.card.name)
         return context
@@ -437,6 +434,9 @@ class ReActAgent(BaseAgent):
         else:
             raise ValueError("Input must be dict with 'query' or str")
 
+        # Hook: before invoke
+        await self._execute_callbacks(AgentCallbackEvent.BEFORE_INVOKE, inputs=inputs)
+
         # Get or create model context
         context = await self._init_context(session)
 
@@ -451,13 +451,15 @@ class ReActAgent(BaseAgent):
             if msg.get("role") == "system"
         ]
 
-        if len(system_messages) > 0 and self._skill_util.has_skill():
+        if len(system_messages) > 0 and self._skill_util is not None and self._skill_util.has_skill():
             skill_prompt = self._skill_util.get_skill_prompt()
             last_msg = system_messages[-1]
             last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
 
         # Get tool info from _ability_manager
         tools = await self.ability_manager.list_tool_info()
+
+        result = None
 
         # ReAct loop
         for iteration in range(self._config.max_iterations):
@@ -471,10 +473,26 @@ class ReActAgent(BaseAgent):
                 tools=tools if tools else None,
             )
 
+            # Hook: before model call
+            await self._execute_callbacks(
+                AgentCallbackEvent.BEFORE_MODEL_CALL,
+                inputs=inputs,
+                iteration=iteration + 1,
+                messages=context_window.get_messages()
+            )
+
             # Call LLM with messages and tools from context window
             ai_message = await self._call_llm(
                 context_window.get_messages(),
                 context_window.get_tools() or None
+            )
+
+            # Hook: after model call
+            await self._execute_callbacks(
+                AgentCallbackEvent.AFTER_MODEL_CALL,
+                inputs=inputs,
+                iteration=iteration + 1,
+                response=ai_message
             )
 
             # Add AI message to context
@@ -493,29 +511,63 @@ class ReActAgent(BaseAgent):
                         f"with args: {tool_call.arguments}"
                     )
 
+                    # Hook: before tool call
+                    await self._execute_callbacks(
+                        AgentCallbackEvent.BEFORE_TOOL_CALL,
+                        inputs=inputs,
+                        iteration=iteration + 1,
+                        tool_name=tool_call.name,
+                        tool_args=tool_call.arguments
+                    )
+
                 # Execute tools using _execute_ability (supports parallel)
                 results = await self.ability_manager.execute(
-                    ai_message.tool_calls, session
+                    ai_message.tool_calls, session, tag=self.card.id
                 )
 
                 # Process results and add tool messages to context
-                for (result, tool_msg) in results:
-                    logger.info(f"Tool result: {result}")
+                for idx, (tool_result, tool_msg) in enumerate(results):
+                    logger.info(f"Tool result: {tool_result}")
                     await context.add_messages(tool_msg)
+
+                    # Hook: after tool call
+                    tool_call = ai_message.tool_calls[idx]
+                    await self._execute_callbacks(
+                        AgentCallbackEvent.AFTER_TOOL_CALL,
+                        inputs=inputs,
+                        iteration=iteration + 1,
+                        tool_name=tool_call.name,
+                        tool_args=tool_call.arguments,
+                        tool_result=tool_result
+                    )
             else:
                 # No tool calls, return AI response
                 await self.context_engine.save_contexts(session)
-                return {
+                result = {
                     "output": ai_message.content,
                     "result_type": "answer"
                 }
+                # Hook: after invoke
+                await self._execute_callbacks(
+                    AgentCallbackEvent.AFTER_INVOKE,
+                    inputs=inputs,
+                    result=result
+                )
+                return result
 
         # Max iterations reached
         await self.context_engine.save_contexts(session)
-        return {
+        result = {
             "output": "Max iterations reached without completion",
             "result_type": "error"
         }
+        # Hook: after invoke
+        await self._execute_callbacks(
+            AgentCallbackEvent.AFTER_INVOKE,
+            inputs=inputs,
+            result=result
+        )
+        return result
 
     async def stream(
             self,

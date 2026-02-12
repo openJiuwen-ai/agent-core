@@ -30,14 +30,12 @@ def test_model_client_config_accepts_supported_providers():
 
 def test_model_client_config_model_validate_invalid_provider_raises_base_error():
     with pytest.raises(BaseError) as error:
-        ModelClientConfig.model_validate(
-            {
-                "client_provider": "invalid_provider",
-                "api_key": "sk-test",
-                "api_base": "http://localhost",
-            }
+        ModelClientConfig(
+            client_provider="mock-LLM",
+            api_key="sk-test",
+            api_base="http://localhost"
         )
-    assert error.value.code == StatusCode.MODEL_CLIENT_CONFIG_INVALID.code
+    assert error.value.code == StatusCode.MODEL_PROVIDER_INVALID.code
 
 
 def test_model_client_config_allows_registered_string_provider():

@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import AsyncGenerator, Any
 from typing import Callable
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import graph_logger as logger
+from openjiuwen.core.common.logging import LogEventType
 from openjiuwen.core.common.utils.dict_utils import extract_leaf_nodes, format_path, rebuild_dict
 from openjiuwen.core.session import EndFrame, get_value_by_nested_path, extract_origin_key
 from openjiuwen.core.workflow.components.base import ComponentAbility
@@ -60,40 +61,50 @@ class StreamActor:
         self._node_id: str = node_id
         self._running_tasks: list[asyncio.Task] = []
 
-    async def send(self, message: dict, source_ability: ComponentAbility, first_frame: bool = False):
+    async def send(self, message: dict, source_ability: ComponentAbility, first_frame: bool = False,
+                   producer_id: str = None):
+        log_message = dict(event_type=LogEventType.GRAPH_SEND_STREAM_CHUNK,
+                           chunk=message,
+                           node_id=self._node_id)
         if not self._vertex.should_handle_message():
             logger.warning(
-                f"discard message [{message}], because current component [{self._node_id}] can not handle message")
+                f"Discard chunk send from [{producer_id}], {self._node_id}[{source_ability.name}] unable to handle",
+                **log_message
+            )
             return
         if self._task is None or self._task.done():
             if self._task and self._task.done() and self._task.exception():
-                logger.warning(f"previous task with exception {self._task.exception()}")
+                logger.warning(
+                    f"Exception occurred while sending chunk of node [{self._node_id}] ", **log_message,
+                    exception=self._task.exception(), )
             if self._task_error and self._task_error.done() and self._task_error.exception():
                 logger.warning(
-                    f"discard message [{message}], because current component [{self._node_id}] has error "
-                    f"[{self._task_error.exception()}], can not handle message "
-                )
+                    f"Discard chunk send from [{producer_id}], {self._node_id}[{source_ability.name}] occur exception",
+                    **log_message,
+                    exception=self._task_error.exception())
                 return
             if not first_frame or not self._vertex.is_done():
-                logger.warning(f"discard message [{message}], "
-                               f"because current component [{self._node_id}] has been finished")
+                logger.warning(
+                    f"Discard chunk send from [{producer_id}], {self._node_id}[{source_ability.name}] vertex is done",
+                    **log_message)
                 return
-            logger.debug(f"actor [{self._node_id}] start by message: {message}")
             event = asyncio.Event()
             self._task_error = asyncio.Future()
             self._task = asyncio.create_task(self._vertex.stream_call(event, self._error_callback))
             await event.wait()
+            logger.debug(f"Stream actor task node [{self._node_id}] started",
+                         event_type=LogEventType.GRAPH_VERTEX_STREAM_ACTOR_START,
+                         node_id=self._node_id)
             for ability, processor in self._processors.items():
                 task = asyncio.create_task(processor.run(ability))
                 self._running_tasks.append(task)
+        logger.debug(f"Send chunk from [{producer_id}] to {self._node_id}[{source_ability.name}]", **log_message)
         for processor in self._processors.values():
-            logger.debug(f"processor [{processor.node_id}] receive message [{message}]")
             await processor.receive(StreamPayload(message, source_ability))
 
     async def generator(self, ability: ComponentAbility, schema: dict,
                         stream_callback: Callable[[dict], Awaitable[None]] = None) -> dict:
         processor = self._processors[ability]
-        logger.debug(f"processor [{processor.node_id}] generate message for ability: [{ability.name}]")
         return processor.generator(schema, stream_callback)
 
     def _error_callback(self, error):
@@ -101,26 +112,35 @@ class StreamActor:
             self._task_error.set_exception(error)
 
     async def shutdown(self):
+        log_message = dict(
+            event_type=LogEventType.GRAPH_VERTEX_STREAM_ACTOR_SHUTDOWN,
+            node_id=self._node_id
+        )
         try:
+            logger.debug(f"Begin to shutdown stream actor task for {self._node_id}", **log_message)
             if self._task and not self._task.done() and not self._task.cancelled():
                 self._task.cancel()
                 try:
                     await self._task
                 except asyncio.CancelledError:
-                    logger.warning("task has been cancelled")
+                    logger.debug(f"Cancel stream actor task for {self._node_id}", **log_message)
                 except Exception as e:
-                    logger.warning(f"unexpected exception {e}")
+                    logger.debug(f"Cancel stream actor task for {self._node_id} with exception", exception=e,
+                                 **log_message)
             if self._task_error:
                 if not self._task_error.done() and not self._task_error.cancelled():
                     self._task_error.cancel()
                     try:
                         await self._task_error
                     except asyncio.CancelledError:
-                        logger.warning("task error has been cancelled")
+                        logger.debug(f"Cancel stream actor error task for {self._node_id}", **log_message)
                     except Exception as e:
-                        logger.warning(f"unexpected exception {e}")
+                        logger.debug(f"Cancel stream actor error task for {self._node_id} with exception",
+                                     exception=e, **log_message)
+
                 if not self._task_error.cancelled() and self._task_error.exception():
-                    logger.warning(f"unexpected exception {self._task_error.exception()}")
+                    logger.debug(f"No need cancel stream actor error task for {self._node_id} with exception",
+                                 exception=self._task_error.exception(), **log_message)
 
             if self._running_tasks:
                 for task in self._running_tasks:
@@ -129,7 +149,9 @@ class StreamActor:
                 results = await asyncio.gather(*self._running_tasks, return_exceptions=True)
                 for result in results:
                     if isinstance(result, Exception):
-                        logger.debug(f"running task with exception {result}")
+                        logger.debug(f"Cancel stream actor running task for {self._node_id} with exception",
+                                     exception=result, **log_message)
+            logger.debug(f"Succeed to shutdown stream actor task for {self._node_id}", **log_message)
         finally:
             self._task = None
             self._running_tasks = []
@@ -144,7 +166,6 @@ class StreamProcessor:
         self._timeout = stream_generator_timeout if stream_generator_timeout > 0 else None
 
     async def run(self, ability: ComponentAbility):
-        logger.info(f"stream processor started for {self.node_id}, ability: [{ability.name}]")
         handle_map = set()
         source_map: dict[ComponentAbility, set[str]] = defaultdict(set)
         while True:
@@ -175,7 +196,6 @@ class StreamProcessor:
                             await queue.put(value)
             if handle_map == self.sources:
                 break
-        logger.info(f"stream processor finished for {self.node_id}, ability: [{ability.name}]")
 
     @staticmethod
     def is_value_from_source(path: str, source_id: str) -> bool:
@@ -202,7 +222,6 @@ class StreamProcessor:
                 continue
             inputs.append((key_path, self._create_generator(path_str, ref_path, stream_callable)))
         input_map = rebuild_dict(inputs)
-        logger.debug(f"stream generator source: {input_map}, schema: {schema}")
         return input_map
 
     def _create_generator(self, k_path: str, r_path: str,
@@ -217,12 +236,31 @@ class StreamProcessor:
             while True:
                 message = await asyncio.wait_for(queue.get(), timeout=self._timeout)
                 if message is None:
-                    logger.warning(f"stream processor finished for {self.node_id}, message timeout {self._timeout}")
+                    logger.warning(
+                        f"Receive chunk timeout {self._timeout}s of [{self.node_id}.{k_path}]",
+                        event_type=LogEventType.GRAPH_RECEIVE_STREAM_CHUNK,
+                        node_id=self.node_id,
+                        chunk=message,
+                        metadata={"k_path": k_path, "r_path": r_path}
+                    )
                     break
                 if isinstance(message, EndFrame):
-                    logger.debug(f"EndFrame received: {message}, k_path: {k_path}, r_path: {r_path}")
+                    logger.debug(
+                        f"Receive EndFrame chunk of [{self.node_id}.{k_path}]",
+                        event_type=LogEventType.GRAPH_RECEIVE_STREAM_CHUNK,
+                        node_id=self.node_id,
+                        chunk=message,
+                        metadata={"k_path": k_path, "r_path": r_path}
+                    )
                     queue.task_done()
                     break
+                logger.debug(
+                    f"Receive chunk of [{self.node_id}.{k_path}]",
+                    event_type=LogEventType.GRAPH_RECEIVE_STREAM_CHUNK,
+                    node_id=self.node_id,
+                    chunk=message,
+                    metadata={"k_path": k_path, "r_path": r_path}
+                )
                 yield message
                 if stream_callable:
                     await stream_callable({k_path: message})
@@ -242,4 +280,4 @@ def _is_end_message(message: dict[str, Any]) -> bool:
 def _get_producer_id(message):
     if not isinstance(message, dict) or len(message) != 1:
         raise ValueError("message is invalid")
-    return next(iter(message))  # 从一个单键值map中获取key
+    return next(iter(message))

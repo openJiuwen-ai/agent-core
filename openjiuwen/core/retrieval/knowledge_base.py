@@ -37,7 +37,7 @@ class KnowledgeBase(ABC):
         index_manager: Optional[Indexer] = None,
         llm_client: Optional[Any] = None,
         strict_validation: bool = True,
-        **kwargs: Any,
+        **kwargs,
     ):
         self.strict_validation = strict_validation
         self.config = config
@@ -91,7 +91,7 @@ class KnowledgeBase(ABC):
     async def parse_files(
         self,
         file_paths: List[str],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[Document]:
         """
         Parse files from file paths into a list of Document objects
@@ -108,7 +108,7 @@ class KnowledgeBase(ABC):
     async def add_documents(
         self,
         documents: List[Document],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[str]:
         """Add documents to the knowledge base"""
 
@@ -117,7 +117,7 @@ class KnowledgeBase(ABC):
         self,
         query: str,
         config: Optional[RetrievalConfig] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[RetrievalResult]:
         """Retrieve relevant documents"""
 
@@ -125,7 +125,7 @@ class KnowledgeBase(ABC):
     async def delete_documents(
         self,
         doc_ids: List[str],
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete documents"""
 
@@ -133,7 +133,7 @@ class KnowledgeBase(ABC):
     async def update_documents(
         self,
         documents: List[Document],
-        **kwargs: Any,
+        **kwargs,
     ) -> List[str]:
         """Update documents"""
 

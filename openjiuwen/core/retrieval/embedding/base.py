@@ -7,14 +7,14 @@ Provides a unified interface for embedding models.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import List, Optional
 
 
 class Embedding(ABC):
     """Embedding model abstract base class"""
 
     @abstractmethod
-    async def embed_query(self, text: str, **kwargs: Any) -> List[float]:
+    async def embed_query(self, text: str, **kwargs) -> List[float]:
         """Embed query text"""
 
     @abstractmethod
@@ -22,7 +22,7 @@ class Embedding(ABC):
         self,
         texts: List[str],
         batch_size: Optional[int] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> List[List[float]]:
         """Embed document texts"""
 

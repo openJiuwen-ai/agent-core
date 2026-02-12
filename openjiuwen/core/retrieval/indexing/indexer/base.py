@@ -23,7 +23,7 @@ class Indexer(ABC):
         chunks: List[TextChunk],
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Build index"""
 
@@ -34,7 +34,7 @@ class Indexer(ABC):
         doc_id: str,
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Update index"""
 
@@ -43,7 +43,7 @@ class Indexer(ABC):
         self,
         doc_id: str,
         index_name: str,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete index"""
 

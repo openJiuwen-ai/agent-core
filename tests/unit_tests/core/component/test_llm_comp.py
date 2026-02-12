@@ -12,9 +12,10 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.llm import ModelConfig
-from openjiuwen.core.workflow import ComponentAbility, End, WorkflowCard
+from openjiuwen.core.workflow import ComponentAbility, End, WorkflowCard, WorkflowComponent
 from openjiuwen.core.workflow import Start
-from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
+from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine, ModelContext
+from openjiuwen.core.graph.executable import Input, Output
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, SystemMessage, UserMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -103,15 +104,18 @@ class FakeModel(Model):
         super().__init__(model_client_config=model_client_config, model_config=model_config)
         # Override the _client to avoid actual API calls
         self._client = self
-    
+
     async def invoke(self, messages: Union[List[BaseMessage], List[Dict], str],
-                      tools: Union[List[ToolInfo], List[Dict]] = None, **kwargs: Any):
+                     tools: Union[List[ToolInfo], List[Dict]] = None, **kwargs: Any):
         return AssistantMessage(role="assistant", content="mocked response")
 
     async def stream(self, messages: Union[List[BaseMessage], List[Dict], str],
-                      tools: Union[List[ToolInfo], List[Dict]] = None, **kwargs: Any) -> AsyncIterator[
+                     tools: Union[List[ToolInfo], List[Dict]] = None, **kwargs: Any) -> AsyncIterator[
         AssistantMessageChunk]:
-        yield AssistantMessageChunk(role="assistant", content="mocked response")
+        # Simulate streaming with multiple chunks
+        chunks = ["Hello", " ", "world", "!", " This", " is", " a", " streamed", " response."]
+        for chunk_content in chunks:
+            yield AssistantMessageChunk(role="assistant", content=chunk_content)
 
 
 @patch(
@@ -138,10 +142,10 @@ class TestLLMExecutableInvoke:
                 "required": True,
             }},
         )
-        
+
         fake_llm = FakeModel(api_base="http://fake.api.com", api_key="fake-key")
         mock_model.return_value = fake_llm
-        
+
         exe = LLMExecutable(config)
 
         output = await exe.invoke(fake_input(userFields=dict(query="pytest")), fake_node_ctx, context=Mock())
@@ -170,7 +174,7 @@ class TestLLMExecutableInvoke:
 
         fake_llm = FakeModel(api_base="http://fake.api.com", api_key="fake-key")
         mock_model.return_value = fake_llm
-        
+
         exe = LLMExecutable(config)
 
         # 调用 stream 方法，异步迭代所有 chunk
@@ -193,7 +197,7 @@ class TestLLMExecutableInvoke:
         config = LLMCompConfig(model_client_config=fake_model_client_config,
                                model_config=fake_model_config,
                                template_content=[{"role": "user", "content": "Hello {name}"}],
-                               response_format={"type": "text"},)
+                               response_format={"type": "text"}, )
         try:
             exe = LLMExecutable(config)
         except BaseError as e:
@@ -282,7 +286,8 @@ class TestLLMExecutableInvokeNew:
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_agent_stream_start_llm_end_with_stream_writer(self,
-                                            fake_model_config, fake_model_client_config):
+                                                                               fake_model_config,
+                                                                               fake_model_client_config):
         id = "write_poem_workflow"
         version = "1.0"
         name = "poem"
@@ -304,7 +309,8 @@ class TestLLMExecutableInvokeNew:
         config = LLMCompConfig(
             model_config=fake_model_config,
             model_client_config=fake_model_client_config,
-            template_content=[{"role": "system", "content": "我的系统提示词"}, {"role": "user", "content": "Hello {{query}}"}],
+            template_content=[{"role": "system", "content": "我的系统提示词"},
+                              {"role": "user", "content": "Hello {{query}}"}],
             response_format={"type": "text"},
             output_config={"output": {"type": "string", "required": True}},
         )
@@ -364,7 +370,8 @@ class TestLLMExecutableInvokeNew:
 
         config = LLMCompConfig(
             model=model_config,
-            template_content=[{"role": "system", "content": "我的系统提示词"}, {"role": "user", "content": "Hello {{query}}"}],
+            template_content=[{"role": "system", "content": "我的系统提示词"},
+                              {"role": "user", "content": "Hello {{query}}"}],
             response_format={"type": "markdown"},
             output_config={"output": {"type": "string", "required": True}},
         )
@@ -390,7 +397,7 @@ class TestLLMExecutableInvokeNew:
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_invoke_start_llm_end_with_json_output(self,
-                                                fake_model_config, fake_model_client_config):
+                                                                       fake_model_config, fake_model_client_config):
         flow = Workflow()
 
         start_component = Start()
@@ -403,15 +410,15 @@ class TestLLMExecutableInvokeNew:
                               {"role": "user", "content": "{{query}}"}],
             response_format={"type": "json"},
             output_config={"output": {"type": "array",
-                                    "description": "个人信息列表",
-                                    "items": {"type": "object",
-                                              "properties": {
-                                                "name": {"type": "string", "description": "姓名"},
-                                                "age": {"type": "integer", "description": "年龄"}
+                                      "description": "个人信息列表",
+                                      "items": {"type": "object",
+                                                "properties": {
+                                                    "name": {"type": "string", "description": "姓名"},
+                                                    "age": {"type": "integer", "description": "年龄"}
                                                 },
-                                              "required": ["name", "age"]
-                                              },
-                                    "required": True}},
+                                                "required": ["name", "age"]
+                                                },
+                                      "required": True}},
         )
         llm_comp = LLMComponent(config)
 
@@ -436,7 +443,8 @@ class TestLLMExecutableInvokeNew:
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_stream_start_llm_end_with_component_streaming(self,
-                                                fake_model_config, fake_model_client_config):
+                                                                               fake_model_config,
+                                                                               fake_model_client_config):
         flow = Workflow()
 
         start_component = Start()
@@ -445,8 +453,9 @@ class TestLLMExecutableInvokeNew:
         config = LLMCompConfig(
             model_config=fake_model_config,
             model_client_config=fake_model_client_config,
-            template_content=[{"role": "system", "content": "你是一个AI助手，能够帮我完成任务。\n注意：请不要推理，直接输出结果就好了！"},
-                              {"role": "user", "content": "Hello {{query}}"}],
+            template_content=[
+                {"role": "system", "content": "你是一个AI助手，能够帮我完成任务。\n注意：请不要推理，直接输出结果就好了！"},
+                {"role": "user", "content": "Hello {{query}}"}],
             response_format={"type": "markdown"},
             output_config={"output": {"type": "string", "required": True}},
         )
@@ -466,13 +475,14 @@ class TestLLMExecutableInvokeNew:
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
         workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
-        async for chunk in flow.stream(inputs={"query": "please write a 3-line poem"}, session=workflow_session, context=workflow_context):
+        async for chunk in flow.stream(inputs={"query": "please write a 3-line poem"}, session=workflow_session,
+                                       context=workflow_context):
             print(f"stream chunk >>> {chunk}")
 
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
-    async def test_real_workflow_stream_start_llm_end_with_component_streaming_with_json_output_schema(self,
-                                                                        fake_model_config, fake_model_client_config):
+    async def test_real_workflow_stream_start_llm_end_with_component_streaming_with_json_output_schema(
+            self, fake_model_config, fake_model_client_config):
         flow = Workflow()
 
         start_component = Start()
@@ -481,19 +491,20 @@ class TestLLMExecutableInvokeNew:
         config = LLMCompConfig(
             model_config=fake_model_config,
             model_client_config=fake_model_client_config,
-            template_content=[{"role": "system", "content": "你是一个AI助手，能够帮我完成任务。\n注意：请不要推理，直接输出结果就好了！"},
-                              {"role": "user", "content": "{{query}}"}],
+            template_content=[
+                {"role": "system", "content": "你是一个AI助手，能够帮我完成任务。\n注意：请不要推理，直接输出结果就好了！"},
+                {"role": "user", "content": "{{query}}"}],
             response_format={"type": "json"},
             output_config={"output": {"type": "array",
-                                    "description": "个人信息列表",
-                                    "items": {"type": "object",
-                                              "properties": {
-                                                  "name": {"type": "string", "description": "姓名"},
-                                                  "age": {"type": "integer", "description": "年龄"}
-                                              },
-                                              "required": ["name", "age"]
-                                              },
-                                    "required": True}},
+                                      "description": "个人信息列表",
+                                      "items": {"type": "object",
+                                                "properties": {
+                                                    "name": {"type": "string", "description": "姓名"},
+                                                    "age": {"type": "integer", "description": "年龄"}
+                                                },
+                                                "required": ["name", "age"]
+                                                },
+                                      "required": True}},
         )
         llm_comp = LLMComponent(config)
 
@@ -511,14 +522,16 @@ class TestLLMExecutableInvokeNew:
         ce_engine = ContextEngine(config)
         workflow_context = await ce_engine.create_context(context_id="llm_workflow")
         workflow_session = create_agent_session(session_id=session_id).create_workflow_session()
-        async for chunk in flow.stream(inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"}, session=workflow_session,
+        async for chunk in flow.stream(inputs={"query": "收集到的个人信息包括：姓名为张三，年龄为18；姓名为李四，年龄20"},
+                                       session=workflow_session,
                                        context=workflow_context):
             print(f"stream chunk >>> {chunk}")
 
     @unittest.skip("skip system test")
     @pytest.mark.asyncio  # 新增
     async def test_real_workflow_agent_invoke_start_llm_end_with_stream_writer(self,
-                                            fake_model_config, fake_model_client_config):
+                                                                               fake_model_config,
+                                                                               fake_model_client_config):
         id = "write_poem_workflow"
         version = "1.0"
         name = "poem"
@@ -530,7 +543,8 @@ class TestLLMExecutableInvokeNew:
         config = LLMCompConfig(
             model_config=fake_model_config,
             model_client_config=fake_model_client_config,
-            template_content=[{"role": "system", "content": "我的系统提示词"}, {"role": "user", "content": "Hello {{query}}"}],
+            template_content=[{"role": "system", "content": "我的系统提示词"},
+                              {"role": "user", "content": "Hello {{query}}"}],
             response_format={"type": "text"},
             output_config={"output": {"type": "string", "required": True}},
         )
@@ -550,12 +564,12 @@ class TestLLMExecutableInvokeNew:
         workflow_name = flow.card.name
         workflow_version = flow.card.version
         schema = WorkflowSchema(id=workflow_id,
-                              name=workflow_name,
-                              description="写诗工作流",
-                              version=workflow_version,
-                              inputs={"query": {
-                                  "type": "string",
-                              }})
+                                name=workflow_name,
+                                description="写诗工作流",
+                                version=workflow_version,
+                                inputs={"query": {
+                                    "type": "string",
+                                }})
         config = WorkflowAgentConfig(
             id="write_poem_agent",
             version="0.1.0",
@@ -710,3 +724,250 @@ class TestLLMModelInputs:
         assert isinstance(model_inputs[1], BaseMessage)
         assert model_inputs[1].content == "Hello {query}"
 
+    @pytest.mark.asyncio
+    async def test_template_empty_system_exists_user_missing_adds_empty_user(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[],
+            system_prompt_template=SystemMessage(content="system prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 2
+        assert isinstance(model_inputs[0], SystemMessage)
+        assert model_inputs[0].content == "system prompt template"
+        assert isinstance(model_inputs[1], UserMessage)
+        assert model_inputs[1].content == ""
+
+    @pytest.mark.asyncio
+    async def test_template_empty_system_missing_user_exists_keeps_user(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[],
+            user_prompt_template=UserMessage(content="user prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 1
+        assert isinstance(model_inputs[0], UserMessage)
+        assert model_inputs[0].content == "user prompt template"
+
+    @pytest.mark.asyncio
+    async def test_template_empty_system_and_user_exists_keeps_both(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[],
+            system_prompt_template=SystemMessage(content="system prompt template"),
+            user_prompt_template=UserMessage(content="user prompt template"),
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 2
+        assert isinstance(model_inputs[0], SystemMessage)
+        assert model_inputs[0].content == "system prompt template"
+        assert isinstance(model_inputs[1], UserMessage)
+        assert model_inputs[1].content == "user prompt template"
+
+    @pytest.mark.asyncio
+    async def test_template_missing_system_missing_user_missing(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            response_format={"type": "text"},
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 1
+        assert isinstance(model_inputs[0], UserMessage)
+
+    @pytest.mark.asyncio
+    async def test_template_empty_system_missing_user_missing(
+            self,
+            fake_input,
+            fake_model_client_config,
+            fake_model_config,
+    ):
+        config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            response_format={"type": "text"},
+            template_content=[],
+            output_config={"result": {
+                "type": "string",
+                "required": True,
+            }},
+        )
+
+        exe = TestLLMExecutable(config)
+        model_inputs = await exe.prepare_model_inputs(fake_input(userFields=dict(query="pytest")))
+        assert len(model_inputs) == 1
+        assert isinstance(model_inputs[0], UserMessage)
+
+
+class StreamConsumerComponent(WorkflowComponent):
+    """Custom component that consumes stream output from LLM component"""
+
+    def __init__(self, component_id: str = "stream_consumer"):
+        super().__init__()
+        self.component_id = component_id
+
+    async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        """Consume stream output from LLM component"""
+        collected_chunks = []
+        stream_input = inputs.get("result")
+
+        if stream_input and hasattr(stream_input, '__aiter__'):
+            async for chunk in stream_input:
+                if isinstance(chunk, dict):
+                    chunk_content = chunk.get("result", "")
+                    if chunk_content:
+                        collected_chunks.append(chunk_content)
+                else:
+                    collected_chunks.append(str(chunk))
+
+        # Store collected chunks count in component output
+        return {
+            "chunks_count": len(collected_chunks),
+            "total_length": sum(len(str(c)) for c in collected_chunks)
+        }
+
+
+@patch(
+    "openjiuwen.core.workflow.components.llm.llm_comp.Model",
+    autospec=True,
+)
+class TestLLMStreamCacheWorkflow:
+    """Test workflow with start-llm-custom_component-end where custom component consumes stream"""
+
+    @pytest.mark.asyncio
+    async def test_workflow_with_stream_consumer(
+            self,
+            mock_model,
+            fake_model_config,
+            fake_model_client_config
+    ):
+        """Test workflow: start -> llm (stream) -> stream_consumer (collect) -> end
+        
+        The stream_consumer component consumes the stream output from LLM,
+        and the end component should be able to reference the LLM's final result
+        (when cache_stream=True, it will be stored in global state).
+        """
+        session = create_workflow_session()
+
+        # Mock LLM
+        fake_llm = FakeModel(api_key="fake-key", api_base="http://fake.api.com")
+        mock_model.return_value = fake_llm
+
+        # Build workflow
+        flow = Workflow()
+
+        # Start component
+        start_component = Start()
+        flow.set_start_comp("start", start_component, inputs_schema={"query": "${query}"})
+
+        # LLM component with cache_stream enabled
+        llm_config = LLMCompConfig(
+            model_client_config=fake_model_client_config,
+            model_config=fake_model_config,
+            template_content=[{"role": "user", "content": "Say: {query}"}],
+            response_format={"type": "text"},
+            output_config={"result": {"type": "string", "required": True}},
+            cache_stream=True,  # Enable stream caching
+        )
+        llm_comp = LLMComponent(llm_config)
+        flow.add_workflow_comp(
+            "llm",
+            llm_comp,
+            inputs_schema={"query": "${start.query}"},
+            comp_ability=[ComponentAbility.STREAM],
+            wait_for_all=True
+        )
+
+        # Custom stream consumer component
+        stream_consumer = StreamConsumerComponent("stream_consumer")
+        flow.add_workflow_comp(
+            "stream_consumer",
+            stream_consumer,
+            stream_inputs_schema={"result": "${llm.result}"},
+            comp_ability=[ComponentAbility.COLLECT],
+            wait_for_all=True
+        )
+
+        # End component that references LLM output
+        end_component = End({"responseTemplate": "LLM said: {{llm_result}}"})
+        flow.set_end_comp(
+            "end",
+            end_component,
+            inputs_schema={"llm_result": "${llm.result}"}
+        )
+
+        # Add connections
+        flow.add_connection("start", "llm")
+        flow.add_stream_connection("llm", "stream_consumer")
+        flow.add_connection("stream_consumer", "end")
+
+        # Execute workflow
+        result = await flow.invoke(
+            inputs={"query": "Hello"},
+            session=session
+        )
+
+        # Verify results
+        assert result is not None
+        # The end component should be able to access llm.result from IO state
+        # Verify that the cached result contains the complete mock LLM output
+        assert hasattr(result, 'result')
+        result_dict = result.result
+        assert "response" in result_dict
+        output_content = result_dict.get("response", "")
+        # Verify that the output contains the complete streamed content
+        assert "Hello" in output_content
+        assert "world" in output_content
+        # The complete mock output should be: "Hello world! This is a streamed response."
+        assert "Hello world! This is a streamed response." in output_content

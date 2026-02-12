@@ -6,12 +6,12 @@ ChatAgent - simplest llm chat single_agent
 from typing import Dict, Any, List, AsyncIterator
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent, LLMCallConfig
 from openjiuwen.dev_tools.tune.chat_agent.chat_config import ChatAgentConfig
-from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.context_engine import ContextEngineConfig, ContextEngine
-from openjiuwen.core.operator.llm_call import LLMCall
-from openjiuwen.core.session import Session
+from openjiuwen.core.operator.legacy.llm_call.base import LLMCall
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.tool import Tool
 
@@ -51,6 +51,10 @@ class ChatAgent(BaseAgent):
             llm_config.freeze_system_prompt,
             llm_config.freeze_user_prompt
         )
+        self._session = Session(
+            session_id="default_session",
+            card=AgentCard(id="prompt_optimization")
+        )
 
     def _init_model(self, model_config, model_client_config):
         """Initialize model"""
@@ -72,7 +76,7 @@ class ChatAgent(BaseAgent):
 
         if session is None:
             # Compatible with old usage without session
-            agent_session = await self._session.pre_run(session_id=session_id)
+            agent_session = self._session
         else:
             agent_session = session
 
@@ -82,10 +86,11 @@ class ChatAgent(BaseAgent):
             inputs=inputs,
             session=agent_session,
             history=agent_context.get_messages(),
-            tools=await Runner.resource_mgr.get_tool_infos()
+            tools=await Runner.resource_mgr.get_tool_infos(
+                tool_id=[tool.card.id for tool in self.tools] or None,
+                tag=self.agent_config.id
+            )
         )
-        if session is None:
-            await agent_session.post_run()
         return dict(output=result.content, tool_calls=result.tool_calls)
 
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:

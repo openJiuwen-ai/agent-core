@@ -15,7 +15,7 @@ from openjiuwen.core.controller.modules.task_manager import TaskManager, TaskFil
 from openjiuwen.core.controller.schema import Intent
 from openjiuwen.core.controller.schema.event import Event, InputEvent
 from openjiuwen.core.foundation.llm import SystemMessage, UserMessage, ToolMessage
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.common.logging import logger
 

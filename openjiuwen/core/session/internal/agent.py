@@ -22,38 +22,6 @@ from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.tracer.tracer import Tracer
 
 
-class StaticAgentSession(BaseSession):
-    def __init__(self, config: Config = None):
-        self._config = config if config is not None else Config()
-        self._checkpointer = CheckpointerFactory.get_checkpointer()
-
-    def config(self) -> Config:
-        return self._config
-
-    def checkpointer(self) -> Checkpointer:
-        return self._checkpointer
-
-    def state(self) -> State:
-        pass
-
-    def tracer(self) -> Any:
-        pass
-
-    def stream_writer_manager(self) -> StreamWriterManager:
-        pass
-
-    def callback_manager(self) -> CallbackManager:
-        pass
-
-    def session_id(self) -> str:
-        pass
-
-    async def create_agent_session(self, session_id: str, inputs=None) -> BaseSession:
-        session = AgentSession(session_id, self._config, self._checkpointer)
-        await self._checkpointer.pre_agent_execute(session, inputs)
-        return session
-
-
 class AgentSession(BaseSession):
     def __init__(
             self,

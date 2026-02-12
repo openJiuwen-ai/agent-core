@@ -4,9 +4,6 @@ import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, List, Optional, Dict
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
@@ -29,6 +26,9 @@ class StdioClient(McpClient):
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         """Establish Stdio connection to the tool server"""
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        
         try:
             # server_path should be StdioServerParameters for stdio client
             valid_handlers = {"strict", "ignore", "replace"}

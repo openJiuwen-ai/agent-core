@@ -221,6 +221,14 @@ class SchemaUtils:
         # Extract properties and required fields
         properties = schema_dict.get("properties", {})
         required = schema_dict.get("required", [])
+        additional_properties = schema_dict.get("additionalProperties", False)
+        extra_config = "ignore"
+        if additional_properties is True:
+            extra_config = "allow"
+        elif additional_properties is False:
+            extra_config = "forbid"
+        else:
+            extra_config = 'ignore'
 
         # Build field definitions
         field_definitions = {}
@@ -235,7 +243,7 @@ class SchemaUtils:
 
         # Configure model behavior
         config = ConfigDict(
-            extra="ignore",  # Ignore extra fields not in schema
+            extra=extra_config,
             validate_default=True,  # Validate default values
             json_schema_extra={"schema": schema_dict}  # Preserve original schema
         )

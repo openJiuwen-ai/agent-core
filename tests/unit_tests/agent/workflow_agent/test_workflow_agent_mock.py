@@ -363,5 +363,89 @@ class TestWorkflowAgentMock(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class TestWorkflowAgentTagIsolation(unittest.IsolatedAsyncioTestCase):
+    """Test workflow tag isolation for WorkflowAgent.
+    Covers commit: fix(controller): use agent_id as tag to get tool
+
+    Core logic:
+    - WorkflowAgent (BaseAgent) calls Runner.resource_mgr.add_workflow(..., tag=self.agent_config.id)
+    - WorkflowController retrieves workflows via Runner.resource_mgr.get_workflow(..., tag=self.agent_config.id)
+    """
+
+    async def asyncSetUp(self):
+        await Runner.start()
+
+    async def asyncTearDown(self):
+        await Runner.stop()
+
+    @staticmethod
+    def _build_simple_workflow(workflow_id: str, workflow_name: str, version: str = "1.0") -> Workflow:
+        """Build a simple workflow: start -> node -> end"""
+        flow = Workflow(card=WorkflowCard(
+            id=workflow_id, version=version, name=workflow_name,
+            description=f"Simple workflow: {workflow_name}",
+        ))
+        flow.set_start_comp("start", MockStartNode("start"), inputs_schema={"query": "${query}"})
+        flow.add_workflow_comp("node_a", Node1("node_a"), inputs_schema={"output": "${start.query}"})
+        flow.set_end_comp("end", MockEndNode("end"), inputs_schema={"result": "${node_a.output}"})
+        flow.add_connection("start", "node_a")
+        flow.add_connection("node_a", "end")
+        return flow
+
+    @pytest.mark.asyncio
+    async def test_workflow_agent_workflow_tagged_with_agent_id(self):
+        """After WorkflowAgent.add_workflows, workflow is tagged with agent_config.id in resource_mgr"""
+        from openjiuwen.core.runner.resources_manager.base import GLOBAL
+        from openjiuwen.core.workflow import generate_workflow_key
+
+        os.environ.setdefault("LLM_SSL_VERIFY", "false")
+
+        workflow = self._build_simple_workflow(
+            workflow_id="tag_test_wf",
+            workflow_name="Tag Test WF"
+        )
+
+        agent_config = WorkflowAgentConfig(
+            id="wf_agent_tag_test",
+            version="1.0",
+            description="Tag Test Agent",
+        )
+        agent = WorkflowAgent(agent_config)
+        agent.add_workflows([workflow])
+
+        # Verify: workflow is tagged with agent_config.id, not GLOBAL
+        wf_key = generate_workflow_key("tag_test_wf", "1.0")
+        assert Runner.resource_mgr.resource_has_tag(wf_key, "wf_agent_tag_test")
+        assert not Runner.resource_mgr.resource_has_tag(wf_key, GLOBAL)
+
+    @pytest.mark.asyncio
+    async def test_two_workflow_agents_isolated(self):
+        """Workflows registered by two WorkflowAgents are isolated via tag"""
+        from openjiuwen.core.workflow import generate_workflow_key
+
+        os.environ.setdefault("LLM_SSL_VERIFY", "false")
+
+        # Agent A
+        wf_a = self._build_simple_workflow("wf_iso_a", "WF A")
+        agent_a = WorkflowAgent(WorkflowAgentConfig(id="iso_agent_A", version="1.0", description="A"))
+        agent_a.add_workflows([wf_a])
+
+        # Agent B
+        wf_b = self._build_simple_workflow("wf_iso_b", "WF B")
+        agent_b = WorkflowAgent(WorkflowAgentConfig(id="iso_agent_B", version="1.0", description="B"))
+        agent_b.add_workflows([wf_b])
+
+        wf_key_a = generate_workflow_key("wf_iso_a", "1.0")
+        wf_key_b = generate_workflow_key("wf_iso_b", "1.0")
+
+        # Agent A's workflow belongs to iso_agent_A only, not iso_agent_B
+        assert Runner.resource_mgr.resource_has_tag(wf_key_a, "iso_agent_A")
+        assert not Runner.resource_mgr.resource_has_tag(wf_key_a, "iso_agent_B")
+
+        # Agent B's workflow belongs to iso_agent_B only, not iso_agent_A
+        assert Runner.resource_mgr.resource_has_tag(wf_key_b, "iso_agent_B")
+        assert not Runner.resource_mgr.resource_has_tag(wf_key_b, "iso_agent_A")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

@@ -40,34 +40,29 @@ class TestSentenceSplitter:
     @classmethod
     def test_init_with_defaults(cls, mock_tokenizer):
         """Test initialization with default values"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
-            mock_segmenter = MagicMock()
-            mock_segmenter_class.return_value = mock_segmenter
-
-            splitter = SentenceSplitter(
-                tokenizer=mock_tokenizer,
-                chunk_size=512,
-                chunk_overlap=50,
-            )
-            assert splitter.chunk_size == 512
-            assert splitter.chunk_overlap == 50
-            assert splitter.tokenizer == mock_tokenizer
-            mock_segmenter_class.assert_called_once_with(language="zh", clean=False)
+        splitter = SentenceSplitter(
+            tokenizer=mock_tokenizer,
+            chunk_size=512,
+            chunk_overlap=50,
+            lan="auto",
+        )
+        assert splitter.chunk_size == 512
+        assert splitter.chunk_overlap == 50
+        assert splitter.tokenizer == mock_tokenizer
+        assert splitter.default_lan == ""
+        assert splitter.seg is None  # Segmenter is initialized lazily in __call__
 
     @classmethod
     def test_init_with_custom_language(cls, mock_tokenizer):
         """Test initialization with custom language"""
-        with patch("openjiuwen.core.retrieval.indexing.processor.splitter.splitter.Segmenter") as mock_segmenter_class:
-            mock_segmenter = MagicMock()
-            mock_segmenter_class.return_value = mock_segmenter
-
-            splitter = SentenceSplitter(
-                tokenizer=mock_tokenizer,
-                chunk_size=512,
-                chunk_overlap=50,
-                lan="en",
-            )
-            mock_segmenter_class.assert_called_once_with(language="en", clean=False)
+        splitter = SentenceSplitter(
+            tokenizer=mock_tokenizer,
+            chunk_size=512,
+            chunk_overlap=50,
+            lan="en",
+        )
+        assert splitter.default_lan == "en"
+        assert splitter.seg is None  # Segmenter is initialized lazily in __call__
 
     @classmethod
     def test_call_empty_text(cls, mock_tokenizer):

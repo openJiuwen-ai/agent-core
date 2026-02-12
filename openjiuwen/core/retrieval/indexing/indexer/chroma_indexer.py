@@ -14,12 +14,12 @@ import chromadb
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback, TqdmCallback
 from openjiuwen.core.retrieval.common.config import IndexConfig, VectorStoreConfig
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
-from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
 from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
 
 
@@ -36,7 +36,7 @@ class ChromaIndexer(Indexer):
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
         doc_index_callback: type[BaseCallback] = TqdmCallback,
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize ChromaDB index manager
@@ -105,7 +105,7 @@ class ChromaIndexer(Indexer):
         chunks: List[TextChunk],
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Build index"""
         try:
@@ -187,7 +187,7 @@ class ChromaIndexer(Indexer):
         doc_id: str,
         config: IndexConfig,
         embed_model: Optional[Embedding] = None,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Update index"""
         try:
@@ -204,12 +204,12 @@ class ChromaIndexer(Indexer):
         self,
         doc_id: str,
         index_name: str,
-        **kwargs: Any,
+        **kwargs,
     ) -> bool:
         """Delete index"""
         try:
             # ChromaDB doesn't support complex filter expressions, need to query first then delete
-            collection = await asyncio.to_thread(
+            collection: chromadb.Collection = await asyncio.to_thread(
                 self._client.get_collection,
                 name=index_name,
             )
@@ -262,7 +262,7 @@ class ChromaIndexer(Indexer):
             if not await self.index_exists(index_name):
                 return {"exists": False}
 
-            collection = await asyncio.to_thread(
+            collection: chromadb.Collection = await asyncio.to_thread(
                 self._client.get_collection,
                 name=index_name,
             )

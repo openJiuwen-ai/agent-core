@@ -7,7 +7,7 @@ import asyncio
 from collections import defaultdict
 from typing import Dict, Optional, Union, Callable, Any, Coroutine, List, TYPE_CHECKING
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.pregel.base import TriggerMessage, PregelNode, Channel, Interrupt, GraphInterrupt
 from openjiuwen.core.graph.pregel.channels import ChannelManager
 from openjiuwen.core.graph.pregel.config import PregelConfig, DEFAULT_PREGEL_CONFIG, InnerPregelConfig, \
@@ -61,6 +61,19 @@ class PregelLoop:
         try:
             return await self._run_step()
         except Exception as e:
+            # Add GRAPH_SUPER_STEP_ERROR log
+            graph_logger.error(
+                f"Failed to run graph super-step[{self.step}]",
+                event_type=LogEventType.GRAPH_SUPER_STEP_ERROR,
+                exception=e,
+                graph_id=self.config.get(NS),
+                session_id=self.config.get(SESSION_ID),
+                metadata={
+                    "ns": self.config.get(NS),
+                    "step": self.step,
+                    "active_nodes": list(self.active_nodes) if self.active_nodes else [],
+                }
+            )
             await self._save_state_on_error(e)
             raise e
 
@@ -70,6 +83,18 @@ class PregelLoop:
                 bool(state.pending_node) or bool(state.pending_buffer) or bool(state.channel_values))
 
     async def _run_step(self) -> bool:
+        # Add GRAPH_SUPER_STEP_START log
+        graph_logger.debug(
+            f"Start to run graph super-step[{self.step}]",
+            event_type=LogEventType.GRAPH_SUPER_STEP_START,
+            graph_id=self.config.get(NS),
+            session_id=self.config.get(SESSION_ID),
+            metadata={
+                "ns": self.config.get(NS),
+                "step": self.step,
+                "active_nodes": list(self.active_nodes) if self.active_nodes else []
+            }
+        )
         # 1. Determine tasks for this round
         tasks_to_run = []
 
@@ -112,6 +137,9 @@ class PregelLoop:
 
         try:
             await self.executor.wait_all()
+        except asyncio.CancelledError:
+            await self.executor.cancel_all()
+            raise
         except Exception as e:
             raise e
 
@@ -132,7 +160,18 @@ class PregelLoop:
         return True
 
     async def _save_state_on_error(self, exception: Exception):
-        logger.debug(f"save_state_on_error: {exception}")
+        graph_logger.debug(
+            f"Failed to run graph super-step[{self.step}], caused by save state",
+            event_type=LogEventType.GRAPH_SUPER_STEP_ERROR,
+            exception=exception,
+            graph_id=self.config.get(NS),
+            session_id=self.config.get(SESSION_ID),
+            metadata={
+                "ns": self.config.get(NS),
+                "step": self.step,
+                "active_nodes": list(self.active_nodes) if self.active_nodes else [],
+            }
+        )
         if not self.config.get(SESSION_ID) or not self.config.get(NS) or not self.saver:
             return
         pending_buffer = self.manager.buffer
@@ -185,13 +224,38 @@ class Pregel:
             if current_ns:
                 inner_config[PARENT_NS] = current_ns
 
+        # Add GRAPH_START log
+        graph_logger.info(
+            "Pregel graph engine execution started",
+            event_type=LogEventType.GRAPH_START,
+            graph_id=inner_config.get(NS),
+            session_id=inner_config.get(SESSION_ID),
+            metadata={"is_top_level": is_top_level}
+        )
+
         loop = PregelLoop(self, inner_config)
         try:
             await loop.init()
             while await loop.run_step():
                 pass
+            # Add GRAPH_END log
+            graph_logger.info(
+                "Pregel graph engine execution completed",
+                event_type=LogEventType.GRAPH_END,
+                graph_id=inner_config.get(NS),
+                session_id=inner_config.get(SESSION_ID),
+                metadata={"total_steps": loop.step}
+            )
             return {}
         except GraphInterrupt as e:
+            # Add GRAPH_END log (interrupted case)
+            graph_logger.info(
+                "Pregel graph engine execution interrupted",
+                event_type=LogEventType.GRAPH_END,
+                graph_id=inner_config.get(NS),
+                session_id=inner_config.get(SESSION_ID),
+                metadata={"total_steps": loop.step}
+            )
             if is_top_level:
                 return {TASK_STATUS_INTERRUPT: e.value}
             else:

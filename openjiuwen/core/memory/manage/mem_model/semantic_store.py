@@ -2,7 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import List, Tuple
 
-from openjiuwen.core.retrieval.vector_store.base import VectorStore
+from openjiuwen.core.foundation.store.base_vector_store import (
+    BaseVectorStore,
+    CollectionSchema,
+    FieldSchema,
+    VectorDataType,
+)
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -18,11 +23,11 @@ class SemanticStore:
     It uses an embedding model to generate vector representations of text documents and a vector store
     to store and search these embeddings efficiently.
     """
-    
-    def __init__(self, vector_store: VectorStore, embedding_model: Embedding | None = None):
+
+    def __init__(self, vector_store: BaseVectorStore, embedding_model: Embedding | None = None):
         """
         Initialize the semantic store with an embedding model and vector store.
-        
+
         Args:
             vector_store: The vector store to use for storing and searching embeddings.
             embedding_model: Optional embedding model to use for generating embeddings.
@@ -30,16 +35,65 @@ class SemanticStore:
         """
         self.embedding_model = embedding_model
         self.vector_store = vector_store
-    
+        # Cache for created collections to avoid repeated existence checks
+        self._created_collections: set[str] = set()
+
     def initialize_embedding_model(self, embedding_model: Embedding):
         """
         Initialize or update the embedding model used by the semantic store.
-        
+
         Args:
             embedding_model: The embedding model to use for generating text embeddings.
         """
         self.embedding_model = embedding_model
-    
+
+    async def _create_collection_if_not_exists(self, collection_name: str, embedding_dim: int) -> None:
+        """
+        Create a collection if it does not already exist.
+
+        Args:
+            collection_name: Name of the collection to check/create
+            embedding_dim: Dimension of the embedding vector
+        """
+        # Check if we already created this collection (in-memory cache)
+        if collection_name in self._created_collections:
+            return
+
+        # Check if collection exists in vector store
+        exists = await self.vector_store.collection_exists(collection_name)
+        if exists:
+            self._created_collections.add(collection_name)
+            return
+
+        # Create collection with schema
+        schema = CollectionSchema(
+            description="Semantic memory collection",
+            enable_dynamic_field=False,
+        )
+        schema.add_field(
+            FieldSchema(
+                name="id",
+                dtype=VectorDataType.VARCHAR,
+                max_length=256,
+                is_primary=True,
+            )
+        )
+        schema.add_field(
+            FieldSchema(
+                name="embedding",
+                dtype=VectorDataType.FLOAT_VECTOR,
+                dim=embedding_dim,
+            )
+        )
+
+        await self.vector_store.create_collection(collection_name, schema)
+        self._created_collections.add(collection_name)
+        memory_logger.debug(
+            f"Created collection '{collection_name}' with embedding dimension {embedding_dim}",
+            event_type=LogEventType.MEMORY_STORE,
+            metadata={"collection_name": collection_name, "embedding_dim": embedding_dim}
+        )
+
     async def add_docs(self, docs: List[Tuple[str, str]], table_name: str, scope_id: str | None = None) -> bool:
         """
         Add documents to a specified table after generating their embeddings.
@@ -62,22 +116,27 @@ class SemanticStore:
                 metadata={"collection_name": table_name}
             )
             return False
-            
+
         try:
             memory_ids, texts = zip(*docs)
             memory_ids = list(memory_ids)
             texts = list(texts)
-            
+
             # Generate embeddings for the texts
             embeddings = await self.embedding_model.embed_documents(texts=texts)
-            
+
             if len(memory_ids) != len(embeddings):
                 raise build_error(
                     StatusCode.MEMORY_STORE_VALIDATION_INVALID,
                     store_type="semantic store",
                     error_msg=f"memory_ids and embeddings must have same length",
                 )
-            
+
+            # Create collection if not exists (get dimension from first embedding)
+            if embeddings:
+                embedding_dim = len(embeddings[0])
+                await self._create_collection_if_not_exists(table_name, embedding_dim)
+
             # Prepare data for vector store, content is not stored
             data = []
             for doc_id, embedding in zip(memory_ids, embeddings):
@@ -85,9 +144,9 @@ class SemanticStore:
                     "id": doc_id,
                     "embedding": embedding,
                 })
-            
+
             # Add to vector store
-            await self.vector_store.add(data=data, table_name=table_name)
+            await self.vector_store.add_docs(collection_name=table_name, docs=data)
             return True
         except Exception as e:
             memory_logger.error(
@@ -98,20 +157,27 @@ class SemanticStore:
                 metadata={"collection_name": table_name}
             )
             return False
-    
-    async def delete_docs(self, ids: List[str], table_name: str) -> bool:
+
+    async def delete_docs(self, ids: List[str], table_name: str) -> None:
         """
         Delete documents from a specified table by their unique identifiers.
 
         Args:
             ids (List[str]): A list of unique document ids whose embeddings should be removed.
             table_name (str): The name of the table from which to delete embeddings.
-
-        Returns:
-            bool: True if the operation succeeded, False otherwise.
         """
         try:
-            return await self.vector_store.delete(ids=ids, table_name=table_name)
+            # Check if collection exists before attempting deletion
+            exists = await self.vector_store.collection_exists(table_name)
+            if not exists:
+                memory_logger.debug(
+                    f"Collection '{table_name}' does not exist, nothing to delete",
+                    event_type=LogEventType.MEMORY_DELETE,
+                    metadata={"collection_name": table_name}
+                )
+                return None
+
+            return await self.vector_store.delete_docs_by_ids(ids=ids, collection_name=table_name)
         except Exception as e:
             memory_logger.error(
                 "Failed to delete documents from semantic store.",
@@ -120,8 +186,7 @@ class SemanticStore:
                 meta_data={"collection_name": table_name},
                 memory_id=ids
             )
-            return False
-    
+
     async def search(self, query: str, table_name: str,
                      scope_id: str | None = None, top_k: int = 5) -> List[Tuple[str, float]]:
         """
@@ -150,7 +215,7 @@ class SemanticStore:
                 meta_data={"collection_name": table_name}
             )
             return []
-            
+
         try:
             # Generate embedding for the query
             query_embeddings = await self.embedding_model.embed_documents(texts=[query])
@@ -164,37 +229,43 @@ class SemanticStore:
                 return []
             query_embedding = query_embeddings[0]
 
+            exists = await self.vector_store.collection_exists(table_name)
+            if not exists:
+                return []
+
             # Search in vector store
             results = await self.vector_store.search(
+                collection_name=table_name,
                 query_vector=query_embedding,
+                vector_field="embedding",
                 top_k=top_k,
-                table_name=table_name
             )
-            
+
             # Convert to required format
-            return [(result.id, result.score) for result in results]
+            return [(result.fields.get("id", ""), result.score) for result in results]
         except Exception as e:
             memory_logger.error(
                 "Failed to embed query.",
                 event_type=LogEventType.MEMORY_RETRIEVE,
                 query=query,
                 exception=str(e),
-                meta_data={"collection_name": table_name}
+                metadata={"collection_name": table_name}
             )
             return []
-    
-    async def delete_table(self, table_name: str) -> bool:
+
+    async def delete_table(self, table_name: str) -> None:
         """
         Delete an entire table and all its stored embeddings.
 
         Args:
             table_name (str): The name of the table to delete.
-
-        Returns:
-            bool: True if the operation succeeded, False otherwise.
         """
         try:
-            return await self.vector_store.delete_table(table_name=table_name)
+            result = await self.vector_store.delete_collection(collection_name=table_name)
+            # Remove from cache after successful deletion
+            if table_name in self._created_collections:
+                self._created_collections.remove(table_name)
+            return result
         except Exception as e:
             memory_logger.error(
                 "Failed to delete table from semantic store.",
@@ -203,4 +274,3 @@ class SemanticStore:
                 exception=str(e),
                 meta_data={"collection_name": table_name}
             )
-            return False

@@ -1,20 +1,22 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Optional, AsyncIterator, Union, Any
+from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any
 
 import httpx
-import openai
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
+    AudioGenerationResponse
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage,
     AssistantMessage,
-    UsageMetadata
+    UsageMetadata,
+    UserMessage
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -22,6 +24,9 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+
+if TYPE_CHECKING:
+    import openai
 
 
 class OpenAIModelClient(BaseModelClient):
@@ -34,13 +39,62 @@ class OpenAIModelClient(BaseModelClient):
         """Get client name."""
         return "OpenAI client"
 
-    def _create_async_openai_client(self, timeout: Optional[float] = None) -> openai.AsyncOpenAI:
+    def _build_request_params(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            stop: Union[Optional[str], None],
+            max_tokens: Optional[int],
+            stream: bool,
+            **kwargs
+    ) -> dict:
+        """
+        Build request params with OpenAI-specific adjustments.
+
+        Custom rule:
+            For api_base containing "openai.com", keep only one of temperature/top_p:
+            - temperature has higher priority than top_p
+            - if temperature is present, drop top_p
+            - if temperature is not present but top_p is, keep top_p
+        """
+        # First, use the base implementation to build standard OpenAI-compatible params
+        params = super()._build_request_params(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            stop=stop,
+            max_tokens=max_tokens,
+            stream=stream,
+            **kwargs
+        )
+
+        api_base = (self.model_client_config.api_base or "").lower()
+        if "openai.com" in api_base:
+            has_temperature = "temperature" in params and params["temperature"] is not None
+            has_top_p = "top_p" in params and params["top_p"] is not None
+
+            # If both exist, keep temperature and remove top_p
+            if has_temperature and has_top_p:
+                params.pop("top_p", None)
+            # If only one exists, keep as-is
+
+        return params
+
+    def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """
         Create an OpenAI Async client with configured SSL/proxy/http client settings.
         
         Args:
             timeout: Optional timeout override for this specific request
         """
+        from openai import AsyncOpenAI
+        
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
@@ -58,7 +112,7 @@ class OpenAIModelClient(BaseModelClient):
             max_retries=self.model_client_config.max_retries
         )
 
-        return openai.AsyncOpenAI(
+        return AsyncOpenAI(
             api_key=self.model_client_config.api_key,
             base_url=self.model_client_config.api_base,
             http_client=http_client,
@@ -254,6 +308,50 @@ class OpenAIModelClient(BaseModelClient):
             if async_client is not None:
                 await async_client.close()
 
+    async def generate_image(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            size: Optional[str] = "1664*928",
+            negative_prompt: Optional[str] = None,
+            n: Optional[int] = 1,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            seed: int = 0,
+            **kwargs
+    ) -> ImageGenerationResponse:
+        pass
+
+    async def generate_video(
+            self,
+            messages: List[UserMessage],
+            *,
+            img_url: Optional[str] = None,
+            audio_url: Optional[str] = None,
+            model: Optional[str] = None,
+            size: Optional[str] = None,
+            resolution: Optional[str] = None,
+            duration: Optional[int] = 5,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            negative_prompt: Optional[str] = None,
+            seed: Optional[int] = None,
+            **kwargs
+    ) -> VideoGenerationResponse:
+        pass
+
+    async def generate_speech(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            voice: Optional[str] = "Cherry",
+            language_type: Optional[str] = "Auto",
+            **kwargs
+    ) -> AudioGenerationResponse:
+        pass
+
     async def _astream_with_parser(
             self,
             response_stream,
@@ -269,14 +367,14 @@ class OpenAIModelClient(BaseModelClient):
         5. When parsing fails, parser_content is None, continue accumulating
         """
         accumulated_content = ""
-        
+
         async for chunk_item in response_stream:
             parsed_chunk = self._parse_stream_chunk(chunk_item)
             if parsed_chunk:
                 # Accumulate content
                 if parsed_chunk.content:
                     accumulated_content += parsed_chunk.content
-                
+
                 # Attempt to parse accumulated content every time
                 parser_content = None
                 if accumulated_content and output_parser:
@@ -296,7 +394,7 @@ class OpenAIModelClient(BaseModelClient):
                             exception=str(e)
                         )
                         parser_content = None
-                
+
                 chunk_with_parser = AssistantMessageChunk(
                     content=parsed_chunk.content,  # Keep original content increment unchanged
                     reasoning_content=parsed_chunk.reasoning_content,
@@ -305,7 +403,7 @@ class OpenAIModelClient(BaseModelClient):
                     finish_reason=parsed_chunk.finish_reason,
                     parser_content=parser_content  # Has value when parsing succeeds, otherwise None
                 )
-                
+
                 yield chunk_with_parser
 
     async def _parse_response(

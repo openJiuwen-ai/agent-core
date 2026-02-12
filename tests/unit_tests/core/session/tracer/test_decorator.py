@@ -4,6 +4,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
+    AudioGenerationResponse
 from openjiuwen.core.workflow import LLMCompConfig, WorkflowCard
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import BaseSession
@@ -11,7 +13,7 @@ from openjiuwen.core.session.stream import StreamMode, BaseStreamMode
 from openjiuwen.core.session.tracer import decorate_tool_with_trace, decorate_workflow_with_trace, \
     decorate_model_with_trace
 from openjiuwen.core.foundation.llm import (
-    BaseModelClient, BaseOutputParser, ModelClientConfig, ModelRequestConfig, BaseMessage
+    BaseModelClient, BaseOutputParser, ModelClientConfig, ModelRequestConfig, BaseMessage, UserMessage
 )
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard, Input, Output
 from openjiuwen.core.workflow.components.llm.llm_comp import LLMExecutable
@@ -188,6 +190,50 @@ class MockModel(BaseModelClient):
         logger.info(f"Request params: {params}")
         yield messages
 
+    async def generate_image(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            size: Optional[str] = "1664*928",
+            negative_prompt: Optional[str] = None,
+            n: Optional[int] = 1,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            seed: int = 0,
+            **kwargs
+    ) -> ImageGenerationResponse:
+        pass
+
+    async def generate_video(
+            self,
+            messages: List[UserMessage],
+            *,
+            img_url: Optional[str] = None,
+            audio_url: Optional[str] = None,
+            model: Optional[str] = None,
+            size: Optional[str] = None,
+            resolution: Optional[str] = None,
+            duration: Optional[int] = 5,
+            prompt_extend: bool = True,
+            watermark: bool = False,
+            negative_prompt: Optional[str] = None,
+            seed: Optional[int] = None,
+            **kwargs
+    ) -> VideoGenerationResponse:
+        pass
+
+    async def generate_speech(
+            self,
+            messages: List[UserMessage],
+            *,
+            model: Optional[str] = None,
+            voice: Optional[str] = "Cherry",
+            language_type: Optional[str] = "Auto",
+            **kwargs
+    ) -> AudioGenerationResponse:
+        pass
+
 
 class MockTracer:
     def __init__(self):
@@ -219,8 +265,10 @@ class TestDecator:
 
         mock_agent_span = MagicMock()
         mock_session = MagicMock()
-        mock_session.tracer.return_value = mock_tracer
-        mock_session.span.return_value = mock_agent_span
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = mock_agent_span
 
         wrapped_tool = decorate_tool_with_trace(tool, mock_session)
         await wrapped_tool.invoke({"a": "a"}, context=3)
@@ -251,8 +299,10 @@ class TestDecator:
 
         mock_agent_span = MagicMock()
         mock_session = MagicMock()
-        mock_session.tracer.return_value = mock_tracer
-        mock_session.span.return_value = mock_agent_span
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = mock_agent_span
 
         wrapped_workflow = decorate_workflow_with_trace(workflow, mock_session)
 
@@ -290,8 +340,10 @@ class TestDecator:
 
         mock_agent_span = MagicMock()
         mock_session = MagicMock()
-        mock_session.tracer.return_value = mock_tracer
-        mock_session.span.return_value = mock_agent_span
+        mock_inner_session = MagicMock()
+        mock_session._inner = mock_inner_session
+        mock_inner_session.tracer.return_value = mock_tracer
+        mock_inner_session.span.return_value = mock_agent_span
 
         mocked_model = decorate_model_with_trace(model, mock_session)
 

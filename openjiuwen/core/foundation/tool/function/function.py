@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import inspect
+from functools import wraps
 from typing import Callable, AsyncIterator
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -9,12 +10,55 @@ from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
 
 
+def support_args_param(arg_param_name: str, parameters, func: Callable) -> Callable:
+    @wraps(func)
+    def wrapper(**kwargs):
+        if arg_param_name in kwargs:
+            params_dict = kwargs
+            positional_args = []
+            keyword_args = {}
+            args_list = params_dict.get(arg_param_name, [])
+            used_params = set()
+            for i, (param_name, param) in enumerate(parameters.items()):
+                if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                    used_params.add(param_name)
+                    continue
+                if param_name in params_dict:
+                    if param.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                                      inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                        used_params.add(param_name)
+                        if param.default == inspect.Parameter.empty:
+                            positional_args.append(params_dict[param_name])
+                    elif param.kind is not inspect.Parameter.KEYWORD_ONLY:
+                        used_params.add(param_name)
+                        keyword_args[param_name] = params_dict[param_name]
+            if len(used_params) < len(params_dict):
+                for param_name, param in params_dict.items():
+                    if param_name not in used_params:
+                        keyword_args[param_name] = param
+            positional_args.extend(args_list)
+            return func(*positional_args, **keyword_args)
+        return func(**kwargs)
+
+    return wrapper
+
+
 class LocalFunction(Tool):
     def __init__(self, card: ToolCard, func: Callable):
         super().__init__(card)
         if func is None:
             raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_FUNC_NOT_SUPPORTED, card=self._card)
-        self._func = func
+
+        sig = inspect.signature(func)
+        parameters = sig.parameters
+        args_names = [p.name for p in parameters.values() if p.kind == inspect.Parameter.VAR_POSITIONAL]
+        arg_param_name = None
+        if args_names:
+            arg_param_name = args_names[0]
+        if args_names:
+            self._func = support_args_param(arg_param_name, parameters, func)
+        else:
+            self._func = func
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         if self.card.input_params is not None:

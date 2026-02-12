@@ -6,7 +6,7 @@ from typing import List, Any
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.context_engine import ContextEngine
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.foundation.llm import (
     BaseMessage, AssistantMessage, UserMessage, ToolMessage
 )
@@ -32,16 +32,13 @@ class MessageUtils:
         Returns:
             bool: Whether to add user message
         """
-        agent_context = context_engine.get_context(session_id=session.session_id())
+        agent_context = context_engine.get_context(session_id=session.get_session_id())
         last_message = agent_context.get_messages(size=1)
 
         if not last_message:
             return True
 
         last_message = last_message[0]
-        if last_message.role == 'tool':
-            logger.info("Skipping user message - post-tool-call request")
-            return False
 
         if last_message.role == 'user' and last_message.content == query:
             logger.info("Skipping duplicate user message")
@@ -63,7 +60,7 @@ class MessageUtils:
             session: Session instance
         """
         if MessageUtils.should_add_user_message(query, context_engine, session):
-            agent_context = context_engine.get_context(session_id=session.session_id())
+            agent_context = context_engine.get_context(session_id=session.get_session_id())
             user_message = UserMessage(content=query)
             await agent_context.add_messages(user_message)
             if UserConfig.is_sensitive():
@@ -85,7 +82,7 @@ class MessageUtils:
             session: Session instance
         """
         if ai_message:
-            agent_context = context_engine.get_context(session_id=session.session_id())
+            agent_context = context_engine.get_context(session_id=session.get_session_id())
             await agent_context.add_messages(ai_message)
 
     @staticmethod
@@ -102,7 +99,7 @@ class MessageUtils:
             session: Session instance
         """
         if tool_message:
-            agent_context = context_engine.get_context(session_id=session.session_id())
+            agent_context = context_engine.get_context(session_id=session.get_session_id())
             await agent_context.add_messages(tool_message)
 
     @staticmethod
@@ -122,7 +119,7 @@ class MessageUtils:
         """
         workflow_context = context_engine.get_context(
             context_id=workflow_id,
-            session_id=session.session_id()
+            session_id=session.get_session_id()
         )
         await workflow_context.add_messages(message)
 
@@ -142,7 +139,7 @@ class MessageUtils:
         Returns:
             List[BaseMessage]: Chat history message list
         """
-        agent_context = context_engine.get_context(session_id=session.session_id())
+        agent_context = context_engine.get_context(session_id=session.get_session_id())
         chat_history = agent_context.get_messages()
         max_rounds = config.constrain.reserved_max_chat_rounds
         return chat_history[-2 * max_rounds:]

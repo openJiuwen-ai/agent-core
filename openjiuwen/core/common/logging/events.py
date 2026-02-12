@@ -34,6 +34,9 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.core.common import BaseCard
+from openjiuwen.core.common.exception.codes import StatusCode
+
 
 class LogEventType(Enum):
     """Log event type enumeration"""
@@ -46,8 +49,10 @@ class LogEventType(Enum):
     AGENT_ERROR = "agent_error"  # Agent error
 
     # Workflow related events
-    WORKFLOW_START = "workflow_start"  # Workflow started
-    WORKFLOW_END = "workflow_end"  # Workflow ended
+    WORKFLOW_EXECUTE_START = "workflow_execute_start"
+    WORKFLOW_EXECUTE_END = "workflow_execute_end"
+    WORKFLOW_EXECUTE_ERROR = "workflow_execute_error"
+    WORKFLOW_OUTPUT_CHUNK = "workflow_output_chunk"
     WORKFLOW_COMPONENT_START = "workflow_component_start"  # Workflow component started
     WORKFLOW_COMPONENT_END = "workflow_component_end"  # Workflow component ended
     WORKFLOW_COMPONENT_ERROR = "workflow_component_error"  # Workflow component error
@@ -105,6 +110,75 @@ class LogEventType(Enum):
     SYSTEM_SHUTDOWN = "system_shutdown"  # System shutdown
     SYSTEM_ERROR = "system_error"  # System error
 
+    # SysOperation events
+    SYS_OP_START = "sys_operation_start"  # System Operation started
+    SYS_OP_END = "sys_operation_end"  # System Operation succeeded
+    SYS_OP_ERROR = "sys_operation_error"  # System Operation error occurred
+    SYS_OP_STREAM = "sys_operation_stream"  # System operation streaming scenario
+
+    # Checkpoint related events
+    CHECKPOINT_SAVE = "checkpoint_save"  # Checkpoint saved
+    CHECKPOINT_RESTORE = "checkpoint_restore"  # Checkpoint restored
+    CHECKPOINT_CLEAR = "checkpoint_clear"  # Checkpoint cleared
+    CHECKPOINT_ERROR = "checkpoint_error"  # Checkpoint error
+
+    # Checkpointer store events
+    CHECKPOINTER_STORE_ADD = "checkpointer_store_add"  # Checkpointer store added
+    CHECKPOINTER_STORE_REMOVE = "checkpointer_store_remove"  # Checkpointer store deleted
+
+    # Graph streaming events
+    GRAPH_STREAM_CHUNK = "graph_stream_chunk"  # Graph stream chunk
+    GRAPH_SEND_STREAM_CHUNK = "graph_send_stream_chunk"
+    GRAPH_RECEIVE_STREAM_CHUNK = "graph_receive_stream_chunk"
+
+    # Session streaming events
+    SESSION_STREAM_CHUNK = "session_stream_chunk"  # Session stream chunk
+    SESSION_STREAM_ERROR = "session_stream_error"  # Session stream error
+
+    # Graph vertex execution related events
+    GRAPH_VERTEX_INIT = "graph_vertex_init"  # Graph vertex init
+    GRAPH_VERTEX_CALL_START = "graph_vertex_call_start"  # Graph vertex started
+    GRAPH_VERTEX_CALL_END = "graph_vertex_call_end"  # Graph vertex ended
+    GRAPH_VERTEX_CALL_ERROR = "graph_vertex_call_error"  # Graph vertex error
+
+    # Graph vertex stream events
+    GRAPH_VERTEX_STREAM_ACTOR_START = "graph_vertex_stream_actor_start"
+    GRAPH_VERTEX_STREAM_ACTOR_SHUTDOWN = "graph_vertex_stream_actor_shutdown"
+
+    GRAPH_VERTEX_STREAM_CALL_START = "graph_vertex_stream_call_start"  # Graph vertex stream started
+    GRAPH_VERTEX_STREAM_CALL_END = "graph_vertex_stream_call_end"  # Graph vertex stream ended
+    GRAPH_VERTEX_STREAM_CALL_ERROR = "graph_vertex_stream_call_error"  # Graph vertex stream error
+
+    GRAPH_VERTEX_ABILITY_START = "graph_vertex_ability_start"
+    GRAPH_VERTEX_ABILITY_RUNNING = "graph_vertex_ability_running"
+    GRAPH_VERTEX_ABILITY_END = "graph_vertex_ability_end"
+    GRAPH_VERTEX_ABILITY_ERROR = "graph_vertex_ability_error"
+
+    # Graph super step events
+    GRAPH_SUPER_STEP_START = "graph_super_step_start"  # Graph super step started
+    GRAPH_SUPER_STEP_END = "graph_super_step_end"  # Graph super step ended
+    GRAPH_SUPER_STEP_ERROR = "graph_super_step_error"  # Graph super step error
+
+    # Graph lifecycle events
+    GRAPH_START = "graph_start"  # Graph execution started
+    GRAPH_END = "graph_end"  # Graph execution ended
+    GRAPH_ERROR = "graph_error"  # Graph-level error
+
+    # Graph Store related events
+    GRAPH_STORE_SAVE = "graph_store_save"  # Graph state saved
+    GRAPH_STORE_DELETE = "graph_store_delete"  # Graph state deleted
+    GRAPH_STORE_GET = "graph_store_get"  # Graph state retrieved
+
+    # Runner event
+    RUNNER_START = "runner_start"
+    RUNNER_STOP = "runner_stop"
+    RESOURCE_MGR_ADD_RESOURCE = "add_resource"
+    RESOURCE_MGR_REMOVE_RESOURCE = "remove_resource"
+    RESOURCE_MGR_GET_RESOURCE = "get_resource"
+    RESOURCE_MGR_ADD_RESOURCE_SERVER = "add_resource_server"
+    RESOURCE_MGR_REMOVE_RESOURCE_SERVER = "remove_resource_server"
+    RESOURCE_MGR_REMOVE_TAG = "remove_tag"
+
 
 class LogLevel(Enum):
     """Log level enumeration"""
@@ -131,6 +205,7 @@ class ModuleType(Enum):
     RETRIEVAL = "retrieval"
     SYSTEM = "system"
     USER = "user"
+    SYS_OPERATION = "sys_operation"
 
 
 class EventStatus(Enum):
@@ -149,7 +224,7 @@ class BaseLogEvent:
 
     # Basic event information
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    event_type: LogEventType = LogEventType.SYSTEM_START
+    event_type: LogEventType | str = LogEventType.SYSTEM_START
     log_level: LogLevel = LogLevel.INFO
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -173,7 +248,7 @@ class BaseLogEvent:
     # Message and stack trace
     message: Optional[str] = None  # Log message content
     stacktrace: Optional[str] = None  # Stack trace information (for exceptions)
-    exception: Optional[str] = None  # Exception detail string
+    exception: Optional[Exception] = None  # Exception detail string
 
     # Extended fields
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -186,16 +261,26 @@ class BaseLogEvent:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format for serialization"""
-        result = asdict(self)
-
+        event_data = asdict(self)
         # Handle enum types
-        for key, value in result.items():
+        result: Dict[str, Any] = {}
+        for key, value in event_data.items():
+            if value is None:
+                continue
             if isinstance(value, Enum):
                 result[key] = value.value
             elif isinstance(value, datetime):
                 result[key] = value.isoformat()
             elif isinstance(value, dict):
                 result[key] = self._convert_dict(value)  # type: ignore[arg-type]
+            elif isinstance(value, Exception):
+                result[key] = str(value)
+                if event_data.get("error_code") is None:
+                    result["error_code"] = StatusCode.ERROR.code
+                if event_data.get("error_message") is None:
+                    result["error_message"] = str(value)
+            else:
+                result[key] = value
 
         return result
 
@@ -204,6 +289,8 @@ class BaseLogEvent:
         """Recursively convert enums and datetime in dictionary"""
         result: Dict[str, Any] = {}
         for k, v in d.items():
+            if v is None:
+                continue
             if isinstance(v, Enum):
                 result[k] = v.value
             elif isinstance(v, datetime):
@@ -257,7 +344,10 @@ class WorkflowEvent(BaseLogEvent):
     )
     branch_condition: Optional[str] = None  # Branch condition (for branch events)
     selected_branch: Optional[str] = None  # Selected branch
-    input_data: Optional[Dict[str, Any]] = None
+    inputs: Optional[Dict[str, Any]] = None
+    outputs: Optional[Any] = None
+    chunk: Optional[Any] = None
+    chunk_idx: Optional[int] = None
     output_data: Optional[Dict[str, Any]] = None
     execution_time_ms: Optional[float] = None
 
@@ -289,10 +379,10 @@ class LLMEvent(BaseLogEvent):
     latency_ms: Optional[float] = None  # Latency (milliseconds)
     is_stream: bool = False  # Whether it's a streaming call
     chunk_index: Optional[int] = None  # Chunk index (for streaming calls)
-    extra_params: Dict[str, Any] = None # extra LLM parameters
-    timeout: Optional[float] = None # timeout parameter
-    stop: Optional[str] = None # stop parameter
-    max_retries: Optional[int] = None # max_retries parameter
+    extra_params: Dict[str, Any] = None  # extra LLM parameters
+    timeout: Optional[float] = None  # timeout parameter
+    stop: Optional[str] = None  # stop parameter
+    max_retries: Optional[int] = None  # max_retries parameter
 
     def __post_init__(self):
         super().__post_init__()
@@ -320,8 +410,8 @@ class ToolEvent(BaseLogEvent):
 class StoreEvent(BaseLogEvent):
     """Data store related event"""
 
-    table_name: Optional[str] = None # Table name
-    data_num: Optional[int] = None # Data number
+    table_name: Optional[str] = None  # Table name
+    data_num: Optional[int] = None  # Data number
 
     def __post_init__(self):
         super().__post_init__()
@@ -437,7 +527,77 @@ class SystemEvent(BaseLogEvent):
         self.module_type = ModuleType.SYSTEM
 
 
+@dataclass
+class SysOperationEvent(BaseLogEvent):
+    """SysOperation event"""
+
+    # Basic attributes
+    operation_name: Optional[str] = None  # System operation category, e.g., "fs", "code", "shell"
+    operation_mode: Optional[str] = None  # Execution mode of operation, e.g., "local", "sandbox"
+    operation_desc: Optional[str] = None  # Detailed description of the operation
+    method_name: Optional[str] = None  # Specific method of the operation, e.g., "read_file", "upload_file_stream"
+
+    # Extended attributes
+    method_params: Optional[Dict[str, Any]] = None  # Input parameters of the method (e.g., path, chunk_size)
+    method_result: Optional[Dict[str, Any]] = None  # Method return result
+    method_exec_time_ms: Optional[float] = None  # Execution time (milliseconds)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.module_type = ModuleType.SYS_OPERATION
+
+
+@dataclass
+class StreamEvent(BaseLogEvent):
+    """Stream related event - base class for all streaming events"""
+
+    stream_type: Optional[str] = None  # "workflow", "graph", "session"
+    chunk_index: Optional[int] = None  # Chunk index in stream
+    frame_count: Optional[int] = None  # Total frame count
+    stream_id: Optional[str] = None  # Stream identifier
+
+
+@dataclass
+class WorkflowStreamEvent(StreamEvent):
+    """Workflow streaming event - for workflow component streaming"""
+
+    workflow_id: Optional[str] = None
+    workflow_name: Optional[str] = None
+    component_id: Optional[str] = None
+    component_name: Optional[str] = None
+    component_type_str: Optional[str] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.module_type = ModuleType.WORKFLOW_COMPONENT
+
+
+@dataclass
+class GraphEvent(BaseLogEvent):
+    """Graph execution related event"""
+    graph_id: Optional[str] = None
+    node_id: Optional[str] = None
+    node_name: Optional[str] = None
+    inputs: Optional[Any] = None  # batch inputs
+    outputs: Optional[Any] = None  # batch outputs
+    chunk: Optional[Any] = None  # Stream chunk data
+
+
+class RunnerEvent(BaseLogEvent):
+    runner_id: Optional[str] = None,
+    inputs: Optional[Any] = None,
+    outputs: Optional[Any] = None,
+    chunk: Optional[Any] = None,
+    envs: Optional[Any] = None
+    resource_id: Optional[str] = None
+    resource_type: Optional[str] = None
+    tag: Optional[Any] = None
+    card: Optional[BaseCard] = None
+
+
 # Event type mapping for creating corresponding event classes based on event type
+
+
 EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     # Agent events
     LogEventType.AGENT_START: AgentEvent,
@@ -446,8 +606,10 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.AGENT_RESPONSE: AgentEvent,
     LogEventType.AGENT_ERROR: AgentEvent,
     # Workflow events
-    LogEventType.WORKFLOW_START: WorkflowEvent,
-    LogEventType.WORKFLOW_END: WorkflowEvent,
+    LogEventType.WORKFLOW_EXECUTE_START: WorkflowEvent,
+    LogEventType.WORKFLOW_EXECUTE_END: WorkflowEvent,
+    LogEventType.WORKFLOW_EXECUTE_ERROR: WorkflowEvent,
+    LogEventType.WORKFLOW_OUTPUT_CHUNK: WorkflowEvent,
     LogEventType.WORKFLOW_COMPONENT_START: WorkflowEvent,
     LogEventType.WORKFLOW_COMPONENT_END: WorkflowEvent,
     LogEventType.WORKFLOW_COMPONENT_ERROR: WorkflowEvent,
@@ -488,6 +650,63 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.SYSTEM_START: SystemEvent,
     LogEventType.SYSTEM_SHUTDOWN: SystemEvent,
     LogEventType.SYSTEM_ERROR: SystemEvent,
+    # SysOperation events
+    LogEventType.SYS_OP_START: SysOperationEvent,
+    LogEventType.SYS_OP_END: SysOperationEvent,
+    LogEventType.SYS_OP_ERROR: SysOperationEvent,
+    LogEventType.SYS_OP_STREAM: SysOperationEvent,
+    # Checkpoint events
+    LogEventType.CHECKPOINT_SAVE: SessionEvent,
+    LogEventType.CHECKPOINT_RESTORE: SessionEvent,
+    LogEventType.CHECKPOINT_CLEAR: SessionEvent,
+    LogEventType.CHECKPOINT_ERROR: SessionEvent,
+    # Checkpointer store events
+    LogEventType.CHECKPOINTER_STORE_ADD: SessionEvent,
+    LogEventType.CHECKPOINTER_STORE_REMOVE: SessionEvent,
+    # Graph stream events
+    LogEventType.GRAPH_SEND_STREAM_CHUNK: GraphEvent,
+    LogEventType.GRAPH_RECEIVE_STREAM_CHUNK: GraphEvent,
+
+    # Session stream events
+    LogEventType.SESSION_STREAM_CHUNK: SessionEvent,
+    LogEventType.SESSION_STREAM_ERROR: SessionEvent,
+    # Graph events
+
+    LogEventType.GRAPH_VERTEX_INIT: GraphEvent,
+    LogEventType.GRAPH_VERTEX_CALL_START: GraphEvent,
+    LogEventType.GRAPH_VERTEX_CALL_END: GraphEvent,
+    LogEventType.GRAPH_VERTEX_CALL_ERROR: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_ACTOR_START: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_ACTOR_SHUTDOWN: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_CALL_START: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_CALL_END: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_CALL_ERROR: GraphEvent,
+    LogEventType.GRAPH_VERTEX_ABILITY_START: GraphEvent,
+    LogEventType.GRAPH_VERTEX_ABILITY_RUNNING: GraphEvent,
+    LogEventType.GRAPH_VERTEX_ABILITY_END: GraphEvent,
+    LogEventType.GRAPH_VERTEX_ABILITY_ERROR: GraphEvent,
+
+    LogEventType.GRAPH_SUPER_STEP_START: GraphEvent,
+    LogEventType.GRAPH_SUPER_STEP_END: GraphEvent,
+    LogEventType.GRAPH_SUPER_STEP_ERROR: GraphEvent,
+    LogEventType.GRAPH_START: GraphEvent,
+    LogEventType.GRAPH_END: GraphEvent,
+    LogEventType.GRAPH_ERROR: GraphEvent,
+    # Graph Store events
+    LogEventType.GRAPH_STORE_SAVE: GraphEvent,
+    LogEventType.GRAPH_STORE_DELETE: GraphEvent,
+    LogEventType.GRAPH_STORE_GET: GraphEvent,
+
+    # Runner events
+    LogEventType.RUNNER_START: RunnerEvent,
+    LogEventType.RUNNER_STOP: RunnerEvent,
+
+    LogEventType.RESOURCE_MGR_ADD_RESOURCE: RunnerEvent,
+    LogEventType.RESOURCE_MGR_REMOVE_RESOURCE: RunnerEvent,
+    LogEventType.RESOURCE_MGR_GET_RESOURCE: RunnerEvent,
+    LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER: RunnerEvent,
+    LogEventType.RESOURCE_MGR_REMOVE_RESOURCE_SERVER: RunnerEvent,
+    LogEventType.RESOURCE_MGR_REMOVE_TAG: RunnerEvent,
 }
 
 # Cache for event class field names to improve performance
@@ -508,6 +727,9 @@ def _get_event_field_names(event_class: type) -> set[str]:
         _EVENT_FIELD_CACHE[event_class] = {f.name for f in fields(event_class)}
     return _EVENT_FIELD_CACHE[event_class]
 
+
+# Independent dynamic event class registry using string keys (does not modify static EVENT_CLASS_MAP)
+_CUSTOM_EVENT_CLASS_MAP: Dict[str, type] = {}
 
 # Cache for logger to avoid repeated lookups
 _common_logger: Optional[Any] = None
@@ -534,12 +756,81 @@ def _get_common_logger() -> Any:
     return _common_logger
 
 
-def create_log_event(event_type: LogEventType, **kwargs: Any) -> BaseLogEvent:
+def register_event_class(event_type: str, event_class: type) -> None:
+    """
+    Dynamically register a custom event class (does not modify static EVENT_CLASS_MAP)
+
+    Args:
+        event_type: String identifier for the custom event type
+        event_class: Event class (should inherit from BaseLogEvent)
+
+    Raises:
+        TypeError: If event_class is not a subclass of BaseLogEvent
+        ValueError: If event_type conflicts with existing LogEventType enum values
+    """
+    if not issubclass(event_class, BaseLogEvent):
+        raise TypeError(f"Event class must be a subclass of BaseLogEvent, got {event_class}")
+
+    # Ensure string value doesn't conflict with existing LogEventType enum values
+    type_key = event_type
+    existing_enum_values = {e.value for e in LogEventType}
+    if type_key in existing_enum_values:
+        raise ValueError(
+            f"Event type '{type_key}' conflicts with predefined enum value. "
+            "Use a different string identifier for custom event types."
+        )
+
+    _CUSTOM_EVENT_CLASS_MAP[type_key] = event_class
+    # Clear field cache for this class to ensure fresh field discovery
+    _EVENT_FIELD_CACHE.pop(event_class, None)
+
+
+def unregister_event_class(event_type: str) -> bool:
+    """
+    Unregister a custom event class
+
+    Args:
+        event_type: String identifier of the custom event type to unregister
+
+    Returns:
+        True if unregistered, False if not found
+    """
+    return _CUSTOM_EVENT_CLASS_MAP.pop(event_type, None) is not None
+
+
+def get_event_class(event_type: LogEventType | str) -> type:
+    """
+    Get event class: checks dynamic registry first, then static EVENT_CLASS_MAP
+
+    Priority: dynamic registry (str key) > static EVENT_CLASS_MAP (LogEventType key) > BaseLogEvent
+
+    Args:
+        event_type: LogEventType enum or string identifier to query
+
+    Returns:
+        Event class, or BaseLogEvent if not found
+    """
+    # Convert to string key for dynamic registry lookup
+    type_key = event_type.value if isinstance(event_type, LogEventType) else str(event_type)
+
+    # Check dynamic registry first (using string key)
+    if type_key in _CUSTOM_EVENT_CLASS_MAP:
+        return _CUSTOM_EVENT_CLASS_MAP[type_key]
+
+    # Then check static mapping (using LogEventType if it's an enum)
+    if isinstance(event_type, LogEventType):
+        return EVENT_CLASS_MAP.get(event_type, BaseLogEvent)
+
+    # For string input with no static mapping, return BaseLogEvent
+    return BaseLogEvent
+
+
+def create_log_event(event_type: LogEventType | str, **kwargs: Any) -> BaseLogEvent:
     """
     Create corresponding event object based on event type
 
     Args:
-        event_type: Event type
+        event_type: Event type (LogEventType enum or string identifier)
         **kwargs: Event field parameters (undefined fields will be ignored with warning)
 
     Returns:
@@ -548,10 +839,14 @@ def create_log_event(event_type: LogEventType, **kwargs: Any) -> BaseLogEvent:
     Raises:
         ValueError: If event type is not supported
     """
-    event_class = EVENT_CLASS_MAP.get(event_type)
-    if event_class is None:
-        # If no corresponding class found, use base event class
-        event_class = BaseLogEvent
+    # Get event class from dynamic registry first, then static mapping, then base class
+    event_class = get_event_class(event_type)
+
+    # Smart detection: Stream events choose specific class based on context
+    if event_class == StreamEvent:
+        workflow_indicators = {'workflow_id', 'component_id', 'component_type_str'}
+        if any(key in kwargs for key in workflow_indicators):
+            event_class = WorkflowStreamEvent
 
     # Early return if no kwargs to filter
     if not kwargs:
@@ -590,10 +885,11 @@ def validate_event(event: BaseLogEvent) -> bool:
     if not event.event_id:
         return False
 
-    # Check if enum types are valid (by checking if they have value attribute)
-    if not hasattr(event.event_type, "value"):
+    # Check if event_type is valid (can be LogEventType enum or string for custom events)
+    if not isinstance(event.event_type, (LogEventType, str)) or not event.event_type:
         return False
 
+    # Check if other enum types are valid (by checking if they have value attribute)
     if not hasattr(event.log_level, "value"):
         return False
 

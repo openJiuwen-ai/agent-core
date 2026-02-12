@@ -13,7 +13,7 @@ from openjiuwen.core.common.logging import prompt_logger, LogEventType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
-from openjiuwen.core.operator.llm_call import LLMCall
+from openjiuwen.core.operator.legacy.llm_call.base import LLMCall
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.dev_tools.tune.base import Case, TuneConstant, EvaluatedCase
 from openjiuwen.dev_tools.tune.utils import TuneUtils

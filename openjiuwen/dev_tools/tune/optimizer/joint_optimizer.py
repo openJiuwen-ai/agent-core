@@ -9,7 +9,7 @@ import random
 import copy
 from typing import List, Dict, Optional
 
-from openjiuwen.core.operator.llm_call import LLMCall
+from openjiuwen.core.operator.legacy.llm_call.base import LLMCall
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.dev_tools.tune.base import TuneConstant, EvaluatedCase

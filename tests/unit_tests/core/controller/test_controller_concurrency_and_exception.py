@@ -27,7 +27,6 @@ import pytest
 
 from openjiuwen.core.controller.modules.task_manager import TaskFilter
 from openjiuwen.core.single_agent import AgentCard
-from openjiuwen.core.session.internal.wrapper import TaskSession
 from openjiuwen.core.controller.base import Controller, ControllerConfig
 from openjiuwen.core.controller.modules import (
     EventHandler,
@@ -47,7 +46,7 @@ from openjiuwen.core.controller.schema import (
 )
 from openjiuwen.core.single_agent.base import AbilityManager, ControllerAgent
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session import Session
+from openjiuwen.core.single_agent import Session
 
 
 # ==================== TaskExecutors for testing ====================
@@ -62,7 +61,7 @@ class NormalTaskExecutor(TaskExecutor):
             type="controller_output",
             payload=ControllerOutputPayload(
                 type="processing",
-                data=[TextDataFrame(type="text", text=f"Task {task_id} started in session {session.session_id()}")]
+                data=[TextDataFrame(type="text", text=f"Task {task_id} started in session {session.get_session_id()}")]
             ),
             last_chunk=False
         )
@@ -86,7 +85,8 @@ class NormalTaskExecutor(TaskExecutor):
             type="controller_output",
             payload=ControllerOutputPayload(
                 type=EventType.TASK_COMPLETION,
-                data=[TextDataFrame(type="text", text=f"Task {task_id} completed in session {session.session_id()}")]
+                data=[TextDataFrame(type="text",
+                                    text=f"Task {task_id} completed in session {session.get_session_id()}")]
             ),
             last_chunk=True
         )
@@ -187,7 +187,7 @@ class ConcurrentSessionEventHandler(EventHandler):
     
     async def handle_input(self, inputs: EventHandlerInput):
         """Handle input event - create task (task_id contains session_id)"""
-        session_id = inputs.session.session_id()
+        session_id = inputs.session.get_session_id()
         task = Task(
             session_id=session_id,
             task_id=f"task_{session_id}",
@@ -225,7 +225,7 @@ class ExceptionInEventHandlerEventHandler(EventHandler):
         """Handle input event - create multiple tasks"""
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id=f"task_{i}",
                 task_type="normal",
                 priority=i,
@@ -266,7 +266,7 @@ class FailingTaskEventHandler(EventHandler):
         """Handle input event - create failing task and normal task"""
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="failing_task",
                 task_type="failing",
                 priority=1,
@@ -274,7 +274,7 @@ class FailingTaskEventHandler(EventHandler):
                 context_id="failing_context"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="normal_task",
                 task_type="normal",
                 priority=2,
@@ -307,7 +307,7 @@ class StreamExceptionTaskEventHandler(EventHandler):
         """Handle input event - create task that raises exception during streaming and a normal task"""
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="stream_fail_task",
                 task_type="stream_exception",
                 priority=1,
@@ -315,7 +315,7 @@ class StreamExceptionTaskEventHandler(EventHandler):
                 context_id="stream_fail_context"
             ),
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id="normal_task_2",
                 task_type="normal",
                 priority=2,
@@ -356,7 +356,7 @@ class ConcurrentTasksEventHandler(EventHandler):
         self.created = True
         tasks = [
             Task(
-                session_id=inputs.session.session_id(),
+                session_id=inputs.session.get_session_id(),
                 task_id=f"concurrent_task_{i}",
                 task_type="normal",
                 priority=1,
@@ -385,7 +385,7 @@ class TimeoutTestEventHandler(EventHandler):
         """Create 3 tasks for timeout testing, the 2nd task is normal, other tasks are very time-consuming"""
         tasks = [
             Task(
-                session_id=event_input.session.session_id(),
+                session_id=event_input.session.get_session_id(),
                 task_id=f"timeout_task_{i}",
                 task_type="slow",
                 priority=1,
@@ -523,9 +523,9 @@ class TestConcurrentSessionIsolation:
         )
 
         # Create 3 different sessions
-        session_1 = TaskSession(session_id="session_1")
-        session_2 = TaskSession(session_id="session_2")
-        session_3 = TaskSession(session_id="session_3")
+        session_1 = Session(session_id="session_1")
+        session_2 = Session(session_id="session_2")
+        session_3 = Session(session_id="session_3")
 
         # Create 3 input events
         input_event_1 = InputEvent(
@@ -605,8 +605,8 @@ class TestConcurrentSessionIsolation:
             }
         )
 
-        session_1 = TaskSession(session_id="normal_session")
-        session_2 = TaskSession(session_id="failing_session")
+        session_1 = Session(session_id="normal_session")
+        session_2 = Session(session_id="failing_session")
 
         input_event_1 = InputEvent(
             event_type=EventType.INPUT,
@@ -663,7 +663,7 @@ class TestConcurrentSessionIsolation:
             task_executors={"normal": build_normal_executor}
         )
 
-        sessions = [TaskSession(session_id=f"session_{i}") for i in range(5)]
+        sessions = [Session(session_id=f"session_{i}") for i in range(5)]
 
         input_events = [
             InputEvent(
@@ -718,7 +718,7 @@ class TestExceptionHandling:
             }
         )
 
-        session = TaskSession(session_id="test_exception")
+        session = Session(session_id="test_exception")
 
         input_event = InputEvent(
             event_type=EventType.INPUT,
@@ -774,7 +774,7 @@ class TestExceptionHandling:
             }
         )
 
-        session = TaskSession(session_id="test_stream_exception")
+        session = Session(session_id="test_stream_exception")
 
         input_event = InputEvent(
             event_type=EventType.INPUT,
@@ -823,7 +823,7 @@ class TestExceptionHandling:
             task_executors={"normal": build_normal_executor}
         )
 
-        session = TaskSession(session_id="test_handler_exception")
+        session = Session(session_id="test_handler_exception")
 
         input_event = InputEvent(
             event_type=EventType.INPUT,
@@ -873,9 +873,9 @@ class TestExceptionHandling:
             }
         )
 
-        session_1 = TaskSession(session_id="normal_1")
-        session_2 = TaskSession(session_id="failing")
-        session_3 = TaskSession(session_id="normal_2")
+        session_1 = Session(session_id="normal_1")
+        session_2 = Session(session_id="failing")
+        session_3 = Session(session_id="normal_2")
 
         input_event = InputEvent(
             event_type=EventType.INPUT,
@@ -982,7 +982,7 @@ class TestControllerConfig:
         agent.controller.task_scheduler.config.task_timeout = 2.0  # 2 seconds
         agent.controller.task_scheduler.config.schedule_interval = 0.1
         
-        session = TaskSession(session_id="test_timeout_session")
+        session = Session(session_id="test_timeout_session")
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test timeout"},
@@ -999,7 +999,7 @@ class TestControllerConfig:
             
             # Check task status
             task_manager = agent.controller.task_scheduler.task_manager
-            tasks = await task_manager.get_task(task_filter=TaskFilter(session_id=session.session_id()))
+            tasks = await task_manager.get_task(task_filter=TaskFilter(session_id=session.get_session_id()))
             
             assert len(tasks) > 0, "Should have at least one task"
 
@@ -1039,7 +1039,7 @@ class TestControllerConfig:
         agent.controller.task_scheduler.config.task_timeout = 10.0
         agent.controller.task_scheduler.config.schedule_interval = 0.1
         
-        session = TaskSession(session_id="test_cancel_session")
+        session = Session(session_id="test_cancel_session")
         input_event = InputEvent(
             event_type=EventType.INPUT,
             content={"query": "test manual cancel"},
@@ -1056,13 +1056,13 @@ class TestControllerConfig:
             
             # Manually cancel the task (before timeout)
             task_manager = agent.controller.task_scheduler.task_manager
-            tasks = await task_manager.get_task(task_filter=TaskFilter(session_id=session.session_id()))
+            tasks = await task_manager.get_task(task_filter=TaskFilter(session_id=session.get_session_id()))
             assert len(tasks) > 0, "Should have at least one task"
             
             task_id = tasks[0].task_id
             logger.info(f"Manually cancelling task {task_id}")
             
-            success = await agent.controller.task_scheduler.cancel_task(task_id, session)
+            success = await agent.controller.task_scheduler.cancel_task(task_id)
             assert success, "Manual cancellation should succeed"
             
             await asyncio.sleep(0.5)

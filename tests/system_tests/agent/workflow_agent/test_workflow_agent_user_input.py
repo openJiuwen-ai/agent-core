@@ -22,7 +22,7 @@ from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.graph.executable import Output, Input
 from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.session import Session
+from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.workflow import Workflow

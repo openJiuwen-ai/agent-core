@@ -5,6 +5,7 @@ from openjiuwen.core.session.state.base import ReadableStateLike
 from openjiuwen.core.session import get_by_schema
 from openjiuwen.core.session.utils import update_dict, root_to_index
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent import AgentCard
 
 
 class TestSession:
@@ -258,7 +259,7 @@ class TestSession:
 
     @staticmethod
     def test_agent_session():
-        agent_session = getattr(Session(session_id="abc"), "_inner")
+        agent_session = Session(session_id="abc", card=AgentCard())
         data = {"data": {"a": 1}}
         agent_session.update_state({"result": data})
         assert agent_session.get_state("result") == {"data": {"a": 1}}

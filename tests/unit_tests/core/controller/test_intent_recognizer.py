@@ -11,7 +11,7 @@ from openjiuwen.core.foundation.llm import (
     ModelClientConfig, ModelRequestConfig, Model, AssistantMessage, ToolCall, UsageMetadata
 )
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.session.internal.wrapper import TaskSession
+from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.single_agent import AbilityManager
 from tests.unit_tests.fixtures.mock_llm import (
     mock_llm_context,
@@ -58,7 +58,7 @@ class TestIntentRecognizer(unittest.IsolatedAsyncioTestCase):
             InputEvent(input_data=[TextDataFrame(text="不搜了，改成昨天天气")]),
         ]
         session_id = "session_id"
-        session = TaskSession(session_id=session_id)
+        session = create_agent_session(session_id=session_id)
 
         # Mock LLM responses for the first input event
         # First call: create_task tool call
@@ -142,7 +142,7 @@ class TestIntentRecognizer(unittest.IsolatedAsyncioTestCase):
             InputEvent(input_data=[TextDataFrame(text="不搜了，改成昨天天气")]),
         ]
         session_id = "session_id"
-        session = TaskSession(session_id=session_id)
+        session = create_agent_session(session_id=session_id)
 
         intents = await self.intent_recognizer.recognize(input_events[0], session)
         assert intents[0].intent_type == IntentType.CREATE_TASK

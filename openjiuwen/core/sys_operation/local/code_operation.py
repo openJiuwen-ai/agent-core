@@ -5,6 +5,7 @@ import platform
 from typing import Optional, Dict, Any, Literal, AsyncIterator, Callable, Tuple
 import sys
 
+from openjiuwen.core.common.logging import sys_operation_logger, LogEventType
 from openjiuwen.core.sys_operation.local.utils import OperationUtils, StreamEvent, StreamEventType
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.result.code_operation_result import ExecuteCodeChunkData
@@ -27,8 +28,8 @@ class CodeOperation(BaseCodeOperation):
     _UNIX_CMD_LIMIT: int = 100000
     _SUPPORT_LANGUAGE_CONFIG_DICT: Dict[str, Any] = {
         "python": {
-            "exec_cli": lambda code: [sys.executable, "-c", code],
-            "exec_file": lambda path: [sys.executable, path],
+            "exec_cli": lambda code: [sys.executable, "-u", "-c", code],
+            "exec_file": lambda path: [sys.executable, "-u", path],
             "file_suffix": ".py",
         },
         "javascript": {
@@ -98,16 +99,35 @@ class CodeOperation(BaseCodeOperation):
             ExecuteCodeResult: Execution result.
         """
 
+        method_name = self.execute_code.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to execute code", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
+
         def _create_exec_code_err(error_msg: str, data: Optional[ExecuteCodeData] = None) -> ExecuteCodeResult:
             """Create standard error result for code execution"""
             if data and hasattr(data, "exit_code") and data.exit_code is None:
                 data.exit_code = -1
-            return build_operation_error_result(
+            err_result = build_operation_error_result(
                 error_type=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR,
                 msg_format_kwargs={"execution": "execute_code", "error_msg": error_msg},
                 result_cls=ExecuteCodeResult,
                 data=data
             )
+            sys_operation_logger.error("Failed to execute code", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_ERROR,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(err_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return err_result
 
         if not code or not code.strip():
             return _create_exec_code_err(error_msg="code can not be empty")
@@ -125,6 +145,8 @@ class CodeOperation(BaseCodeOperation):
                                              data=ExecuteCodeData(code_content=code, language=language))
 
             env = OperationUtils.prepare_environment(environment)
+            if language == "javascript":
+                env["NODE_DISABLE_COLORS"] = "1"
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -148,7 +170,7 @@ class CodeOperation(BaseCodeOperation):
                                                  stderr=invoke_data.stderr
                                              ))
 
-            return ExecuteCodeResult(
+            success_result = ExecuteCodeResult(
                 code=StatusCode.SUCCESS.code,
                 message="Code executed successfully",
                 data=ExecuteCodeData(
@@ -159,14 +181,24 @@ class CodeOperation(BaseCodeOperation):
                     stderr=invoke_data.stderr
                 )
             )
+            sys_operation_logger.info("End to execute code", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
 
         except FileNotFoundError:
-            return _create_exec_code_err(error_msg=f"{language} file not found error",
+            return _create_exec_code_err(error_msg=f"{language} file not found error, please install "
+                                                   f"and add it to your system environment variable PATH.",
                                          data=ExecuteCodeData(code_content=code, language=language))
 
         except Exception as e:
             return _create_exec_code_err(error_msg=f"unexpected error: {str(e)}",
                                          data=ExecuteCodeData(code_content=code, language=language))
+
         finally:
             if code_file_path:
                 await OperationUtils.delete_tmp_file(code_file_path)
@@ -196,17 +228,37 @@ class CodeOperation(BaseCodeOperation):
             AsyncIterator[ExecuteCodeStreamResult]: Streaming structured results.
         """
 
+        method_name = self.execute_code_stream.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to execute code streaming", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
+
         def _create_exec_code_stream_err(error_msg: str,
                                          data: Optional[ExecuteCodeChunkData] = None) -> ExecuteCodeStreamResult:
             """Create standard error result for code stream execution"""
             if data and hasattr(data, "exit_code") and data.exit_code is None:
                 data.exit_code = -1
-            return build_operation_error_result(
+
+            err_result = build_operation_error_result(
                 error_type=StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR,
                 msg_format_kwargs={"execution": "execute_code_stream", "error_msg": error_msg},
                 result_cls=ExecuteCodeStreamResult,
                 data=data
             )
+            sys_operation_logger.error("Failed to execute code streaming", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_ERROR,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(err_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return err_result
 
         chunk_index = 0
         if not code or not code.strip():
@@ -230,6 +282,8 @@ class CodeOperation(BaseCodeOperation):
 
         try:
             env = OperationUtils.prepare_environment(environment)
+            if language == "javascript":
+                env["NODE_DISABLE_COLORS"] = "1"
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -247,11 +301,19 @@ class CodeOperation(BaseCodeOperation):
                 def _handle_std_out_err(event: StreamEvent, idx: int) -> ExecuteCodeStreamResult:
                     """Handle stdout and stderr events, package data and return success result"""
                     chunk_data = ExecuteCodeChunkData(text=event.data, type=event.type.value, chunk_index=idx)
-                    return ExecuteCodeStreamResult(
+                    stream_result = ExecuteCodeStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message=f"Get {chunk_data.type} stream successfully",
                         data=chunk_data
                     )
+                    sys_operation_logger.debug("Receive execute code stream", event=self._create_sys_operation_event(
+                        event_type=LogEventType.SYS_OP_STREAM,
+                        method_name=method_name,
+                        method_params=method_params,
+                        method_result=self._safe_model_dump(stream_result),
+                        method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+                    ))
+                    return stream_result
 
                 def _handle_exec_error(event: StreamEvent, idx: int) -> ExecuteCodeStreamResult:
                     """Handle execution error events and return standardized error result"""
@@ -263,11 +325,19 @@ class CodeOperation(BaseCodeOperation):
                     """Handle process exit events, return result by exit code judgment"""
                     exit_code = event.data
                     chunk_data = ExecuteCodeChunkData(chunk_index=idx, exit_code=exit_code)
-                    return ExecuteCodeStreamResult(
+                    exit_result = ExecuteCodeStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message="Code executed successfully",
                         data=chunk_data
                     )
+                    sys_operation_logger.info("End to execute code streaming", event=self._create_sys_operation_event(
+                        event_type=LogEventType.SYS_OP_END,
+                        method_name=method_name,
+                        method_params=method_params,
+                        method_result=self._safe_model_dump(exit_result),
+                        method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+                    ))
+                    return exit_result
 
                 event_handler_map: dict[StreamEventType, Callable[[StreamEvent, int], ExecuteCodeStreamResult]] = {
                     StreamEventType.STDOUT: _handle_std_out_err,
@@ -276,7 +346,15 @@ class CodeOperation(BaseCodeOperation):
                     StreamEventType.EXIT: _handle_process_exit
                 }
                 handler = event_handler_map.get(stream_event_data.type)
-                return handler(stream_event_data, data_idx) if handler else None
+                if handler is None:
+                    sys_operation_logger.warning("Failed to get event handler", event=self._create_sys_operation_event(
+                        event_type=LogEventType.SYS_OP_ERROR,
+                        method_name=method_name,
+                        metadata={"stream_type": stream_event_data.type.value}
+                    ))
+                    return None
+                else:
+                    return handler(stream_event_data, data_idx)
 
             async for chunk in process_handler.stream():
                 modify_data = _stream_event_trans(chunk, chunk_index)
@@ -286,10 +364,17 @@ class CodeOperation(BaseCodeOperation):
                 if chunk.type in (StreamEventType.ERROR, StreamEventType.EXIT):
                     return
 
+        except FileNotFoundError:
+            yield _create_exec_code_stream_err(error_msg=f"{language} file not found error, please install "
+                                                         f"and add it to your system environment variable PATH.",
+                                               data=ExecuteCodeChunkData(chunk_index=chunk_index, exit_code=-1))
+            return
+
         except Exception as e:
             yield _create_exec_code_stream_err(error_msg=f"unexpected error: {str(e)}",
                                                data=ExecuteCodeChunkData(chunk_index=chunk_index, exit_code=-1))
             return
+
         finally:
             if code_file_path:
                 await OperationUtils.delete_tmp_file(code_file_path)

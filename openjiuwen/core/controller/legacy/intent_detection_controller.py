@@ -14,7 +14,7 @@ from openjiuwen.core.controller.legacy.event.event import Event
 from openjiuwen.core.controller.legacy.task.task import Task, TaskStatus
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 
 

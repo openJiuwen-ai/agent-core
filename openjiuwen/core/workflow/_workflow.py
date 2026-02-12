@@ -90,7 +90,7 @@ class BaseWorkflow:
         self._validate_schemas(comp_id, inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
         self._validate_comp_ability(comp_id, comp_ability, wait_for_all)
         node_spec = NodeSpec(
-            io_config=CompIOConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema),
+            io_configs=CompIOConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema),
             stream_io_configs=CompIOConfig(inputs_schema=stream_inputs_schema, outputs_schema=stream_outputs_schema),
             abilities=comp_ability if comp_ability is not None else [])
         self._workflow_spec.comp_configs[comp_id] = node_spec
@@ -110,6 +110,7 @@ class BaseWorkflow:
         self._graph.start_node(start_comp_id)
         if self._drawable:
             self._drawable.set_start_node(start_comp_id)
+        self._workflow_spec.start_nodes.append(start_comp_id)
         return self
 
     def end_comp(
@@ -318,6 +319,9 @@ class BaseWorkflow:
             # Has streaming input + streaming output -> TRANSFORM
             if node in edge_topology.target_stream_map:
                 self._add_ability_to_node(node, ComponentAbility.TRANSFORM)
+            elif node not in self._workflow_spec.start_nodes:
+                # when branch taget node with stream edge
+                self._add_ability_to_node(node, ComponentAbility.STREAM)
 
         # Nodes that receive stream
         for node in edge_topology.target_stream_map:

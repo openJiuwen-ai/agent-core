@@ -53,10 +53,10 @@ def _deprecated_class(cls, alternative: str):
 from openjiuwen.core.single_agent.legacy.agent import (
     BaseAgent as _BaseAgent,
     ControllerAgent as _ControllerAgent,
-    AgentSession as _AgentSession,
     WorkflowFactory as _WorkflowFactory,
     workflow_provider,
 )
+
 
 # From legacy.config
 from openjiuwen.core.single_agent.legacy.config import (
@@ -78,7 +78,7 @@ from openjiuwen.core.single_agent.legacy.schema import (
 
 # From legacy.react_agent
 from openjiuwen.core.single_agent.legacy.react_agent import (
-    LegacyReActAgent as _LegacyReActAgent,
+    AgentSession, LegacyReActAgent as _LegacyReActAgent,
     create_react_agent_config,
 )
 
@@ -93,10 +93,7 @@ ControllerAgent = _deprecated_class(
     _ControllerAgent,
     "openjiuwen.core.single_agent.agent.BaseAgent"
 )
-AgentSession = _deprecated_class(
-    _AgentSession,
-    "openjiuwen.core.session.Session"
-)
+
 WorkflowFactory = _deprecated_class(
     _WorkflowFactory,
     "Workflow class directly"

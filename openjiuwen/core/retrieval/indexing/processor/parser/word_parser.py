@@ -3,7 +3,7 @@
 
 import asyncio
 import os
-from typing import Any, Optional
+from typing import Optional
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -17,7 +17,7 @@ from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 class WordParser(Parser):
     """Local file parser for DOCX format"""
 
-    def __init__(self, **kwargs: Any):
+    def __init__(self, **kwargs):
         pass
 
     async def _parse(self, file_path: str) -> Optional[str]:

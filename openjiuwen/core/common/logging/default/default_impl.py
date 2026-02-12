@@ -30,9 +30,9 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging.events import (
     BaseLogEvent,
+    create_log_event,
     LogEventType,
     LogLevel,
-    create_log_event,
 )
 from openjiuwen.core.common.logging.protocol import LoggerProtocol
 from openjiuwen.core.common.logging.utils import (
@@ -367,7 +367,7 @@ class DefaultLogger(LoggerProtocol):
             self,
             log_level: LogLevel,
             msg: str,
-            event_type: Optional[LogEventType] = None,
+            event_type: Optional[LogEventType | str] = None,
             event: Optional[BaseLogEvent] = None,
             **kwargs: Any,
     ) -> str:
@@ -381,7 +381,8 @@ class DefaultLogger(LoggerProtocol):
         Args:
             log_level: Log level for the message
             msg: Log message (string)
-            event_type: Event type for creating structured event (only used when event is None)
+            event_type: Event type for creating structured event
+                (LogEventType enum or string identifier, only used when event is None)
             event: Optional structured log event object
             **kwargs: Additional keyword arguments for event creation
 

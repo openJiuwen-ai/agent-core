@@ -4,7 +4,7 @@
 import asyncio
 from typing import Any, Optional
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import session_logger, LogEventType
 
 
 class AsyncStreamQueue:
@@ -45,18 +45,24 @@ class AsyncStreamQueue:
             try:
                 await asyncio.wait_for(self._stream_queue.put(data),
                                        attempt_timeout)
-                logger.debug(
-                    f"Sending stream data success, timeout: {attempt_timeout}, attempt: {attempt + 1}"
+                session_logger.debug(
+                    "Stream data sent successfully",
+                    event_type=LogEventType.SESSION_STREAM_CHUNK,
+                    metadata={"timeout": attempt_timeout, "attempt": attempt + 1}
                 )
                 return
             except asyncio.TimeoutError:
-                logger.error(
-                    f"Sending stream data timeout error, timeout: {attempt_timeout}, attempt: {attempt + 1}"
+                session_logger.error(
+                    "Stream data send timeout",
+                    event_type=LogEventType.SESSION_STREAM_ERROR,
+                    metadata={"timeout": attempt_timeout, "attempt": attempt + 1}
                 )
                 continue
-        
-        logger.error(
-            f"Failed to send stream data after {max_retries} attempts, timeout: {attempt_timeout}"
+
+        session_logger.error(
+            "Failed to send stream data after max retries",
+            event_type=LogEventType.SESSION_STREAM_ERROR,
+            metadata={"max_retries": max_retries, "timeout": attempt_timeout}
         )
 
     async def receive(self, timeout: float = DEFAULT_RECEIVE_TIMEOUT) -> Optional[Any]:
@@ -66,22 +72,25 @@ class AsyncStreamQueue:
         stream_item = await asyncio.wait_for(self._stream_queue.get(),
                                              timeout if timeout and timeout > 0 else None)
         self._stream_queue.task_done()
-        logger.debug(f"Receiving stream data success, stream frame: {stream_item}")
+        session_logger.debug(
+            "Stream data received successfully",
+            event_type=LogEventType.SESSION_STREAM_CHUNK,
+            metadata={"stream_item_type": type(stream_item).__name__}
+        )
         return stream_item
 
     async def close(self, timeout: float = DEFAULT_CLOSE_TIMEOUT) -> None:
         if self._closed:
-            logger.debug("StreamQueue is already closed")
             return
         self._closed = True
 
         try:
             await asyncio.wait_for(self._stream_queue.join(), timeout if timeout and timeout > 0 else None)
-            logger.info(
-                f"StreamQueue closed successfully, timeout: {timeout}")
         except asyncio.TimeoutError:
-            logger.error(
-                f"Closing StreamQueue timeout error, timeout: {timeout}, force clear stream queue."
+            session_logger.error(
+                "StreamQueue close timeout, force clearing queue",
+                event_type=LogEventType.SESSION_STREAM_ERROR,
+                metadata={"timeout": timeout}
             )
             self._force_clear()
 
@@ -102,7 +111,11 @@ class AsyncStreamQueue:
             except ValueError:
                 break
 
-        logger.info(f"Force cleared {cleared_items} items from StreamQueue.")
+        session_logger.info(
+            "StreamQueue force cleared",
+            event_type=LogEventType.SESSION_STREAM_CHUNK,
+            metadata={"cleared_items": cleared_items}
+        )
 
 
 class StreamEmitter:
@@ -127,7 +140,6 @@ class StreamEmitter:
 
     async def close(self) -> None:
         if self._closed:
-            logger.debug("StreamWriter is already closed.")
             return
         self._closed = True
 

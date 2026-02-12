@@ -6,16 +6,24 @@ Main classes included:
  - Ability: Ability type definition
  - AbilityManager: Agent ability manager
  - BaseAgent: Single agent base class
+ - AgentCallbackEvent: Hook event types
+ - HookContext: Hook context data
+ - HookRegistry: Hook registration and execution
+ - Plugin: Plugin base class for grouped hooks
 
 Created on: 2025-11-25
 Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 
-import asyncio
-import json
 from abc import abstractmethod, ABC
-from typing import List, Any, AsyncIterator, Union, Optional, Tuple, Dict, TYPE_CHECKING
+from typing import (
+    List,
+    Any,
+    AsyncIterator,
+    Union,
+    Optional
+)
 from pydantic import BaseModel
 
 from openjiuwen.core.context_engine import ContextEngine
@@ -23,20 +31,23 @@ from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
-from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.foundation.tool import McpServerConfig
-from openjiuwen.core.session.session import Session
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
+from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent, AgentCallbackContext, AgentMiddleware, \
+    AnyAgentCallback
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.single_agent.ability_manager import AbilityManager, Ability
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.skills import GitHubTree
 
+
+# =============================================================================
+# BaseAgent
+# =============================================================================
 
 class BaseAgent(ABC):
     """Single Agent Base Class
@@ -63,6 +74,30 @@ class BaseAgent(ABC):
         """
         self.card = card
         self._ability_manager = AbilityManager()
+        self._agent_callback_manager = AgentCallbackManager()
+        self._skill_util = None
+        self.lazy_init_skill()
+
+    def lazy_init_skill(self) -> None:
+        """Lazy init SkillUtil
+
+        Note:
+            - If sys_operation_id is not configured, do nothing
+            - If already initialized, update sys_operation_id when supported
+        """
+        if not hasattr(self._config, "sys_operation_id") or self._config.sys_operation_id is None:
+            return
+
+        from openjiuwen.core.single_agent.skills import SkillUtil
+
+        if self._skill_util is None:
+            self._skill_util = SkillUtil(self._config.sys_operation_id)
+            return
+
+        if hasattr(self._skill_util, "set_sys_operation_id"):
+            self._skill_util.set_sys_operation_id(self._config.sys_operation_id)
+        else:
+            self._skill_util = SkillUtil(self._config.sys_operation_id)
 
     # ========== Configuration Interface ==========
     @abstractmethod
@@ -78,6 +113,82 @@ class BaseAgent(ABC):
     @property
     def ability_manager(self) -> AbilityManager:
         return self._ability_manager
+
+    @property
+    def agent_callback_manager(self) -> AgentCallbackManager:
+        """Access the hook registry for advanced registration."""
+        return self._agent_callback_manager
+
+    async def register_skill(self, skill_path: Union[str, List[str]]):
+        """Register a skill"""
+        self.lazy_init_skill()
+        await self._skill_util.register_skills(skill_path, self)
+
+    async def register_remote_skills(self, skills_dir: str, github_tree: GitHubTree, token: str = ""):
+        """Register remote skills"""
+        self.lazy_init_skill()
+        await self._skill_util.register_remote_skills(skills_dir, github_tree, token=token)
+
+    def register_callback(
+        self,
+        event: AgentCallbackEvent,
+        callback: AnyAgentCallback,
+        priority: int = 100
+    ) -> 'BaseAgent':
+        """Register an agent callback.
+
+        Args:
+            event: agent callback event type
+            callback: Callback function (sync or async)
+            priority: Execution priority (lower = runs first)
+
+        Returns:
+            self for chaining
+        """
+        self._agent_callback_manager.register_callback(event, callback, priority)
+        return self
+
+    def register_middleware(self, middleware: AgentMiddleware) -> 'BaseAgent':
+        """Register a middleware instance.
+
+        Args:
+            middleware: MiddleWare to register
+
+        Returns:
+            self for chaining
+        """
+        self._agent_callback_manager.register_middleware(middleware)
+        return self
+
+    async def _execute_callbacks(
+        self,
+        event: AgentCallbackEvent,
+        inputs: Any = None,
+        iteration: int = 0,
+        **extra
+    ) -> AgentCallbackContext:
+        """Execute callbacks for a given event.
+
+        This method should be called by subclasses at appropriate points
+        in their execution flow.
+
+        Args:
+            event: The agent callback event
+            inputs: Original inputs
+            iteration: Current iteration number
+            **extra: Additional context data
+
+        Returns:
+            AgentCallbackContext with potential modifications
+        """
+        ctx = AgentCallbackContext(
+            agent=self,
+            event=event,
+            inputs=inputs,
+            iteration=iteration,
+            extra=extra
+        )
+        return await self._agent_callback_manager.execute(event, ctx)
 
     @abstractmethod
     async def invoke(
@@ -197,7 +308,7 @@ class ControllerAgent(BaseAgent):
                 session_id=session_id
             )
         from openjiuwen.core.runner import Runner
-        await Runner().release(session_id=session_id)
+        await Runner.release(session_id=session_id)
 
     async def invoke(
         self,
@@ -241,16 +352,10 @@ class ControllerAgent(BaseAgent):
             # Convert inputs to InputEvent
             input_event = InputEvent.from_user_input(user_input=inputs)
 
-            from openjiuwen.core.session.agent import Session as AgentSession
-            if isinstance(session, AgentSession):
-                agent_session = getattr(session, "_inner")
-            else:
-                agent_session = session
-
             # Call controller.invoke
             return await self.controller.invoke(
                 inputs=input_event,
-                session=agent_session,
+                session=session,
                 **kwargs
             )
 
@@ -301,11 +406,6 @@ class ControllerAgent(BaseAgent):
                     StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="session is required",
                 )
-            from openjiuwen.core.session.agent import Session as AgentSession
-            if isinstance(session, AgentSession):
-                agent_session = getattr(session, "_inner")
-            else:
-                agent_session = session
 
             # Convert inputs to InputEvent
             input_event = InputEvent.from_user_input(user_input=inputs)
@@ -313,7 +413,7 @@ class ControllerAgent(BaseAgent):
             # Forward directly to Controller.stream()
             async for chunk in self.controller.stream(
                 inputs=input_event,
-                session=agent_session,
+                session=session,
                 stream_modes=stream_modes,
                 **kwargs
             ):

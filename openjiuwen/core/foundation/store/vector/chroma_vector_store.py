@@ -17,6 +17,11 @@ from openjiuwen.core.foundation.store.base_vector_store import (
     FieldSchema,
     VectorDataType,
 )
+from openjiuwen.core.foundation.store.vector.utils import (
+    convert_cosine_distance,
+    convert_l2_squared,
+    convert_ip_distance,
+)
 
 
 class ChromaVectorStore(BaseVectorStore):
@@ -49,7 +54,7 @@ class ChromaVectorStore(BaseVectorStore):
             except Exception as e:
                 # Collection doesn't exist, will be created in create_collection
                 raise ValidationError(
-                    StatusCode.STORE_VECTOR_COLLECTION_NOT_EXIST,
+                    StatusCode.STORE_VECTOR_COLLECTION_NOT_FOUND,
                     msg="collection doesn't exist",
                     details=str(e),
                     collection_name=collection_name,
@@ -85,16 +90,21 @@ class ChromaVectorStore(BaseVectorStore):
             # Validate: primary key field is required
             primary_field = schema.get_primary_key_field()
             if not primary_field:
-                raise build_error(StatusCode.STORE_VECTOR_SCHEMA_MISSING_PRIMARY_KEY)
+                raise build_error(
+                    StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                    error_msg="schema must contain a primary key field (is_primary=True)"
+                )
 
             # Validate: FLOAT_VECTOR field must be unique
             vector_fields = schema.get_vector_fields()
             if len(vector_fields) == 0:
-                raise build_error(StatusCode.STORE_VECTOR_SCHEMA_MISSING_VECTOR_FIELD)
+                raise build_error(
+                    StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                    error_msg="schema must contain at least one FLOAT_VECTOR field"
+                )
 
             # Extract vector field info
             vector_field = vector_fields[0]
-            vector_dim = vector_field.dim
 
             # Build field mapping: user-defined field names -> ChromaDB built-in fields
             # ChromaDB built-in fields: ids, embeddings, documents, metadatas
@@ -156,13 +166,13 @@ class ChromaVectorStore(BaseVectorStore):
                 if collection_name in self._collections:
                     del self._collections[collection_name]
                 store_logger.info(
-                    f"Deleted collection",
+                    "Deleted collection",
                     event_type=LogEventType.STORE_DELETE,
                     table_name=collection_name
                 )
             except Exception as e:
                 store_logger.error(
-                    f"Failed to delete collection",
+                    "Failed to delete collection",
                     event_type=LogEventType.STORE_DELETE,
                     table_name=collection_name,
                     exception=str(e)
@@ -272,7 +282,7 @@ class ChromaVectorStore(BaseVectorStore):
                     return schema
             except Exception as e:
                 store_logger.warning(
-                    f"Could not get schema from collection",
+                    "Could not get schema from collection",
                     event_type=LogEventType.STORE_RETRIEVE,
                     table_name=collection_name,
                     exception=str(e)
@@ -348,13 +358,19 @@ class ChromaVectorStore(BaseVectorStore):
                 # Extract ID from user-defined primary key field
                 doc_id = doc.get(primary_key)
                 if doc_id is None:
-                    raise build_error(StatusCode.STORE_VECTOR_DOC_MISSING_PRIMARY_KEY, field=primary_key)
+                    raise build_error(
+                        StatusCode.STORE_VECTOR_DOC_INVALID,
+                        error_msg=f"document must have primary field '{primary_key}'"
+                    )
                 ids.append(str(doc_id))
 
                 # Extract embedding from user-defined vector field
                 embedding = doc.get(vector_field)
                 if embedding is None:
-                    raise build_error(StatusCode.STORE_VECTOR_DOC_MISSING_VECTOR_FIELD, field=vector_field)
+                    raise build_error(
+                        StatusCode.STORE_VECTOR_DOC_INVALID,
+                        error_msg=f"document must have vector field '{vector_field}'"
+                    )
                 embeddings.append(embedding)
 
                 # Extract text content from user-defined text field
@@ -405,7 +421,7 @@ class ChromaVectorStore(BaseVectorStore):
             )
 
         store_logger.info(
-            f"Successfully added documents",
+            "Successfully added documents",
             event_type=LogEventType.STORE_ADD,
             table_name=collection_name,
             data_num=total
@@ -466,22 +482,21 @@ class ChromaVectorStore(BaseVectorStore):
                     # Get distance and convert to similarity score
                     distance = distances_list[idx] if idx < len(distances_list) else None
                     if distance is not None:
-                        # Convert distance to similarity score
                         # Get metric from collection metadata (saved during creation)
                         metric = metadata.get("distance_metric", "cosine")
 
                         # Convert distance to similarity score based on metric
                         if metric == "cosine":
                             # ChromaDB cosine distance ranges from 0 to 2
-                            # Convert to similarity: similarity = 1 - (distance / 2)
-                            score = max(0.0, 1.0 - (distance / 2.0))
+                            # Convert to similarity: (2.0 - distance) / 2.0
+                            score = convert_cosine_distance(distance)
                         elif metric == "l2":
-                            # L2 distance, convert to similarity: similarity = 1 / (1 + distance)
-                            score = 1.0 / (1.0 + distance)
+                            # L2 distance, convert to similarity: (max_dist - distance) / max_dist
+                            score = convert_l2_squared(distance)
                         else:  # ip (inner product)
-                            # For inner product, ChromaDB may return similarity directly
-                            # or negative similarity, normalize to 0-1 range
-                            score = max(0.0, min(1.0, (distance + 1.0) / 2.0))
+                            # ChromaDB IP distance = 1 - inner_product, range [0, 2]
+                            # Convert to similarity: max(0, min(1, (2.0 - distance) / 2.0))
+                            score = convert_ip_distance(distance)
                     else:
                         score = 0.0
 
@@ -541,7 +556,7 @@ class ChromaVectorStore(BaseVectorStore):
         def _delete():
             collection.delete(ids=ids)
             store_logger.info(
-                f"Deleted documents",
+                "Deleted documents",
                 event_type=LogEventType.STORE_DELETE,
                 table_name=collection_name,
                 data_num=len(ids)
@@ -570,7 +585,7 @@ class ChromaVectorStore(BaseVectorStore):
             where = filters
             collection.delete(where=where)
             store_logger.info(
-                f"Deleted documents matching filters",
+                "Deleted documents matching filters",
                 event_type=LogEventType.STORE_DELETE,
                 table_name=collection_name
             )

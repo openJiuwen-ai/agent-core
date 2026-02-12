@@ -16,7 +16,7 @@ from openjiuwen.dev_tools.tune.utils import TuneUtils
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
-from openjiuwen.core.operator.llm_call import LLMCall
+from openjiuwen.core.operator.legacy.llm_call.base import LLMCall
 from openjiuwen.core.foundation.llm import BaseMessage, Model
 from openjiuwen.core.foundation.tool import ToolInfo
 

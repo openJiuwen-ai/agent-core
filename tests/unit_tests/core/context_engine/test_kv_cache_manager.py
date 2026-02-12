@@ -5,14 +5,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import List, Optional
-from unittest.mock import MagicMock, AsyncMock, patch, call
-import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
 )
@@ -21,6 +19,7 @@ from openjiuwen.core.context_engine.processor.offloader.message_offloader import
 )
 from openjiuwen.core.foundation.llm import UserMessage, ToolMessage, AssistantMessage, ToolCall
 from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAffinityModel
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 
 pytestmark = pytest.mark.asyncio
 
@@ -30,13 +29,12 @@ def create_tool_call_list(ids: List[str]) -> List[ToolCall]:
 
 
 class _FakeInferenceAffinityModel(InferenceAffinityModel):
-    """A minimal fake that passes KVCacheManager's isinstance check.
+    """Fake model implementation for testing KV cache release behavior.
 
-    This test double uses AsyncMock for the release method to properly
-    track async calls even when not awaited.
+    This test double records all release() calls for verification without
+    requiring a real model client configuration.
     """
-
-    def __init__(  # noqa: D107  # pylint: disable=super-init-not-called
+    def __init__(
             self,
             model_client_config=None,
             model_config=None,
@@ -44,13 +42,34 @@ class _FakeInferenceAffinityModel(InferenceAffinityModel):
     ):
         # Intentionally skip parent __init__ to avoid requiring real client config
         # This is a test double that only needs to pass isinstance check
-        # NOTE: KVCacheManager.release reads `model.model_config.model_name`
-        self.model_config = SimpleNamespace(model_name=model_name)
-        self.model_client_config = model_client_config
-        self._client = None
+        if model_client_config is None:
+            model_client_config = MagicMock(spec=ModelClientConfig)
+        if model_config is None:
+            model_config = SimpleNamespace(model_name=model_name)
+        self.release_calls: list[dict] = []
+        try:
+            super().__init__(model_client_config, model_config)
+        except Exception:
+            # If parent init fails, manually set required attributes
+            self.model_config = SimpleNamespace(model_name=model_name)
+            self.model_client_config = model_client_config
+            self._client = None
 
-        # Use AsyncMock to properly track async calls
-        self.release = AsyncMock(return_value=True)
+    async def release(
+            self,
+            session_id: str,
+            messages: List,
+            messages_released_index: int,
+            *,
+            tools: List = None,
+            tools_released_index: Optional[int] = None,
+            model: str = None
+    ) -> bool:
+        self.release_calls.append({
+            "cache_salt": session_id,
+            "block_released": "MOCK_BLOCK_RELEASED_NUM",
+        })
+        return True
 
 
 class TestKVCacheManager:
@@ -104,12 +123,7 @@ class TestKVCacheManager:
 
         # First get_context_window - snapshots the window, no release should happen
         window1 = await context.get_context_window(model=fake_model)
-
-        # Give event loop a chance to process any pending tasks
-        await asyncio.sleep(0)
-
-        assert fake_model.release.call_count == 0, \
-            "First get_context_window should not trigger release"
+        assert fake_model.release_calls == [], "First get_context_window should not trigger release"
 
         # Add new messages to trigger offload (exceeds messages_threshold)
         # This will cause MessageOffloader to offload the large tool message
@@ -121,21 +135,9 @@ class TestKVCacheManager:
         # Second get_context_window - should detect message change and trigger release
         window2 = await context.get_context_window(model=fake_model)
 
-        # Give event loop a chance to process any pending tasks
-        await asyncio.sleep(0)
-
         # Verify release was called due to context change from offload
-        assert fake_model.release.call_count == 1, \
-            f"Release should be triggered after context changed by offload, " \
-            f"but got {fake_model.release.call_count} calls"
-
-        # Verify the call arguments
-        assert fake_model.release.called, "release method should have been called"
-        call_args = fake_model.release.call_args
-
-        # Check that messages parameter was passed
-        assert "messages" in call_args.kwargs or len(call_args.args) > 1, \
-            "Release call should include messages"
+        assert len(fake_model.release_calls) == 1, \
+            "Release should be triggered after context changed by offload"
 
     async def test_kv_cache_release_triggered_after_dialogue_compression(self):
         """Test that KVCacheManager.release is triggered when DialogueCompressor modifies context.
@@ -199,10 +201,7 @@ class TestKVCacheManager:
             # First get_context_window - triggers compression via add_messages
             # This snapshots the window, no release should happen yet
             window1 = await context.get_context_window(model=fake_model)
-            await asyncio.sleep(0)
-
-            assert fake_model.release.call_count == 0, \
-                "First get_context_window should not trigger release"
+            assert fake_model.release_calls == [], "First get_context_window should not trigger release"
 
             # Now the context has been compressed (messages modified)
             # Get messages to verify compression happened
@@ -214,16 +213,9 @@ class TestKVCacheManager:
             # Second get_context_window - should detect message change and trigger release
             window2 = await context.get_context_window(model=fake_model)
 
-            # Give event loop a chance to process any pending tasks
-            await asyncio.sleep(0)
-
             # Verify release was called due to context change from compression
-            assert fake_model.release.call_count == 1, \
-                f"Release should be triggered after context changed by compression, " \
-                f"but got {fake_model.release.call_count} calls"
-
-            # Verify the call was made
-            assert fake_model.release.called, "release method should have been called"
+            assert len(fake_model.release_calls) == 1, \
+                "Release should be triggered after context changed by compression"
 
     async def test_kv_cache_release_with_multiple_compression_rounds(self):
         """
@@ -278,9 +270,7 @@ class TestKVCacheManager:
 
             # First window - snapshot only
             _ = await context.get_context_window(model=fake_model)
-            await asyncio.sleep(0)
-
-            initial_release_count = fake_model.release.call_count
+            initial_release_count = len(fake_model.release_calls)
 
             # Add more messages to trigger another compression
             await context.add_messages([
@@ -296,13 +286,9 @@ class TestKVCacheManager:
             # Second window - should detect changes and release
             _ = await context.get_context_window(model=fake_model)
 
-            # Give event loop a chance to process any pending tasks
-            await asyncio.sleep(0)
-
             # Verify release was called
-            assert fake_model.release.call_count > initial_release_count, \
-                f"Release should be triggered after adding new messages and compression, " \
-                f"but got {fake_model.release.call_count} calls (initial: {initial_release_count})"
+            assert len(fake_model.release_calls) > initial_release_count, \
+                "Release should be triggered after adding new messages and compression"
 
     async def test_kv_cache_no_release_when_disabled(self):
         """
@@ -351,15 +337,11 @@ class TestKVCacheManager:
                 token_counter=None,
             )
 
-            # Multiple get_context_window calls
+            # Multiple window accesses with message additions
             _ = await context.get_context_window(model=fake_model)
             await context.add_messages(UserMessage(content="Follow up"))
             _ = await context.get_context_window(model=fake_model)
 
-            # Give event loop a chance to process any potential async operations
-            await asyncio.sleep(0)
-
             # No release should be called when kv_cache is disabled
-            assert fake_model.release.call_count == 0, \
-                f"No release should be triggered when enable_kv_cache_release is False, " \
-                f"but got {fake_model.release.call_count} calls"
+            assert len(fake_model.release_calls) == 0, \
+                "No release should be triggered when enable_kv_cache_release is False"

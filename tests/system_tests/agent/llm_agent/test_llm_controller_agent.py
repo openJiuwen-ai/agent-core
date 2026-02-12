@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from openjiuwen.core.common import Param
-from openjiuwen.core.memory import MemoryChromaVectorStore
+from openjiuwen.core.foundation.store import create_vector_store
 from openjiuwen.core.foundation.store import DbBasedKVStore
 from openjiuwen.core.retrieval import EmbeddingConfig
 from openjiuwen.core.application.llm_agent import create_llm_agent_config, create_llm_agent, LLMAgent
@@ -17,7 +17,7 @@ from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScopeConfig, AgentMemoryConfig
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
-from openjiuwen.core.foundation.store.default_db_store import DefaultDbStore
+from openjiuwen.core.foundation.store.db.default_db_store import DefaultDbStore
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.foundation.tool import LocalFunction
 from openjiuwen.core.foundation.tool import RestfulApi, ToolCard, RestfulApiCard
@@ -272,7 +272,7 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         )
         kv_store = DbBasedKVStore(engine)
         db_store = DefaultDbStore(engine)
-        vector_store = MemoryChromaVectorStore(persist_directory="./resource_dir")
+        vector_store = create_vector_store("chroma", persist_directory="./resource_dir")
         memory_engine = LongTermMemory()
         await memory_engine.register_store(kv_store=kv_store, db_store=db_store, vector_store=vector_store)
         memory_engine.set_config(MemoryEngineConfig(

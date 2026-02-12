@@ -13,7 +13,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.runner.message_queue_base import InvokeQueueMessage
 from openjiuwen.core.runner.message_queue_inmemory import MessageQueueInMemory
-from openjiuwen.core.session import Session
+from openjiuwen.core.session.agent import Session
 
 
 class BaseController(ABC):
@@ -48,7 +48,6 @@ class BaseController(ABC):
         # Hold core dependencies (can be None initially)
         self._config = config
         self._context_engine = context_engine
-        self._session = session
         
         # Group reference (auto-injected by BaseGroup.add_agent)
         self._group = None
@@ -91,13 +90,6 @@ class BaseController(ABC):
                 f"Agent {agent.__class__.__name__} must have _context_engine"
             )
         self._context_engine = agent._context_engine
-
-        # Get session
-        if not hasattr(agent, '_session'):
-            raise AttributeError(
-                f"Agent {agent.__class__.__name__} must have _session"
-            )
-        self._session = agent._session
 
     async def _get_or_create_subscription(self, conversation_id: str):
         """Get or create subscription for conversation_id (lazy subscription)

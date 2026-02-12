@@ -1,0 +1,622 @@
+# -*- coding: UTF-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
+"""
+Decorator implementations for AsyncCallbackFramework.
+
+Extracted decorator logic for on(), trigger_on_call(), emits(),
+emits_stream(), and emit_around() to keep framework.py focused on
+registration and execution flow.
+
+Also provides transform_io decorator for modifying function inputs/outputs
+with full async and generator support. Transform logic can be provided
+either as direct callables (input_transform/output_transform) or as
+event names (input_event/output_event); when using events, the framework
+triggers the event and uses the last callback result as the transformed
+input or output.
+"""
+
+import inspect
+from functools import wraps
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Optional,
+    Set,
+)
+
+from openjiuwen.core.runner.callback.filters import EventFilter
+
+# Type aliases for transform callables (sync or async).
+InputTransform = Callable[
+    ...,
+    tuple[tuple[Any, ...], dict[str, Any]]
+    | Awaitable[tuple[tuple[Any, ...], dict[str, Any]]],
+]
+OutputTransform = Callable[[Any], Any | Awaitable[Any]]
+
+
+def _bind_args_no_duplicate(
+    func: Callable[..., Any],
+    new_args: tuple[Any, ...],
+    new_kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Prefer keyword over position to avoid duplicate argument.
+
+    When input transform returns (args, kwargs), passing both to func can cause
+    "multiple values for argument" if the same parameter appears in both.
+    We prefer keyword: for the first len(args) parameters of func, if the
+    parameter name is in new_kwargs, pass it only by keyword and drop that
+    positional slot; otherwise keep the positional value.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):
+        return new_args, new_kwargs
+    param_names: list[str] = []
+    for name, p in sig.parameters.items():
+        if p.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            break
+        param_names.append(name)
+    n_pos = min(len(new_args), len(param_names))
+    # Prefer keyword: drop positional for params that are in new_kwargs.
+    keep_pos = [
+        new_args[i]
+        for i in range(n_pos)
+        if param_names[i] not in new_kwargs
+    ]
+    # Remaining positional args (e.g. *args or extra positionals)
+    extra_pos = new_args[n_pos:]
+    call_args = tuple(keep_pos) + extra_pos
+    return call_args, dict(new_kwargs)
+
+
+def create_on_decorator(
+    framework: Any,
+    event: str,
+    *,
+    priority: int = 0,
+    once: bool = False,
+    namespace: str = "default",
+    tags: Optional[Set[str]] = None,
+    filters: Optional[list[EventFilter]] = None,
+    rollback_handler: Optional[Callable] = None,
+    error_handler: Optional[Callable] = None,
+    max_retries: int = 0,
+    retry_delay: float = 0.0,
+    timeout: Optional[float] = None,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable]:
+    """Create decorator that registers an async callback with the framework.
+
+    Used by AsyncCallbackFramework.on(). Registers the function synchronously
+    and returns a wrapper that delegates to the original function.
+
+    Args:
+        framework: AsyncCallbackFramework instance (has register_sync).
+        event: Event name to listen for.
+        priority: Execution priority (higher first).
+        once: Execute only once then disable.
+        namespace: Namespace for grouping.
+        tags: Set of tags for filtering.
+        filters: List of filters to apply.
+        rollback_handler: Function to call on rollback.
+        error_handler: Function to call on error.
+        max_retries: Maximum retry attempts.
+        retry_delay: Delay between retries in seconds.
+        timeout: Execution timeout in seconds.
+
+    Returns:
+        A decorator that registers the wrapped function and returns the wrapper.
+    """
+
+    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
+        callback_info = framework.register_sync(
+            event,
+            func,
+            priority=priority,
+            once=once,
+            namespace=namespace,
+            tags=tags,
+            filters=filters,
+            rollback_handler=rollback_handler,
+            error_handler=error_handler,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
+            timeout=timeout,
+        )
+
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            return await func(*args, **kwargs)
+
+        callback_info.wrapper = wrapper
+        return wrapper
+
+    return decorator
+
+
+def create_trigger_on_call_decorator(
+    framework: Any,
+    event: str,
+    pass_result: bool = False,
+    pass_args: bool = True,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable]:
+    """Create decorator that triggers event when the decorated function is called.
+
+    Triggers the event before executing the decorated function; optionally
+    triggers again with result if pass_result is True.
+
+    Args:
+        framework: AsyncCallbackFramework instance (has trigger).
+        event: Event name to trigger.
+        pass_result: Whether to pass function result to callbacks.
+        pass_args: Whether to pass function arguments to callbacks.
+
+    Returns:
+        A decorator that triggers the event then runs the wrapped function.
+    """
+
+    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if pass_args:
+                await framework.trigger(event, *args, **kwargs)
+            else:
+                await framework.trigger(event)
+
+            result = await func(*args, **kwargs)
+
+            if pass_result:
+                await framework.trigger(event, result=result)
+
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+def create_emits_decorator(
+    framework: Any,
+    event: str,
+    result_key: str = "result",
+    include_args: bool = False,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable]:
+    """Create decorator that triggers event with function result after execution.
+
+    Args:
+        framework: AsyncCallbackFramework instance (has trigger).
+        event: Event name to trigger.
+        result_key: Keyword argument name for the result.
+        include_args: Whether to include original args in event.
+
+    Returns:
+        A decorator that runs the function then triggers the event with result.
+    """
+
+    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            result = await func(*args, **kwargs)
+            event_kwargs: dict[str, Any] = {result_key: result}
+            if include_args:
+                event_kwargs.update(kwargs)
+                await framework.trigger(event, *args, **event_kwargs)
+            else:
+                await framework.trigger(event, **event_kwargs)
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+def create_emits_stream_decorator(
+    framework: Any,
+    event: str,
+    item_key: str = "item",
+) -> Callable[[Callable], Callable]:
+    """Create decorator that emits event for each item yielded by async generator.
+
+    Args:
+        framework: AsyncCallbackFramework instance (has trigger, enable_logging, logger).
+        event: Event name to trigger for each yielded item.
+        item_key: Keyword argument name for the yielded item.
+
+    Returns:
+        A decorator that wraps an async generator and triggers event per item.
+    """
+
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            async_gen = func(*args, **kwargs)
+            if not inspect.isasyncgen(async_gen):
+                raise TypeError(
+                    "emits_stream can only decorate async generator functions, "
+                    f"got {type(async_gen)}"
+                )
+            try:
+                async for item in async_gen:
+                    await framework.trigger(event, **{item_key: item})
+                    yield item
+            except Exception as e:
+                if framework.enable_logging:
+                    framework.logger.error(
+                        f"Error in emits_stream for event '{event}': {e}"
+                    )
+                raise
+
+        return wrapper
+
+    return decorator
+
+
+def create_emit_around_decorator(
+    framework: Any,
+    before_event: str,
+    after_event: str,
+    *,
+    pass_args: bool = True,
+    pass_result: bool = True,
+    on_error_event: Optional[str] = None,
+) -> Callable[[Callable[..., Awaitable[Any]]], Callable]:
+    """Create decorator that triggers events before and after function execution.
+
+    Args:
+        framework: AsyncCallbackFramework instance (has trigger).
+        before_event: Event to trigger before execution.
+        after_event: Event to trigger after successful execution.
+        pass_args: Whether to pass function arguments to events.
+        pass_result: Whether to pass result to after_event.
+        on_error_event: Optional event to trigger on error.
+
+    Returns:
+        A decorator that triggers before/after/error events around the function.
+    """
+
+    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if pass_args:
+                await framework.trigger(before_event, *args, **kwargs)
+            else:
+                await framework.trigger(before_event)
+
+            try:
+                result = await func(*args, **kwargs)
+
+                if pass_result:
+                    after_kwargs = dict(kwargs)
+                    after_kwargs["result"] = result
+                    if pass_args:
+                        await framework.trigger(after_event, *args, **after_kwargs)
+                    else:
+                        await framework.trigger(after_event, result=result)
+                else:
+                    if pass_args:
+                        await framework.trigger(after_event, *args, **kwargs)
+                    else:
+                        await framework.trigger(after_event)
+
+                return result
+
+            except Exception as e:
+                if on_error_event:
+                    error_kwargs = dict(kwargs)
+                    error_kwargs["error"] = e
+                    if pass_args:
+                        await framework.trigger(
+                            on_error_event, *args, **error_kwargs
+                        )
+                    else:
+                        await framework.trigger(on_error_event, error=e)
+                raise
+
+        return wrapper
+
+    return decorator
+
+
+async def _apply_output_transform(
+    value: Any, transform: OutputTransform
+) -> Any:
+    """Apply output transform; await if transform is async."""
+    out = transform(value)
+    if inspect.iscoroutine(out):
+        return await out
+    return out
+
+
+def create_transform_io_decorator(
+    *,
+    input_transform: Optional[InputTransform] = None,
+    output_transform: Optional[OutputTransform] = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Create a decorator that can modify function inputs and/or outputs.
+
+    Supports sync/async functions and sync/async generators. Input transform
+    receives (args, kwargs) and returns (new_args, new_kwargs). Output
+    transform is applied to the return value, or to each yielded item when
+    the function returns a generator. Transforms may be sync or async.
+
+    Example:
+        >>> def add_one(args, kwargs):
+        ...     a, k = list(args), dict(kwargs)
+        ...     k["n"] = k.get("n", 0) + 1
+        ...     return (tuple(a), k)
+        >>> def double(x):
+        ...     return x * 2
+        >>> @create_transform_io_decorator(
+        ...     input_transform=add_one,
+        ...     output_transform=double,
+        ... )
+        ... async def compute(n: int):
+        ...     return n
+        >>> await compute(0)  # input n becomes 1, output 1*2 -> 2
+        2
+
+    Args:
+        input_transform: Optional. (args, kwargs) -> (new_args, new_kwargs).
+            May be sync or async. Called before invoking the wrapped function.
+        output_transform: Optional. value -> new_value. Applied to the
+            return value, or to each yielded item when the function returns
+            an async/sync generator. May be sync or async.
+
+    Returns:
+        A decorator that wraps the function with input/output transformation.
+    """
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        func_async_gen = inspect.isasyncgenfunction(func)
+        func_async = inspect.iscoroutinefunction(func)
+        func_sync_gen = inspect.isgeneratorfunction(func)
+
+        async def _run_input_transform(
+            args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            if input_transform is None:
+                return args, kwargs
+            out = input_transform(*args, **kwargs)
+            if inspect.iscoroutine(out):
+                return await out
+            return out  # type: ignore[return-value]
+
+        def _run_input_transform_sync(
+            args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            if input_transform is None:
+                return args, kwargs
+            out = input_transform(*args, **kwargs)
+            if inspect.iscoroutine(out):
+                raise TypeError(
+                    "input_transform returned a coroutine but wrapped "
+                    "function is sync; use async decorated function"
+                )
+            return out  # type: ignore[return-value]
+
+        # Async generator: wrapper must be an async generator function so
+        # that calling it returns an async generator, not a coroutine.
+        if func_async_gen:
+
+            @wraps(func)
+            async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _run_input_transform(
+                    args, kwargs
+                )
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                async_gen = func(*call_args, **call_kwargs)
+                if not inspect.isasyncgen(async_gen):
+                    raise TypeError(
+                        "expected async generator function, "
+                        f"got {type(async_gen)}"
+                    )
+                async for item in async_gen:
+                    if output_transform is None:
+                        yield item
+                    else:
+                        yield await _apply_output_transform(
+                            item, output_transform
+                        )
+
+            return async_gen_wrapper  # type: ignore[return-value]
+
+        # Async (coroutine) function.
+        if func_async:
+
+            @wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _run_input_transform(
+                    args, kwargs
+                )
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                result = await func(*call_args, **call_kwargs)
+                if output_transform is None:
+                    return result
+                return await _apply_output_transform(
+                    result, output_transform
+                )
+
+            return async_wrapper  # type: ignore[return-value]
+
+        # Sync generator function.
+        if func_sync_gen:
+
+            @wraps(func)
+            def sync_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = _run_input_transform_sync(
+                    args, kwargs
+                )
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                gen = func(*call_args, **call_kwargs)
+                if not inspect.isgenerator(gen):
+                    raise TypeError(
+                        "expected generator function, got " f"{type(gen)}"
+                    )
+                for item in gen:
+                    if output_transform is None:
+                        yield item
+                    else:
+                        out = output_transform(item)
+                        if inspect.iscoroutine(out):
+                            raise TypeError(
+                                "output_transform returned a coroutine but "
+                                "wrapped function is sync; use async "
+                                "decorated function for async transform"
+                            )
+                        yield out
+
+            return sync_gen_wrapper  # type: ignore[return-value]
+
+        # Sync (plain) function.
+        @wraps(func)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            new_args, new_kwargs = _run_input_transform_sync(args, kwargs)
+            call_args, call_kwargs = _bind_args_no_duplicate(
+                func, new_args, new_kwargs
+            )
+            result = func(*call_args, **call_kwargs)
+            if output_transform is None:
+                return result
+            out = output_transform(result)
+            if inspect.iscoroutine(out):
+                raise TypeError(
+                    "output_transform returned a coroutine but wrapped "
+                    "function is sync; use async decorated function"
+                )
+            return out
+
+        return sync_wrapper
+
+    return decorator
+
+
+def create_transform_io_by_events_decorator(
+    framework: Any,
+    *,
+    input_event: Optional[str] = None,
+    output_event: Optional[str] = None,
+    result_key: str = "result",
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Create transform_io decorator driven by event callbacks.
+
+    Before calling the wrapped function, triggers input_event with
+    (*args, **kwargs); the last callback return value is used as
+    (new_args, new_kwargs).     After the function returns (or for each
+    yielded item), triggers output_event with result_key=<value>; the last
+    callback return value is used as the transformed output. Callbacks
+    must be async and return the transformed value.
+
+    Args:
+        framework: AsyncCallbackFramework instance (has trigger).
+        input_event: Event name for input transform. Callbacks receive
+            (*args, **kwargs) and must return (new_args, new_kwargs).
+        output_event: Event name for output transform. Callbacks receive
+            result_key=<value> and must return the transformed value.
+        result_key: Keyword used when triggering output_event (default:
+            "result").
+
+    Returns:
+        A decorator that uses event callbacks for input/output transform.
+    """
+
+    async def _input_from_events(
+        args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        if not input_event:
+            return args, kwargs
+        results = await framework.trigger(input_event, *args, **kwargs)
+        if not results:
+            return args, kwargs
+        out = results[-1]
+        if isinstance(out, (tuple, list)) and len(out) == 2:
+            return (tuple(out[0]), dict(out[1]))
+        return args, kwargs
+
+    async def _output_from_events(value: Any) -> Any:
+        if not output_event:
+            return value
+        results = await framework.trigger(
+            output_event, **{result_key: value}
+        )
+        if not results:
+            return value
+        return results[-1]
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        func_async_gen = inspect.isasyncgenfunction(func)
+        func_async = inspect.iscoroutinefunction(func)
+        func_sync_gen = inspect.isgeneratorfunction(func)
+
+        if func_async_gen:
+
+            @wraps(func)
+            async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _input_from_events(args, kwargs)
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                async_gen = func(*call_args, **call_kwargs)
+                if not inspect.isasyncgen(async_gen):
+                    raise TypeError(
+                        "expected async generator function, "
+                        f"got {type(async_gen)}"
+                    )
+                async for item in async_gen:
+                    yield await _output_from_events(item)
+
+            return async_gen_wrapper  # type: ignore[return-value]
+
+        if func_async:
+
+            @wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _input_from_events(args, kwargs)
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                result = await func(*call_args, **call_kwargs)
+                return await _output_from_events(result)
+
+            return async_wrapper  # type: ignore[return-value]
+
+        if func_sync_gen:
+
+            @wraps(func)
+            async def sync_gen_async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _input_from_events(args, kwargs)
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                gen = func(*call_args, **call_kwargs)
+                if not inspect.isgenerator(gen):
+                    raise TypeError(
+                        "expected generator function, got " f"{type(gen)}"
+                    )
+                for item in gen:
+                    yield await _output_from_events(item)
+
+            return sync_gen_async_wrapper  # type: ignore[return-value]
+
+        @wraps(func)
+        async def sync_async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            new_args, new_kwargs = await _input_from_events(args, kwargs)
+            call_args, call_kwargs = _bind_args_no_duplicate(
+                func, new_args, new_kwargs
+            )
+            result = func(*call_args, **call_kwargs)
+            return await _output_from_events(result)
+
+        return sync_async_wrapper
+
+    return decorator

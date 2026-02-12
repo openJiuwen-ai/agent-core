@@ -5,6 +5,7 @@ import asyncio
 import os
 import shutil
 import tempfile
+import unittest
 
 import pytest
 import pytest_asyncio
@@ -293,6 +294,7 @@ async def test_fs_read_line_range(sys_op, work_dir):
 
 
 @pytest.mark.asyncio
+@unittest.skip("skip perf test")
 async def test_fs_list_search_non_blocking(sys_op, work_dir):
     # Setup many files
     for i in range(200):

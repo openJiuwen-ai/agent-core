@@ -7,7 +7,7 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import runner_logger as logger
 from openjiuwen.core.session.tracer import decorate_tool_with_trace
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import McpToolCard, MCPTool, McpServerConfig

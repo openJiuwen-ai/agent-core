@@ -9,7 +9,7 @@ Supports vector search, sparse search (text matching), and hybrid search.
 import asyncio
 import json
 import uuid
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import chromadb
 from chromadb.config import DEFAULT_DATABASE, Settings
@@ -17,9 +17,15 @@ from chromadb.config import DEFAULT_DATABASE, Settings
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.store.query import QueryExpr
+from openjiuwen.core.foundation.store.vector.utils import (
+    convert_cosine_distance,
+    convert_ip_distance,
+    convert_l2_squared,
+)
+from openjiuwen.core.foundation.store.vector_fields.chroma_fields import ChromaVectorField
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
-from openjiuwen.core.retrieval.indexing.vector_fields.chroma_fields import ChromaVectorField
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
@@ -36,7 +42,7 @@ class ChromaVectorStore(VectorStore):
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
-        **kwargs: Any,
+        **kwargs,
     ):
         """
         Initialize ChromaDB vector store (persistent mode)
@@ -130,7 +136,7 @@ class ChromaVectorStore(VectorStore):
         self,
         data: dict | List[dict],
         batch_size: int | None = 128,
-        **kwargs: Any,
+        **kwargs,
     ) -> None:
         """Add vector data"""
         if batch_size is None or batch_size <= 0:
@@ -226,7 +232,7 @@ class ChromaVectorStore(VectorStore):
             return
 
         # Re-fetch collection to ensure using the latest collection reference
-        collection = await asyncio.to_thread(
+        collection: chromadb.Collection = await asyncio.to_thread(
             self._client.get_collection,
             name=self.collection_name,
         )
@@ -244,32 +250,35 @@ class ChromaVectorStore(VectorStore):
         self,
         query_vector: List[float],
         top_k: int = 5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """Vector search"""
         # Re-fetch collection to ensure using the latest collection reference
-        collection = await asyncio.to_thread(
+        collection: chromadb.Collection = await asyncio.to_thread(
             self._client.get_collection,
             name=self.collection_name,
         )
 
         # Build where filter conditions
-        where = None
-        if filters:
+        query_args = {}
+        if isinstance(filters, dict):
             where = {}
             for key, value in filters.items():
                 if isinstance(value, str):
                     where[key] = value
                 else:
                     where[key] = value
+            query_args["where"] = where
+        elif isinstance(filters, QueryExpr):
+            query_args.update({k: v for k, v in filters.to_expr("chroma").items() if v})
 
         # Execute search
         results = await asyncio.to_thread(
             collection.query,
             query_embeddings=[query_vector],
             n_results=top_k,
-            where=where,
+            **query_args,
         )
 
         return self._chroma_result_to_search_results(results, mode="vector")
@@ -278,26 +287,29 @@ class ChromaVectorStore(VectorStore):
         self,
         query_text: str,
         top_k: int = 5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """Sparse search (text matching)"""
         # Re-fetch collection to ensure using the latest collection reference
-        collection = await asyncio.to_thread(
+        collection: chromadb.Collection = await asyncio.to_thread(
             self._client.get_collection,
             name=self.collection_name,
         )
 
         # ChromaDB doesn't directly support BM25, use text query as alternative
         # Build where filter conditions
-        where = None
-        if filters:
+        query_args = {}
+        if isinstance(filters, dict):
             where = {}
             for key, value in filters.items():
                 if isinstance(value, str):
                     where[key] = value
                 else:
                     where[key] = value
+            query_args["where"] = where
+        elif isinstance(filters, QueryExpr):
+            query_args.update({k: v for k, v in filters.to_expr("chroma").items() if v})
 
         try:
             # Use text query (ChromaDB's text search is based on TF-IDF)
@@ -305,7 +317,7 @@ class ChromaVectorStore(VectorStore):
                 collection.query,
                 query_texts=[query_text],
                 n_results=top_k,
-                where=where,
+                **query_args,
             )
 
             if results and results.get("ids") and len(results["ids"][0]) > 0:
@@ -321,20 +333,10 @@ class ChromaVectorStore(VectorStore):
         query_vector: Optional[List[float]] = None,
         top_k: int = 5,
         alpha: float = 0.5,
-        filters: Optional[dict] = None,
-        **kwargs: Any,
+        filters: Optional[dict | QueryExpr] = None,
+        **kwargs,
     ) -> List[SearchResult]:
         """Hybrid search (text retrieval + vector retrieval)"""
-        # Build where filter conditions
-        where = None
-        if filters:
-            where = {}
-            for key, value in filters.items():
-                if isinstance(value, str):
-                    where[key] = value
-                else:
-                    where[key] = value
-
         try:
             # Execute vector search and text search separately
             tasks = []
@@ -411,34 +413,26 @@ class ChromaVectorStore(VectorStore):
     async def delete(
         self,
         ids: Optional[List[str]] = None,
-        filter_expr: Optional[str] = None,
-        **kwargs: Any,
+        filter_expr: Optional[str | QueryExpr] = None,
+        **kwargs,
     ) -> bool:
         """Delete vectors"""
         try:
             # Re-fetch collection to ensure using the latest collection reference
-            collection = await asyncio.to_thread(
+            collection: chromadb.Collection = await asyncio.to_thread(
                 self._client.get_collection,
                 name=self.collection_name,
             )
 
-            if ids:
-                # Delete by ID
-                await asyncio.to_thread(
-                    collection.delete,
-                    ids=ids,
-                )
-                return True
-            if filter_expr:
-                # ChromaDB doesn't support complex filter_expr, need to query first then delete
-                # Simplified handling here, only supports simple where conditions
-                logger.warning(
-                    "ChromaDB does not support complex filter expressions for deletion. "
-                    "Please use ids parameter instead."
-                )
-                return False
-            logger.warning("Either ids or filter_expr must be provided")
-            return False
+            query_args = dict(ids=ids)
+            if filter_expr is not None:
+                if isinstance(filter_expr, QueryExpr):
+                    query_args.update({k: v for k, v in filter_expr.to_expr("chroma").items() if v})
+                else:
+                    logger.warning("ChromaDB does not support string filter expressions.")
+                    return False
+            await asyncio.to_thread(collection.delete, **query_args)
+            return True
         except Exception as e:
             logger.error(f"Failed to delete vectors: {e}")
             return False
@@ -488,14 +482,15 @@ class ChromaVectorStore(VectorStore):
                 # ChromaDB returns distance, need to convert to similarity score
                 if raw_score_val is not None:
                     if self._distance_metric == "l2":
-                        # L2 distance, simple normalization (max distance is 4)
-                        raw_score_scaled = max(0.0, (4.0 - raw_score_val) / 4.0)
+                        # L2 distance, convert to similarity: (max_dist - distance) / max_dist
+                        raw_score_scaled = convert_l2_squared(raw_score_val)
                     elif self._distance_metric == "cosine":
-                        # For cosine distance, similarity = 1 - distance
-                        raw_score_scaled = (2.0 - raw_score_val) / 2.0
+                        # Cosine distance ranges from 0 to 2, convert to similarity: (2.0 - distance) / 2.0
+                        raw_score_scaled = convert_cosine_distance(raw_score_val)
                     else:
-                        # Chroma ip is a distance: d = 1 - dot
-                        raw_score_scaled = 1.0 - raw_score_val
+                        # Chroma IP is a distance: d = 1 - dot (range [0, 2])
+                        # Convert to similarity: max(0, min(1, (2.0 - distance) / 2.0))
+                        raw_score_scaled = convert_ip_distance(raw_score_val)
                     final_score = raw_score_scaled
             elif mode == "sparse":
                 # Text search score (ChromaDB may return similarity score or distance)

@@ -22,7 +22,6 @@ from openjiuwen.core.session.constants import (
 from openjiuwen.core.session.interaction.base import AgentInterrupt
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.internal.agent import StaticAgentSession
 from openjiuwen.core.session.internal.workflow import (
     NodeSession,
     SubWorkflowSession,
@@ -30,13 +29,11 @@ from openjiuwen.core.session.internal.workflow import (
 )
 from openjiuwen.core.session.internal.wrapper import (
     RouterSession,
-    StaticWrappedSession,
     WrappedSession,
 )
 from openjiuwen.core.session.session import (
     BaseSession,
-    ProxySession,
-    Session,
+    ProxySession
 )
 from openjiuwen.core.session.state.base import Transformer
 from openjiuwen.core.session.state.workflow_state import CommitState
@@ -49,9 +46,12 @@ from openjiuwen.core.session.utils import (
     NESTED_PATH_SPLIT,
 )
 
+from openjiuwen.core.session.session import Session
+
+deprecated = ["Session"]
+
 __all__ = [
     # session
-    "Session",
     "BaseSession",
     "WrappedSession",
     "ProxySession",
@@ -64,8 +64,6 @@ __all__ = [
     "workflow_session_vars",
 
     # agent session
-    "StaticAgentSession",
-    "StaticWrappedSession",
     "CommitState",
 
     # interaction
@@ -97,4 +95,4 @@ __all__ = [
     "extract_origin_key",
     "is_ref_path",
     "Transformer",
-]
+] + deprecated

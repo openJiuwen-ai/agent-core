@@ -4,10 +4,6 @@ import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, List, Optional
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
-
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
@@ -29,6 +25,10 @@ class PlaywrightClient(McpClient):
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         """Establish connection to Playwright MCP server"""
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.sse import sse_client
+        from mcp.client.stdio import stdio_client
+        
         try:
             # Determine client type based on server_path type
             if isinstance(self._server_path, StdioServerParameters):

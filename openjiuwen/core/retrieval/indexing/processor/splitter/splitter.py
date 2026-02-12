@@ -14,7 +14,7 @@ class SentenceSplitter(Splitter):
         tokenizer: Callable,
         chunk_size: int,
         chunk_overlap: int,
-        lan: str = "zh",
+        lan: str = "auto",
     ):
         """
         Initialize sentence splitter
@@ -23,7 +23,7 @@ class SentenceSplitter(Splitter):
             tokenizer: Tokenizer, must have encode and decode methods
             chunk_size: Chunk size (number of tokens)
             chunk_overlap: Chunk overlap size (number of tokens)
-            lan: Language code, defaults to "zh" (Chinese)
+            lan: Language code, defaults to "auto" (auto-detect)
         """
         super().__init__(
             tokenizer=tokenizer,
@@ -31,7 +31,55 @@ class SentenceSplitter(Splitter):
             chunk_overlap=chunk_overlap,
         )
 
-        self.seg = Segmenter(language=lan, clean=False)
+        self.default_lan = lan if lan != "auto" else ""
+        self.seg = None  # Initialized per document
+        self._span_recovery_failures = {}
+
+    @staticmethod
+    def _detect_chinese(text: str, threshold: float = 0.1) -> str:
+        """
+        Detect if text is primarily Chinese or English based on character distribution.
+
+        Args:
+            text: Text to analyze
+            threshold: Detection threhold, defaults to 0.1 (10%+ Chinese chars -> "zh")
+
+        Returns:
+            "zh" if more than 10% of characters are Chinese, otherwise "en"
+        """
+        import numpy as np
+
+        if not text:
+            return "en"
+
+        # Check character ratio
+        total_chars = len(text)
+        threshold_val = int(threshold * total_chars)
+        chinese_count = 0
+
+        # Convert chunk to UTF-32 and count codepoints in range
+        mem_threshold = 50_000_000
+        if total_chars <= mem_threshold:
+            # If mem alloc < ~200MB, count in one go
+            char_arr = np.frombuffer(text.encode("utf-32-le"), dtype="<u4")
+            chinese_count = int(np.sum((char_arr >= 0x4E00) & (char_arr <= 0x9FFF)))
+        else:
+            # If mem alloc > ~200MB, count chunk by chunk, we will still outspeed regex or ord :-)
+            for start in range(0, total_chars, mem_threshold):
+                end = min(start + mem_threshold, total_chars)
+                char_arr = np.frombuffer(text[start:end].encode("utf-32-le"), dtype="<u4")
+                chinese_count += int(np.sum((char_arr >= 0x4E00) & (char_arr <= 0x9FFF)))
+                # Early decision: already met threshold
+                if chinese_count >= threshold_val:
+                    return "zh"
+
+        # Fallback: use punctuation types as heuristics
+        is_chinese = int(chinese_count) >= threshold_val
+        if is_chinese is False:
+            using_chinese_puncs = text.count("？") > text.count("?") and text.count("！") > text.count("!")
+            # using_chinese_puncs |= text.count("，") > text.count(",") or text.count("。") > text.count(".")
+            is_chinese = using_chinese_puncs
+        return "zh" if is_chinese else "en"
 
     def __call__(self, doc: str) -> List[Tuple[str, int, int]]:
         """
@@ -45,62 +93,73 @@ class SentenceSplitter(Splitter):
         """
         if not doc or not doc.strip():
             return []
+
+        # Auto-detect language based on Chinese character ratio
+
+        detected_lan = self.default_lan or self._detect_chinese(doc)
+        self.seg = Segmenter(language=detected_lan, clean=False)
+
         sentences_with_spans = self._sentences_with_spans(doc)
         chunks: List[Tuple[str, int, int]] = []
-        cur_sents: List[Tuple[str, int, int]] = []
+        cur_sents: List[Tuple[str, int, int, int]] = []  # (text, start, end, token_len)
 
-        for sent_text, sent_start, sent_end in sentences_with_spans:
+        for sent_text, sent_start, sent_end, sent_len in sentences_with_spans:
             if not sent_text.strip():
                 continue
-
-            sent_tokens = self.tokenizer_enc(sent_text)
-            sent_len = len(sent_tokens)
 
             if sent_len > self.chunk_size:
                 chunks, cur_sents = self._flush(chunks, cur_sents)
                 chunks.append((sent_text, sent_start, sent_end))
                 continue
 
-            cur_chunk_text = " ".join(s[0] for s in cur_sents)
-            cur_chunk_tokens = self.tokenizer_enc(cur_chunk_text) if cur_sents else []
-
-            if len(cur_chunk_tokens) + sent_len <= self.chunk_size:
-                cur_sents.append((sent_text, sent_start, sent_end))
+            cur_token_count = sum(s[3] for s in cur_sents)
+            if cur_token_count + sent_len <= self.chunk_size:
+                cur_sents.append((sent_text, sent_start, sent_end, sent_len))
             else:
                 chunks, cur_sents = self._flush(chunks, cur_sents)
-                cur_sents = [(sent_text, sent_start, sent_end)]
+                cur_sents = [(sent_text, sent_start, sent_end, sent_len)]
 
         chunks, _ = self._flush(chunks, cur_sents)
         logger.info(f"Computed the following sentence-level chunks: {len(chunks)} chunks")
         return chunks
 
-    def _sentences_with_spans(self, text: str) -> List[Tuple[str, int, int]]:
+    def _sentences_with_spans(self, text: str) -> List[Tuple[str, int, int, int]]:
         sentences = self.seg.segment(text)
+        used_spans = set()
         spans = []
-        start = 0
 
         for sent in sentences:
             if not sent.strip():
                 continue
-            # Find next occurrence starting from `start` to avoid duplicates
-            idx = text.find(sent, start)
-            if idx == -1:
-                # Fallback: skip (unlikely with clean=False)
-                logger.warning(f"Span recovery failed for: {repr(sent[:30])}...")
-                continue
-            end = idx + len(sent)
-            spans.append((sent, idx, end))
-            start = end
+
+            # Pre-calculate token length once
+            sent_tokens = len(self.tokenizer_enc(sent))
+
+            # Search for all occurrences
+            idx = 0
+            while True:
+                idx = text.find(sent, idx)
+                if idx == -1:
+                    logger.warning(f"Span recovery failed for: {repr(sent[:30])}...")
+                    break
+
+                span = (idx, idx + len(sent))
+                if span not in used_spans:
+                    used_spans.add(span)
+                    spans.append((sent, span[0], span[1], sent_tokens))
+                    break
+
+                idx += 1
 
         return spans
 
     def _flush(
-        self, chunks: List[Tuple[str, int, int]], cur_sents: List[Tuple[str, int, int]]
-    ) -> Tuple[List[Tuple[str, int, int]], List[Tuple[str, int, int]]]:
+        self, chunks: List[Tuple[str, int, int]], cur_sents: List[Tuple[str, int, int, int]]
+    ) -> Tuple[List[Tuple[str, int, int]], List[Tuple[str, int, int, int]]]:
         if not cur_sents:
             return chunks, []
 
-        chunk_text = " ".join(s[0] for s in cur_sents)
+        chunk_text = "".join(s[0] for s in cur_sents)
         start_char = cur_sents[0][1]
         end_char = cur_sents[-1][2]
         chunks.append((chunk_text, start_char, end_char))
@@ -110,10 +169,9 @@ class SentenceSplitter(Splitter):
         if self.chunk_overlap > 0 and len(cur_sents) > 1:
             overlap_tokens = 0
             overlap_sents = []
-            for sent_text, s_start, s_end in reversed(cur_sents):
-                sent_toks = len(self.tokenizer_enc(sent_text))
+            for sent_text, s_start, s_end, sent_toks in reversed(cur_sents):
                 if overlap_tokens + sent_toks <= self.chunk_overlap:
-                    overlap_sents.append((sent_text, s_start, s_end))
+                    overlap_sents.append((sent_text, s_start, s_end, sent_toks))
                     overlap_tokens += sent_toks
                 else:
                     break

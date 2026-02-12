@@ -4,7 +4,7 @@ import uuid
 from enum import Enum
 from typing import Optional, Union, Any, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic.config import ExtraValues
 
 from openjiuwen.core.common.exception.errors import build_error
@@ -15,6 +15,7 @@ class ProviderType(str, Enum):
     """ModelClientProvider type"""
     OpenAI = "OpenAI"
     SiliconFlow = "SiliconFlow"
+    DashScope = "DashScope"
 
 
 class ModelClientConfig(BaseModel):
@@ -23,7 +24,7 @@ class ModelClientConfig(BaseModel):
         description="The ModelClient client ID is a unique identifier used for registration in the Runner")
     client_provider: Union[ProviderType, str] = Field(
         ...,
-        description="Service provider identification, Enumeration value: OpenAI or SiliconFlow"
+        description="Service provider identification, Enumeration value: OpenAI, SiliconFlow or ICBC"
     )
     api_key: str = Field(..., description="API key")
     api_base: str = Field(..., description="API base URL")
@@ -31,36 +32,21 @@ class ModelClientConfig(BaseModel):
     max_retries: int = Field(default=3, description="Maximum number of retries")
     verify_ssl: bool = Field(default=True, description="Whether to verify SSL certificates")
     ssl_cert: Optional[str] = Field(default=None, description="Path to SSL certificate file")
+    model_config = {"extra": "allow"}  # Allow extra fields like user_id for ICBC
 
-    @classmethod
-    def model_validate(
-        cls,
-        obj: Any,
-        *,
-        strict: bool | None = None,
-        extra: ExtraValues | None = None,
-        from_attributes: bool | None = None,
-        context: Any | None = None,
-        by_alias: bool | None = None,
-        by_name: bool | None = None,
-    ) -> Self:
-        cfg = super().model_validate(
-            obj,
-            strict=strict,
-            extra=extra,
-            from_attributes=from_attributes,
-            context=context,
-            by_alias=by_alias,
-            by_name=by_name,
-        )
-        if isinstance(cfg.client_provider, str):
+    @model_validator(mode='after')
+    def validate_client_provider(self) -> Self:
+        """Validate client_provider is registered in _CLIENT_TYPE_REGISTRY"""
+        if isinstance(self.client_provider, str):
             from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
-            if cfg.client_provider not in _CLIENT_TYPE_REGISTRY:
+            if self.client_provider not in _CLIENT_TYPE_REGISTRY:
+                supported_providers = ", ".join(_CLIENT_TYPE_REGISTRY.keys())
                 raise build_error(
-                    StatusCode.MODEL_CLIENT_CONFIG_INVALID,
-                    error_msg=f"client_provider '{cfg.client_provider}' is not registered",
+                    StatusCode.MODEL_PROVIDER_INVALID,
+                    error_msg=f"unavailable model provider: {self.client_provider},"
+                              f"and available providers are: {supported_providers}"
                 )
-        return cfg
+        return self
 
 
 class ModelRequestConfig(BaseModel):
