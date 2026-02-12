@@ -34,7 +34,10 @@ def update(self, execution_time: float, is_error: bool = False) -> None
 
 Update metrics with new execution data.
 
-**Parameters**: **execution_time** (float): Duration of this execution in seconds. **is_error** (bool, optional): Whether the execution failed. Default: False.
+**Parameters**:
+
+* **execution_time** (float): Duration of this execution in seconds.
+* **is_error** (bool, optional): Whether the execution failed. Default: False.
 
 ### avg_time
 
@@ -69,7 +72,12 @@ class FilterResult(
 
 Result returned by event filters.
 
-**Parameters**: **action** (FilterAction): Action to take (CONTINUE, STOP, SKIP, MODIFY). **modified_args** (Optional[tuple], optional): New positional arguments when action is MODIFY. Default: None. **modified_kwargs** (Optional[dict], optional): New keyword arguments when action is MODIFY. Default: None. **reason** (Optional[str], optional): Reason for the action. Default: None.
+**Parameters**:
+
+* **action** (FilterAction): Action to take (CONTINUE, STOP, SKIP, MODIFY).
+* **modified_args** (Optional[tuple], optional): New positional arguments when action is MODIFY. Default: None.
+* **modified_kwargs** (Optional[dict], optional): New keyword arguments when action is MODIFY. Default: None.
+* **reason** (Optional[str], optional): Reason for the action. Default: None.
 
 ---
 
@@ -91,7 +99,17 @@ class ChainContext(
 
 Execution context for callback chains; used to share state and data along the chain.
 
-**Parameters**: **event** (str): Name of the event being processed. **initial_args** (tuple): Original positional arguments. **initial_kwargs** (dict): Original keyword arguments. **results** (List[Any], optional): List of results from executed callbacks. Default: []. **metadata** (Dict[str, Any], optional): Custom metadata. Default: {}. **current_index** (int, optional): Index of the currently executing callback. Default: 0. **is_completed** (bool, optional): Whether the chain completed successfully. Default: False. **is_rolled_back** (bool, optional): Whether the chain was rolled back. Default: False. **start_time** (float, optional): Timestamp when chain execution started. Default: time.time().
+**Parameters**:
+
+* **event** (str): Name of the event being processed.
+* **initial_args** (tuple): Original positional arguments.
+* **initial_kwargs** (dict): Original keyword arguments.
+* **results** (List[Any], optional): List of results from executed callbacks. Default: [].
+* **metadata** (Dict[str, Any], optional): Custom metadata. Default: {}.
+* **current_index** (int, optional): Index of the currently executing callback. Default: 0.
+* **is_completed** (bool, optional): Whether the chain completed successfully. Default: False.
+* **is_rolled_back** (bool, optional): Whether the chain was rolled back. Default: False.
+* **start_time** (float, optional): Timestamp when chain execution started. Default: time.time().
 
 ### get_last_result
 
@@ -119,7 +137,12 @@ Get all results from executed callbacks (a copy).
 def set_metadata(self, key: str, value: Any) -> None
 ```
 
-Store metadata in the context. **key** (str): Key. **value** (Any): Value.
+Store metadata in the context.
+
+**Parameters**:
+
+* **key** (str): Key.
+* **value** (Any): Value.
 
 ### get_metadata
 
@@ -127,7 +150,12 @@ Store metadata in the context. **key** (str): Key. **value** (Any): Value.
 def get_metadata(self, key: str, default: Any = None) -> Any
 ```
 
-Retrieve metadata from the context. **key** (str): Key. **default** (Any, optional): Default if key is missing. Default: None.
+Retrieve metadata from the context.
+
+**Parameters**:
+
+* **key** (str): Key.
+* **default** (Any, optional): Default if key is missing. Default: None.
 
 **Returns**: **Any**, metadata value or default.
 
@@ -154,7 +182,12 @@ class ChainResult(
 
 Result of chain execution.
 
-**Parameters**: **action** (ChainAction): Final action of the chain. **result** (Any, optional): Final result value. Default: None. **context** (Optional[ChainContext], optional): Chain execution context. Default: None. **error** (Optional[Exception], optional): Exception if the chain failed. Default: None.
+**Parameters**:
+
+* **action** (ChainAction): Final action of the chain.
+* **result** (Any, optional): Final result value. Default: None.
+* **context** (Optional[ChainContext], optional): Chain execution context. Default: None.
+* **error** (Optional[Exception], optional): Exception if the chain failed. Default: None.
 
 ---
 
@@ -178,4 +211,16 @@ class CallbackInfo(
 
 Metadata and configuration for a registered callback.
 
-**Parameters**: **callback** (Callable[..., Awaitable[Any]]): Async callback function. **priority** (int): Execution priority (higher runs first). **once** (bool, optional): Execute only once. Default: False. **enabled** (bool, optional): Whether currently enabled. Default: True. **namespace** (str, optional): Namespace. Default: "default". **tags** (Set[str], optional): Set of tags. Default: set(). **max_retries** (int, optional): Maximum retries on failure. Default: 0. **retry_delay** (float, optional): Delay between retries in seconds. Default: 0.0. **timeout** (Optional[float], optional): Execution timeout in seconds. Default: None. **created_at** (float, optional): Registration timestamp. Default: time.time(). **wrapper** (Optional[Callable], optional): Wrapper returned by decorator (for unregistering). Default: None.
+**Parameters**:
+
+* **callback** (Callable[..., Awaitable[Any]]): Async callback function.
+* **priority** (int): Execution priority (higher runs first).
+* **once** (bool, optional): Execute only once. Default: False.
+* **enabled** (bool, optional): Whether currently enabled. Default: True.
+* **namespace** (str, optional): Namespace. Default: "default".
+* **tags** (Set[str], optional): Set of tags. Default: set().
+* **max_retries** (int, optional): Maximum retries on failure. Default: 0.
+* **retry_delay** (float, optional): Delay between retries in seconds. Default: 0.0.
+* **timeout** (Optional[float], optional): Execution timeout in seconds. Default: None.
+* **created_at** (float, optional): Registration timestamp. Default: time.time().
+* **wrapper** (Optional[Callable], optional): Wrapper returned by decorator (for unregistering). Default: None.

@@ -139,7 +139,10 @@ def set_metadata(self, key: str, value: Any) -> None
 
 在上下文中保存元数据。
 
-**参数**：**key**(str)：键。**value**(Any)：值。
+**参数**：
+
+* **key**(str)：键。
+* **value**(Any)：值。
 
 ### get_metadata
 
@@ -149,9 +152,14 @@ def get_metadata(self, key: str, default: Any = None) -> Any
 
 从上下文中读取元数据。
 
-**参数**：**key**(str)：键。**default**(Any, 可选)：键不存在时的默认值。默认值：None。
+**参数**：
 
-**返回**：**Any**，元数据值或 default。
+* **key**(str)：键。
+* **default**(Any, 可选)：键不存在时的默认值。默认值：None。
+
+**返回**：
+
+* **Any**，元数据值或 default。
 
 ### elapsed_time
 

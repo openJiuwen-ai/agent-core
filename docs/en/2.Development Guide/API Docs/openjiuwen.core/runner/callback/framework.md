@@ -10,7 +10,10 @@ class AsyncCallbackFramework(enable_metrics: bool = True, enable_logging: bool =
 
 Async event-driven framework: callback registration, multiple trigger modes, filters, chains with rollback, metrics, and hooks. All operations are async.
 
-**Parameters**: **enable_metrics** (bool, optional): Whether to collect performance metrics. Default: True. **enable_logging** (bool, optional): Whether to enable logging. Default: True.
+**Parameters**:
+
+* **enable_metrics** (bool, optional): Whether to collect performance metrics. Default: True.
+* **enable_logging** (bool, optional): Whether to enable logging. Default: True.
 
 ### callbacks
 
@@ -68,7 +71,19 @@ def on(
 
 Decorator to register an async function as a callback for an event. Higher priority runs first.
 
-**Parameters**: **event** (str): Event name. **priority** (int, optional): Priority. Default: 0. **once** (bool, optional): Execute only once. Default: False. **namespace** (str, optional): Namespace. Default: "default". **tags** (Optional[Set[str]], optional): Tags. Default: None. **filters** (Optional[List[EventFilter]], optional): Filters for this callback. Default: None. **rollback_handler** (Optional[Callable], optional): Function to call on rollback. Default: None. **error_handler** (Optional[Callable], optional): Function to call on error. Default: None. **max_retries** (int, optional): Max retries. Default: 0. **retry_delay** (float, optional): Retry delay in seconds. Default: 0.0. **timeout** (Optional[float], optional): Execution timeout in seconds. Default: None.
+**Parameters**:
+
+* **event** (str): Event name.
+* **priority** (int, optional): Priority. Default: 0.
+* **once** (bool, optional): Execute only once. Default: False.
+* **namespace** (str, optional): Namespace. Default: "default".
+* **tags** (Optional[Set[str]], optional): Tags. Default: None.
+* **filters** (Optional[List[EventFilter]], optional): Filters for this callback. Default: None.
+* **rollback_handler** (Optional[Callable], optional): Function to call on rollback. Default: None.
+* **error_handler** (Optional[Callable], optional): Function to call on error. Default: None.
+* **max_retries** (int, optional): Max retries. Default: 0.
+* **retry_delay** (float, optional): Retry delay in seconds. Default: 0.0.
+* **timeout** (Optional[float], optional): Execution timeout in seconds. Default: None.
 
 **Returns**: Decorator function.
 
@@ -82,7 +97,11 @@ def trigger_on_call(self, event: str, pass_result: bool = False, pass_args: bool
 
 Decorator: trigger the event when the decorated function is called (before execution; if pass_result is True, trigger again after with the result).
 
-**Parameters**: **event** (str): Event name to trigger. **pass_result** (bool, optional): Pass function return value to callbacks. Default: False. **pass_args** (bool, optional): Pass function arguments to callbacks. Default: True.
+**Parameters**:
+
+* **event** (str): Event name to trigger.
+* **pass_result** (bool, optional): Pass function return value to callbacks. Default: False.
+* **pass_args** (bool, optional): Pass function arguments to callbacks. Default: True.
 
 **Returns**: Decorator function.
 
@@ -96,7 +115,11 @@ def emits(self, event: str, result_key: str = "result", include_args: bool = Fal
 
 Decorator: trigger the event after the function returns, passing the return value under **result_key**.
 
-**Parameters**: **event** (str): Event name to trigger. **result_key** (str, optional): Key for the result. Default: "result". **include_args** (bool, optional): Include original arguments. Default: False.
+**Parameters**:
+
+* **event** (str): Event name to trigger.
+* **result_key** (str, optional): Key for the result. Default: "result".
+* **include_args** (bool, optional): Include original arguments. Default: False.
 
 **Returns**: Decorator function.
 
@@ -110,7 +133,10 @@ def emits_stream(self, event: str, item_key: str = "item") -> Callable
 
 Decorator for async generators: trigger the event on each yield, passing the item under **item_key**; the generator still yields to the caller as usual.
 
-**Parameters**: **event** (str): Event name to trigger on each yield. **item_key** (str, optional): Key for the item. Default: "item".
+**Parameters**:
+
+* **event** (str): Event name to trigger on each yield.
+* **item_key** (str, optional): Key for the item. Default: "item".
 
 **Returns**: Decorated async generator function.
 
@@ -131,7 +157,13 @@ def emit_around(
 
 Decorator: trigger before_event before execution and after_event after success; if an exception occurs and on_error_event is set, trigger that event.
 
-**Parameters**: **before_event** (str): Event before execution. **after_event** (str): Event after success. **pass_args** (bool, optional): Pass function args to events. Default: True. **pass_result** (bool, optional): Pass result to after_event. Default: True. **on_error_event** (Optional[str], optional): Event on error. Default: None.
+**Parameters**:
+
+* **before_event** (str): Event before execution.
+* **after_event** (str): Event after success.
+* **pass_args** (bool, optional): Pass function args to events. Default: True.
+* **pass_result** (bool, optional): Pass result to after_event. Default: True.
+* **on_error_event** (Optional[str], optional): Event on error. Default: None.
 
 **Returns**: Decorator function.
 
@@ -153,7 +185,13 @@ def transform_io(
 
 Decorator to transform function inputs and outputs. Two modes: **event mode** (set input_event/output_event; framework triggers events and uses last callback return as transformed input or result); **direct callback mode** (set input_transform/output_transform; input_transform(*args, **kwargs) returns (new_args, new_kwargs), output_transform(value) returns new value). Supports async functions and async generators (output transform applied per item for generators).
 
-**Parameters**: **input_event** (Optional[str], optional): Input transform event name. Default: None. **output_event** (Optional[str], optional): Output transform event name. Default: None. **result_key** (str, optional): Key for output event payload. Default: "result". **input_transform** (InputTransform, optional): Direct input transform. Default: None. **output_transform** (OutputTransform, optional): Direct output transform. Default: None.
+**Parameters**:
+
+* **input_event** (Optional[str], optional): Input transform event name. Default: None.
+* **output_event** (Optional[str], optional): Output transform event name. Default: None.
+* **result_key** (str, optional): Key for output event payload. Default: "result".
+* **input_transform** (InputTransform, optional): Direct input transform. Default: None.
+* **output_transform** (OutputTransform, optional): Direct output transform. Default: None.
 
 **Returns**: Decorator that applies input/output transformation.
 
@@ -192,7 +230,10 @@ async def unregister(self, event: str, callback: Callable) -> None
 
 Unregister a callback from an event. Supports either the original callback or the wrapper returned by **@on**.
 
-**Parameters**: **event** (str): Event name. **callback** (Callable): Callback to remove (original or wrapper).
+**Parameters**:
+
+* **event** (str): Event name.
+* **callback** (Callable): Callback to remove (original or wrapper).
 
 ---
 
@@ -202,7 +243,11 @@ Unregister a callback from an event. Supports either the original callback or th
 async def unregister_namespace(self, namespace: str) -> None
 ```
 
-Unregister all callbacks in the given namespace. **namespace** (str): Namespace.
+Unregister all callbacks in the given namespace.
+
+**Parameters**:
+
+* **namespace** (str): Namespace.
 
 ---
 
@@ -212,7 +257,11 @@ Unregister all callbacks in the given namespace. **namespace** (str): Namespace.
 async def unregister_by_tags(self, tags: Set[str]) -> None
 ```
 
-Unregister callbacks that have any of the given tags. **tags** (Set[str]): Tags to match.
+Unregister callbacks that have any of the given tags.
+
+**Parameters**:
+
+* **tags** (Set[str]): Tags to match.
 
 ---
 
@@ -222,7 +271,11 @@ Unregister callbacks that have any of the given tags. **tags** (Set[str]): Tags 
 async def unregister_event(self, event: str) -> None
 ```
 
-Unregister all callbacks for the event and remove associated filters, chains, hooks, and circuit breakers. **event** (str): Event name.
+Unregister all callbacks for the event and remove associated filters, chains, hooks, and circuit breakers.
+
+**Parameters**:
+
+* **event** (str): Event name.
 
 ---
 
@@ -234,7 +287,11 @@ async def trigger(self, event: str, *args, **kwargs) -> List[Any]
 
 Trigger the event: run all registered callbacks in priority order (with filters, metrics, hooks) and collect results.
 
-**Parameters**: **event** (str): Event name. **\*args**, **\*\*kwargs**: Arguments for callbacks.
+**Parameters**:
+
+* **event** (str): Event name.
+* **\*args**: Arguments for callbacks.
+* **\*\*kwargs**: Keyword arguments for callbacks.
 
 **Returns**: **List[Any]**, list of results from executed callbacks.
 
@@ -246,7 +303,14 @@ Trigger the event: run all registered callbacks in priority order (with filters,
 async def trigger_delayed(self, event: str, delay: float, *args, **kwargs) -> List[Any]
 ```
 
-Trigger the event after a delay in seconds. **event** (str): Event name. **delay** (float): Delay in seconds. **\*args**, **\*\*kwargs**: Arguments for callbacks.
+Trigger the event after a delay in seconds.
+
+**Parameters**:
+
+* **event** (str): Event name.
+* **delay** (float): Delay in seconds.
+* **\*args**: Arguments for callbacks.
+* **\*\*kwargs**: Keyword arguments for callbacks.
 
 **Returns**: **List[Any]**, callback results.
 
@@ -260,7 +324,11 @@ async def trigger_chain(self, event: str, *args, **kwargs) -> ChainResult
 
 Trigger as a chain: execute callbacks in priority order, passing each result to the next; supports rollback.
 
-**Parameters**: **event** (str): Event name. **\*args**, **\*\*kwargs**: Initial arguments for the chain.
+**Parameters**:
+
+* **event** (str): Event name.
+* **\*args**: Initial arguments for the chain.
+* **\*\*kwargs**: Initial keyword arguments for the chain.
 
 **Returns**: **ChainResult**, with final action, result, context, and optional exception.
 
@@ -274,7 +342,11 @@ async def trigger_parallel(self, event: str, *args, **kwargs) -> List[Any]
 
 Trigger in parallel: run all callbacks concurrently with asyncio.gather; suited for I/O-bound work.
 
-**Parameters**: **event** (str): Event name. **\*args**, **\*\*kwargs**: Arguments for callbacks.
+**Parameters**:
+
+* **event** (str): Event name.
+* **\*args**: Arguments for callbacks.
+* **\*\*kwargs**: Keyword arguments for callbacks.
 
 **Returns**: **List[Any]**, results from callbacks that succeeded.
 
@@ -294,7 +366,12 @@ async def trigger_until(
 
 Execute callbacks in priority order until one return value satisfies condition(result); then return that result.
 
-**Parameters**: **event** (str): Event name. **condition** (Callable[[Any], bool]): Function that takes the callback result and returns bool. **\*args**, **\*\*kwargs**: Arguments for callbacks.
+**Parameters**:
+
+* **event** (str): Event name.
+* **condition** (Callable[[Any], bool]): Function that takes the callback result and returns bool.
+* **\*args**: Arguments for callbacks.
+* **\*\*kwargs**: Keyword arguments for callbacks.
 
 **Returns**: **Optional[Any]**, first result that satisfies the condition, or None.
 
@@ -314,7 +391,12 @@ async def trigger_with_timeout(
 
 Trigger with an overall time limit; on timeout, return whatever results have been collected.
 
-**Parameters**: **event** (str): Event name. **timeout** (float): Max execution time in seconds. **\*args**, **\*\*kwargs**: Arguments for callbacks.
+**Parameters**:
+
+* **event** (str): Event name.
+* **timeout** (float): Max execution time in seconds.
+* **\*args**: Arguments for callbacks.
+* **\*\*kwargs**: Keyword arguments for callbacks.
 
 **Returns**: **List[Any]**, callback results (may be incomplete on timeout).
 
@@ -334,7 +416,12 @@ async def trigger_stream(
 
 Trigger the event for each item from an async input stream; yield results as they are produced. Callbacks may return plain values or async generators.
 
-**Parameters**: **event** (str): Event name. **input_stream** (AsyncIterator[Any]): Async input stream. **\*args**, **\*\*kwargs**: Extra arguments for callbacks.
+**Parameters**:
+
+* **event** (str): Event name.
+* **input_stream** (AsyncIterator[Any]): Async input stream.
+* **\*args**: Extra arguments for callbacks.
+* **\*\*kwargs**: Extra keyword arguments for callbacks.
 
 **Yields**: Results from callback execution for each stream item.
 
@@ -348,7 +435,11 @@ async def trigger_generator(self, event: str, *args, **kwargs) -> AsyncIterator[
 
 Trigger the event and aggregate output: iterate async generators returned by callbacks and yield their items; yield non-generator return values as single items.
 
-**Parameters**: **event** (str): Event name. **\*args**, **\*\*kwargs**: Arguments for callbacks.
+**Parameters**:
+
+* **event** (str): Event name.
+* **\*args**: Arguments for callbacks.
+* **\*\*kwargs**: Keyword arguments for callbacks.
 
 **Yields**: All output from callbacks (including generator items).
 
@@ -360,7 +451,12 @@ Trigger the event and aggregate output: iterate async generators returned by cal
 def add_filter(self, event: str, filter_obj: EventFilter) -> None
 ```
 
-Add a filter for a specific event. **event** (str): Event name. **filter_obj** (EventFilter): Filter instance.
+Add a filter for a specific event.
+
+**Parameters**:
+
+* **event** (str): Event name.
+* **filter_obj** (EventFilter): Filter instance.
 
 ---
 
@@ -370,7 +466,11 @@ Add a filter for a specific event. **event** (str): Event name. **filter_obj** (
 def add_global_filter(self, filter_obj: EventFilter) -> None
 ```
 
-Add a filter that applies to all events. **filter_obj** (EventFilter): Filter instance.
+Add a filter that applies to all events.
+
+**Parameters**:
+
+* **filter_obj** (EventFilter): Filter instance.
 
 ---
 
@@ -386,7 +486,14 @@ def add_circuit_breaker(
 ) -> None
 ```
 
-Add circuit breaker protection for a callback. **event** (str): Event name. **callback** (Callable): Callback to protect. **failure_threshold** (int, optional): Failures before opening. Default: 5. **timeout** (float, optional): Wait before retry in seconds. Default: 60.0.
+Add circuit breaker protection for a callback.
+
+**Parameters**:
+
+* **event** (str): Event name.
+* **callback** (Callable): Callback to protect.
+* **failure_threshold** (int, optional): Failures before opening. Default: 5.
+* **timeout** (float, optional): Wait before retry in seconds. Default: 60.0.
 
 ---
 
@@ -396,7 +503,13 @@ Add circuit breaker protection for a callback. **event** (str): Event name. **ca
 def add_hook(self, event: str, hook_type: HookType, hook: Callable) -> None
 ```
 
-Add a lifecycle hook for an event. **event** (str): Event name. **hook_type** (HookType): BEFORE, AFTER, ERROR, or CLEANUP. **hook** (Callable): Function to run (may be async).
+Add a lifecycle hook for an event.
+
+**Parameters**:
+
+* **event** (str): Event name.
+* **hook_type** (HookType): BEFORE, AFTER, ERROR, or CLEANUP.
+* **hook** (Callable): Function to run (may be async).
 
 ---
 
@@ -410,7 +523,12 @@ def get_metrics(
 ) -> Dict[str, Dict[str, Any]]
 ```
 
-Get performance metrics for callbacks. **event** (Optional[str], optional): Filter by event. **callback** (Optional[str], optional): Filter by callback name.
+Get performance metrics for callbacks.
+
+**Parameters**:
+
+* **event** (Optional[str], optional): Filter by event.
+* **callback** (Optional[str], optional): Filter by callback name.
 
 **Returns**: **Dict[str, Dict[str, Any]]**, key to metric dict (e.g. call_count, avg_time, error_rate).
 
@@ -432,7 +550,11 @@ Clear all performance metrics.
 def get_slow_callbacks(self, threshold: float = 1.0) -> List[Dict[str, Any]]
 ```
 
-Return callbacks whose average execution time exceeds the threshold. **threshold** (float, optional): Min average time in seconds. Default: 1.0.
+Return callbacks whose average execution time exceeds the threshold.
+
+**Parameters**:
+
+* **threshold** (float, optional): Min average time in seconds. Default: 1.0.
 
 **Returns**: **List[Dict[str, Any]]**, slow callbacks sorted by avg_time descending.
 
@@ -444,7 +566,11 @@ Return callbacks whose average execution time exceeds the threshold. **threshold
 def enable_event_history(self, enabled: bool = True) -> None
 ```
 
-Enable or disable event history recording. **enabled** (bool, optional): Whether to record. Default: True.
+Enable or disable event history recording.
+
+**Parameters**:
+
+* **enabled** (bool, optional): Whether to record. Default: True.
 
 ---
 
@@ -458,7 +584,12 @@ def get_event_history(
 ) -> List[Dict[str, Any]]
 ```
 
-Get recorded event history. **event** (Optional[str], optional): Filter by event. **since** (Optional[datetime], optional): Only records after this time.
+Get recorded event history.
+
+**Parameters**:
+
+* **event** (Optional[str], optional): Filter by event.
+* **since** (Optional[datetime], optional): Only records after this time.
 
 **Returns**: **List[Dict[str, Any]]**, event records.
 
@@ -470,7 +601,11 @@ Get recorded event history. **event** (Optional[str], optional): Filter by event
 async def replay_events(self, since: Optional[datetime] = None) -> None
 ```
 
-Replay recorded events in order. **since** (Optional[datetime], optional): Replay only records after this time. Default: None.
+Replay recorded events in order.
+
+**Parameters**:
+
+* **since** (Optional[datetime], optional): Replay only records after this time. Default: None.
 
 ---
 
@@ -480,7 +615,11 @@ Replay recorded events in order. **since** (Optional[datetime], optional): Repla
 def save_state(self, filepath: str) -> None
 ```
 
-Save framework state to a file (metadata only, not callback functions). **filepath** (str): File path.
+Save framework state to a file (metadata only, not callback functions).
+
+**Parameters**:
+
+* **filepath** (str): File path.
 
 ---
 
@@ -490,7 +629,11 @@ Save framework state to a file (metadata only, not callback functions). **filepa
 def list_events(self, namespace: Optional[str] = None) -> List[str]
 ```
 
-List registered event names. **namespace** (Optional[str], optional): Only events that have callbacks in this namespace.
+List registered event names.
+
+**Parameters**:
+
+* **namespace** (Optional[str], optional): Only events that have callbacks in this namespace.
 
 **Returns**: **List[str]**, event names.
 
@@ -502,7 +645,11 @@ List registered event names. **namespace** (Optional[str], optional): Only event
 def list_callbacks(self, event: str) -> List[Dict[str, Any]]
 ```
 
-List metadata for all callbacks registered for an event. **event** (str): Event name.
+List metadata for all callbacks registered for an event.
+
+**Parameters**:
+
+* **event** (str): Event name.
 
 **Returns**: **List[Dict[str, Any]]**, callback info (name, priority, enabled, namespace, tags, once, max_retries, timeout, etc.).
 
