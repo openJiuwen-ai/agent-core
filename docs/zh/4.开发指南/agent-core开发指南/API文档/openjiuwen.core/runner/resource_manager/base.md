@@ -82,6 +82,7 @@ class Ok(value: T)
 * **value**(T)：要封装的成功结果值。
 
 ### is_ok
+
 ```python
 def is_ok() -> bool
 ```
@@ -93,6 +94,7 @@ def is_ok() -> bool
 **bool**，始终为True，因为这是Ok实例。
 
 ### is_err
+
 ```python
 def is_err() -> bool
 ```
@@ -104,6 +106,7 @@ def is_err() -> bool
 **bool**，始终为False，因为这是Ok实例。
 
 ### msg
+
 ```python
 def msg() -> T
 ```
@@ -128,6 +131,7 @@ class Error(error: E = None)
 * **error**(E, 可选)：要封装的错误值。
 
 ### is_ok
+
 ```python
 def is_ok() -> bool
 ```
@@ -139,6 +143,7 @@ def is_ok() -> bool
 **bool**，始终为False，因为这是Error实例。
 
 ### is_err
+
 ```python
 def is_err() -> bool
 ```
@@ -150,6 +155,7 @@ def is_err() -> bool
 **bool**，始终为True，因为这是Error实例。
 
 ### msg
+
 ```python
 def msg() -> E
 ```
@@ -161,6 +167,7 @@ def msg() -> E
 **E**，封装的错误值。
 
 ### error
+
 ```python
 def error() -> E
 ```

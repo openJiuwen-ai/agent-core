@@ -18,7 +18,6 @@ AgentGroupProvider = Callable[[GroupCard], Awaitable[BaseGroup]] | Callable[[Gro
 AgentGroup factory class type definition.
 
 
-
 ## alias WorkflowProvider
 
 ```python
@@ -57,14 +56,14 @@ Default tag constant for resources without explicit tags, used to mark resources
 
 ## enum TagMatchStrategy
 
-Defines the strategy for matching multiple tags when querying or filtering resources.
+Defines strategies for matching multiple tags when querying or filtering resources.
 
-* **ALL**: All-match strategy: resource must contain all specified tags.
-* **ANY**: Partial-match strategy: resource must contain any specified tag.
+* **ALL**: Full match strategy: resource must contain all specified tags.
+* **ANY**: Partial match strategy: resource must contain any of the specified tags.
 
 ## enum TagUpdateStrategy
 
-Defines the strategy for updating resource tags.
+Defines strategies for updating resource tags.
 
 * **MERGE**: Merge strategy: merge new tags with existing tags, removing duplicates.
 * **REPLACE**: Replace strategy: completely replace all existing tags with new tags.
@@ -80,9 +79,10 @@ Represents a successful operation result.
 
 **Parameters**:
 
-* **value** (T): The successful result value to be wrapped.
+* **value**(T): The success result value to encapsulate.
 
 ### is_ok
+
 ```python
 def is_ok() -> bool
 ```
@@ -91,9 +91,10 @@ Check if the result indicates success.
 
 **Returns**:
 
-**bool**, always True, as this is an Ok instance.
+**bool**, always True since this is an Ok instance.
 
 ### is_err
+
 ```python
 def is_err() -> bool
 ```
@@ -102,9 +103,10 @@ Check if the result indicates an error.
 
 **Returns**:
 
-**bool**, always False, as this is an Ok instance.
+**bool**, always False since this is an Ok instance.
 
 ### msg
+
 ```python
 def msg() -> T
 ```
@@ -113,7 +115,7 @@ Get the success message/value.
 
 **Returns**:
 
-**T**, the wrapped success value.
+**T**, the encapsulated success value.
 
 ## class Error
 
@@ -126,9 +128,10 @@ Represents a failed operation result.
 
 **Parameters**:
 
-* **error** (E, optional): The error value to be wrapped.
+* **error**(E, optional): The error value to encapsulate.
 
 ### is_ok
+
 ```python
 def is_ok() -> bool
 ```
@@ -137,9 +140,10 @@ Check if the result indicates success.
 
 **Returns**:
 
-**bool**, always False, as this is an Error instance.
+**bool**, always False since this is an Error instance.
 
 ### is_err
+
 ```python
 def is_err() -> bool
 ```
@@ -148,9 +152,10 @@ Check if the result indicates an error.
 
 **Returns**:
 
-**bool**, always True, as this is an Error instance.
+**bool**, always True since this is an Error instance.
 
 ### msg
+
 ```python
 def msg() -> E
 ```
@@ -159,18 +164,19 @@ Get the error message/value.
 
 **Returns**:
 
-**E**, the wrapped error value.
+**E**, the encapsulated error value.
 
 ### error
+
 ```python
 def error() -> E
 ```
 
-Get the error value (alternative method to msg()).
+Get the error value (alternative to msg()).
 
 **Returns**:
 
-**E**, the wrapped error value.
+**E**, the encapsulated error value.
 
 ## alias Result
 
@@ -178,9 +184,9 @@ Get the error value (alternative method to msg()).
 Result: TypeAlias = Ok[T] | Error[E]
 ```
 
-Operation result type alias using the Result pattern.
+Operation result type alias using the result pattern.
 
-Represents a successful result (Ok[T]) or an error result (Error[E]). This pattern provides explicit error handling without exceptions, making error states part of the type system and API contract.
+Represents either a successful result (Ok[T]) or an error result (Error[E]). This pattern provides explicit error handling without exceptions, making error states part of the type system and API contract.
 
 **Example**:
 

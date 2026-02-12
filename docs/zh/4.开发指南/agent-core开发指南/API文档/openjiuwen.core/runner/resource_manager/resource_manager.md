@@ -2,120 +2,6 @@
 
 ## class ResourceMgr
 
-### add_agent_group
-
-```python
-async def add_agent_group(self,
-                          card: GroupCard,
-                          agent_group: AgentGroupProvider,
-                          *,
-                          tag: Optional[Tag | list[Tag]] = None,
-                          ) -> Result[GroupCard, Exception]
-```
-
-添加单个代理组到资源管理器。
-
-**参数：**
-
-* **card(GroupCard)**：代理组的元数据卡片，包含配置和标识信息。
-* **agent_group(AgentGroupProvider)**：可调用提供者，用于创建或返回代理组实例。
-* **tag(Optional[Tag | list[Tag]]，可选)**：用于分类和过滤代理组的标签。如果为None，则不添加或更新标签。
-
-**返回：**
-
-**Result[GroupCard, Exception]**，包含添加的组卡片或异常的Result对象。
-
-**样例：**
-
-```python
->>> from openjiuwen.core.runner import Runner
->>> from openjiuwen.core.multi_agent import BaseGroup, GroupCard
->>> 
->>>
->>> card = GroupCard(id="team_analyzer", name="分析团队", description="数据分析专家团队")
->>> agent_group_provider: AgentGroupProvider = lambda _: BaseGroup()
->>> 
->>> result = await Runner.resource_mgr.add_agent_group(card, agent_group_provider, tag=["analysis", "team"])
->>> if result.is_ok():
-...     print(f"添加代理组成功: {result.msg()}")
-```
-
-
-### remove_agent_group
-
-```python
-async def remove_agent_group(self,
-                             *,
-                             group_id: Optional[str | list[str]] = None,
-                             tag: Optional[Tag | list[Tag]] = None,
-                             tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                             skip_if_tag_not_exists: bool = False,
-                             ) -> Result[Optional[GroupCard], Exception] | list[Result[Optional[GroupCard], Exception]]
-```
-
-通过ID或标签删除代理组。
-
-**参数：**
-
-* **group_id(Optional[str | list[str]]，可选)**：要删除的代理组的单个ID或ID列表。不能与tag参数同时使用。
-* **tag(Optional[Tag | list[Tag]]，可选)**：单个标签或标签列表；删除所有匹配标签的代理组。不能与id参数同时使用。
-* **tag_match_strategy(TagMatchStrategy，可选)**：使用tag参数时的标签匹配策略。ALL - 资源必须具有所有指定的标签。ANY - 资源必须至少具有一个指定的标签。默认值：TagMatchStrategy.ALL。
-* **skip_if_tag_not_exists(bool，可选)**：如果为True，则静默跳过不存在的资源。
-
-**返回：**
-
-**Result[Optional[GroupCard], Exception]|list[Result[Optional[GroupCard], Exception]]**，包含删除的组卡片或异常的Result对象或列表。
-
-**样例：**
-
-```python
->>> from openjiuwen.core.runner import Runner
->>> from openjiuwen.core.runner.resources_manager.base import TagMatchStrategy
->>> 
->>>
->>> # 通过ID删除
->>> result = await Runner.resource_mgr.remove_agent_group(group_id="team_analyzer")
->>> # 通过标签删除
->>> result = await Runner.resource_mgr.remove_agent_group(tag=["analysis"], tag_match_strategy=TagMatchStrategy.ANY)
-```
-
-### get_agent_group
-
-```python
-async def get_agent_group(self,
-                          group_id: str = None,
-                          *,
-                          tag: Optional[Tag | list[Tag]] = None,
-                          tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                          session: Optional[Session] = None
-                          ) -> Optional[BaseGroup] | list[Optional[BaseGroup]]
-```
-
-通过ID或标签获取代理组实例。
-
-**参数：**
-
-* **group_id(str，可选)**：代理组的唯一标识符。必须提供id或tag之一。
-* **tag(Optional[Tag | list[Tag]]，可选)**：提供id时的可选标签过滤器，或未提供id时的主要查找条件。
-* **tag_match_strategy(TagMatchStrategy，可选)**：使用tag参数时的标签匹配策略。默认值：TagMatchStrategy.ALL。
-* **session(Optional[Session]，可选)**：代理组的可选会话上下文。如果提供，代理组将使用此会话进行初始化。
-
-**返回：**
-
-**Optional[BaseGroup]|list[Optional[BaseGroup]]**，找到的BaseGroup实例，否则为None。
-
-
-**样例：**
-
-```python
->>> from openjiuwen.core.runner import Runner
->>> 
->>> # 通过ID获取
->>> group = await Runner.resource_mgr.get_agent_group(group_id="team_analyzer")
->>> # 通过标签获取
->>> groups = await Runner.resource_mgr.get_agent_group(tag=["analysis"])
-```
-
 ### add_agent
 
 ```python
@@ -732,62 +618,75 @@ def get_prompt(self,
 
 ```python
 def add_sys_operation(self,
-                      card: SysOperationCard,
+                      card: SysOperationCard | List[SysOperationCard],
                       *,
                       tag: Optional[Tag | List[Tag]] = None
-                      ) -> Result[SysOperationCard, Exception]
+                      ) -> Result[SysOperationCard, Exception] | List[Result[SysOperationCard, Exception]]
 ```
 
-通过SysOperationCard添加系统操作（可选标签）。
+通过SysOperationCard添加系统操作（可选标签）。支持批量添加多个系统操作。
 
 **参数：**
 
-* **card(SysOperationCard)**：带有有效id的SysOperationCard（必需）。
+* **card(SysOperationCard | List[SysOperationCard])**：单个SysOperationCard或SysOperationCard列表（必需）。
 * **tag(Optional[Tag | List[Tag]]，可选)**：用于分类的可选单个标签/标签列表。
 
-**返回**
+**返回：**
 
-**Result[SysOperationCard, Exception]**，成功卡片或错误。
+**Result[SysOperationCard, Exception] | List[Result[SysOperationCard, Exception]]**，单个结果对象或结果对象列表，包含成功添加的卡片或错误。
 
 **样例：**
 
 ```python
 >>> from openjiuwen.core.sys_operation import SysOperationCard
 >>> 
+>>> # 添加单个系统操作
 >>> card = SysOperationCard(id="cleanup_op", name="清理操作")
 >>> result = Runner.resource_mgr.add_sys_operation(card, tag=["maintenance"])
+>>>
+>>> # 批量添加多个系统操作
+>>> cards = [
+...     SysOperationCard(id="op1", name="操作1"),
+...     SysOperationCard(id="op2", name="操作2")
+... ]
+>>> results = Runner.resource_mgr.add_sys_operation(cards, tag=["batch_ops"])
 ```
 
 ### remove_sys_operation
 
 ```python
 def remove_sys_operation(self,
+                         sys_operation_id: str | List[str],
                          *,
-                         sys_operation_id: Optional[str | List[str]] = None,
-                         tag: Optional[Tag | List[Tag]] = None,
+                         tag: Optional[Tag | List[Tag]] = GLOBAL,
                          tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                          skip_if_tag_not_exists: bool = False,
-                         ) -> Union[Result[Optional[SysOperationCard], Exception],
-List[Result[Optional[SysOperationCard], Exception]]]
+                         ) -> Result[Optional[SysOperationCard], Exception] | List[Result[Optional[SysOperationCard], Exception]]
 ```
 
-通过ID/标签删除系统操作（支持批量）。
+通过ID/标签删除系统操作（支持批量）。删除系统操作时会同时删除其关联的工具。
 
 **参数：**
 
-* **sys_operation_id(Optional[str | List[str]]，可选)**：要删除的单个操作ID/ID列表。
-* **tag(Optional[Tag | List[Tag]]，可选)**：如果没有ID，则为可选单个标签/标签列表过滤器。
-* **tag_match_strategy(TagMatchStrategy，可选)**：标签匹配的ALL/ANY（默认：ALL）。
-* **skip_if_tag_not_exists(bool，可选)**：忽略缺失的标签（默认：False）。
+* **sys_operation_id(str | List[str])**：要删除的单个操作ID或ID列表（必需）。
+* **tag(Optional[Tag | List[Tag]]，可选)**：单个标签或标签列表过滤器（默认：GLOBAL）。
+* **tag_match_strategy(TagMatchStrategy，可选)**：标签匹配策略（默认：ALL）。
+* **skip_if_tag_not_exists(bool，可选)**：如果为True，跳过不存在的标签（默认：False）。
 
 **返回：**
 
-**Result|list[Result]**，删除的卡片或错误。
+**Result[Optional[SysOperationCard], Exception] | List[Result[Optional[SysOperationCard], Exception]]**，单个结果对象或结果对象列表，包含删除的卡片或错误。
 
 **样例：**
 
 ```python
->>> Runner.resource_mgr.remove_sys_operation(sys_operation_id="cleanup_op")
+>>> # 删除单个系统操作
+>>> Runner.resource_mgr.remove_sys_operation("cleanup_op")
+>>>
+>>> # 批量删除多个系统操作
+>>> Runner.resource_mgr.remove_sys_operation(["op1", "op2"])
+>>>
+>>> # 按标签删除
 >>> Runner.resource_mgr.remove_sys_operation(tag=["temporary"])
 ```
 
@@ -795,31 +694,37 @@ List[Result[Optional[SysOperationCard], Exception]]]
 
 ```python
 def get_sys_operation(self,
-                      sys_operation_id: Optional[str] = None,
+                      sys_operation_id: str | List[str] = None,
                       *,
                       tag: Optional[Tag | List[Tag]] = None,
                       tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
                       session: Optional[Session] = None
-                      ) -> Union[Optional[SysOperation], List[Optional[SysOperation]]
+                      ) -> Optional[SysOperation] | List[Optional[SysOperation]]
 ```
 
-通过ID/标签获取系统操作。
+通过ID/标签获取系统操作实例。
 
 **参数：**
 
-* **sys_operation_id(Optional[str]，可选)**：可选特定操作ID。
-* **tag(Optional[Tag | List[Tag]]，可选)**：如果没有ID，则为可选单个标签/标签列表过滤器。
-* **tag_match_strategy(TagMatchStrategy，可选)**：标签匹配的ALL/ANY（默认：ALL）。
+* **sys_operation_id(str | List[str]，可选)**：单个操作ID或ID列表。
+* **tag(Optional[Tag | List[Tag]]，可选)**：单个标签或标签列表过滤器。
+* **tag_match_strategy(TagMatchStrategy，可选)**：标签匹配策略（默认：ALL）。
 * **session(Optional[Session]，可选)**：可选上下文会话。
 
 **返回：**
 
-**SysOperation/List[SysOperation]**，匹配的操作或None。
+**SysOperation | List[SysOperation]**，单个系统操作实例或实例列表，如果未找到则返回None。
 
 **样例：**
 
 ```python
->>> operation = Runner.resource_mgr.get_sys_operation(sys_operation_id="cleanup_op")
+>>> # 获取单个系统操作
+>>> operation = Runner.resource_mgr.get_sys_operation("cleanup_op")
+>>>
+>>> # 批量获取多个系统操作
+>>> operations = Runner.resource_mgr.get_sys_operation(["op1", "op2"])
+>>>
+>>> # 按标签获取
 >>> operations = Runner.resource_mgr.get_sys_operation(tag=["scheduled"])
 ```
 
