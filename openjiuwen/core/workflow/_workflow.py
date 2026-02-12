@@ -90,7 +90,7 @@ class BaseWorkflow:
         self._validate_schemas(comp_id, inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
         self._validate_comp_ability(comp_id, comp_ability, wait_for_all)
         node_spec = NodeSpec(
-            io_config=CompIOConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema),
+            io_configs=CompIOConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema),
             stream_io_configs=CompIOConfig(inputs_schema=stream_inputs_schema, outputs_schema=stream_outputs_schema),
             abilities=comp_ability if comp_ability is not None else [])
         self._workflow_spec.comp_configs[comp_id] = node_spec

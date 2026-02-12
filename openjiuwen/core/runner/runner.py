@@ -10,7 +10,7 @@ from typing import (
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import LogEventType, runner_logger as logger
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.multi_agent import (
     BaseGroup,
@@ -116,12 +116,13 @@ class _RunnerImpl:
     async def start(self) -> bool:
         """Start the runner and its associated components, such as message queue."""
         result = True
-        logger.info("[Runner] Starting...")
+        logger.info("Begin to start runner", event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
 
         # Initialize checkpointer if configured
         checkpointer_config = get_runner_config().checkpointer_config
         if checkpointer_config is not None:
-            logger.info(f"[Runner] Initializing checkpointer with type: {checkpointer_config.type}")
+            logger.info(f"Begin to initializing checkpointer with type: {checkpointer_config.type}",
+                        event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
             try:
                 # Lazy import checkpointer providers based on type
                 if checkpointer_config.type == "redis":
@@ -129,15 +130,20 @@ class _RunnerImpl:
                         # Import Redis checkpointer provider to ensure it's registered
                         from openjiuwen.extensions.checkpointer.redis import checkpointer as _  # noqa: F401
                     except ImportError as e:
-                        logger.error(f"[Runner] Redis checkpointer not available. "
-                                     f"Please install redis dependencies: {e}")
+                        logger.error(f"Redis checkpointer not available. "
+                                     f"Please install redis dependencies",
+                                     event_type=LogEventType.RUNNER_START, runner_id=self._runner_id, exception=e)
                         raise
 
                 checkpointer = await CheckpointerFactory.create(checkpointer_config)
                 CheckpointerFactory.set_default_checkpointer(checkpointer)
-                logger.info(f"[Runner] Checkpointer initialized successfully: {type(checkpointer).__name__}")
+                logger.info(f"Succeed to initializing checkpointer with type: {checkpointer_config.type}",
+                            event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
             except Exception as e:
-                logger.error(f"[Runner] Failed to initialize checkpointer: {e}")
+                logger.error(f"Failed to initializing checkpointer with type: {checkpointer_config.type}",
+                             event_type=LogEventType.RUNNER_START, runner_id=self._runner_id, exception=e)
+                logger.error(f"Failed to start runner",
+                             event_type=LogEventType.RUNNER_START, runner_id=self._runner_id, exception=e)
                 raise
 
         if get_runner_config().distributed_mode:
@@ -150,14 +156,16 @@ class _RunnerImpl:
             self.system_reply_sub.activate()
             result = await self._message_queue.start()
         if result:
-            logger.info("[Runner] Started.")
+            logger.info(f"Succeed to start runner",
+                        event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
         else:
-            logger.error("[Runner] Start failed.")
+            logger.error(f"Failed to start runner, message queue start failed",
+                         event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
         return result
 
     async def stop(self):
         """Stop the runner and clean up resources."""
-        logger.info("[Runner] Stopping...")
+        logger.info("Begin to stop runner", event_type=LogEventType.RUNNER_STOP, runner_id=self._runner_id)
         try:
             if get_runner_config().distributed_mode:
                 # 1. Stop ReplyTopicSubscription, clean up collector
@@ -170,12 +178,14 @@ class _RunnerImpl:
                     self._distribute_message_queue = None
 
             result = await self._message_queue.stop()
+            logger.info("Succeed to stop runner", event_type=LogEventType.RUNNER_STOP, runner_id=self._runner_id)
             return result
         except Exception as e:
+            logger.warning("Failed to stop runner", event_type=LogEventType.RUNNER_STOP, runner_id=self._runner_id,
+                           exception=e)
             return False
         finally:
             await self._resource_manager.release()
-            logger.info("[Runner] Stopped.")
 
     async def run_workflow(self,
                            workflow: str | Workflow,

@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ValidationError, build_error
+from openjiuwen.core.common.logging import LogEventType, runner_logger as logger
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard
@@ -37,7 +37,7 @@ from openjiuwen.core.workflow import WorkflowCard
 
 class ResourceMgr:
     """
-    Resource Manager for Model, Workflow, Prompt, Tool
+    Resource Manager for Model, Workflow, Prompt, Tool, Agent, AgentGroup
     """
 
     def __init__(self, ) -> None:
@@ -802,13 +802,19 @@ class ResourceMgr:
                 self._tag_mgr.tag_resource(config.server_id, tag if tag else GLOBAL)
                 add_results.append(Ok(config.server_id))
                 tool_names = [card.name for card in cards]
-                logger.info(
-                    f"add mcp server succeed, id={config.server_id}, server_name={config.server_name},"
-                    f" tools={tool_names}")
+                logger.info("add mcp server succeed", event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER,
+                            resource_id=config.server_id,
+                            resource_type="mcp server",
+                            tag=tag if tag else GLOBAL,
+                            metadata={"tools": tool_names, "server_name": config.server_name})
             except Exception as e:
                 add_results.append(Error(e))
-                logger.info(
-                    f"add mcp server failed, id={config.server_id}, server_name={config.server_name}, reason={str(e)}")
+                logger.error("add mcp server failed", event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER,
+                             resource_id=config.server_id,
+                             resource_type="mcp server",
+                             tag=tag if tag else GLOBAL,
+                             exception=e,
+                             metadata={"server_name": config.server_name})
 
         return add_results if isinstance(server_config, list) else add_results[0]
 
@@ -871,12 +877,20 @@ class ResourceMgr:
                 tool_ids = await self._resource_registry.tool().remove_tool_server(mcp_server_id)
                 if tool_ids:
                     self.remove_tool(tool_id=tool_ids)
-                logger.info(f"remove mcp server succeed, id={mcp_server_id}")
+                logger.info("remove mcp server succeed", event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE_SERVER,
+                            resource_id=mcp_server_id,
+                            resource_type="mcp server",
+                            tag=tag if tag else GLOBAL,
+                            metadata={"tools": tool_ids})
                 results.append(Ok(mcp_server_id))
             except Exception as e:
+                logger.error("remove mcp server failed", event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE_SERVER,
+                             resource_id=mcp_server_id,
+                             resource_type="mcp server",
+                             tag=tag if tag else GLOBAL,
+                             exception=e)
                 if not ignore_exception:
                     raise e
-                logger.info(f"remove mcp server failed, id={mcp_server_id}, reason={str(e)}")
                 results.append(Error(e))
         return results
 
@@ -1043,7 +1057,10 @@ class ResourceMgr:
                                                            skip_if_not_exists=skip_if_tag_not_exists)
             for resource_id in resource_to_removal:
                 self._resource_registry.remove_by_id(resource_id)
-            logger.info(f"remove tag succeed, tag={tag}, release resource={resource_to_removal}")
+            logger.info(f"remove tag succeed",
+                        event_type=LogEventType.RESOURCE_MGR_REMOVE_TAG,
+                        tag=single_tag,
+                        metadata={"removal_resource_ids": resource_to_removal})
             results.append(Ok(single_tag))
         return results[0] if results and isinstance(tag, Tag) else results
 
@@ -1193,18 +1210,22 @@ class ResourceMgr:
             if resource_card:
                 self._id_to_card[resource_id] = resource_card
             self._tag_mgr.tag_resource(resource_id, tag if tag else GLOBAL)
-            if resource_card:
-                logger.info(f"add resource succeed, id={resource_id}, type={resource_type}, card={resource_card}")
-            else:
-                logger.info(f"add resource succeed, id={resource_id}, type={resource_type}")
+            logger.info(f"add resource succeed",
+                        event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE,
+                        resource_id=resource_id,
+                        resource_type=resource_type,
+                        tag=tag if tag else GLOBAL,
+                        card=resource_card.str() if resource_card else None)
             return Ok(resource_card if resource_card else resource_id)
         except Exception as e:
-            if resource_card:
-                logger.error(
-                    f"add resource failed, id={resource_id}, type={resource_type}, card={resource_card},"
-                    f" reason={str(e)}")
-            else:
-                logger.info(f"add resource failed, id={resource_id}, type={resource_type}, reason={str(e)}")
+            logger.error(f"add resource failed",
+                         event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE,
+                         resource_id=resource_id,
+                         resource_type=resource_type,
+                         exception=e,
+                         tag=tag if tag else GLOBAL,
+                         card=resource_card.str() if resource_card else None)
+
             return Error(e)
 
     def _inner_remove_resources(self, *, resource_id: Optional[str | list[str]], resource_type: str,
@@ -1263,9 +1284,13 @@ class ResourceMgr:
                     error = e
             removed_card = self._id_to_card.pop(remove_id, None)
             if error:
-                logger.error(
-                    f"remove resource error, id={remove_id}, type={resource_type}, card={removed_card},"
-                    f" reason={str(error)}")
+                logger.error(f"remove resource failed",
+                             event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
+                             resource_id=remove_id,
+                             resource_type=resource_type,
+                             exception=error,
+                             tag=tag if tag else GLOBAL,
+                             card=removed_card.str() if removed_card else None)
                 results.append(Error(error))
             elif resource_type in ["tool", "prompt"]:
                 results.append(Ok(remove_id))
@@ -1273,11 +1298,13 @@ class ResourceMgr:
                 if removed_card or not remove_by_tag:
                     results.append(Ok(removed_card))
             if not error:
-                if removed_card:
-                    logger.info(f"remove resource succeed, id={remove_id}, type={resource_type},"
-                                f" card={removed_card}")
-                else:
-                    logger.info(f"remove resource succeed, id={remove_id}, type={resource_type}")
+                logger.error(f"remove resource failed",
+                             event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
+                             resource_id=remove_id,
+                             resource_type=resource_type,
+                             exception=error,
+                             tag=tag if tag else GLOBAL,
+                             card=removed_card.str() if removed_card else None)
         return results if not isinstance(resource_id, str) else results[0]
 
     def _inner_find_resource_ids(self, *, resource_id: Optional[str | list[str]], tag: Tag | list[Tag],

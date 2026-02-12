@@ -63,13 +63,15 @@ class PregelLoop:
         except Exception as e:
             # Add GRAPH_SUPER_STEP_ERROR log
             graph_logger.error(
-                "Graph super step failed",
+                f"Failed to run graph super-step[{self.step}]",
                 event_type=LogEventType.GRAPH_SUPER_STEP_ERROR,
+                exception=e,
+                graph_id=self.config.get(NS),
+                session_id=self.config.get(SESSION_ID),
                 metadata={
                     "ns": self.config.get(NS),
                     "step": self.step,
                     "active_nodes": list(self.active_nodes) if self.active_nodes else [],
-                    "error": str(e)
                 }
             )
             await self._save_state_on_error(e)
@@ -83,8 +85,10 @@ class PregelLoop:
     async def _run_step(self) -> bool:
         # Add GRAPH_SUPER_STEP_START log
         graph_logger.debug(
-            "Graph super step started",
+            f"Start to run graph super-step[{self.step}]",
             event_type=LogEventType.GRAPH_SUPER_STEP_START,
+            graph_id=self.config.get(NS),
+            session_id=self.config.get(SESSION_ID),
             metadata={
                 "ns": self.config.get(NS),
                 "step": self.step,
@@ -157,9 +161,16 @@ class PregelLoop:
 
     async def _save_state_on_error(self, exception: Exception):
         graph_logger.debug(
-            "Pregel loop save state is failed",
+            f"Failed to run graph super-step[{self.step}], caused by save state",
             event_type=LogEventType.GRAPH_SUPER_STEP_ERROR,
-            metadata={"namespace": self.config.get(NS)}
+            exception=exception,
+            graph_id=self.config.get(NS),
+            session_id=self.config.get(SESSION_ID),
+            metadata={
+                "ns": self.config.get(NS),
+                "step": self.step,
+                "active_nodes": list(self.active_nodes) if self.active_nodes else [],
+            }
         )
         if not self.config.get(SESSION_ID) or not self.config.get(NS) or not self.saver:
             return
@@ -215,10 +226,11 @@ class Pregel:
 
         # Add GRAPH_START log
         graph_logger.info(
-            "Graph execution started",
+            "Pregel graph engine execution started",
             event_type=LogEventType.GRAPH_START,
             graph_id=inner_config.get(NS),
-            metadata={"session_id": inner_config.get(SESSION_ID), "is_top_level": is_top_level}
+            session_id=inner_config.get(SESSION_ID),
+            metadata={"is_top_level": is_top_level}
         )
 
         loop = PregelLoop(self, inner_config)
@@ -228,19 +240,21 @@ class Pregel:
                 pass
             # Add GRAPH_END log
             graph_logger.info(
-                "Graph execution completed",
+                "Pregel graph engine execution completed",
                 event_type=LogEventType.GRAPH_END,
                 graph_id=inner_config.get(NS),
-                metadata={"session_id": inner_config.get(SESSION_ID), "total_steps": loop.step}
+                session_id=inner_config.get(SESSION_ID),
+                metadata={"total_steps": loop.step}
             )
             return {}
         except GraphInterrupt as e:
             # Add GRAPH_END log (interrupted case)
             graph_logger.info(
-                "Graph execution interrupted",
+                "Pregel graph engine execution interrupted",
                 event_type=LogEventType.GRAPH_END,
                 graph_id=inner_config.get(NS),
-                metadata={"session_id": inner_config.get(SESSION_ID), "total_steps": loop.step, "interrupted": True}
+                session_id=inner_config.get(SESSION_ID),
+                metadata={"total_steps": loop.step}
             )
             if is_top_level:
                 return {TASK_STATUS_INTERRUPT: e.value}

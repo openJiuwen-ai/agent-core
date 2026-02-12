@@ -38,6 +38,7 @@ from openjiuwen.core.graph.pregel import (
     PregelConfig,
     START,
 )
+from openjiuwen.core.graph.pregel.constants import SESSION_ID
 from openjiuwen.core.graph.store import GraphStore
 from openjiuwen.core.graph.vertex import Vertex
 from openjiuwen.core.session import (
@@ -137,8 +138,10 @@ class PregelGraph(Graph):
             if self._session:
                 self._session.state().commit()
             graph_logger.debug(
-                "Graph super step completed",
+                f"Finished to run graph super-step [{loop.step}]",
                 event_type=LogEventType.GRAPH_SUPER_STEP_END,
+                graph_id=loop.config['ns'],
+                session_id=loop.config.get(SESSION_ID),
                 metadata={
                     "ns": loop.config['ns'],
                     "step": loop.step,

@@ -149,11 +149,6 @@ class InMemoryCommitState(CommitStateLike):
         else:
             node_updates = self._updates.get(node_id)
             if not node_updates:
-                session_logger.debug(
-                    "Node outputs has no updates",
-                    event_type=LogEventType.STATE_UPDATE,
-                    metadata={"node_id": node_id}
-                )
                 return
             for update in node_updates:
                 self._state.update(update)

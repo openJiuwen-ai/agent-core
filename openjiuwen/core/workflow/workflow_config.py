@@ -26,7 +26,7 @@ class NodeSpec(BaseModel):
     Contains configuration for both regular and streaming I/O,
     along with component capabilities.
     """
-    io_config: CompIOConfig = None  # Configuration for regular (non-streaming) I/O
+    io_configs: CompIOConfig = None  # Configuration for regular (non-streaming) I/O
     stream_io_configs: CompIOConfig = None  # Configuration for streaming I/O
     abilities: List[ComponentAbility] = Field(default_factory=list)  # List of component abilities supported
 

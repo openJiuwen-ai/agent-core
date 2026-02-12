@@ -74,95 +74,74 @@ class GraphStore(Store):
 
     async def get(self, session_id: str, ns: str) -> Optional[GraphState]:
         """Get graph state from storage."""
-        graph_logger.debug(
-            "Retrieving graph state",
-            event_type=LogEventType.GRAPH_STORE_RETRIEVE,
-            metadata={"session_id": session_id, "namespace": ns}
-        )
         try:
             state = await self._saver.get(session_id, ns)
             if state is None:
                 graph_logger.debug(
-                    "Graph state not found",
-                    event_type=LogEventType.GRAPH_STORE_RETRIEVE,
-                    metadata={"session_id": session_id, "namespace": ns}
-                )
-            else:
-                graph_logger.debug(
-                    "Graph state retrieved successfully",
-                    event_type=LogEventType.GRAPH_STORE_RETRIEVE,
-                    metadata={"session_id": session_id, "namespace": ns, "step": state.step}
+                    "Not found graph state for session",
+                    event_type=LogEventType.GRAPH_STORE_GET,
+                    session_id=session_id,
+                    graph_id=ns
                 )
             return state
         except Exception as e:
             graph_logger.error(
-                "Failed to retrieve graph state",
-                event_type=LogEventType.GRAPH_STORE_RETRIEVE,
-                metadata={"session_id": session_id, "namespace": ns, "error": str(e)}
+                "Failed to get graph state",
+                event_type=LogEventType.GRAPH_STORE_GET,
+                session_id=session_id,
+                exception=e,
+                graph_id=ns
             )
             raise
 
     async def save(self, session_id: str, ns: str, state: GraphState) -> None:
         """Save graph state to storage."""
         graph_logger.debug(
-            "Saving graph state",
-            event_type=LogEventType.GRAPH_STORE_ADD,
-            metadata={"session_id": session_id, "namespace": ns, "step": state.step}
+            f"Begin to save graph state of super-step[{state.step}]",
+            event_type=LogEventType.GRAPH_STORE_SAVE,
+            session_id=session_id,
+            graph_id=ns
         )
         try:
             await self._saver.save(session_id, ns, state)
             graph_logger.debug(
-                "Graph state saved successfully",
-                event_type=LogEventType.GRAPH_STORE_ADD,
-                metadata={"session_id": session_id, "namespace": ns, "step": state.step}
+                f"Succeed to save graph state of super-step[{state.step}]",
+                event_type=LogEventType.GRAPH_STORE_SAVE,
+                session_id=session_id,
+                graph_id=ns
             )
         except Exception as e:
             graph_logger.error(
-                "Failed to save graph state",
-                event_type=LogEventType.GRAPH_STORE_ADD,
-                metadata={"session_id": session_id, "namespace": ns, "step": state.step, "error": str(e)}
+                f"Succeed to save graph state of super-step[{state.step}]",
+                event_type=LogEventType.GRAPH_STORE_SAVE,
+                session_id=session_id,
+                exception=e,
+                graph_id=ns
             )
             raise
 
     async def delete(self, session_id: str, ns: Optional[str] = None) -> None:
         """Delete graph state from storage."""
-        if ns is None:
-            graph_logger.debug(
-                "Deleting all graph states for session",
-                event_type=LogEventType.GRAPH_STORE_DELETE,
-                metadata={"session_id": session_id}
-            )
-        else:
-            graph_logger.debug(
-                "Deleting graph state",
-                event_type=LogEventType.GRAPH_STORE_DELETE,
-                metadata={"session_id": session_id, "namespace": ns}
-            )
+        graph_logger.debug(
+            f"Begin to delete {ns if ns else 'all'} graph states for session",
+            event_type=LogEventType.GRAPH_STORE_DELETE,
+            session_id=session_id,
+            graph_id=ns,
+        )
         try:
             await self._saver.delete(session_id, ns)
-            if ns is None:
-                graph_logger.debug(
-                    "All graph states deleted successfully",
-                    event_type=LogEventType.GRAPH_STORE_DELETE,
-                    metadata={"session_id": session_id}
-                )
-            else:
-                graph_logger.debug(
-                    "Graph state deleted successfully",
-                    event_type=LogEventType.GRAPH_STORE_DELETE,
-                    metadata={"session_id": session_id, "namespace": ns}
-                )
+            graph_logger.debug(
+                f"Succeed to delete {ns if ns else 'all'} graph states for session",
+                event_type=LogEventType.GRAPH_STORE_DELETE,
+                session_id=session_id,
+                graph_id=ns,
+            )
         except Exception as e:
-            if ns is None:
-                graph_logger.error(
-                    "Failed to delete all graph states",
-                    event_type=LogEventType.GRAPH_STORE_DELETE,
-                    metadata={"session_id": session_id, "error": str(e)}
-                )
-            else:
-                graph_logger.error(
-                    "Failed to delete graph state",
-                    event_type=LogEventType.GRAPH_STORE_DELETE,
-                    metadata={"session_id": session_id, "namespace": ns, "error": str(e)}
-                )
+            graph_logger.debug(
+                f"Failed delete {ns if ns else 'all'} graph states for session",
+                event_type=LogEventType.GRAPH_STORE_DELETE,
+                session_id=session_id,
+                exception=e,
+                graph_id=ns,
+            )
             raise

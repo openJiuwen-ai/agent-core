@@ -34,6 +34,7 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 
 
@@ -48,8 +49,10 @@ class LogEventType(Enum):
     AGENT_ERROR = "agent_error"  # Agent error
 
     # Workflow related events
-    WORKFLOW_START = "workflow_start"  # Workflow started
-    WORKFLOW_END = "workflow_end"  # Workflow ended
+    WORKFLOW_EXECUTE_START = "workflow_execute_start"
+    WORKFLOW_EXECUTE_END = "workflow_execute_end"
+    WORKFLOW_EXECUTE_ERROR = "workflow_execute_error"
+    WORKFLOW_OUTPUT_CHUNK = "workflow_output_chunk"
     WORKFLOW_COMPONENT_START = "workflow_component_start"  # Workflow component started
     WORKFLOW_COMPONENT_END = "workflow_component_end"  # Workflow component ended
     WORKFLOW_COMPONENT_ERROR = "workflow_component_error"  # Workflow component error
@@ -121,29 +124,35 @@ class LogEventType(Enum):
 
     # Checkpointer store events
     CHECKPOINTER_STORE_ADD = "checkpointer_store_add"  # Checkpointer store added
-    CHECKPOINTER_STORE_DELETE = "checkpointer_store_delete"  # Checkpointer store deleted
+    CHECKPOINTER_STORE_REMOVE = "checkpointer_store_remove"  # Checkpointer store deleted
 
     # Graph streaming events
     GRAPH_STREAM_CHUNK = "graph_stream_chunk"  # Graph stream chunk
-    GRAPH_STREAM_ERROR = "graph_stream_error"  # Graph stream error
-
-    # Workflow streaming events
-    WORKFLOW_STREAM_CHUNK = "workflow_stream_chunk"  # Workflow stream chunk
-    WORKFLOW_STREAM_ERROR = "workflow_stream_error"  # Workflow stream error
+    GRAPH_SEND_STREAM_CHUNK = "graph_send_stream_chunk"
+    GRAPH_RECEIVE_STREAM_CHUNK = "graph_receive_stream_chunk"
 
     # Session streaming events
     SESSION_STREAM_CHUNK = "session_stream_chunk"  # Session stream chunk
     SESSION_STREAM_ERROR = "session_stream_error"  # Session stream error
 
-    # Graph execution related events
-    GRAPH_NODE_CALL_START = "graph_node_start"  # Graph node started
-    GRAPH_NODE_CALL_END = "graph_node_end"  # Graph node ended
-    GRAPH_NODE_CALL_ERROR = "graph_node_error"  # Graph node error
+    # Graph vertex execution related events
+    GRAPH_VERTEX_INIT = "graph_vertex_init"  # Graph vertex init
+    GRAPH_VERTEX_CALL_START = "graph_vertex_call_start"  # Graph vertex started
+    GRAPH_VERTEX_CALL_END = "graph_vertex_call_end"  # Graph vertex ended
+    GRAPH_VERTEX_CALL_ERROR = "graph_vertex_call_error"  # Graph vertex error
 
-    # Graph node stream events
-    GRAPH_NODE_STREAM_START = "graph_node_stream_start"  # Graph node stream started
-    GRAPH_NODE_STREAM_END = "graph_node_stream_end"  # Graph node stream ended
-    GRAPH_NODE_STREAM_ERROR = "graph_node_stream_error"  # Graph node stream error
+    # Graph vertex stream events
+    GRAPH_VERTEX_STREAM_ACTOR_START = "graph_vertex_stream_actor_start"
+    GRAPH_VERTEX_STREAM_ACTOR_SHUTDOWN = "graph_vertex_stream_actor_shutdown"
+
+    GRAPH_VERTEX_STREAM_CALL_START = "graph_vertex_stream_call_start"  # Graph vertex stream started
+    GRAPH_VERTEX_STREAM_CALL_END = "graph_vertex_stream_call_end"  # Graph vertex stream ended
+    GRAPH_VERTEX_STREAM_CALL_ERROR = "graph_vertex_stream_call_error"  # Graph vertex stream error
+
+    GRAPH_VERTEX_ABILITY_START = "graph_vertex_ability_start"
+    GRAPH_VERTEX_ABILITY_RUNNING = "graph_vertex_ability_running"
+    GRAPH_VERTEX_ABILITY_END = "graph_vertex_ability_end"
+    GRAPH_VERTEX_ABILITY_ERROR = "graph_vertex_ability_error"
 
     # Graph super step events
     GRAPH_SUPER_STEP_START = "graph_super_step_start"  # Graph super step started
@@ -156,12 +165,19 @@ class LogEventType(Enum):
     GRAPH_ERROR = "graph_error"  # Graph-level error
 
     # Graph Store related events
-    GRAPH_STORE_ADD = "graph_store_add"  # Graph state saved
+    GRAPH_STORE_SAVE = "graph_store_save"  # Graph state saved
     GRAPH_STORE_DELETE = "graph_store_delete"  # Graph state deleted
-    GRAPH_STORE_RETRIEVE = "graph_store_retrieve"  # Graph state retrieved
+    GRAPH_STORE_GET = "graph_store_get"  # Graph state retrieved
 
-    # State related events
-    STATE_UPDATE = "state_update"  # State updated
+    # Runner event
+    RUNNER_START = "runner_start"
+    RUNNER_STOP = "runner_stop"
+    RESOURCE_MGR_ADD_RESOURCE = "add_resource"
+    RESOURCE_MGR_REMOVE_RESOURCE = "remove_resource"
+    RESOURCE_MGR_GET_RESOURCE = "get_resource"
+    RESOURCE_MGR_ADD_RESOURCE_SERVER = "add_resource_server"
+    RESOURCE_MGR_REMOVE_RESOURCE_SERVER = "remove_resource_server"
+    RESOURCE_MGR_REMOVE_TAG = "remove_tag"
 
 
 class LogLevel(Enum):
@@ -328,7 +344,10 @@ class WorkflowEvent(BaseLogEvent):
     )
     branch_condition: Optional[str] = None  # Branch condition (for branch events)
     selected_branch: Optional[str] = None  # Selected branch
-    input_data: Optional[Dict[str, Any]] = None
+    inputs: Optional[Dict[str, Any]] = None
+    outputs: Optional[Any] = None
+    chunk: Optional[Any] = None
+    chunk_idx: Optional[int] = None
     output_data: Optional[Dict[str, Any]] = None
     execution_time_ms: Optional[float] = None
 
@@ -360,10 +379,10 @@ class LLMEvent(BaseLogEvent):
     latency_ms: Optional[float] = None  # Latency (milliseconds)
     is_stream: bool = False  # Whether it's a streaming call
     chunk_index: Optional[int] = None  # Chunk index (for streaming calls)
-    extra_params: Dict[str, Any] = None # extra LLM parameters
-    timeout: Optional[float] = None # timeout parameter
-    stop: Optional[str] = None # stop parameter
-    max_retries: Optional[int] = None # max_retries parameter
+    extra_params: Dict[str, Any] = None  # extra LLM parameters
+    timeout: Optional[float] = None  # timeout parameter
+    stop: Optional[str] = None  # stop parameter
+    max_retries: Optional[int] = None  # max_retries parameter
 
     def __post_init__(self):
         super().__post_init__()
@@ -391,8 +410,8 @@ class ToolEvent(BaseLogEvent):
 class StoreEvent(BaseLogEvent):
     """Data store related event"""
 
-    table_name: Optional[str] = None # Table name
-    data_num: Optional[int] = None # Data number
+    table_name: Optional[str] = None  # Table name
+    data_num: Optional[int] = None  # Data number
 
     def __post_init__(self):
         super().__post_init__()
@@ -556,18 +575,29 @@ class WorkflowStreamEvent(StreamEvent):
 @dataclass
 class GraphEvent(BaseLogEvent):
     """Graph execution related event"""
-
     graph_id: Optional[str] = None
     node_id: Optional[str] = None
     node_name: Optional[str] = None
-    ability: Optional[str] = None  # ComponentAbility name
-    operation: Optional[str] = None  # Operation being performed
+    inputs: Optional[Any] = None  # batch inputs
+    outputs: Optional[Any] = None  # batch outputs
     chunk: Optional[Any] = None  # Stream chunk data
-    chunk_idx: Optional[int] = None  # Chunk index
-    first_frame: Optional[bool] = None  # Is first frame
+
+
+class RunnerEvent(BaseLogEvent):
+    runner_id: Optional[str] = None,
+    inputs: Optional[Any] = None,
+    outputs: Optional[Any] = None,
+    chunk: Optional[Any] = None,
+    envs: Optional[Any] = None
+    resource_id: Optional[str] = None
+    resource_type: Optional[str] = None
+    tag: Optional[Any] = None
+    card: Optional[BaseCard] = None
 
 
 # Event type mapping for creating corresponding event classes based on event type
+
+
 EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     # Agent events
     LogEventType.AGENT_START: AgentEvent,
@@ -576,8 +606,10 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.AGENT_RESPONSE: AgentEvent,
     LogEventType.AGENT_ERROR: AgentEvent,
     # Workflow events
-    LogEventType.WORKFLOW_START: WorkflowEvent,
-    LogEventType.WORKFLOW_END: WorkflowEvent,
+    LogEventType.WORKFLOW_EXECUTE_START: WorkflowEvent,
+    LogEventType.WORKFLOW_EXECUTE_END: WorkflowEvent,
+    LogEventType.WORKFLOW_EXECUTE_ERROR: WorkflowEvent,
+    LogEventType.WORKFLOW_OUTPUT_CHUNK: WorkflowEvent,
     LogEventType.WORKFLOW_COMPONENT_START: WorkflowEvent,
     LogEventType.WORKFLOW_COMPONENT_END: WorkflowEvent,
     LogEventType.WORKFLOW_COMPONENT_ERROR: WorkflowEvent,
@@ -630,23 +662,30 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.CHECKPOINT_ERROR: SessionEvent,
     # Checkpointer store events
     LogEventType.CHECKPOINTER_STORE_ADD: SessionEvent,
-    LogEventType.CHECKPOINTER_STORE_DELETE: SessionEvent,
+    LogEventType.CHECKPOINTER_STORE_REMOVE: SessionEvent,
     # Graph stream events
-    LogEventType.GRAPH_STREAM_CHUNK: GraphEvent,
-    LogEventType.GRAPH_STREAM_ERROR: GraphEvent,
-    # Workflow stream events
-    LogEventType.WORKFLOW_STREAM_CHUNK: WorkflowEvent,
-    LogEventType.WORKFLOW_STREAM_ERROR: WorkflowEvent,
+    LogEventType.GRAPH_SEND_STREAM_CHUNK: GraphEvent,
+    LogEventType.GRAPH_RECEIVE_STREAM_CHUNK: GraphEvent,
+
     # Session stream events
     LogEventType.SESSION_STREAM_CHUNK: SessionEvent,
     LogEventType.SESSION_STREAM_ERROR: SessionEvent,
     # Graph events
-    LogEventType.GRAPH_NODE_CALL_START: GraphEvent,
-    LogEventType.GRAPH_NODE_CALL_END: GraphEvent,
-    LogEventType.GRAPH_NODE_CALL_ERROR: GraphEvent,
-    LogEventType.GRAPH_NODE_STREAM_START: GraphEvent,
-    LogEventType.GRAPH_NODE_STREAM_END: GraphEvent,
-    LogEventType.GRAPH_NODE_STREAM_ERROR: GraphEvent,
+
+    LogEventType.GRAPH_VERTEX_INIT: GraphEvent,
+    LogEventType.GRAPH_VERTEX_CALL_START: GraphEvent,
+    LogEventType.GRAPH_VERTEX_CALL_END: GraphEvent,
+    LogEventType.GRAPH_VERTEX_CALL_ERROR: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_ACTOR_START: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_ACTOR_SHUTDOWN: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_CALL_START: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_CALL_END: GraphEvent,
+    LogEventType.GRAPH_VERTEX_STREAM_CALL_ERROR: GraphEvent,
+    LogEventType.GRAPH_VERTEX_ABILITY_START: GraphEvent,
+    LogEventType.GRAPH_VERTEX_ABILITY_RUNNING: GraphEvent,
+    LogEventType.GRAPH_VERTEX_ABILITY_END: GraphEvent,
+    LogEventType.GRAPH_VERTEX_ABILITY_ERROR: GraphEvent,
+
     LogEventType.GRAPH_SUPER_STEP_START: GraphEvent,
     LogEventType.GRAPH_SUPER_STEP_END: GraphEvent,
     LogEventType.GRAPH_SUPER_STEP_ERROR: GraphEvent,
@@ -654,11 +693,20 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.GRAPH_END: GraphEvent,
     LogEventType.GRAPH_ERROR: GraphEvent,
     # Graph Store events
-    LogEventType.GRAPH_STORE_ADD: GraphEvent,
+    LogEventType.GRAPH_STORE_SAVE: GraphEvent,
     LogEventType.GRAPH_STORE_DELETE: GraphEvent,
-    LogEventType.GRAPH_STORE_RETRIEVE: GraphEvent,
-    # State events
-    LogEventType.STATE_UPDATE: SessionEvent,
+    LogEventType.GRAPH_STORE_GET: GraphEvent,
+
+    # Runner events
+    LogEventType.RUNNER_START: RunnerEvent,
+    LogEventType.RUNNER_STOP: RunnerEvent,
+
+    LogEventType.RESOURCE_MGR_ADD_RESOURCE: RunnerEvent,
+    LogEventType.RESOURCE_MGR_REMOVE_RESOURCE: RunnerEvent,
+    LogEventType.RESOURCE_MGR_GET_RESOURCE: RunnerEvent,
+    LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER: RunnerEvent,
+    LogEventType.RESOURCE_MGR_REMOVE_RESOURCE_SERVER: RunnerEvent,
+    LogEventType.RESOURCE_MGR_REMOVE_TAG: RunnerEvent,
 }
 
 # Cache for event class field names to improve performance

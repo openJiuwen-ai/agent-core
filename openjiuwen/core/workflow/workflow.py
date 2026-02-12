@@ -10,7 +10,8 @@ from typing import Self, Union, AsyncIterator, List, Tuple
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import workflow_logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType
+from openjiuwen.core.common.logging import workflow_logger as logger
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.workflow.base import WorkflowCard, WorkflowChunk, WorkflowExecutionState, \
     WorkflowOutput
@@ -268,12 +269,12 @@ class Workflow:
         self._validate_session(session)
         self._validate_inputs(inputs, **kwargs)
         self._install_asyncio_exception_handler()
-        workflow_logger.info(
-            "Workflow invoke started",
-            event_type=LogEventType.WORKFLOW_START,
+        logger.info(
+            "Begin to run workflow invoke",
+            event_type=LogEventType.WORKFLOW_EXECUTE_START,
             workflow_id=self._card.id,
             workflow_name=self._card.name,
-            input_data=inputs
+            inputs=inputs,
         )
         workflow_session = self._create_workflow_session(session, stream_modes=[BaseStreamMode.OUTPUT], is_sub=False)
 
@@ -296,18 +297,31 @@ class Workflow:
                 else:
                     result = workflow_session.state().get_outputs(self._end_comp_id)
                 output = WorkflowOutput(result=result, state=WorkflowExecutionState.COMPLETED)
-            workflow_logger.info(
-                "Workflow invoke completed",
-                event_type=LogEventType.WORKFLOW_END,
-                workflow_id=self._card.id,
-                workflow_name=self._card.name,
-                session_id=workflow_session.session_id(),
-                output_data=output
-            )
+
             return output
 
         invoke_timeout = workflow_session.config().get_env(WORKFLOW_EXECUTE_TIMEOUT)
-        return await self._execute_with_timeout(_invoke_task, invoke_timeout)
+        try:
+            result = await self._execute_with_timeout(_invoke_task, invoke_timeout)
+            logger.info(
+                "Succeed to run workflow invoke",
+                event_type=LogEventType.WORKFLOW_EXECUTE_END,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name,
+                session_id=workflow_session.session_id(),
+                outputs=result
+            )
+            return result
+        except Exception as e:
+            logger.error(
+                "Failed to run workflow invoke",
+                event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name,
+                exception=e,
+                session_id=workflow_session.session_id(),
+            )
+            raise e
 
     async def stream(
             self,
@@ -338,12 +352,37 @@ class Workflow:
             async for chunk in self._sub_stream(inputs, session, context, **kwargs):
                 yield chunk
             return
+
         self._validate_session(session)
         self._validate_inputs(inputs, **kwargs)
         self._install_asyncio_exception_handler()
+        logger.info(
+            "Begin to run workflow stream",
+            event_type=LogEventType.WORKFLOW_EXECUTE_START,
+            workflow_id=self._card.id,
+            workflow_name=self._card.name,
+            inputs=inputs,
+        )
         workflow_session = self._create_workflow_session(session, stream_modes=stream_modes, is_sub=False)
+        idx = 0
         async for chunk in self._stream(inputs, workflow_session, context):
+            logger.debug(
+                f"Output workflow chunk[{idx}]",
+                event_type=LogEventType.WORKFLOW_OUTPUT_CHUNK,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name,
+                chunk=chunk,
+                chunk_idx=idx,
+            )
             yield chunk
+            idx += 1
+        logger.info(
+            "Succeed to run workflow stream",
+            event_type=LogEventType.WORKFLOW_EXECUTE_END,
+            workflow_id=self._card.id,
+            workflow_name=self._card.name,
+            metadata={"total_chunks": idx}
+        )
 
     def draw(
             self,
@@ -426,25 +465,26 @@ class Workflow:
                 else:
                     await self._add_messages_to_context(inputs, chunks, context)
             except asyncio.CancelledError:
-                workflow_logger.debug(
-                    "task cancelled",
-                    event_type=LogEventType.WORKFLOW_STREAM_ERROR,
+                logger.warning(
+                    "Workflow stream output be cancelled",
+                    event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
                     workflow_id=self._card.id,
                     workflow_name=self._card.name
                 )
                 raise
         except asyncio.CancelledError:
+            logger.warning(
+                "Canecel stream output task",
+                event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name
+            )
             if not task.done() and not task.cancelled():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
-                    workflow_logger.warning(
-                        "workflow task was cancelled",
-                        event_type=LogEventType.WORKFLOW_STREAM_ERROR,
-                        workflow_id=self._card.id,
-                        workflow_name=self._card.name
-                    )
+                    pass
             raise
         except BaseError:
             raise
@@ -457,16 +497,16 @@ class Workflow:
                 try:
                     await task
                 except asyncio.CancelledError:
-                    workflow_logger.warning(
+                    logger.warning(
                         "workflow task was cancelled",
-                        event_type=LogEventType.WORKFLOW_STREAM_ERROR,
+                        event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
                         workflow_id=self._card.id,
                         workflow_name=self._card.name
                     )
                 except Exception as e:
-                    workflow_logger.warning(
+                    logger.warning(
                         "unexpected exception",
-                        event_type=LogEventType.WORKFLOW_STREAM_ERROR,
+                        event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
                         workflow_id=self._card.id,
                         workflow_name=self._card.name
                     )
@@ -475,14 +515,6 @@ class Workflow:
 
     async def _sub_invoke(self, inputs: Input, session: Session,
                           context: ModelContext = None, **kwargs) -> Output:
-        workflow_logger.info(
-            "Sub-workflow invoke started",
-            event_type=LogEventType.WORKFLOW_START,
-            workflow_id=self._card.id,
-            workflow_name=self._card.name,
-            session_id=session.get_session_id(),
-            input_data=inputs
-        )
         sub_workflow_session = self._create_workflow_session(session, is_sub=True)
 
         try:
@@ -498,40 +530,18 @@ class Workflow:
                     frame = await sub_workflow_session.actor_manager().sub_workflow_stream().receive(
                         session.get_env(WORKFLOW_EXECUTE_TIMEOUT))
                     if frame is None:
-                        workflow_logger.warning(
-                            "No frame received from sub-workflow",
-                            event_type=LogEventType.WORKFLOW_STREAM_ERROR,
-                            workflow_id=self._card.id,
-                            session_id=session.get_session_id(),
-                            metadata={"is_sub": True}
-                        )
                         continue
                     if frame == StreamEmitter.END_FRAME:
                         stream_ability_count -= 1
                         continue
                     messages.append(frame)
                 if messages:
-                    workflow_logger.debug(
-                        "Sub-workflow messages received",
-                        event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
-                        workflow_id=self._card.id,
-                        session_id=session.get_session_id(),
-                        metadata={"message_count": len(messages), "is_sub": True}
-                    )
                     return dict(stream=messages)
 
             node_session = NodeSession(sub_workflow_session, self._end_comp_id)
             output_key = self._end_comp_id
 
             results = node_session.state().get_outputs(output_key)
-            workflow_logger.info(
-                "Sub-workflow invoke completed",
-                event_type=LogEventType.WORKFLOW_END,
-                workflow_id=self._card.id,
-                workflow_name=self._card.name,
-                session_id=session.get_session_id(),
-                metadata={"is_sub": True, "has_results": results is not None}
-            )
             return results
         finally:
             await asyncio.shield(sub_workflow_session.close())
@@ -539,14 +549,6 @@ class Workflow:
 
     async def _sub_stream(self, inputs: Input, session: Session, context: ModelContext = None, **kwargs) -> \
             AsyncIterator[Output]:
-        workflow_logger.info(
-            "Sub-workflow stream started",
-            event_type=LogEventType.WORKFLOW_START,
-            workflow_id=self._card.id,
-            workflow_name=self._card.name,
-            session_id=session.get_session_id(),
-            input_data=inputs
-        )
         sub_workflow_session = self._create_workflow_session(session, is_sub=True)
         try:
             compiled_graph = self._internal.compile(sub_workflow_session, context=context)
@@ -558,34 +560,13 @@ class Workflow:
             required_abilities = [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]
             stream_ability_count = sum(ability in sub_end_ability for ability in required_abilities)
             while stream_ability_count > 0:
-                workflow_logger.debug(
-                    "Waiting for sub-workflow frame",
-                    event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
-                    workflow_id=self._card.id,
-                    session_id=session.get_session_id(),
-                    metadata={"frame_count": frame_count, "timeout": stream_timeout, "is_sub": True}
-                )
                 frame = await sub_workflow_session.actor_manager().sub_workflow_stream().receive(stream_timeout)
                 if frame is None:
-                    workflow_logger.warning(
-                        "No frame received from sub-workflow stream",
-                        event_type=LogEventType.WORKFLOW_STREAM_ERROR,
-                        workflow_id=self._card.id,
-                        session_id=session.get_session_id(),
-                        metadata={"is_sub": True}
-                    )
                     continue
                 if frame == StreamEmitter.END_FRAME:
                     stream_ability_count -= 1
                     continue
                 frame_count += 1
-                workflow_logger.debug(
-                    "Yielding sub-workflow frame",
-                    event_type=LogEventType.WORKFLOW_STREAM_CHUNK,
-                    workflow_id=self._card.id,
-                    session_id=session.get_session_id(),
-                    metadata={"frame_count": frame_count, "is_sub": True}
-                )
                 yield frame
         finally:
             await asyncio.shield(sub_workflow_session.close())
@@ -596,13 +577,21 @@ class Workflow:
         try:
             return await asyncio.wait_for(task, timeout=timeout if (timeout and timeout > 0) else None)
         except asyncio.CancelledError:
-            workflow_logger.debug(
-                "execute cancelled",
-                event_type=LogEventType.WORKFLOW_STREAM_ERROR,
-                workflow_id=self._card.id
+            logger.error(
+                "Workflow execution cancelled",
+                event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name
             )
             raise
         except asyncio.TimeoutError as e:
+            logger.error(
+                f"Workflow execution timeout {timeout} s",
+                event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name,
+                exception=e
+            )
             raise build_error(StatusCode.WORKFLOW_EXECUTION_TIMEOUT, cause=e, timeout=timeout, card=self._card)
         except BaseError as e:
             raise e
@@ -721,7 +710,7 @@ class Workflow:
                 import traceback
                 traceback_info = ''.join(traceback.format_exception(type(exception), exception,
                                                                     exception.__traceback__))
-                workflow_logger.error(
+                logger.error(
                     "Unhandled exception in asyncio",
                     event_type=LogEventType.SYSTEM_ERROR,
                     error_message=str(exception),

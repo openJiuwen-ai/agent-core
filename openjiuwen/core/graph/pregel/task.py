@@ -73,7 +73,7 @@ class TaskExecutorPool:
             if isinstance(result, Exception):
                 graph_logger.warning(
                     "Task cancelled with exception",
-                    event_type=LogEventType.GRAPH_NODE_CALL_ERROR,
+                    event_type=LogEventType.GRAPH_VERTEX_CALL_ERROR,
                     metadata={"error": str(result)}
                 )
         for t in tasks_to_cancel:

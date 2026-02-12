@@ -102,7 +102,8 @@ def test_create_agent_event():
 
 def test_create_workflow_event():
     """Test creating a WorkflowEvent"""
-    event = create_log_event(LogEventType.WORKFLOW_START, workflow_id="workflow_001", workflow_name="TestWorkflow")
+    event = create_log_event(LogEventType.WORKFLOW_EXECUTE_START, workflow_id="workflow_001",
+                             workflow_name="TestWorkflow")
 
     assert isinstance(event, WorkflowEvent)
     assert event.workflow_id == "workflow_001"
@@ -412,7 +413,7 @@ def test_tool_events():
 
 def test_workflow_events():
     """Test workflow event types"""
-    event = create_log_event(LogEventType.WORKFLOW_START, workflow_id="workflow_001")
+    event = create_log_event(LogEventType.WORKFLOW_EXECUTE_START, workflow_id="workflow_001")
     assert isinstance(event, WorkflowEvent)
     assert event.workflow_id == "workflow_001"
 
