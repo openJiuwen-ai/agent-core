@@ -110,6 +110,7 @@ class BaseWorkflow:
         self._graph.start_node(start_comp_id)
         if self._drawable:
             self._drawable.set_start_node(start_comp_id)
+        self._workflow_spec.start_nodes.append(start_comp_id)
         return self
 
     def end_comp(
@@ -318,7 +319,7 @@ class BaseWorkflow:
             # Has streaming input + streaming output -> TRANSFORM
             if node in edge_topology.target_stream_map:
                 self._add_ability_to_node(node, ComponentAbility.TRANSFORM)
-            else:
+            elif node not in self._workflow_spec.start_nodes:
                 # when branch taget node with stream edge
                 self._add_ability_to_node(node, ComponentAbility.STREAM)
 

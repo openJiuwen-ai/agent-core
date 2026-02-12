@@ -49,6 +49,7 @@ class WorkflowSpec(BaseModel):
         default_factory=dict,
         description="Configuration for each component in the workflow"
     )
+    start_nodes: list[str] = Field(default_factory=list)
 
 
 class WorkflowConfig(BaseModel):
