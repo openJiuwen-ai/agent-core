@@ -266,7 +266,7 @@ class IntentRecognizer:
         text_input = self._validate_and_extract_input(event)
         
         # 2. 准备上下文
-        context = self._context_engine.get_context(session_id=session.session_id())
+        context = self._context_engine.get_context(session_id=session.get_session_id())
         if not context:
             logger.info("create context")
             context = await self._context_engine.create_context(session=session)
@@ -278,7 +278,7 @@ class IntentRecognizer:
         
         toolkits = IntentToolkits(event, self._config.intent_confidence_threshold)
         from openjiuwen.core.runner import Runner
-        model = await Runner.resource_mgr.get_model(model_id=self._config.intent_llm_id)
+        model = await Runner.resource_mgr.get_model(model_id=self._config.intent_llm_id, session=session)
         
         response = await model.invoke(
             messages=[self._system_message] + context.get_messages(size=50),

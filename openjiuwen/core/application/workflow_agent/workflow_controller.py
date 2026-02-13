@@ -325,7 +325,7 @@ class WorkflowController(IntentDetectionController):
                                 content_parts.append(str(chunk.payload.value) if chunk.payload.value else "")
                     workflow_content = "".join(content_parts)
                     await MessageUtils.add_ai_message(AssistantMessage(content=workflow_content),
-                                                self._context_engine, session)
+                                                      self._context_engine, session)
 
                 # Construct WorkflowOutput
                 if has_interaction:
@@ -380,7 +380,7 @@ class WorkflowController(IntentDetectionController):
                 interaction_data = (
                     result.result if hasattr(result, 'result') else None
                 )
-                
+
                 # 状态保存：保存所有中断
                 await self.interrupt_task(task, session, interaction_data)
 
@@ -1057,10 +1057,10 @@ class WorkflowController(IntentDetectionController):
         """
         if not interaction_data:
             return []
-        
+
         first_interrupt_found = False
         result = []
-        
+
         for chunk in interaction_data:
             if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
                 # 只保留第一个 __interaction__
@@ -1077,7 +1077,7 @@ class WorkflowController(IntentDetectionController):
                         f"Skipping additional interrupt: component_id="
                         f"{chunk.payload.id if hasattr(chunk.payload, 'id') else 'unknown'}"
                     )
-        
+
         return result
 
     def _count_interactions(
@@ -1094,12 +1094,12 @@ class WorkflowController(IntentDetectionController):
         """
         if not interaction_data:
             return 0
-        
+
         count = 0
         for chunk in interaction_data:
             if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
                 count += 1
-        
+
         return count
 
     async def _find_workflow_from_agent(self, workflow_id: str, session: Session):
@@ -1118,7 +1118,7 @@ class WorkflowController(IntentDetectionController):
             logger.info(f"Trying to find workflow from resource_mgr: {workflow_id}")
 
             workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id,
-                                                              session=session.base())
+                                                              session=session)
             logger.info(f"Found workflow from resource_mgr: {workflow is not None}")
             if workflow:
                 return workflow
@@ -1129,7 +1129,8 @@ class WorkflowController(IntentDetectionController):
         try:
             from openjiuwen.core.runner import Runner
             logger.info(f"Trying to find workflow from controller._session: {workflow_id}")
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id,
+                                                              session=session)
             logger.info(f"Found workflow from controller._session: {workflow is not None}")
             return workflow
         except Exception as e:
@@ -1149,7 +1150,8 @@ class WorkflowController(IntentDetectionController):
             Workflow object, None if not found
         """
         try:
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id,
+                                                              session=session)
             return workflow
         except Exception as e:
             logger.error(f"Failed to find workflow {workflow_id}: {e}")

@@ -273,7 +273,7 @@ class AbilityManager:
             tool_card = self._tools[tool_name]
             tool_id = tool_card.id or tool_card.name
             from openjiuwen.core.runner import Runner
-            tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag, session=session)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)
@@ -287,7 +287,7 @@ class AbilityManager:
             workflow_card = self._workflows[tool_name]
             workflow_id = workflow_card.id or workflow_card.name
             from openjiuwen.core.runner import Runner
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=tag)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=tag, session=session)
             if workflow:
                 try:
                     result = await workflow.invoke(tool_args, session)
@@ -303,7 +303,7 @@ class AbilityManager:
             agent_card = self._agents[tool_name]
             agent_id = agent_card.id or agent_card.name
             from openjiuwen.core.runner import Runner
-            agent = await Runner.resource_mgr.get_agent(agent_id=agent_id)
+            agent = await Runner.resource_mgr.get_agent(agent_id=agent_id, session=session)
             if agent:
                 try:
                     result = await agent.invoke(tool_args)
@@ -320,7 +320,7 @@ class AbilityManager:
         else:
             # Fallback: try to get tool from Runner.resource_mgr by name
             from openjiuwen.core.runner import Runner
-            tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=tag)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=tag, session=session)
             if tool:
                 try:
                     result = await tool.invoke(tool_args)

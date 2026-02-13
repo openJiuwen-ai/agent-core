@@ -215,7 +215,7 @@ class LegacyReActAgent(BaseAgent):
         except (json.JSONDecodeError, AttributeError):
             tool_args = {}
         from openjiuwen.core.runner import Runner
-        tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=self.agent_config.id)
+        tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=self.agent_config.id, session=session)
         if not tool:
             raise ValueError(f"Tool not found: {tool_name}")
 
