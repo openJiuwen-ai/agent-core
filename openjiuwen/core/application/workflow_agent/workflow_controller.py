@@ -852,13 +852,18 @@ class WorkflowController(IntentDetectionController):
         # Get query
         query = event.content.get_query() if hasattr(event.content, 'get_query') else ""
 
+        # Determine the required input key from schema
+        schema = workflow.input_params or {}
+        required_key = self._get_required_input_key(schema)
+        
+        # Fallback to 'input' or 'query' if no required field found
+        if not required_key:
+            required_key = "input" if "input" in schema.get("properties", schema) else "query"
+
         # Filter input parameters
-        user_data = {"query": query}
+        user_data = {required_key: query}
         user_data.update(event.content.extensions or {})
-        filtered_inputs = self._filter_workflow_inputs(
-            workflow.input_params or {},
-            user_data
-        )
+        filtered_inputs = self._filter_workflow_inputs(schema, user_data)
 
         logger.info(f"Creating task with inputs: {filtered_inputs}, query: {query}")
 
@@ -875,6 +880,33 @@ class WorkflowController(IntentDetectionController):
         )
 
         return task
+
+    def _get_required_input_key(self, schema: Dict) -> Optional[str]:
+        """Get the required input key from schema
+        
+        Returns the first required field key, or None if no required field found.
+        Falls back to 'input' or 'query' if no required field specified.
+        """
+        if not schema:
+            return None
+        
+        properties = schema.get("properties", {})
+        if not properties:
+            return None
+        
+        # Check for required field in standard JSON Schema format
+        required = schema.get("required", [])
+        if required and isinstance(required, list):
+            if "input" in required:
+                return "input"
+        
+        # Fallback: try 'input' first, then 'query'
+        if "input" in properties:
+            return "input"
+        if "query" in properties:
+            return "query"
+        
+        return None
 
     def _filter_workflow_inputs(
             self,
