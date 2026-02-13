@@ -66,7 +66,7 @@ from openjiuwen.core.session.checkpointer import (
     CheckpointerConfig,
 )
 
-# 使用 SQLite 存储
+# 使用 SQLite 存储（基础配置）
 config = CheckpointerConfig(
     type="persistence",
     conf={
@@ -75,6 +75,26 @@ config = CheckpointerConfig(
     }
 )
 checkpointer = await CheckpointerFactory.create(config)
+
+# 使用 SQLite 存储（完整配置，推荐用于高并发场景）
+config = CheckpointerConfig(
+    type="persistence",
+    conf={
+        "db_type": "sqlite",
+        "db_path": "checkpointer.db",
+        "db_timeout": 30,        # SQLite 锁等待超时时间（秒），默认 30
+        "db_enable_wal": True    # 启用 WAL 模式以提高写入性能，默认 True
+    }
+)
+checkpointer = await CheckpointerFactory.create(config)
+```
+
+**SQLite 配置参数说明**：
+
+- `db_type`: 存储后端类型，可选值 `"sqlite"` 或 `"shelve"`，默认为 `"sqlite"`
+- `db_path`: 数据库文件路径，默认为 `"checkpointer"`
+- `db_timeout`: SQLite 数据库锁等待超时时间（秒），默认 `30`
+- `db_enable_wal`: 是否启用 SQLite WAL（Write-Ahead Logging）模式，默认 `True`。WAL 模式可提高写入性能
 
 # 使用 Shelve 存储
 config = CheckpointerConfig(
@@ -258,12 +278,19 @@ runner_config.checkpointer_config = CheckpointerConfig(
     type="persistence",
     conf={
         "db_type": "sqlite",
-        "db_path": "checkpointer.db"  # SQLite 数据库文件路径
+        "db_path": "checkpointer.db",  # SQLite 数据库文件路径
+        "db_timeout": 30,               # 锁等待超时时间（秒），默认 30
+        "db_enable_wal": True           # 启用 WAL 模式以提高写入性能，默认 True，推荐启用
     }
 )
 Runner.set_config(runner_config)
 await Runner.start()
 ```
+
+**注意**：在高并发场景下（如多个任务同时执行），建议：
+
+- 保持 `db_enable_wal: True`（默认已启用）以启用 WAL 模式，提高写入性能
+- 根据实际情况调整 `db_timeout`，可以适当增大该值（如 60 秒）
 
 #### 使用持久化检查点（Shelve）
 

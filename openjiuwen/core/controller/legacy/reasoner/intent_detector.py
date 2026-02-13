@@ -221,7 +221,7 @@ class IntentDetector:
     ) -> str:
         try:
             model = await ReasonerUtils.get_model(
-                self.agent_config.model
+                self.agent_config.model, session=self.session
             )
             llm_output = await model.invoke(
                 llm_inputs,

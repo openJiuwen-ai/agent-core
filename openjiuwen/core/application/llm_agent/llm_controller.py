@@ -623,7 +623,7 @@ class LLMController(BaseController):
         tool = None
         tool_id = self._find_plugin_id_by_name(task.input.target_name)
         if tool_id:
-            tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=self.config.id)
+            tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=self.config.id, session=session)
         if not tool:
             logger.error("Tool not found")
             raise build_error(
@@ -975,7 +975,8 @@ class LLMController(BaseController):
             Workflow object, None if not found
         """
         try:
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.config.id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.config.id,
+                                                              session=session)
             return workflow
         except Exception as e:
             logger.error(f"Failed to find workflow {workflow_id}: {e}")

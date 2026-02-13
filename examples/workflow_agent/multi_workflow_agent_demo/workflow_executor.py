@@ -91,7 +91,7 @@ class WorkflowTaskExecutor(TaskExecutor):
             "input": user_input,
         })
         llm_inputs = get_default_template().format(current_inputs).to_messages()
-        model = await Runner.resource_mgr.get_model(model_id=self._config.intent_llm_id)
+        model = await Runner.resource_mgr.get_model(model_id=self._config.intent_llm_id, session=session)
         llm_output = await model.invoke(messages=llm_inputs)
         llm_output_content = llm_output.content.strip()
         output_data = json.loads(llm_output_content)

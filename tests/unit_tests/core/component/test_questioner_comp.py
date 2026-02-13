@@ -14,6 +14,8 @@ from openjiuwen.core.foundation.llm import ModelConfig, ModelRequestConfig, Mode
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import FieldInfo, QuestionerConfig, QuestionerComponent
 from openjiuwen.core.workflow import Start
+from openjiuwen.core.workflow import LoopGroup, LoopComponent
+from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.graph.executable import Input
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session import WorkflowSession
@@ -644,3 +646,144 @@ class TestQuestionerStream:
         print("   - Expected type: integer")
         print("   - LLM returned: 3.14 (float)")
         print("   - Result: Field rejected, workflow asks user again ✓")
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler."
+           "_invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
+    async def test_loop_with_questioner(self, mock_get_model, mock_init_prompt, mock_llm_inputs, mock_extraction):
+        """
+        Test workflow with loop component that contains questioner inside
+        Name information must be obtained through human-computer interaction
+        """
+        mock_get_model.return_value = MockLLMModel()
+        mock_prompt_template = [
+            dict(role="system", content="系统提示词"),
+            dict(role="user", content="你是一个AI助手")
+        ]
+        mock_init_prompt.return_value = PromptTemplate(name="test", content=mock_prompt_template)
+        mock_llm_inputs.return_value = mock_prompt_template
+        
+        # Mock extraction behavior:
+        # When questioner is in loop, it may be called multiple times.
+        # We simulate LLM extraction results based on user feedback:
+        #   Loop 1:
+        #     1) First call:  {}               -> cannot extract name, triggers interaction
+        #     2) After user feedback "Bob":   {"name": "Bob"}  -> extracts name=Bob
+        #   Loop 2:
+        #     3) Third call: {}               -> again cannot extract name (second loop starts)
+        #     4) After user feedback "Alice": {"name": "Alice"} -> extracts name=Alice
+        # Mock results as per user requirement: 1st: {}, 2nd: {"name": "Bob"}, 3rd: {}, 4th: {"name": "Alice"}
+        mock_results = [{}, {"name": "Bob"}, {}, {"name": "Alice"}]
+        call_count = [0]
+        
+        def extraction_side_effect(*args, **kwargs):
+            result = mock_results[call_count[0]] if call_count[0] < len(mock_results) else {}
+            call_count[0] += 1
+            return result
+        
+        mock_extraction.side_effect = extraction_side_effect
+
+        flow = Workflow()
+        flow.set_start_comp("start", Start(), inputs_schema={"input_data": "${data}"})
+        flow.set_end_comp("end", End(), inputs_schema={"end_out": "${loop}"})
+
+        # Create loop group
+        loop_group = LoopGroup()
+        
+        # Create questioner config
+        questioner_config = QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=[
+                FieldInfo(
+                    field_name="name",
+                    description="用户姓名",
+                    type="string",
+                    cn_field_name="姓名",
+                    required=True
+                )
+            ],
+            max_response=3,
+            with_chat_history=False
+        )
+        
+        # Create questioner component
+        questioner_component = QuestionerComponent(questioner_config)
+        loop_group.add_workflow_comp("questioner", questioner_component, 
+                                    inputs_schema={"query": "${start.input_data}"})
+        
+        loop_group.start_nodes(["questioner"])
+        loop_group.end_nodes(["questioner"])
+
+        # Create loop component with specified loop number (2 iterations)
+        loop_component = LoopComponent(loop_group, 
+                                     output_schema={"questioner_result": "${questioner}"})
+        flow.add_workflow_comp("loop", loop_component,
+                               inputs_schema={"loop_type": "number", "loop_number": 2})
+
+        # Add connections
+        flow.add_connection("start", "loop")
+        flow.add_connection("loop", "end")
+
+        inputs = {"data": "测试数据"}
+        session_id = "test_loop_with_questioner"
+        
+        workflow_session_1 = Session(session_id=session_id).create_workflow_session()
+        workflow_result_1 = await flow.invoke(inputs, workflow_session_1)
+        
+        assert workflow_result_1.state == WorkflowExecutionState.INPUT_REQUIRED
+        component_id = workflow_result_1.result[0].payload.id
+        assert component_id == "loop.questioner" or component_id.endswith(".questioner")
+        
+        max_attempts = 6
+        attempt = 0
+        current_result = workflow_result_1
+        workflow_result_2 = None
+        user_feedbacks = ["Bob", "Alice"]
+
+        while attempt < max_attempts:
+            attempt += 1
+            assert current_result.state == WorkflowExecutionState.INPUT_REQUIRED, \
+                f"Expected INPUT_REQUIRED at attempt {attempt}, got {current_result.state}"
+            cur_component_id = current_result.result[0].payload.id
+            
+            feedback_text = user_feedbacks[attempt - 1] if attempt <= len(user_feedbacks) else user_feedbacks[-1]
+
+            workflow_session_next = Session(session_id=session_id).create_workflow_session()
+            user_feedback = InteractiveInput()
+            user_feedback.update(cur_component_id, feedback_text)
+            next_result = await flow.invoke(user_feedback, workflow_session_next)
+
+            if next_result.state == WorkflowExecutionState.COMPLETED:
+                workflow_result_2 = next_result
+                break
+
+            assert next_result.state == WorkflowExecutionState.INPUT_REQUIRED, \
+                f"Expected INPUT_REQUIRED or COMPLETED after feedback, got {next_result.state}"
+            current_result = next_result
+        else:
+            assert False, f"Workflow did not complete within {max_attempts} interaction attempts"
+
+        assert workflow_result_2.state == WorkflowExecutionState.COMPLETED
+        
+        end_out = workflow_result_2.result.get('output', {}).get('end_out', {})
+        assert isinstance(end_out, dict), f"end_out should be dict, got {type(end_out)}"
+        
+        questioner_result = end_out.get('questioner_result')
+        assert questioner_result is not None, "questioner_result should exist in loop output"
+        assert isinstance(questioner_result, list), f"questioner_result should be list, got {type(questioner_result)}"
+        assert len(questioner_result) == 2, f"questioner_result should have 2 items, got {len(questioner_result)}"
+        
+        first_result = questioner_result[0]
+        second_result = questioner_result[1]
+        assert isinstance(first_result, dict), f"First result should be dict, got {type(first_result)}"
+        assert isinstance(second_result, dict), f"Second result should be dict, got {type(second_result)}"
+        assert "name" in first_result, f"name should be in first result, got keys: {first_result.keys()}"
+        assert "name" in second_result, f"name should be in second result, got keys: {second_result.keys()}"
+        assert first_result['name'] == "Bob", f"first name should be 'Bob', got '{first_result['name']}'"
+        assert second_result['name'] == "Alice", f"second name should be 'Alice', got '{second_result['name']}'"

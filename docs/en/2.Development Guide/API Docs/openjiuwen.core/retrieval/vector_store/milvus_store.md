@@ -173,10 +173,14 @@ Delete vector data.
 ### close
 
 ```python
-close() -> None
+close(release_collection: bool = False) -> None
 ```
 
 Close the vector store and release resources.
+
+**Parameters**:
+
+* **release_collection**(bool, optional): Whether to release the loaded collection. If True, the collection will be released when it is in Loaded state. Default: False.
 
 ### async table_exists
 

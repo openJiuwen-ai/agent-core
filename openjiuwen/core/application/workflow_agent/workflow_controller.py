@@ -325,7 +325,7 @@ class WorkflowController(IntentDetectionController):
                                 content_parts.append(str(chunk.payload.value) if chunk.payload.value else "")
                     workflow_content = "".join(content_parts)
                     await MessageUtils.add_ai_message(AssistantMessage(content=workflow_content),
-                                                self._context_engine, session)
+                                                      self._context_engine, session)
 
                 # Construct WorkflowOutput
                 if has_interaction:
@@ -380,7 +380,7 @@ class WorkflowController(IntentDetectionController):
                 interaction_data = (
                     result.result if hasattr(result, 'result') else None
                 )
-                
+
                 # 状态保存：保存所有中断
                 await self.interrupt_task(task, session, interaction_data)
 
@@ -852,13 +852,18 @@ class WorkflowController(IntentDetectionController):
         # Get query
         query = event.content.get_query() if hasattr(event.content, 'get_query') else ""
 
+        # Determine the required input key from schema
+        schema = workflow.input_params or {}
+        required_key = self._get_required_input_key(schema)
+        
+        # Fallback to 'input' or 'query' if no required field found
+        if not required_key:
+            required_key = "input" if "input" in schema.get("properties", schema) else "query"
+
         # Filter input parameters
-        user_data = {"query": query}
+        user_data = {required_key: query}
         user_data.update(event.content.extensions or {})
-        filtered_inputs = self._filter_workflow_inputs(
-            workflow.input_params or {},
-            user_data
-        )
+        filtered_inputs = self._filter_workflow_inputs(schema, user_data)
 
         logger.info(f"Creating task with inputs: {filtered_inputs}, query: {query}")
 
@@ -875,6 +880,33 @@ class WorkflowController(IntentDetectionController):
         )
 
         return task
+
+    def _get_required_input_key(self, schema: Dict) -> Optional[str]:
+        """Get the required input key from schema
+        
+        Returns the first required field key, or None if no required field found.
+        Falls back to 'input' or 'query' if no required field specified.
+        """
+        if not schema:
+            return None
+        
+        properties = schema.get("properties", {})
+        if not properties:
+            return None
+        
+        # Check for required field in standard JSON Schema format
+        required = schema.get("required", [])
+        if required and isinstance(required, list):
+            if "input" in required:
+                return "input"
+        
+        # Fallback: try 'input' first, then 'query'
+        if "input" in properties:
+            return "input"
+        if "query" in properties:
+            return "query"
+        
+        return None
 
     def _filter_workflow_inputs(
             self,
@@ -1057,10 +1089,10 @@ class WorkflowController(IntentDetectionController):
         """
         if not interaction_data:
             return []
-        
+
         first_interrupt_found = False
         result = []
-        
+
         for chunk in interaction_data:
             if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
                 # 只保留第一个 __interaction__
@@ -1077,7 +1109,7 @@ class WorkflowController(IntentDetectionController):
                         f"Skipping additional interrupt: component_id="
                         f"{chunk.payload.id if hasattr(chunk.payload, 'id') else 'unknown'}"
                     )
-        
+
         return result
 
     def _count_interactions(
@@ -1094,12 +1126,12 @@ class WorkflowController(IntentDetectionController):
         """
         if not interaction_data:
             return 0
-        
+
         count = 0
         for chunk in interaction_data:
             if isinstance(chunk, OutputSchema) and chunk.type == INTERACTION:
                 count += 1
-        
+
         return count
 
     async def _find_workflow_from_agent(self, workflow_id: str, session: Session):
@@ -1118,7 +1150,7 @@ class WorkflowController(IntentDetectionController):
             logger.info(f"Trying to find workflow from resource_mgr: {workflow_id}")
 
             workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id,
-                                                              session=session.base())
+                                                              session=session)
             logger.info(f"Found workflow from resource_mgr: {workflow is not None}")
             if workflow:
                 return workflow
@@ -1129,7 +1161,8 @@ class WorkflowController(IntentDetectionController):
         try:
             from openjiuwen.core.runner import Runner
             logger.info(f"Trying to find workflow from controller._session: {workflow_id}")
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id,
+                                                              session=session)
             logger.info(f"Found workflow from controller._session: {workflow is not None}")
             return workflow
         except Exception as e:
@@ -1149,7 +1182,8 @@ class WorkflowController(IntentDetectionController):
             Workflow object, None if not found
         """
         try:
-            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id)
+            workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=self.agent_config.id,
+                                                              session=session)
             return workflow
         except Exception as e:
             logger.error(f"Failed to find workflow {workflow_id}: {e}")

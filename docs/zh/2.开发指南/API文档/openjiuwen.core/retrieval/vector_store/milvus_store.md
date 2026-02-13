@@ -172,10 +172,14 @@ delete(ids: Optional[List[str]] = None, filter_expr: str | QueryExpr | None = No
 ### close
 
 ```python
-close() -> None
+close(release_collection: bool = False) -> None
 ```
 
 关闭向量存储并释放资源。
+
+**参数**：
+
+* **release_collection**(bool, 可选)：是否释放已加载的集合。如果为 True，当集合处于 Loaded 状态时会释放集合。默认值：False。
 
 ### async table_exists
 

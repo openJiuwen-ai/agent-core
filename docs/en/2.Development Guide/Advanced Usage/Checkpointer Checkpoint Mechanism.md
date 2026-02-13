@@ -66,7 +66,7 @@ from openjiuwen.core.session.checkpointer import (
     CheckpointerConfig,
 )
 
-# Using SQLite storage
+# Using SQLite storage (basic configuration)
 config = CheckpointerConfig(
     type="persistence",
     conf={
@@ -75,6 +75,27 @@ config = CheckpointerConfig(
     }
 )
 checkpointer = await CheckpointerFactory.create(config)
+
+# Using SQLite storage (full configuration, recommended for high concurrency)
+config = CheckpointerConfig(
+    type="persistence",
+    conf={
+        "db_type": "sqlite",
+        "db_path": "checkpointer.db",
+        "db_timeout": 30,        # SQLite lock wait timeout in seconds, default 30
+        "db_enable_wal": True    # Enable WAL mode to improve write performance, default True
+    }
+)
+checkpointer = await CheckpointerFactory.create(config)
+```
+
+**SQLite Configuration Parameters**:
+
+- `db_type`: Storage backend type, options: `"sqlite"` or `"shelve"`, default: `"sqlite"`
+- `db_path`: Database file path, default: `"checkpointer"`
+- `db_timeout`: SQLite database lock wait timeout in seconds, default: `30`
+- `db_enable_wal`: Whether to enable SQLite WAL (Write-Ahead Logging) mode, default: `True`. WAL mode improves write
+  performance
 
 # Using Shelve storage
 config = CheckpointerConfig(
@@ -258,12 +279,19 @@ runner_config.checkpointer_config = CheckpointerConfig(
     type="persistence",
     conf={
         "db_type": "sqlite",
-        "db_path": "checkpointer.db"  # SQLite database file path
+        "db_path": "checkpointer.db",  # SQLite database file path
+        "db_timeout": 30,               # Lock wait timeout in seconds, default 30
+        "db_enable_wal": True           # Enable WAL mode to improve write performance, default True, recommended
     }
 )
 Runner.set_config(runner_config)
 await Runner.start()
 ```
+
+**Note**: In high concurrency scenarios (e.g., multiple tasks running simultaneously), it is recommended to:
+
+- Keep `db_enable_wal: True` (enabled by default) to enable WAL mode and improve write performance
+- Adjust `db_timeout` based on actual needs. You can increase this value appropriately if needed (e.g., 60 seconds)
 
 #### Using Persistent Checkpoint (Shelve)
 

@@ -158,7 +158,7 @@ class IntentDetectionExecutable(ComponentExecutable):
     @staticmethod
     def _get_chat_history_from_context(context) -> List[BaseMessage]:
         chat_history = []
-        if context:
+        if context is not None:
             chat_history = context.get_messages()
         return chat_history
 

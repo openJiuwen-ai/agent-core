@@ -78,6 +78,7 @@ async def register_store(
 >>> resource_dir = os.path.join(project_root, "resources")
 >>> os.makedirs(resource_dir, exist_ok=True)
 >>> kv_path = os.path.join(resource_dir, "kv_store.db")
+>>> # 使用 sqlite 前需要安装 aiosqlite 依赖包， 目前 aiosqlite 是可选依赖
 >>> engine = create_async_engine(
 >>>     f"sqlite+aiosqlite:///{kv_path}",
 >>>     pool_pre_ping=True,
@@ -87,7 +88,7 @@ async def register_store(
 >>> kv_store = DbBasedKVStore(engine)
 >>>
 >>> # ---------- Vector Store ----------
->>> # 使用 Chroma 向量存储
+>>> # 使用 Chroma 向量存储， 需要安装 chromadb 依赖包， 目前 chromadb 是可选依赖
 >>> vector_store = create_vector_store("chroma", persist_directory="./resources/chroma")
 >>> # 或使用 Milvus 向量存储
 >>> # vector_store = create_vector_store("milvus", milvus_uri="http://localhost:19530")

@@ -667,7 +667,7 @@ class LLMExecutable(ComponentExecutable):
 
     def _insert_history_to_system_and_user_prompt(self, system_prompt: list, user_prompt: list):
         original_history = system_prompt if isinstance(system_prompt, list) else []
-        if self._config.enable_history and self._context:
+        if self._config.enable_history and self._context is not None:
             chat_history = self._context.get_messages()
             original_history.extend(chat_history)
         original_history.extend(user_prompt)

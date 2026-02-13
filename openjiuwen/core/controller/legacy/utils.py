@@ -276,7 +276,7 @@ class ReasonerUtils:
         return chat_history[-2 * chat_history_max_turn:]
 
     @staticmethod
-    async def get_model(model_config: ModelConfig):
+    async def get_model(model_config: ModelConfig, session: Session = None):
         """Get model instance by config"""
         from openjiuwen.core.runner import Runner
         model_id = generate_key(
@@ -285,7 +285,7 @@ class ReasonerUtils:
             model_config.model_provider
         )
 
-        model = await Runner.resource_mgr.get_model(model_id=model_id)
+        model = await Runner.resource_mgr.get_model(model_id=model_id, session=session)
 
         if model is None:
             # Normalize client_provider to correct case (OpenAI, SiliconFlow)
@@ -315,6 +315,6 @@ class ReasonerUtils:
 
             Runner.resource_mgr.add_model(model_id=model_id, model=create_model)
 
-            model = await Runner.resource_mgr.get_model(model_id=model_id)
+            model = await Runner.resource_mgr.get_model(model_id=model_id, session=session)
 
         return model

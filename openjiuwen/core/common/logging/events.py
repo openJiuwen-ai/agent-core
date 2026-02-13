@@ -74,6 +74,7 @@ class LogEventType(Enum):
     STORE_DELETE = "store_delete"  # Data store deleted
     STORE_UPDATE = "store_update"  # Data store updated
     STORE_RETRIEVE = "store_retrieve"  # Data store retrieved
+    STORE_LOAD = "store_load"  # Data store load collection
 
     # Memory related events
     MEMORY_STORE = "memory_store"  # Memory stored

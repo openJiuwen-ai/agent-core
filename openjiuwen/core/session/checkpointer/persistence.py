@@ -17,6 +17,7 @@ from typing import (
     Tuple,
 )
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     create_async_engine,
@@ -877,6 +878,20 @@ class PersistenceCheckpointer(Checkpointer):
         return self._graph_state
 
 
+def _enable_sqlite_wal(engine: AsyncEngine) -> None:
+    """
+    Enable WAL mode on SQLite to reduce 'database is locked' under concurrency.
+
+    WAL allows one writer and concurrent readers. Listens for sync_engine connect
+    and runs PRAGMA journal_mode=WAL on each new connection.
+    """
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
+
 @CheckpointerFactory.register("persistence")
 class PersistenceCheckpointerProvider(CheckpointerProvider):
     """
@@ -886,7 +901,9 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
         {
             "db_type": "sqlite" | "shelve",  # Optional: Type of storage backend (default: "sqlite")
             "db_path": "checkpointer.db",     # Optional: Path to database file
-            "db_client": AsyncEngine          # Optional: Pre-configured database engine
+            "db_client": AsyncEngine,         # Optional: Pre-configured database engine
+            "db_timeout": 30,                 # Optional: SQLite lock wait seconds (default: 30)
+            "db_enable_wal": True,            # Optional: Enable SQLite WAL mode (default: True)
         }
     """
 
@@ -899,6 +916,8 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
                 - 'db_type': Type of storage backend ("sqlite" or "shelve", default: "sqlite")
                 - 'db_path': Path to database file (default: "checkpointer")
                 - 'db_client': Pre-configured AsyncEngine instance (optional)
+                - 'db_timeout': Seconds to wait when SQLite DB is locked (default: 30)
+                - 'db_enable_wal': Enable SQLite WAL mode for better concurrency (default: True)
         
         Returns:
             Checkpointer: A PersistenceCheckpointer instance.
@@ -916,7 +935,15 @@ class PersistenceCheckpointerProvider(CheckpointerProvider):
                 # Ensure parent directory exists; SQLite cannot create it.
                 if db_path and not db_path.strip().startswith(":memory:"):
                     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-                engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+                # Timeout (seconds) to wait when DB is locked; reduces OperationalError.
+                db_timeout = conf.get("db_timeout", 30)
+                engine = create_async_engine(
+                    f"sqlite+aiosqlite:///{db_path}",
+                    connect_args={"timeout": db_timeout},
+                )
+                # Enable WAL mode if configured (default: True)
+                if conf.get("db_enable_wal", True):
+                    _enable_sqlite_wal(engine)
                 kv_store = DbBasedKVStore(engine)
         elif db_type == "shelve":
             if db_path.endswith(".db"):

@@ -10,6 +10,7 @@ import asyncio
 from typing import Any, List, Optional
 
 from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
+from pymilvus.client.types import LoadState
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -87,6 +88,7 @@ class MilvusVectorStore(VectorStore):
             path_or_uri=self.milvus_uri,
             token=self.milvus_token,
         )
+        self._collection_loaded = False
 
     @property
     def client(self) -> MilvusClient:
@@ -151,6 +153,7 @@ class MilvusVectorStore(VectorStore):
         batch_size: int | None = 128,
         **kwargs,
     ) -> None:
+        self._ensure_loaded()
         if batch_size is None or batch_size <= 0:
             batch_size = 128
 
@@ -200,6 +203,7 @@ class MilvusVectorStore(VectorStore):
         **kwargs,
     ) -> List[SearchResult]:
         """Vector search"""
+        self._ensure_loaded()
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field, "chunk_id"]
 
         # Build filter expression
@@ -240,6 +244,7 @@ class MilvusVectorStore(VectorStore):
         **kwargs,
     ) -> List[SearchResult]:
         """Sparse search (BM25)"""
+        self._ensure_loaded()
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
 
         # Build filter expression
@@ -286,6 +291,7 @@ class MilvusVectorStore(VectorStore):
         **kwargs,
     ) -> List[SearchResult]:
         """Hybrid search (sparse retrieval + vector retrieval)"""
+        self._ensure_loaded()
         output_fields = [self.text_field, self.metadata_field, self.doc_id_field]
 
         # Build filter expression
@@ -378,6 +384,7 @@ class MilvusVectorStore(VectorStore):
         **kwargs,
     ) -> bool:
         """Delete vectors"""
+        self._ensure_loaded()
         try:
             if isinstance(filter_expr, QueryExpr):
                 filter_expr = filter_expr.to_expr("milvus")
@@ -466,10 +473,18 @@ class MilvusVectorStore(VectorStore):
 
         return search_results
 
-    def close(self) -> None:
+    def close(self, release_collection: bool = False) -> None:
         """Close vector store"""
         if self._client is None:
             return
+        try:
+            if release_collection and self._client.has_collection(self.collection_name, timeout=15.0):
+                col_state = self._client.get_load_state(self.collection_name, timeout=15.0).get("state")
+                if col_state == LoadState.Loaded:
+                    self._client.release_collection(self.collection_name)
+                self._collection_loaded = False
+        except Exception as e:
+            logger.warning(f"Failed to release Milvus collection: {e}")
         try:
             self._client.close()
         except Exception as e:
@@ -485,3 +500,12 @@ class MilvusVectorStore(VectorStore):
             self._client.drop_collection,
             collection_name=table_name,
         )
+
+    def _ensure_loaded(self) -> None:
+        """Ensure collection is loaded"""
+        if self._collection_loaded:
+            return
+        logger.info("Retrieval Milvus Store: loading collection %s", self.collection_name)
+        self._client.load_collection(self.collection_name, timeout=180.0)
+        logger.info("Retrieval Milvus Store: %s collection loaded", self.collection_name)
+        self._collection_loaded = True

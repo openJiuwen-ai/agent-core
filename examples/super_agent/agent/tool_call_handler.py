@@ -201,7 +201,7 @@ class ToolCallHandler:
             Tool execution result
         """
         # Get tool from session
-        tool = Runner.resource_mgr.get_tool(tool_name)
+        tool = Runner.resource_mgr.get_tool(tool_name, session=session)
         if not tool:
             raise ValueError(f"Tool not found: {tool_name}")
 

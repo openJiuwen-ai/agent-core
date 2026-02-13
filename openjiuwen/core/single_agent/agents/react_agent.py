@@ -402,7 +402,7 @@ class ReActAgent(BaseAgent):
         if self._config.context_engine_config.enable_reload:
             self.ability_manager.add(context_reloader.card)
             from openjiuwen.core.runner import Runner
-            if not Runner.resource_mgr.get_tool(context_reloader.card.id, tag=self.card.id):
+            if not Runner.resource_mgr.get_tool(context_reloader.card.id, tag=self.card.id, session=session):
                 Runner.resource_mgr.add_tool(context_reloader, tag=self.card.id)
         else:
             self.ability_manager.remove(context_reloader.card.name)

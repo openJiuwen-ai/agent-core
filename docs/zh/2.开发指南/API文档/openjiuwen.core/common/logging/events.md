@@ -27,6 +27,7 @@
 * **STORE_DELETE**：数据存储删除
 * **STORE_UPDATE**：数据存储更新
 * **STORE_RETRIEVE**：数据存储检索
+* **STORE_LOAD**：数据存储集合加载
 * **MEMORY_STORE**：内存存储
 * **MEMORY_RETRIEVE**：内存检索
 * **MEMORY_DELETE**：内存删除
