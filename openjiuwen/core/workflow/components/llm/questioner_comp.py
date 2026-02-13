@@ -727,10 +727,14 @@ class QuestionerExecutable(ComponentExecutable):
             # handler might update state
             current_state = invoke_result.pop('_state', current_state)
 
-        self._store_state_to_session(current_state, session)
-
         if current_state.is_undergoing_interaction():
+            self._store_state_to_session(current_state, session)
             await session.interact(invoke_result.get("question", ""))
+        else:
+            # Clear state when component completes normally to support reentrancy
+            new_state = QuestionerState()
+            self._state = new_state
+            self._store_state_to_session(new_state, session)
 
         return invoke_result
 
