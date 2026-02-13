@@ -483,7 +483,7 @@ class BaseAgent(ABC):
         )
 
     async def clear_session(self, session_id: str = "default_session"):
-        await self._session.release(session_id)
+        logger.debug("session is managed by agent, cleared through session's release method")
 
 
 class ControllerAgent(BaseAgent):
@@ -671,6 +671,5 @@ class ControllerAgent(BaseAgent):
                 yield res
 
     async def clear_session(self, session_id: str = "default_session"):
-        await self._session.release(session_id)
         self.context_engine.clear_context(session_id=session_id)
         await self.controller.cleanup_conversation(session_id)

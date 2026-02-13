@@ -456,7 +456,7 @@ class QuestionerDirectReplyHandler:
 
     def _get_latest_chat_history(self, context) -> List:
         result = list()
-        if self._config.with_chat_history and context:
+        if self._config.with_chat_history and context is not None:
             raw_chat_history = context.get_messages()
             if raw_chat_history:
                 result = QuestionerUtils.get_latest_k_rounds_chat(raw_chat_history,
