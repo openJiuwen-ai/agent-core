@@ -78,6 +78,7 @@ Register underlying storage instances, must be completed before calling `set_con
 >>> resource_dir = os.path.join(project_root, "resources")
 >>> os.makedirs(resource_dir, exist_ok=True)
 >>> kv_path = os.path.join(resource_dir, "kv_store.db")
+>>> # Before using sqlite, you need to install the aiosqlite dependency package. Currently, aiosqlite is an optional dependency
 >>> engine = create_async_engine(
 >>>     f"sqlite+aiosqlite:///{kv_path}",
 >>>     pool_pre_ping=True,
@@ -87,7 +88,7 @@ Register underlying storage instances, must be completed before calling `set_con
 >>> kv_store = DbBasedKVStore(engine)
 >>>
 >>> # ---------- Vector Store ----------
->>> # Use Chroma vector storage
+>>> # Use Chroma vector storage, the chromadb dependency package must be installed. Currently, chromadb is an optional dependency
 >>> vector_store = create_vector_store("chroma", persist_directory="./resources/chroma")
 >>> # Or use Milvus vector storage
 >>> # vector_store = create_vector_store("milvus", milvus_uri="http://localhost:19530")
