@@ -26,6 +26,7 @@ Log event type enumeration.
 * **STORE_DELETE**: Data store delete
 * **STORE_UPDATE**: Data store update
 * **STORE_RETRIEVE**: Data store retrieve
+* **STORE_LOAD**: Data store load collection
 * **MEMORY_STORE**: Memory store
 * **MEMORY_RETRIEVE**: Memory retrieve
 * **MEMORY_DELETE**: Memory delete

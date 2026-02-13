@@ -61,6 +61,9 @@ class MilvusVectorStore(BaseVectorStore):
         # Cache for collections metadata (distance metrics, etc.)
         self._collection_metadata: Dict[str, Dict[str, Any]] = {}
 
+        # Cache for which collections are loaded
+        self._collections_loaded: set[str] = set()
+
     @property
     def client(self) -> MilvusClient:
         """
@@ -459,6 +462,7 @@ class MilvusVectorStore(BaseVectorStore):
             **kwargs: Additional parameters for document insertion
                 - batch_size (int, optional): Batch size for bulk insertion (default: 128)
         """
+        self._ensure_loaded(collection_name)
         batch_size = kwargs.get("batch_size", 128)
         if batch_size <= 0:
             batch_size = 128
@@ -545,6 +549,7 @@ class MilvusVectorStore(BaseVectorStore):
             List of VectorSearchResult objects
         """
         # Get collection metadata
+        self._ensure_loaded(collection_name)
         collection_meta = self._collection_metadata.get(collection_name, {})
         distance_metric = kwargs.get("metric_type") or collection_meta.get("distance_metric", "COSINE")
         output_fields = kwargs.get("output_fields")
@@ -660,6 +665,7 @@ class MilvusVectorStore(BaseVectorStore):
                 table_name=collection_name
             )
             return
+        self._ensure_loaded(collection_name)
 
         def _delete():
             try:
@@ -708,6 +714,7 @@ class MilvusVectorStore(BaseVectorStore):
                 table_name=collection_name
             )
             return
+        self._ensure_loaded(collection_name)
 
         # Build filter expression
         filter_expr = self._build_filter_expr(filters)
@@ -737,3 +744,16 @@ class MilvusVectorStore(BaseVectorStore):
                 raise
 
         await asyncio.to_thread(_delete)
+
+    def _ensure_loaded(self, collection: str) -> None:
+        """Ensure a collection is loaded"""
+        if collection in self._collections_loaded:
+            return
+        store_logger.info(
+            "MilvusVectorStore: loading collection %s", collection, event_type=LogEventType.STORE_LOAD,
+        )
+        self.client.load_collection(collection, timeout=180.0)
+        store_logger.info(
+            "MilvusVectorStore: %s collection loaded", collection, event_type=LogEventType.STORE_LOAD,
+        )
+        self._collections_loaded.add(collection)

@@ -7,7 +7,7 @@ Provides a unified interface for knowledge bases as the top-level entry point.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -61,6 +61,9 @@ class KnowledgeBase(ABC):
                         StatusCode.RETRIEVAL_KB_DATABASE_CONFIG_INVALID,
                         error_msg="Chroma database does not support sparse embedding & hybrid search in local mode yet",
                     )
+            ensure_load_fn: Optional[Callable] = getattr(self.vector_store, "_ensure_loaded", None)
+            if ensure_load_fn is not None:
+                ensure_load_fn()
 
     def validate_index(self):
         """Validate vector store and index manager"""
