@@ -25,8 +25,18 @@ def get_sqlite_kv_store():
     kv_store = DbBasedKVStore(engine)
     yield kv_store
 
+    try:
+        asyncio.run(engine.dispose())
+    except RuntimeError:
+        pass
     if os.path.exists(resource_dir):
-        shutil.rmtree(resource_dir)
+        try:
+            shutil.rmtree(resource_dir)
+        except PermissionError:
+            pass  # Windows: file still in use by another process
+        except OSError as e:
+            if getattr(e, "winerror", None) != 32:
+                raise
 
 
 @pytest.fixture(name="mysql_kv_store")
