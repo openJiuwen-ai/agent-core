@@ -749,11 +749,12 @@ class MilvusVectorStore(BaseVectorStore):
         """Ensure a collection is loaded"""
         if collection in self._collections_loaded:
             return
-        store_logger.info(
-            "MilvusVectorStore: loading collection %s", collection, event_type=LogEventType.STORE_LOAD,
-        )
-        self.client.load_collection(collection, timeout=180.0)
-        store_logger.info(
-            "MilvusVectorStore: %s collection loaded", collection, event_type=LogEventType.STORE_LOAD,
-        )
-        self._collections_loaded.add(collection)
+        if self.client.has_collection(collection, timeout=15.0):
+            store_logger.info(
+                "MilvusVectorStore: loading collection %s", collection, event_type=LogEventType.STORE_LOAD,
+            )
+            self.client.load_collection(collection, timeout=180.0)
+            store_logger.info(
+                "MilvusVectorStore: %s collection loaded", collection, event_type=LogEventType.STORE_LOAD,
+            )
+            self._collections_loaded.add(collection)

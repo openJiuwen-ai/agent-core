@@ -505,7 +505,8 @@ class MilvusVectorStore(VectorStore):
         """Ensure collection is loaded"""
         if self._collection_loaded:
             return
-        logger.info("Retrieval Milvus Store: loading collection %s", self.collection_name)
-        self._client.load_collection(self.collection_name, timeout=180.0)
-        logger.info("Retrieval Milvus Store: %s collection loaded", self.collection_name)
-        self._collection_loaded = True
+        if self.client.has_collection(self.collection_name, timeout=15.0):
+            logger.info("Retrieval Milvus Store: loading collection %s", self.collection_name)
+            self.client.load_collection(self.collection_name, timeout=180.0)
+            logger.info("Retrieval Milvus Store: %s collection loaded", self.collection_name)
+            self._collection_loaded = True
