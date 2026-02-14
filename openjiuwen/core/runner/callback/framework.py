@@ -29,6 +29,20 @@ from typing import (
 )
 
 from openjiuwen.core.runner.callback.chain import CallbackChain
+from openjiuwen.core.runner.callback.decorator import (
+    create_emit_around_decorator,
+    create_emits_decorator,
+    create_emits_stream_decorator,
+    create_on_decorator,
+    create_on_wrap_decorator,
+    create_transform_io_by_events_decorator,
+    create_transform_io_decorator,
+    create_trigger_on_call_decorator,
+    create_wrap_by_event_decorator,
+    InputTransform,
+    OutputTransform,
+    WrapHandler,
+)
 from openjiuwen.core.runner.callback.enums import (
     ChainAction,
     FilterAction,
@@ -37,17 +51,6 @@ from openjiuwen.core.runner.callback.enums import (
 from openjiuwen.core.runner.callback.filters import (
     CircuitBreakerFilter,
     EventFilter,
-)
-from openjiuwen.core.runner.callback.decorator import (
-    create_emit_around_decorator,
-    create_emits_decorator,
-    create_emits_stream_decorator,
-    create_on_decorator,
-    create_transform_io_by_events_decorator,
-    create_transform_io_decorator,
-    create_trigger_on_call_decorator,
-    InputTransform,
-    OutputTransform,
 )
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
@@ -450,6 +453,91 @@ class AsyncCallbackFramework:
             input_transform=input_transform,
             output_transform=output_transform,
         )
+
+    def on_wrap(
+        self,
+        event: str,
+        *,
+        priority: int = 0,
+    ) -> Callable[[WrapHandler], WrapHandler]:
+        """Decorator that registers a WrapHandler for *event*.
+
+        WrapHandlers form an explicit call chain around the function decorated
+        with :meth:`wrap`.  Each handler receives ``call_next`` as its first
+        argument and decides when (and whether) to invoke the rest of the chain.
+
+        Handlers are stored in the framework's standard ``_callbacks`` registry
+        under ``"__wrap__:{event}"``, so they participate in the same priority
+        sorting and can be removed via :meth:`unregister` /
+        :meth:`unregister_event`.
+
+        For regular (non-generator) functions::
+
+            @framework.on_wrap("fetch")
+            async def auth_handler(call_next, *args, **kwargs):
+                if not kwargs.get("token"):
+                    raise PermissionError("missing token")
+                return await call_next(*args, **kwargs)
+
+        For async/sync generator functions the handler must itself be an
+        async generator that iterates ``call_next``::
+
+            @framework.on_wrap("stream_data")
+            async def log_handler(call_next, *args, **kwargs):
+                async for item in call_next(*args, **kwargs):
+                    print("item:", item)
+                    yield item
+
+        Args:
+            event: Logical event name shared with the matching :meth:`wrap`
+                decorator.
+            priority: Higher-priority handlers are outermost (called first)
+                in the chain.
+
+        Returns:
+            Decorator that registers the function and returns it unchanged.
+        """
+        return create_on_wrap_decorator(self, event, priority=priority)
+
+    def wrap(
+        self,
+        event: str,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Decorator that wraps a function with event-registered WrapHandlers.
+
+        At each call, the framework retrieves all enabled WrapHandlers
+        registered for *event* via :meth:`on_wrap` and executes them as a
+        chain around the decorated function.  Because the handler list is
+        resolved at call time, handlers registered after decoration are
+        automatically included.
+
+        Supports async functions, sync functions (promoted to async), async
+        generators, and sync generators (promoted to async generators).
+
+        Example::
+
+            @framework.on_wrap("fetch", priority=10)
+            async def log_handler(call_next, *args, **kwargs):
+                print("before fetch")
+                result = await call_next(*args, **kwargs)
+                print("after fetch")
+                return result
+
+            @framework.wrap("fetch")
+            async def fetch_data(url: str) -> dict:
+                ...
+
+        For a static chain (handlers fixed at decoration time, no framework
+        involvement) use :func:`create_wrap_decorator` directly.
+
+        Args:
+            event: Logical event name shared with the matching :meth:`on_wrap`
+                decorators.
+
+        Returns:
+            Decorator that wraps the function with the dynamic handler chain.
+        """
+        return create_wrap_by_event_decorator(self, event)
 
     async def register(
             self,

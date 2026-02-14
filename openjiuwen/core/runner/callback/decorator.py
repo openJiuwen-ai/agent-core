@@ -14,15 +14,23 @@ either as direct callables (input_transform/output_transform) or as
 event names (input_event/output_event); when using events, the framework
 triggers the event and uses the last callback result as the transformed
 input or output.
+
+Also provides wrap/on_wrap decorators for building explicit WrapHandler
+chains around functions. Each WrapHandler receives ``call_next`` as its
+first argument and decides when and whether to invoke the rest of the
+chain, enabling pre/post processing, short-circuiting, and item
+transformation for both regular functions and generators.
 """
 
 import inspect
 from functools import wraps
 from typing import (
     Any,
+    AsyncIterator,
     Awaitable,
     Callable,
     Optional,
+    Protocol,
     Set,
 )
 
@@ -35,6 +43,33 @@ InputTransform = Callable[
     | Awaitable[tuple[tuple[Any, ...], dict[str, Any]]],
 ]
 OutputTransform = Callable[[Any], Any | Awaitable[Any]]
+
+class WrapHandler(Protocol):
+    """Callable placed in a wrap chain around another function.
+
+    Receives ``call_next`` as its first positional-only argument — the next
+    callable in the chain, ultimately reaching the original function — followed
+    by the original ``*args`` and ``**kwargs``.
+
+    The handler controls the full invocation: it may modify arguments before
+    forwarding, transform or replace the result, or short-circuit the chain by
+    never calling ``call_next``.
+
+    Return type depends on the kind of the wrapped function:
+
+    * **Regular function** — must be an ``async def`` returning
+      ``Awaitable[Any]``.
+    * **Generator function** — must be an ``async def`` that is also an async
+      generator (contains ``yield``), returning ``AsyncIterator[Any]``.
+    """
+
+    def __call__(
+        self,
+        call_next: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Awaitable[Any] | AsyncIterator[Any]: ...
 
 
 def _bind_args_no_duplicate(
@@ -618,5 +653,282 @@ def create_transform_io_by_events_decorator(
             return await _output_from_events(result)
 
         return sync_async_wrapper
+
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# Wrap handler infrastructure
+# ---------------------------------------------------------------------------
+
+# Event-name prefix used when storing WrapHandlers inside the framework's
+# standard _callbacks registry.  Keeps wrap entries isolated from regular
+# event callbacks while reusing the same priority-sorted CallbackInfo store.
+_WRAP_EVENT_PREFIX = "__wrap__:"
+
+
+def _get_framework_wrap_handlers(
+    framework: Any, event: str
+) -> list[WrapHandler]:
+    """Return enabled WrapHandlers registered on the framework for *event*.
+
+    Handlers are stored in ``framework.callbacks`` under the key
+    ``_WRAP_EVENT_PREFIX + event``, ordered by descending priority (the same
+    sorting that ``register_sync`` maintains for all callbacks).
+    """
+    infos = framework.callbacks.get(f"{_WRAP_EVENT_PREFIX}{event}", [])
+    return [info.callback for info in infos if info.enabled]
+
+
+def _build_wrap_chain_regular(
+    innermost: Callable, handlers: list[WrapHandler]
+) -> Callable:
+    """Build a regular (non-generator) async WrapHandler chain.
+
+    Returns an async callable equivalent to running handlers[0] around
+    handlers[1] around … around *innermost*.
+    """
+    chain: Callable = innermost
+    for h in reversed(handlers):
+        prev = chain
+
+        def _make_link(handler: WrapHandler, n: Callable) -> Callable:
+            async def link(*a: Any, **kw: Any) -> Any:
+                return await handler(n, *a, **kw)
+
+            return link
+
+        chain = _make_link(h, prev)
+    return chain
+
+
+def _build_wrap_chain_gen(
+    innermost: Callable, handlers: list[WrapHandler]
+) -> Callable:
+    """Build an async-generator WrapHandler chain.
+
+    Returns an async generator callable whose items come from running
+    handlers[0] around handlers[1] around … around *innermost*.
+    Each handler must be an async generator function that iterates
+    ``call_next(*args, **kwargs)`` and yields (optionally transformed) items.
+    """
+    chain: Callable = innermost
+    for h in reversed(handlers):
+        prev = chain
+
+        def _make_gen_link(handler: WrapHandler, n: Callable) -> Callable:
+            async def gen_link(*a: Any, **kw: Any) -> Any:
+                async for item in handler(n, *a, **kw):
+                    yield item
+
+            return gen_link
+
+        chain = _make_gen_link(h, prev)
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# Public decorator factories
+# ---------------------------------------------------------------------------
+
+
+def _make_wrap_decorator(
+    func: Callable[..., Any],
+    get_handlers: Callable[[], list[WrapHandler]],
+) -> Callable[..., Any]:
+    """Build a wrapped version of *func* using a WrapHandler chain.
+
+    *get_handlers* is called on **every invocation** to obtain the current
+    handler list.  This is the single shared core for both static chains
+    (``create_wrap_decorator``) and dynamic/event-based chains
+    (``create_wrap_by_event_decorator``).
+
+    Args:
+        func: The function to wrap.
+        get_handlers: Zero-argument callable that returns the ordered
+            WrapHandler list (outermost first) each time the wrapped function
+            is called.
+
+    Returns:
+        Wrapped async function or async generator, preserving *func*'s
+        metadata via ``functools.wraps``.
+    """
+    func_async_gen = inspect.isasyncgenfunction(func)
+    func_sync_gen = inspect.isgeneratorfunction(func)
+    func_async = inspect.iscoroutinefunction(func)
+
+    # --- generator path -------------------------------------------------------
+    if func_async_gen or func_sync_gen:
+        if func_async_gen:
+
+            async def _inner_gen(*a: Any, **kw: Any) -> Any:
+                async for item in func(*a, **kw):
+                    yield item
+
+        else:
+
+            async def _inner_gen(*a: Any, **kw: Any) -> Any:  # type: ignore[misc]
+                for item in func(*a, **kw):
+                    yield item
+
+        @wraps(func)
+        async def gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+            handlers = get_handlers()
+            if not handlers:
+                async for item in _inner_gen(*args, **kwargs):
+                    yield item
+                return
+            async for item in _build_wrap_chain_gen(_inner_gen, handlers)(*args, **kwargs):
+                yield item
+
+        return gen_wrapper  # type: ignore[return-value]
+
+    # --- regular function path ------------------------------------------------
+    if func_async:
+        _inner: Callable = func
+    else:
+
+        async def _sync_as_async(*a: Any, **kw: Any) -> Any:
+            return func(*a, **kw)
+
+        _inner = _sync_as_async
+
+    @wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        handlers = get_handlers()
+        if not handlers:
+            return await _inner(*args, **kwargs)
+        return await _build_wrap_chain_regular(_inner, handlers)(*args, **kwargs)
+
+    return wrapper
+
+
+def create_wrap_decorator(
+    *handlers: WrapHandler,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Create decorator that applies a static WrapHandler chain around a function.
+
+    Each handler is an async callable that receives ``call_next`` as its first
+    argument and decides when (and whether) to invoke the rest of the chain::
+
+        async def handler(call_next, *args, **kwargs):
+            # pre-processing
+            result = await call_next(*args, **kwargs)
+            # post-processing
+            return result
+
+    Handlers are applied in the given order: ``handlers[0]`` is the outermost
+    (called first); the original function is the innermost.
+
+    For async/sync generators, each handler must be an **async generator
+    function** that iterates ``call_next`` and yields items::
+
+        async def handler(call_next, *args, **kwargs):
+            async for item in call_next(*args, **kwargs):
+                yield transform(item)
+
+    Supports: async functions, sync functions (promoted to async), async
+    generators, and sync generators (promoted to async generators).
+
+    Example::
+
+        async def log_handler(call_next, *args, **kwargs):
+            print("before")
+            result = await call_next(*args, **kwargs)
+            print("after")
+            return result
+
+        @create_wrap_decorator(log_handler)
+        async def add(a, b):
+            return a + b
+
+    Args:
+        *handlers: WrapHandler callables in outermost-first order.
+
+    Returns:
+        A decorator that wraps the function with the handler chain.
+    """
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        if not handlers:
+            return func
+        handler_list = list(handlers)
+        return _make_wrap_decorator(func, lambda: handler_list)
+
+    return decorator
+
+
+def create_on_wrap_decorator(
+    framework: Any,
+    event: str,
+    *,
+    priority: int = 0,
+) -> Callable[[WrapHandler], WrapHandler]:
+    """Create decorator that registers a WrapHandler for the given event.
+
+    The handler is stored in the framework's standard ``_callbacks`` store
+    under the key ``"__wrap__:{event}"``, so it participates in the same
+    priority-sorted registry as regular event callbacks and can be unregistered
+    via the framework's existing ``unregister`` / ``unregister_event`` API.
+
+    For regular functions the handler signature is::
+
+        async def handler(call_next, *args, **kwargs):
+            result = await call_next(*args, **kwargs)
+            return result
+
+    For generator-wrapping events the handler must be an async generator::
+
+        async def handler(call_next, *args, **kwargs):
+            async for item in call_next(*args, **kwargs):
+                yield transformed(item)
+
+    Args:
+        framework: AsyncCallbackFramework instance.
+        event: Logical event name (the same name used in ``wrap()``).
+        priority: Higher-priority handlers are outermost in the chain.
+
+    Returns:
+        A decorator that registers the function and returns it unchanged.
+    """
+
+    def decorator(func: WrapHandler) -> WrapHandler:
+        framework.register_sync(
+            f"{_WRAP_EVENT_PREFIX}{event}",
+            func,
+            priority=priority,
+        )
+        return func
+
+    return decorator
+
+
+def create_wrap_by_event_decorator(
+    framework: Any,
+    event: str,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Create decorator that wraps a function with event-registered WrapHandlers.
+
+    At each invocation, handlers are retrieved from ``framework.callbacks``
+    under ``"__wrap__:{event}"``, so handlers registered after decoration are
+    automatically included and disabled handlers are skipped.  Register
+    handlers with :func:`create_on_wrap_decorator` (or ``framework.on_wrap``).
+
+    The chain ordering and handler signatures are identical to
+    :func:`create_wrap_decorator`.
+
+    Args:
+        framework: AsyncCallbackFramework instance.
+        event: Logical event name (the same name used in ``on_wrap()``).
+
+    Returns:
+        A decorator that wraps the function with the dynamic handler chain.
+    """
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        return _make_wrap_decorator(
+            func,
+            lambda: _get_framework_wrap_handlers(framework, event),
+        )
 
     return decorator
