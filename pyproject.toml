@@ -31,12 +31,12 @@ dependencies = [
     "transformers>=4.52.4",
     "tiktoken>=0.12.0",
     "dashscope>=1.25.6",
-
     # Vector database
     "pymilvus>=2.6.2",
     # MCP server
     "fastmcp>=2.14.2,<3.0",
     # Document processing
+    "beautifulsoup4>=4.12.0",
     "docx2txt>=0.8",
     "python-docx>=1.2.0",
     "pdfplumber>=0.11.8",

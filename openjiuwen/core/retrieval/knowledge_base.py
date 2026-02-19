@@ -6,6 +6,7 @@ Knowledge Base Abstract Base Class
 Provides a unified interface for knowledge bases as the top-level entry point.
 """
 
+import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional
 
@@ -90,22 +91,69 @@ class KnowledgeBase(ABC):
             )
         return await self.vector_store.delete_table(collection)
 
-    @abstractmethod
     async def parse_files(
         self,
         file_paths: List[str],
         **kwargs,
     ) -> List[Document]:
         """
-        Parse files from file paths into a list of Document objects
+        Parse files from file paths into a list of Document objects.
 
         Args:
             file_paths: List of file paths
-            **kwargs: Additional parameters
+            **kwargs: Additional parameters (e.g. file_name, file_id)
 
         Returns:
             List of Document objects
         """
+        if not self.parser:
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_PARSER_NOT_FOUND,
+                error_msg="parser is required for parse_files",
+            )
+        all_documents = []
+        for file_path in file_paths:
+            try:
+                file_name = kwargs.get("file_name", file_path.split("/")[-1])
+                file_id = str(uuid.uuid4())
+                documents = await self.parser.parse(
+                    file_path,
+                    file_id,
+                    file_name=file_name,
+                )
+                all_documents.extend(documents)
+            except Exception as e:
+                logger.error("Failed to parse file %s: %s", file_path, e)
+                continue
+        return all_documents
+
+    async def parse_urls(
+        self,
+        urls: List[str],
+        **kwargs,
+    ) -> List[Document]:
+        """
+        Fetch and parse URLs into Document list. With AutoParser/AutoLinkParser,
+        WeChat (mp.weixin.qq.com) and generic web URLs are auto-routed.
+        """
+        if not self.parser:
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_PARSER_NOT_FOUND,
+                error_msg="parser is required for parse_urls",
+            )
+        all_documents = []
+        for url in urls:
+            try:
+                if not self.parser.supports(url):
+                    logger.warning("Parser does not support URL %s, skipping", url)
+                    continue
+                doc_id = str(uuid.uuid4())
+                docs = await self.parser.parse(url, doc_id=doc_id, **kwargs)
+                all_documents.extend(docs)
+            except Exception as e:
+                logger.error("Failed to parse URL %s: %s", url, e)
+                continue
+        return all_documents
 
     @abstractmethod
     async def add_documents(

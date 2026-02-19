@@ -640,12 +640,14 @@ class GraphRetriever(Retriever):
                             metadata = json.loads(metadata)
                         except Exception:
                             metadata = {}
+                    # doc_id may be at top level (e.g. Milvus query returns document_id there)
+                    doc_id = item.get("document_id") or metadata.get("doc_id")
 
                     node = RetrievalResult(
                         text=item.get("content", ""),
                         score=item.get("score", 0.0),
                         metadata=metadata,
-                        doc_id=metadata.get("doc_id"),
+                        doc_id=doc_id,
                         chunk_id=metadata.get("chunk_id", ""),
                     )
                     nodes.append(node)
@@ -727,20 +729,21 @@ class GraphRetriever(Retriever):
 
             item = results[0]
 
-            # Extract metadata
+            # Extract metadata; doc_id may be at top level (e.g. Milvus query returns document_id there)
             metadata = item.get("metadata", {}) or {}
             if isinstance(metadata, str):
                 try:
                     metadata = json.loads(metadata)
                 except Exception:
                     metadata = {}
+            doc_id = item.get("document_id") or metadata.get("doc_id")
 
             # Create RetrievalResult
             result = RetrievalResult(
                 text=item.get("content", ""),
                 score=item.get("score", 0.0),
                 metadata=metadata,
-                doc_id=metadata.get("doc_id"),
+                doc_id=doc_id,
                 chunk_id=metadata.get("chunk_id", chunk_id),
             )
             return result

@@ -78,33 +78,6 @@ class GraphKnowledgeBase(KnowledgeBase):
         self.llm_model_name = llm_model_name
         self.graph_retriever: Optional[GraphRetriever] = None
 
-    async def parse_files(
-        self,
-        file_paths: List[str],
-        **kwargs,
-    ) -> List[Document]:
-        """Parse files from file paths into a list of Document objects"""
-        if not self.parser:
-            raise build_error(StatusCode.RETRIEVAL_KB_PARSER_NOT_FOUND, error_msg="parser is required for parse_files")
-
-        all_documents = []
-        for file_path in file_paths:
-            try:
-                file_name = kwargs.get("file_name", file_path.split("/")[-1])
-                file_id = kwargs.get("file_id", str(uuid.uuid4()))
-
-                documents = await self.parser.parse(
-                    file_path,
-                    file_name=file_name,
-                    file_id=file_id,
-                )
-                all_documents.extend(documents)
-            except Exception as e:
-                logger.error(f"Failed to parse file {file_path}: {e}")
-                continue
-
-        return all_documents
-
     async def add_documents(
         self,
         documents: List[Document],
@@ -121,6 +94,10 @@ class GraphKnowledgeBase(KnowledgeBase):
             )
         if self.strict_validation and self.vector_store:
             self.vector_store.check_vector_field()
+
+        for doc in documents:
+            if not (getattr(doc, "id_", None) or "").strip():
+                doc.id_ = str(uuid.uuid4())
 
         # Chunk documents
         chunks = self.chunker.chunk_documents(documents)

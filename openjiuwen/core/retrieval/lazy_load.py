@@ -23,7 +23,18 @@ _LAZY_MILVUS = [
 _LAZY_CHROMA = ["ChromaIndexer", "ChromaVectorStore", "ChromaVectorField"]
 _LAZY_OPENAI = ["OpenAIEmbedding", "VLLMEmbedding", "parse_base64_embedding"]
 _LAZY_HTTPX = ["StandardReranker", "ChatReranker"]
-_LAZY_PARSER = ["AutoFileParser", "Parser", "JSONParser", "PDFParser", "TxtMdParser", "WordParser"]
+_LAZY_PARSER = [
+    "AutoFileParser",
+    "AutoLinkParser",
+    "AutoParser",
+    "Parser",
+    "JSONParser",
+    "PDFParser",
+    "TxtMdParser",
+    "WebPageParser",
+    "WeChatArticleParser",
+    "WordParser",
+]
 _LAZY_KNOWLEDGE_BASE = [
     # Knowledge base classes
     "KnowledgeBase",

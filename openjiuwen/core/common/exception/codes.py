@@ -406,6 +406,10 @@ class StatusCode(Enum):
         155109,
         "retrieval indexing_vector_field is invalid, reason: {error_msg}",
     )
+    RETRIEVAL_INDEXING_FETCH_ERROR = (
+        155110,
+        "retrieval indexing fetch or parse error, reason: {error_msg}",
+    )
 
     # KnowledgeBase Retrieval - Retriever 155200 - 155299
     RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT = (155200, "retrieval retriever_mode is not supported, reason: {error_msg}")
