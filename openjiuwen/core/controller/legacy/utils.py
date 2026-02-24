@@ -288,15 +288,9 @@ class ReasonerUtils:
         model = await Runner.resource_mgr.get_model(model_id=model_id, session=session)
 
         if model is None:
-            # Normalize client_provider to correct case (OpenAI, SiliconFlow)
-            provider = model_config.model_provider
-            if provider and provider.lower() == 'openai':
-                provider = 'OpenAI'
-            elif provider and provider.lower() == 'siliconflow':
-                provider = 'SiliconFlow'
             model_client_config = ModelClientConfig(
                 client_id=model_id,
-                client_provider=provider,
+                client_provider=model_config.model_provider,
                 api_key=model_config.model_info.api_key,
                 api_base=model_config.model_info.api_base,
                 timeout=model_config.model_info.timeout,

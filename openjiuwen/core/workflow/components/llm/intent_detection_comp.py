@@ -74,11 +74,6 @@ KG_FILTER_KEY = "filter_string"
 KG_FILTER_PREFIX = "category:"
 KG_SCOPE = "scope"
 
-_PROVIDER_NAME_MAP = {
-    "openai": "OpenAI",
-    "siliconflow": "SiliconFlow",
-}
-
 DEFAULT_SYSTEM_PROMPT = "你是一个识别用户输入意图的AI助手。"
 
 DEFAULT_USER_PROMPT = """

@@ -33,12 +33,6 @@ _TYPE = "type"
 _INSTRUCTION_NAME = "instruction_name"
 _TEMPLATE_NAME = "template_name"
 
-# Provider name mapping: lowercase -> correct case for _CLIENT_TYPE_REGISTRY
-_PROVIDER_NAME_MAP = {
-    "openai": "OpenAI",
-    "siliconflow": "SiliconFlow",
-}
-
 
 class MessageRole(str, Enum):
     USER = "user"

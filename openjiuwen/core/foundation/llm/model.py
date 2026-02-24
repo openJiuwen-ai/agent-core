@@ -21,6 +21,7 @@ from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client impor
 
 _CLIENT_TYPE_REGISTRY: Dict[str, Type[BaseModelClient]] = {
     "OpenAI": OpenAIModelClient,
+    "OpenRouter": OpenAIModelClient,
     "SiliconFlow": SiliconFlowModelClient,
     "DashScope": DashScopeModelClient,
 }
