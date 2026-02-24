@@ -182,6 +182,7 @@ from openjiuwen.core.workflow.base import Workflow
 from openjiuwen.core.workflow.workflow_config import WorkflowConfig, WorkflowMetadata
 from openjiuwen.core.component.common.configs.model_config import ModelConfig
 from openjiuwen.core.utils.llm.base import BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.component.questioner_comp import QuestionerComponent, QuestionerConfig, FieldInfo
 from openjiuwen.agent.config.base import AgentConfig
 from openjiuwen.agent_group.hierarchical_group.agents.main_controller import HierarchicalMainController
@@ -266,9 +267,21 @@ def _build_financial_workflow(
             required=True
         ),
     ]
-    model_config = _create_model_config()
+    model_client_config = ModelClientConfig(
+        client_provider=MODEL_PROVIDER,
+        api_key=API_KEY,
+        api_base=API_BASE,
+        timeout=120,
+        verify_ssl=False,
+    )
+    model_request_config = ModelRequestConfig(
+        model=MODEL_NAME,
+        temperature=0.7,
+        top_p=0.9,
+    )
     questioner_config = QuestionerConfig(
-        model=model_config,
+        model_client_config=model_client_config,
+        model_config=model_request_config,
         question_content="",
         extract_fields_from_response=True,
         field_names=key_fields,

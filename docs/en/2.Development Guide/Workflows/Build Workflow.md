@@ -61,7 +61,7 @@ import os
 from datetime import datetime
 
 from openjiuwen.core.workflow import LLMComponent, LLMCompConfig
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 
 API_BASE = os.getenv("API_BASE", "https://api.openai.com/v1")
 API_KEY = os.getenv("API_KEY", "sk-fake")
@@ -70,18 +70,22 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
 
 SYSTEM_PROMPT_TEMPLATE = "你是一个query改写的AI助手。今天的日期是{}。"
 
-def _create_model_config() -> ModelConfig:
-    """根据环境变量构造模型配置。"""
-    return ModelConfig(
-        model_provider=MODEL_PROVIDER,
-        model_info=BaseModelInfo(
-            model=MODEL_NAME,
-            api_base=API_BASE,
-            api_key=API_KEY,
-            temperature=0.7,
-            top_p=0.9,
-            timeout=120,  # 增加超时时间到120秒，避免网络问题
-        ),
+def _create_model_client_config() -> ModelClientConfig:
+    """根据环境变量构造客户端模型配置。"""
+    return ModelClientConfig(
+        client_provider=MODEL_PROVIDER,
+        api_key=API_KEY,
+        api_base=API_BASE,
+        timeout=120,
+        verify_ssl=False,
+    )
+
+def _create_model_config() -> ModelRequestConfig:
+    """根据环境变量构造模型请求配置。"""
+    return ModelRequestConfig(
+        model=MODEL_NAME,
+        temperature=0.7,
+        top_p=0.9,
     )
 
 def build_current_date():
@@ -90,6 +94,7 @@ def build_current_date():
 
 def _create_llm_component() -> LLMComponent:
     """创建 LLM 组件，仅用于抽取结构化字段（location/date）。"""
+    model_client_config = _create_model_client_config()
     model_config = _create_model_config()
     current_date = build_current_date()
     user_prompt = ("\n原始query为：{{query}}\n\n帮我改写原始query，要求：\n"
@@ -97,7 +102,8 @@ def _create_llm_component() -> LLMComponent:
                    "2. 改写后的query必须包含当前的日期，默认日期为今天；\n"
                    "3. 日期为YYYY-MM-DD格式。")
     config = LLMCompConfig(
-        model=model_config,
+        model_client_config=model_client_config,
+        model_config=model_config,
         template_content=[{"role": "user", "content": SYSTEM_PROMPT_TEMPLATE.format(current_date) + user_prompt}],
         response_format={"type": "text"},
         output_config={
