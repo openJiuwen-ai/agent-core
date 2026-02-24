@@ -63,8 +63,11 @@ class AutoFileParser(Parser):
         try:
             from openjiuwen.core.retrieval.indexing.processor.parser.json_parser import JSONParser
             from openjiuwen.core.retrieval.indexing.processor.parser.pdf_parser import PDFParser
-            from openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser import TxtMdParser
+            from openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser import (
+                TxtMdParser,
+            )
             from openjiuwen.core.retrieval.indexing.processor.parser.word_parser import WordParser
+            from openjiuwen.core.retrieval.indexing.processor.parser.image_parser import ImageParser
         except ImportError as e:
             logger.warning(f"Failed to import some parser modules: {e}")
 
@@ -85,7 +88,9 @@ class AutoFileParser(Parser):
             ValueError: Unsupported file format
         """
         if not os.path.exists(doc):
-            raise build_error(StatusCode.RETRIEVAL_INDEXING_FILE_NOT_FOUND, error_msg=f"File {doc} does not exist")
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_FILE_NOT_FOUND, error_msg=f"File {doc} does not exist"
+            )
 
         # Get file extension
         file_ext = os.path.splitext(doc)[-1].lower()

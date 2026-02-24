@@ -30,6 +30,7 @@ _LAZY_PARSER = [
     "Parser",
     "JSONParser",
     "PDFParser",
+    "ImageParser",
     "TxtMdParser",
     "WebPageParser",
     "WeChatArticleParser",
@@ -44,7 +45,9 @@ _LAZY_KNOWLEDGE_BASE = [
     "retrieve_multi_kb",
     "retrieve_multi_kb_with_source",
 ]
-_LAZY_ATTRIBUTES = _LAZY_MILVUS + _LAZY_CHROMA + _LAZY_OPENAI + _LAZY_HTTPX + _LAZY_PARSER + _LAZY_KNOWLEDGE_BASE
+_LAZY_ATTRIBUTES = (
+    _LAZY_MILVUS + _LAZY_CHROMA + _LAZY_OPENAI + _LAZY_HTTPX + _LAZY_PARSER + _LAZY_KNOWLEDGE_BASE
+)
 _LAZY_IMPORT_CACHE = dict.fromkeys(_LAZY_ATTRIBUTES, None)
 
 

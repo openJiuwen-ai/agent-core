@@ -18,7 +18,7 @@ class TxtMdParser(Parser):
     def __init__(self, **kwargs):
         pass
 
-    async def _parse(self, file_path: str) -> Optional[str]:
+    async def _parse(self, file_path: str, *args, **kwargs) -> Optional[str]:
         """Parse TXT/MD file"""
         try:
             async with aiofiles.open(file_path, "rb") as f:

@@ -17,6 +17,7 @@ from openjiuwen.core.retrieval.indexing.processor.parser.web_page_parser import 
     parse_web_page_url,
 )
 from openjiuwen.core.retrieval.indexing.processor.parser.word_parser import WordParser
+from openjiuwen.core.retrieval.indexing.processor.parser.image_parser import ImageParser
 
 __all__ = [
     "AutoFileParser",
@@ -29,6 +30,7 @@ __all__ = [
     "WebPageParser",
     "WordParser",
     "WeChatArticleParser",
+    "ImageParser",
     "parse_wechat_article_url",
     "parse_web_page_url",
 ]
