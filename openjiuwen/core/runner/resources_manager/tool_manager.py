@@ -157,6 +157,11 @@ class ToolMgr:
         resource = self._sys_op_resources.pop(sys_op_id, None)
         return resource.tool_ids if resource else []
 
+    def get_sys_operation_tool_ids(self, sys_op_id: str) -> list[str]:
+        """Get tool IDs associated with a SysOperation."""
+        resource = self._sys_op_resources.get(sys_op_id)
+        return resource.tool_ids if resource else []
+
     async def refresh_tool_server(self, server_id: str, skip_not_exist: bool = False, force: bool = False) -> list[
         McpToolCard]:
         mcp_resource = self._mcp_server_resources.get(server_id)

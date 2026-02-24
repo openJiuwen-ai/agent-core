@@ -32,6 +32,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.sys_operation import SysOperationCard, SysOperation
 from openjiuwen.core.sys_operation.tool_adapter import SysOperationToolAdapter
+from openjiuwen.core.sys_operation.registry import OperationRegistry
 from openjiuwen.core.workflow.workflow import Workflow
 from openjiuwen.core.workflow import WorkflowCard
 
@@ -724,6 +725,79 @@ class ResourceMgr:
                                          tag_match_strategy=tag_match_strategy,
                                          session=session,
                                          resource_type="sys_operation")
+
+    def get_sys_op_tool_cards(self, sys_operation_id: str,
+                              *,
+                              operation_name: str | List[str] = None,
+                              tool_name: str | List[str] = None) -> ToolCard | List[ToolCard] | None:
+        """
+        Get tool cards from a system operation.
+
+        Args:
+            sys_operation_id: The ID of the system operation.
+            operation_name: Single operation name or list of operation names (e.g., "fs", ["fs", "shell"]).
+                If None, returns all tool cards from all operations.
+            tool_name: Single tool name or list of tool names (e.g., "read_file", ["read_file", "write_file"]).
+                Only valid when operation_name is a single string. Cannot be used when operation_name is a list.
+                If None, returns all tool cards from the specified operation(s).
+
+        Returns:
+            ToolCard or List[ToolCard] or None: Tool card(s) matching the criteria.
+
+        Raises:
+            ValidationError: If operation_name is a list and tool_name is also provided.
+
+        Examples:
+            # Scenario 1: Get a single tool card, returns: ToolCard
+            tool_card = get_sys_op_tool_cards(sys_operation_id, operation_name="fs", tool_name="read_file")
+
+            # Scenario 2: Get multiple tool cards from the same operation, returns: List[ToolCard]
+            tool_cards = get_sys_op_tool_cards(sys_operation_id, operation_name="fs",
+                                               tool_name=["read_file", "write_file"])
+
+            # Scenario 3: Get all tool cards from a single operation, returns: List[ToolCard]
+            tool_cards = get_sys_op_tool_cards(sys_operation_id, operation_name="fs")
+
+            # Scenario 4: Get all tool cards from multiple operations, returns: List[ToolCard]
+            tool_cards = get_sys_op_tool_cards(sys_operation_id, operation_name=["fs", "shell"])
+
+            # Scenario 5: Get all tool cards from all operations, returns: List[ToolCard]
+            tool_cards = get_sys_op_tool_cards(sys_operation_id)
+        """
+        if isinstance(operation_name, list) and tool_name is not None:
+            raise build_error(StatusCode.RESOURCE_VALUE_INVALID, resource_type="sys_operation",
+                              reason="tool_name cannot be specified when operation_name is a list")
+
+        sys_op = self._resource_registry.sys_operation().get_sys_operation(sys_operation_id)
+        if sys_op is None:
+            return None
+
+        if operation_name is None:
+            operation_names = OperationRegistry.get_supported_operations(sys_op.mode)
+        else:
+            operation_names = [operation_name] if isinstance(operation_name, str) else operation_name
+
+        result = []
+        tool_names = [tool_name] if isinstance(tool_name, str) else tool_name
+
+        for op_name in operation_names:
+            if tool_names is None:
+                tool_ids = self._resource_registry.tool().get_sys_operation_tool_ids(sys_operation_id)
+                for tool_id in tool_ids:
+                    if tool_id.startswith(f"{sys_operation_id}.{op_name}."):
+                        card = self._id_to_card.get(tool_id)
+                        if card:
+                            result.append(card)
+            else:
+                for t_name in tool_names:
+                    tool_id = SysOperationCard.generate_tool_id(sys_operation_id, op_name, t_name)
+                    card = self._id_to_card.get(tool_id)
+                    if card:
+                        result.append(card)
+
+        if tool_name is not None and isinstance(tool_name, str):
+            return result[0] if result else None
+        return result
 
     async def get_tool_infos(self,
                              tool_id: str | list[str] = None,
