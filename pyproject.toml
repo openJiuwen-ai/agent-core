@@ -1,6 +1,6 @@
 [project]
 name = "openjiuwen"
-version = "0.1.6"
+version = "0.1.8"
 description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -40,6 +40,7 @@ dependencies = [
     "docx2txt>=0.8",
     "python-docx>=1.2.0",
     "pdfplumber>=0.11.8",
+    "openpyxl>=3.1.0",
     # Utilities
     "numpy!=2.4.0",
     "cacheout>=0.16.0",

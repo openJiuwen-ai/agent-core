@@ -27,6 +27,7 @@ _LAZY_PARSER = [
     "AutoFileParser",
     "AutoLinkParser",
     "AutoParser",
+    "ExcelParser",
     "Parser",
     "JSONParser",
     "PDFParser",

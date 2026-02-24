@@ -61,6 +61,7 @@ class AutoFileParser(Parser):
         """Ensure all parsers are loaded and registered"""
         # Dynamically import all parser modules to trigger decorator execution
         try:
+            from openjiuwen.core.retrieval.indexing.processor.parser.excel_parser import ExcelParser
             from openjiuwen.core.retrieval.indexing.processor.parser.json_parser import JSONParser
             from openjiuwen.core.retrieval.indexing.processor.parser.pdf_parser import PDFParser
             from openjiuwen.core.retrieval.indexing.processor.parser.txt_md_parser import (

@@ -36,6 +36,11 @@ from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 
 # Processor & Chunker classes
 from openjiuwen.core.retrieval.indexing.processor.base import Processor
+from openjiuwen.core.retrieval.indexing.processor.chunker import (
+    HybridChunker,
+    get_chunker,
+    register_chunker,
+)
 from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.chunking import TextChunker
@@ -150,6 +155,9 @@ _NON_LAZY_ATTRIBUTES = [
     "PreprocessingPipeline",
     "TextChunker",
     "CharChunker",
+    "HybridChunker",
+    "get_chunker",
+    "register_chunker",
     "TokenizerChunker",
     "TripleExtractor",
     # Retriever classes

@@ -16,7 +16,22 @@ from openjiuwen.core.retrieval.indexing.processor.base import Processor
 
 
 class Chunker(Processor):
-    """Text chunker abstract base class (inherits from Processor)"""
+    """
+    Text chunker abstract base class.
+
+    Subclasses must implement at least :meth:`chunk_text`; :meth:`chunk_documents` has a default
+    implementation that uses it. The knowledge base calls :meth:`chunk_documents` when building
+    the index.
+
+    **For SDK users**: Use a built-in chunker (e.g. :class:`CharChunker`,
+    :class:`HybridChunker`) or get one by name: :func:`get_chunker` (e.g.
+    ``get_chunker("hybrid", chunk_size=512)``).
+
+    **For contributors**: To add a custom chunker, implement this interface and pass your
+    instance to ``KnowledgeBase(chunker=YourChunker(...))``. To make it available by name
+    (e.g. in config-driven flows), call :func:`register_chunker` with a name and your class
+    or a factory callable.
+    """
 
     def __init__(
         self,
