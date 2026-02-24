@@ -39,15 +39,38 @@
 * **index_name**(str)：索引名称。
 * **index_type**(Literal["hybrid", "bm25", "vector"])：索引类型。默认值："hybrid"。
 
+## class openjiuwen.core.retrieval.common.config.StoreType
+
+向量存储提供者类型枚举（继承自 `str, Enum`）。
+
+**枚举值**：
+
+* **Milvus** = `"milvus"` — Milvus 向量数据库。
+* **Chroma** = `"chroma"` — ChromaDB 向量数据库。
+* **PGVector** = `"pgvector"` — PostgreSQL pgvector 扩展。
+
 ## class openjiuwen.core.retrieval.common.config.VectorStoreConfig
 
 向量存储配置类，定义向量存储相关的配置参数。
 
 **参数**：
 
+* **store_provider**(StoreType)：向量存储提供者标识。必填。可接受的值：`"milvus"`、`"chroma"`、`"pgvector"`（或 `StoreType` 枚举成员）。
 * **database_name**(str)：数据库名称。默认值：""。
 * **collection_name**(str)：集合名称。
 * **distance_metric**(Literal["cosine", "euclidean", "dot"])：距离度量方式，cosine=余弦距离，euclidean=欧氏距离，dot=点积。默认值："cosine"。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.retrieval.common.config import VectorStoreConfig, StoreType
+>>> config = VectorStoreConfig(
+...     store_provider=StoreType.Milvus,
+...     collection_name="my_collection",
+...     distance_metric="cosine",
+... )
+>>> print(config.store_provider)  # StoreType.Milvus
+```
 
 ## class openjiuwen.core.retrieval.common.config.EmbeddingConfig
 

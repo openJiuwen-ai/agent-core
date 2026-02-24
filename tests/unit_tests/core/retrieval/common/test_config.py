@@ -126,7 +126,8 @@ class TestVectorStoreConfig:
     @staticmethod
     def test_create_with_defaults():
         """Test creating configuration with default values"""
-        config = VectorStoreConfig(collection_name="test_collection")
+        config = VectorStoreConfig(store_provider="milvus", collection_name="test_collection")
+        assert config.store_provider == "milvus"
         assert config.collection_name == "test_collection"
         assert config.distance_metric == "cosine"
 
@@ -134,9 +135,11 @@ class TestVectorStoreConfig:
     def test_create_with_custom_values():
         """Test creating configuration with custom values"""
         config = VectorStoreConfig(
+            store_provider="chroma",
             collection_name="test_collection",
             distance_metric="euclidean",
         )
+        assert config.store_provider == "chroma"
         assert config.collection_name == "test_collection"
         assert config.distance_metric == "euclidean"
 
@@ -145,6 +148,7 @@ class TestVectorStoreConfig:
         """Test invalid distance metric"""
         with pytest.raises(ValidationError):
             VectorStoreConfig(
+                store_provider="milvus",
                 collection_name="test_collection",
                 distance_metric="invalid",
             )

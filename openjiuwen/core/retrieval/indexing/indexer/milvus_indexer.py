@@ -146,7 +146,7 @@ class MilvusIndexer(Indexer):
                     chunk.embedding = embedding
 
             vector_store_config = VectorStoreConfig(
-                collection_name=collection_name, database_name=kwargs.pop("database_name", "")
+                store_provider="milvus", collection_name=collection_name, database_name=kwargs.pop("database_name", "")
             )
 
             vector_store = MilvusVectorStore(

@@ -1582,3 +1582,116 @@ The result obtained after execution:
 ```
 main workflow with sub workflow run result: result={'output': {'result': 'hello'}} state=<WorkflowExecutionState.COMPLETED: 'COMPLETED'>
 ```
+
+# KnowledgeRetrieval Component
+
+The `KnowledgeRetrievalComponent` is a preset component that integrates knowledge retrieval into openJiuwen workflows. It wraps `KnowledgeBase` and supports multiple vector store backends (Milvus, ChromaDB, PGVector) via the `store_provider` field in `VectorStoreConfig`.
+
+## Configuration
+
+Create a `KnowledgeRetrievalCompConfig` to configure the component. The key fields are:
+
+- `kb_configs`: List of `KnowledgeBaseConfig` defining which knowledge bases to retrieve from.
+- `retrieval_config`: `RetrievalConfig` controlling top_k, score_threshold, etc.
+- `vector_store_config`: `VectorStoreConfig` with `store_provider` set to `StoreType.Milvus`, `StoreType.Chroma`, or `StoreType.PGVector`.
+- `vector_store_additional_config`: Additional keyword arguments for the vector store constructor.
+- `embed_config`: `EmbeddingConfig` for embedding model (required for vector/hybrid index types).
+- `result_separator`: Separator when joining retrieved texts into `context`. Default: `"\n\n"`.
+- `include_metadata`: Set to `True` to include `results_with_metadata` in the output.
+
+## Example: RAG Workflow (Start → KnowledgeRetrieval → LLM → End)
+
+The following example builds a simple Retrieval-Augmented Generation pipeline using the `KnowledgeRetrievalComponent`:
+
+```python
+from openjiuwen.core.retrieval.common.config import (
+    EmbeddingConfig,
+    KnowledgeBaseConfig,
+    RetrievalConfig,
+    StoreType,
+    VectorStoreConfig,
+)
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.workflow import (
+    End,
+    KnowledgeRetrievalCompConfig,
+    KnowledgeRetrievalComponent,
+    LLMCompConfig,
+    LLMComponent,
+    Start,
+    Workflow,
+    WorkflowCard,
+    create_workflow_session,
+)
+
+# 1. Build workflow
+flow = Workflow(card=WorkflowCard(name="RAG Workflow", id="rag_wf", version="1.0"))
+
+start = Start()
+
+# 2. Configure KnowledgeRetrieval component
+kr_config = KnowledgeRetrievalCompConfig(
+    kb_configs=[
+        KnowledgeBaseConfig(kb_id="demo_kb", index_type="vector"),
+    ],
+    retrieval_config=RetrievalConfig(top_k=3, score_threshold=0.0),
+    vector_store_config=VectorStoreConfig(
+        store_provider=StoreType.Chroma,
+        collection_name="demo_collection",
+        distance_metric="cosine",
+    ),
+    vector_store_additional_config={"chroma_path": "/tmp/demo_chroma"},
+    embed_config=EmbeddingConfig(
+        model_name="text-embedding-v3",
+        base_url="https://api.example.com/embeddings",
+        api_key="your-api-key",
+    ),
+    result_separator="\n\n",
+    include_metadata=False,
+)
+kr_component = KnowledgeRetrievalComponent(component_config=kr_config)
+
+# 3. Configure LLM component
+llm_config = LLMCompConfig(
+    model_client_config=ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="your-api-key",
+        api_base="https://api.example.com/v1",
+        timeout=120,
+        verify_ssl=False,
+    ),
+    model_config=ModelRequestConfig(model="gpt-4", temperature=0.7),
+    template_content=[
+        {"role": "system", "content": "Answer based on the provided context."},
+        {"role": "user", "content": "Context:\n{{context}}\n\nQuestion: {{query}}\n\nAnswer:"},
+    ],
+    response_format={"type": "text"},
+    output_config={"answer": {"type": "string", "required": True}},
+)
+llm_component = LLMComponent(component_config=llm_config)
+
+end = End({"responseTemplate": "{{answer}}"})
+
+# 4. Assemble workflow graph: Start → KnowledgeRetrieval → LLM → End
+flow.set_start_comp("start", start, inputs_schema={"query": "${query}"})
+flow.add_workflow_comp("kr", kr_component, inputs_schema={"query": "${start.query}"})
+flow.add_workflow_comp("llm", llm_component, inputs_schema={
+    "context": "${kr.context}",
+    "query": "${start.query}",
+})
+flow.set_end_comp("end", end, inputs_schema={"answer": "${llm.answer}"})
+
+flow.add_connection("start", "kr")
+flow.add_connection("kr", "llm")
+flow.add_connection("llm", "end")
+
+# 5. Execute
+import asyncio
+
+async def main():
+    session = create_workflow_session(session_id="rag_session")
+    result = await flow.invoke({"query": "What is OpenJiuwen?"}, session)
+    print(result.result)
+
+asyncio.run(main())
+```

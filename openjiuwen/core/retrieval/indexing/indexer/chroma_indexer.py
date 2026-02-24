@@ -111,7 +111,7 @@ class ChromaIndexer(Indexer):
         try:
             collection_name = config.index_name
             vector_store_config = VectorStoreConfig(
-                collection_name=collection_name, database_name=kwargs.pop("database_name", "")
+                store_provider="chroma", collection_name=collection_name, database_name=kwargs.pop("database_name", "")
             )
             vector_store = ChromaVectorStore(
                 config=vector_store_config,

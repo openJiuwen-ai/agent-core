@@ -46,6 +46,10 @@ from openjiuwen.core.workflow.components.llm.intent_detection_comp import (
     IntentDetectionComponent,
     IntentDetectionCompConfig
 )
+from openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp import (
+    KnowledgeRetrievalComponent,
+    KnowledgeRetrievalCompConfig,
+)
 from openjiuwen.core.workflow.components.tool.tool_comp import ToolComponent, ToolComponentConfig
 from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter, Branch
 from openjiuwen.core.workflow.components.condition.condition import Condition, FuncCondition, AlwaysTrue
@@ -107,7 +111,10 @@ _TOOL_RELATED_COMPONENTS = [
     "ToolComponentConfig",
 ]
 
-_RESOURCE_RELATED_COMPONENTS = []
+_RESOURCE_RELATED_COMPONENTS = [
+    "KnowledgeRetrievalComponent",
+    "KnowledgeRetrievalCompConfig",
+]
 
 _CONDITION_CLASSES = [
     "Condition",

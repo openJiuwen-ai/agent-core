@@ -140,6 +140,16 @@ class StatusCode(Enum):
     COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR = (101076,
                                                     "component questioner_execution process error, reason: {error_msg}")
 
+    ## KnowledgeRetrievalComponent 101100 - 101149
+    COMPONENT_KNOWLEDGE_RETRIEVAL_INVOKE_CALL_FAILED = (
+        101100, "component knowledge_retrieval invoke call failed, reason: {error_msg}")
+    COMPONENT_KNOWLEDGE_RETRIEVAL_EMBED_MODEL_INIT_ERROR = (
+        101101, "component knowledge_retrieval embed_model initialization error, reason: {error_msg}")
+    COMPONENT_KNOWLEDGE_RETRIEVAL_INPUT_PARAM_ERROR = (
+        101102, "component knowledge_retrieval input parameter error, reason: {error_msg}")
+    COMPONENT_KNOWLEDGE_RETRIEVAL_LLM_MODEL_INIT_ERROR = (
+        101103, "component knowledge_retrieval llm_model initialization failed, reason: {error_msg}")
+    
     ## ToolComponent  102000 - 102019
     COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
@@ -454,7 +464,9 @@ class StatusCode(Enum):
 
     # KnowledgeBase Retrieval - Vector Store 155400 - 155499
     RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND = (155400, "retrieval vector_store_path not found, reason: {error_msg}")
-    RETRIEVAL_VECTOR_STORE_QUERY_INVALID = (155400, "retrieval vector_store_query not valid, reason: {error_msg}")
+    RETRIEVAL_VECTOR_STORE_QUERY_INVALID = (155401, "retrieval vector_store_query not valid, reason: {error_msg}")
+    RETRIEVAL_VECTOR_STORE_PROVIDER_INVALID = (
+        155402, "retrieval vector_store_provider is not supported, reason: {error_msg}")
 
     # KnowledgeBase Retrieval - Knowledge Base 155500 - 155599
     RETRIEVAL_KB_PARSER_NOT_FOUND = (155500, "retrieval kb_parser not found, reason: {error_msg}")

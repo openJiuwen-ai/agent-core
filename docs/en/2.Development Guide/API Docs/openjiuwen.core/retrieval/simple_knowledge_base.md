@@ -202,10 +202,10 @@ Perform retrieval on multiple knowledge bases, deduplicate by text and merge res
 ## func async retrieve_multi_kb_with_source
 
 ```python
-retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[Dict[str, Any]]
+retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[MultiKBRetrievalResult]
 ```
 
-Perform retrieval on multiple knowledge bases, returning results with source information. Result items include: text/score/raw_score/raw_score_scaled/kb_ids.
+Perform retrieval on multiple knowledge bases, returning results with source information. Each result item is a `MultiKBRetrievalResult` containing: text, score, raw_score, raw_score_scaled, kb_ids, and metadata.
 
 **Parameters**:
 
@@ -216,5 +216,5 @@ Perform retrieval on multiple knowledge bases, returning results with source inf
 
 **Returns**:
 
-**List[Dict[str, Any]]**, returns a list of results containing text, score, source knowledge base IDs, and other information.
+**List[MultiKBRetrievalResult]**, returns a list of `MultiKBRetrievalResult` objects containing text, score, raw scores, source knowledge base IDs, and metadata.
 

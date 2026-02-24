@@ -13,7 +13,6 @@ from unittest.mock import (
     MagicMock,
     patch,
 )
-import pytest
 from sqlalchemy import (
     Table,
     Column,
@@ -32,6 +31,7 @@ from openjiuwen.core.retrieval.vector_store.pg_store import PGVectorStore
 @pytest.fixture
 def vector_store_config():
     return VectorStoreConfig(
+        store_provider="pgvector",
         collection_name="test_collection",
         distance_metric="euclidean",
     )
@@ -69,7 +69,7 @@ class TestPGVectorStore:
         mock_create_engine.assert_called_once()
 
         # Test metric mapping logic
-        config_cosine = VectorStoreConfig(collection_name="c", distance_metric="cosine")
+        config_cosine = VectorStoreConfig(store_provider="pgvector", collection_name="c", distance_metric="cosine")
         store_cosine = PGVectorStore(config=config_cosine, pg_uri="uri")
         # Access exposed public property instead of protected member
         assert store_cosine.distance_metric == "cosine"
@@ -168,6 +168,7 @@ class TestPGVectorStore:
 
         # Test Cosine
         config_cos = VectorStoreConfig(
+            store_provider="pgvector",
             collection_name="c",
             distance_metric="cosine"
         )

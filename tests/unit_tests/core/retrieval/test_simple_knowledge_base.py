@@ -7,11 +7,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.retrieval import SimpleKnowledgeBase, retrieve_multi_kb, retrieve_multi_kb_with_source
-from openjiuwen.core.retrieval import KnowledgeBaseConfig
-from openjiuwen.core.retrieval import Document, TextChunk
-from openjiuwen.core.retrieval import RetrievalResult
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.retrieval import (
+    Document,
+    KnowledgeBaseConfig,
+    SimpleKnowledgeBase,
+    TextChunk,
+    retrieve_multi_kb,
+    retrieve_multi_kb_with_source,
+)
+from openjiuwen.core.retrieval.common.retrieval_result import MultiKBRetrievalResult, RetrievalResult
 
 
 @pytest.fixture
@@ -319,9 +324,10 @@ class TestRetrieveMultiKb:
             ]
         )
 
-        results = await retrieve_multi_kb_with_source([mock_kb1, mock_kb2], "test query", top_k=5)
+        results = await retrieve_multi_kb_with_source(kbs=[mock_kb1, mock_kb2], query="test query", top_k=5)
         assert len(results) <= 5
         if results:
-            assert "text" in results[0]
-            assert "score" in results[0]
-            assert "kb_ids" in results[0]
+            assert isinstance(results[0], MultiKBRetrievalResult)
+            assert results[0].text == "Result 1"
+            assert results[0].score == 0.95
+            assert results[0].kb_ids == ["kb1", "kb2"]

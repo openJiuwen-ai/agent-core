@@ -14,7 +14,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.config import IndexConfig, KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.retrieval.common.retrieval_result import MultiKBRetrievalResult, RetrievalResult
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
@@ -308,7 +308,7 @@ async def retrieve_multi_kb_with_source(
     query: str,
     config: Optional[RetrievalConfig] = None,
     top_k: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+) -> List[MultiKBRetrievalResult]:
     """
     Perform retrieval on multiple knowledge bases, return results with source information.
     Result items: text/score/raw_score/raw_score_scaled/kb_ids
@@ -333,8 +333,8 @@ async def retrieve_multi_kb_with_source(
             text = r.text
             score = 0.0 if r.score is None else float(r.score)
             meta = r.metadata or {}
-            raw_score = meta.get("raw_score")
-            raw_score_scaled = meta.get("raw_score_scaled")
+            raw_score = meta.get("raw_score", score)
+            raw_score_scaled = meta.get("raw_score_scaled", score)
             if text not in merged:
                 merged[text] = {
                     "text": text,
@@ -342,6 +342,7 @@ async def retrieve_multi_kb_with_source(
                     "raw_score": raw_score,
                     "raw_score_scaled": raw_score_scaled,
                     "kb_ids": set(),
+                    "metadata": meta,
                 }
             merged[text]["score"] = max(merged[text]["score"], score)
             if raw_score is not None:
@@ -352,19 +353,18 @@ async def retrieve_multi_kb_with_source(
                 merged[text]["raw_score_scaled"] = max(prev, raw_score_scaled) if prev is not None else raw_score_scaled
             merged[text]["kb_ids"].add(kb_id)
 
-    ranked = sorted(
-        (
-            {
-                "text": v["text"],
-                "score": v["score"],
-                "raw_score": v.get("raw_score"),
-                "raw_score_scaled": v.get("raw_score_scaled"),
-                "kb_ids": sorted(list(v["kb_ids"])),
-            }
-            for v in merged.values()
-        ),
-        key=lambda x: x["score"],
-        reverse=True,
-    )
+    ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
     limit = top_k or (config.top_k if config else None) or 5
-    return ranked[:limit]
+    ranked = ranked[:limit]
+    results = [
+        MultiKBRetrievalResult(
+            text=v["text"],
+            score=v["score"],
+            raw_score=v.get("raw_score"),
+            raw_score_scaled=v.get("raw_score_scaled"),
+            kb_ids=sorted(list(v["kb_ids"])),
+            metadata=v["metadata"],
+        )
+        for v in ranked
+    ]
+    return results

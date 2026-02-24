@@ -231,6 +231,7 @@ class APIEmbedding(Embedding):
 
     async def _get_embeddings(self, text: str | List[str], **kwargs) -> List[List[float]]:
         """Get embedding vectors"""
+        kwargs.pop("callback_cls", None)
 
         payload = {"model": self.model_name, "input": text, **kwargs}
 
@@ -295,6 +296,7 @@ class APIEmbedding(Embedding):
 
     def _get_embeddings_sync(self, text: str | List[str], **kwargs) -> List[List[float]]:
         """Get embedding vectors (sync version)."""
+        kwargs.pop("callback_cls", None)
 
         payload = {"model": self.model_name, "input": text, **kwargs}
 

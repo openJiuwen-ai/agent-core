@@ -22,7 +22,7 @@ from openjiuwen.core.retrieval.common.config import (
     VectorStoreConfig,
 )
 from openjiuwen.core.retrieval.common.document import Document, MultimodalDocument, TextChunk
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
+from openjiuwen.core.retrieval.common.retrieval_result import MultiKBRetrievalResult, RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.common.triple import Triple
 from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
 from openjiuwen.core.retrieval.common.triple_memory import TripleMemory
@@ -84,6 +84,7 @@ from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 
 # Vector store related
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
+from openjiuwen.core.retrieval.vector_store.store import create_vector_store
 
 from .lazy_load import _LAZY_ATTRIBUTES, _LAZY_IMPORT_CACHE, lazy_load
 
@@ -126,6 +127,7 @@ _NON_LAZY_ATTRIBUTES = [
     "Document",
     "MultimodalDocument",
     "TextChunk",
+    "MultiKBRetrievalResult",
     "RetrievalResult",
     "SearchResult",
     "Triple",
@@ -138,6 +140,7 @@ _NON_LAZY_ATTRIBUTES = [
     "APIEmbedding",
     "Reranker",
     "VectorStore",
+    "create_vector_store",
     "Indexer",
     # Processor classes
     "Processor",

@@ -484,6 +484,7 @@ async def main() -> None:
 
     try:
         config = VectorStoreConfig(
+            store_provider="chroma",
             collection_name="test_query_expr_collection",
             distance_metric="cosine",
             database_name="test_db",

@@ -201,10 +201,10 @@ retrieve_multi_kb(kbs: List[KnowledgeBase], query: str, config: Optional[Retriev
 ## func async retrieve_multi_kb_with_source
 
 ```python
-retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[Dict[str, Any]]
+retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[MultiKBRetrievalResult]
 ```
 
-在多个知识库上执行检索，返回包含来源信息的结果。结果项包含：text/score/raw_score/raw_score_scaled/kb_ids。
+在多个知识库上执行检索，返回包含来源信息的结果。每个结果项为 `MultiKBRetrievalResult` 对象，包含：text、score、raw_score、raw_score_scaled、kb_ids 和 metadata。
 
 **参数**：
 
@@ -215,5 +215,5 @@ retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Opti
 
 **返回**：
 
-**List[Dict[str, Any]]**，返回包含文本、得分、来源知识库ID等信息的结果列表。
+**List[MultiKBRetrievalResult]**，返回 `MultiKBRetrievalResult` 对象列表，包含文本、得分、原始得分、来源知识库ID和元数据等信息。
 

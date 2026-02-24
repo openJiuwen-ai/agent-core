@@ -39,15 +39,38 @@ Index configuration class, defining index-related configuration parameters.
 * **index_name**(str): Index name.
 * **index_type**(Literal["hybrid", "bm25", "vector"]): Index type. Default: "hybrid".
 
+## class openjiuwen.core.retrieval.common.config.StoreType
+
+Vector store provider type enumeration (extends `str, Enum`).
+
+**Values**:
+
+* **Milvus** = `"milvus"` — Milvus vector database.
+* **Chroma** = `"chroma"` — ChromaDB vector database.
+* **PGVector** = `"pgvector"` — PostgreSQL with pgvector extension.
+
 ## class openjiuwen.core.retrieval.common.config.VectorStoreConfig
 
 Vector store configuration class, defining vector store-related configuration parameters.
 
 **Parameters**:
 
+* **store_provider**(StoreType): Vector store provider identification. Required. Accepted values: `"milvus"`, `"chroma"`, `"pgvector"` (or `StoreType` enum members).
 * **database_name**(str): Database name. Default: "".
 * **collection_name**(str): Collection name.
 * **distance_metric**(Literal["cosine", "euclidean", "dot"]): Distance metric, cosine=cosine distance, euclidean=Euclidean distance, dot=dot product. Default: "cosine".
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.retrieval.common.config import VectorStoreConfig, StoreType
+>>> config = VectorStoreConfig(
+...     store_provider=StoreType.Milvus,
+...     collection_name="my_collection",
+...     distance_metric="cosine",
+... )
+>>> print(config.store_provider)  # StoreType.Milvus
+```
 
 ## class openjiuwen.core.retrieval.common.config.EmbeddingConfig
 

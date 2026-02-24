@@ -15,6 +15,7 @@ from openjiuwen.core.retrieval import MilvusVectorStore, SearchResult, VectorSto
 def vector_store_config():
     """Create vector store configuration"""
     return VectorStoreConfig(
+        store_provider="milvus",
         collection_name="test_collection",
         distance_metric="cosine",
     )
