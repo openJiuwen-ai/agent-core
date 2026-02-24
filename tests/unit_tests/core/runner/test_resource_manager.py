@@ -9,6 +9,9 @@ from openjiuwen.core.runner.resources_manager.base import GLOBAL
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
+from openjiuwen.core.sys_operation import SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation.config import LocalWorkConfig
+from openjiuwen.core.sys_operation.base import OperationMode
 
 
 class TestResourceMgrAddMethodsValidation:
@@ -325,3 +328,111 @@ class TestResourceMgrToolTagIsolation:
         # Query with tag="agent_1" should only return wf_agent1
         found_list = await resource_mgr.get_workflow(tag="agent_1")
         assert len(found_list) == 1
+
+
+class TestResourceMgrGetSysOpToolCards:
+    """
+    Test get_sys_op_tool_cards method.
+    """
+
+    @pytest.fixture
+    def resource_mgr(self):
+        return ResourceMgr()
+
+    @pytest.fixture
+    def sys_operation_card(self):
+        card = SysOperationCard(
+            id="test_sys_op",
+            mode=OperationMode.LOCAL,
+            work_config=LocalWorkConfig(work_dir="/tmp/test")
+        )
+        return card
+
+    @staticmethod
+    def test_scenario1_single_tool_card(resource_mgr, sys_operation_card):
+        """Scenario 1: Get a single tool card"""
+        result = resource_mgr.add_sys_operation(sys_operation_card)
+        assert result.is_ok()
+
+        tool_card = resource_mgr.get_sys_op_tool_cards("test_sys_op", operation_name="fs", tool_name="read_file")
+
+        assert tool_card is not None
+        assert tool_card.name == "read_file"
+
+    @staticmethod
+    def test_scenario1_nonexistent_tool(resource_mgr, sys_operation_card):
+        """Scenario 1: Get a single tool card that doesn't exist"""
+        result = resource_mgr.add_sys_operation(sys_operation_card)
+        assert result.is_ok()
+
+        tool_card = resource_mgr.get_sys_op_tool_cards("test_sys_op", operation_name="fs", tool_name="nonexistent_tool")
+
+        assert tool_card is None
+
+    @staticmethod
+    def test_scenario2_multiple_tool_cards(resource_mgr, sys_operation_card):
+        """Scenario 2: Get multiple tool cards from the same operation"""
+        result = resource_mgr.add_sys_operation(sys_operation_card)
+        assert result.is_ok()
+
+        tool_cards = resource_mgr.get_sys_op_tool_cards("test_sys_op", operation_name="fs",
+                                                        tool_name=["read_file", "write_file"])
+
+        assert tool_cards is not None
+        assert len(tool_cards) == 2
+        tool_names = [card.name for card in tool_cards]
+        assert "read_file" in tool_names
+        assert "write_file" in tool_names
+
+    @staticmethod
+    def test_scenario3_all_tool_cards_from_single_operation(resource_mgr, sys_operation_card):
+        """Scenario 3: Get all tool cards from a single operation"""
+        result = resource_mgr.add_sys_operation(sys_operation_card)
+        assert result.is_ok()
+
+        tool_cards = resource_mgr.get_sys_op_tool_cards("test_sys_op", operation_name="fs")
+
+        assert tool_cards is not None
+        assert len(tool_cards) > 0
+        for card in tool_cards:
+            assert card.name is not None
+
+    @staticmethod
+    def test_scenario4_all_tool_cards_from_multiple_operations(resource_mgr, sys_operation_card):
+        """Scenario 4: Get all tool cards from multiple operations"""
+        result = resource_mgr.add_sys_operation(sys_operation_card)
+        assert result.is_ok()
+
+        tool_cards = resource_mgr.get_sys_op_tool_cards("test_sys_op", operation_name=["fs", "shell"])
+
+        assert tool_cards is not None
+        assert len(tool_cards) > 0
+
+    @staticmethod
+    def test_scenario5_all_tool_cards_from_all_operations(resource_mgr, sys_operation_card):
+        """Scenario 5: Get all tool cards from all operations"""
+        result = resource_mgr.add_sys_operation(sys_operation_card)
+        assert result.is_ok()
+
+        tool_cards = resource_mgr.get_sys_op_tool_cards("test_sys_op")
+
+        assert tool_cards is not None
+        assert len(tool_cards) > 0
+
+    @staticmethod
+    def test_nonexistent_sys_operation(resource_mgr):
+        """Test getting tool cards from a non-existent sys operation"""
+        tool_cards = resource_mgr.get_sys_op_tool_cards("nonexistent_sys_op")
+
+        assert tool_cards is None
+
+    @staticmethod
+    def test_error_operation_list_with_tool_name(resource_mgr, sys_operation_card):
+        """Test that error is raised when operation_name is a list and tool_name is provided"""
+        result = resource_mgr.add_sys_operation(sys_operation_card)
+        assert result.is_ok()
+
+        with pytest.raises(Exception) as err:
+            resource_mgr.get_sys_op_tool_cards("test_sys_op", operation_name=["fs", "shell"], tool_name="read_file")
+
+        assert "tool_name cannot be specified when operation_name is a list" in str(err.value)
