@@ -166,16 +166,12 @@ class Workflow:
                 comp_ability.append(ComponentAbility.STREAM)
             if stream_inputs_schema is not None:
                 comp_ability.append(ComponentAbility.TRANSFORM)
-                if isinstance(component, End):
-                    component.set_mix()
             if not comp_ability:
                 comp_ability = [ComponentAbility.STREAM]
         else:
             comp_ability = [ComponentAbility.INVOKE]
             if stream_inputs_schema is not None:
                 comp_ability.append(ComponentAbility.COLLECT)
-                if isinstance(component, End):
-                    component.set_mix()
         wait_for_all = True if ((ComponentAbility.COLLECT in comp_ability)
                                 or (ComponentAbility.TRANSFORM in comp_ability)) else False
         self._internal.add_workflow_comp(

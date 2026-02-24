@@ -65,6 +65,11 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 event_type=LogEventType.GRAPH_VERTEX_INIT,
                 **self._log_message)
             self._is_first_init = False
+        has_stream_inputs = self._has_stream_call and (
+                self._node_config and self._node_config.stream_io_configs and
+                self._node_config.stream_io_configs.inputs_schema is not None)
+        if has_stream_inputs and hasattr(self._executable, "set_mix"):
+            self._executable.set_mix()
         return True
 
     async def _run_executable(self, ability: ComponentAbility, is_subgraph: bool = False, config: Any = None,

@@ -912,3 +912,71 @@ async def test_auto_ability_with_condition_edge():
     assert result.result == {'output': {'result2': 1}}
     result = await flow.invoke(inputs={"user_input": {"x": 2}}, session=create_workflow_session())
     assert result.result == {'output': {'result': 3}}
+
+
+class MockLLMComponent(WorkflowComponent):
+    def __init__(self, output, stream_outputs):
+        self.output = output
+        self.stream_outputs = stream_outputs
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        for output in self.stream_outputs:
+            yield {"a": output}
+        await asyncio.sleep(2)
+
+
+async def test_stream_call_fast_than_call():
+    def create_workflow(conf):
+        wf = Workflow()
+        wf.set_start_comp("start", Start(), inputs_schema={"query": "${user.query}"})
+        wf.add_workflow_comp("llm", MockLLMComponent(output={},
+                                                     stream_outputs=['2019', '年', '，', 'Rivian', '在', '没有',
+                                                                     '一辆车',
+                                                                     '下线', '的', '情况', '下', '一年', '进行', '了',
+                                                                     '四轮', '融资']))
+        wf.set_end_comp("end", End(conf=conf), inputs_schema={"query": "${start.query}"},
+                        stream_inputs_schema={"a": "${llm.a}"}, response_mode="streaming")
+
+        wf.add_connection("start", "llm")
+        wf.add_stream_connection("llm", "end")
+        return wf
+
+    template_for_stream_data_source = {"response_template": "####这是 a={{a}}, #####"}
+    wf = create_workflow(template_for_stream_data_source)
+    chunks = []
+    expect_chunks = [OutputSchema(type='end node stream', index=0, payload={'response': '####这是 a='}),
+                     OutputSchema(type='end node stream', index=1, payload={'response': '2019'}),
+                     OutputSchema(type='end node stream', index=2, payload={'response': '年'}),
+                     OutputSchema(type='end node stream', index=3, payload={'response': '，'}),
+                     OutputSchema(type='end node stream', index=4, payload={'response': 'Rivian'}),
+                     OutputSchema(type='end node stream', index=5, payload={'response': '在'}),
+                     OutputSchema(type='end node stream', index=6, payload={'response': '没有'}),
+                     OutputSchema(type='end node stream', index=7, payload={'response': '一辆车'}),
+                     OutputSchema(type='end node stream', index=8, payload={'response': '下线'}),
+                     OutputSchema(type='end node stream', index=9, payload={'response': '的'}),
+                     OutputSchema(type='end node stream', index=10, payload={'response': '情况'}),
+                     OutputSchema(type='end node stream', index=11, payload={'response': '下'}),
+                     OutputSchema(type='end node stream', index=12, payload={'response': '一年'}),
+                     OutputSchema(type='end node stream', index=13, payload={'response': '进行'}),
+                     OutputSchema(type='end node stream', index=14, payload={'response': '了'}),
+                     OutputSchema(type='end node stream', index=15, payload={'response': '四轮'}),
+                     OutputSchema(type='end node stream', index=16, payload={'response': '融资'}),
+                     OutputSchema(type='end node stream', index=17, payload={'response': ', #####'})]
+    async for chunk in wf.stream(inputs={"user": {"query": "i am a girl"}}, session=create_workflow_session(),
+                                 stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert chunks == expect_chunks
+
+    template_for_batch_data_source = {"response_template": "####这是 a={{query}}, #####"}
+    wf2 = create_workflow(template_for_batch_data_source)
+    chunks = []
+    expect_chunks = [
+        OutputSchema(type='end node stream', index=0, payload={'response': '####这是 a='}),
+        OutputSchema(type='end node stream', index=1, payload={'response': 'i am a girl'}),
+        OutputSchema(type='end node stream', index=2, payload={'response': ', #####'})]
+    async for chunk in wf2.stream(inputs={"user": {"query": "i am a girl"}}, session=create_workflow_session(),
+                                  stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert chunks == expect_chunks
