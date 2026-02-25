@@ -39,7 +39,6 @@ from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
-
 class ReActAgentConfig(BaseModel):
     """ReActAgent Configuration Class
 
@@ -181,7 +180,6 @@ class ReActAgentConfig(BaseModel):
         )
         return self
 
-
     def configure_mem_scope(self, mem_scope_id: str) -> 'ReActAgentConfig':
         """Configure memory scope ID
 
@@ -201,7 +199,7 @@ class ReActAgentConfig(BaseModel):
         """Configure maximum iterations
 
         Args:
-            max_iterations: Maximum number of ReAct loop iterations
+            max_iterations: Maximum iterations of ReAct loop iterations
 
         Returns:
             self (supports chaining)
@@ -408,6 +406,38 @@ class ReActAgent(BaseAgent):
             self.ability_manager.remove(context_reloader.card.name)
         return context
 
+    async def _warn_missing_skill_read_file_tool(self) -> None:
+        """
+        Log a warning when skill prompt is enabled but the required read_file tool
+        is missing from ability_manager.
+        """
+        tool_infos = await self.ability_manager.list_tool_info()
+
+        has_read_file = False
+        existing_tool_names: List[str] = []
+
+        for t in tool_infos or []:
+            name = getattr(t, "name", None)
+            if isinstance(name, str) and name:
+                existing_tool_names.append(name)
+                if name == "read_file":
+                    has_read_file = True
+
+        if has_read_file:
+            return
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import build_error
+
+        err = build_error(
+            StatusCode.AGENT_TOOL_NOT_FOUND,
+            error_msg=(
+                "skill prompt requires tool 'read_file' but it is not found in ability_manager. "
+                f"existing_tools={sorted(set(existing_tool_names))}"
+            )
+        )
+        logger.warning(str(err))
+
     async def invoke(
             self,
             inputs: Any,
@@ -452,6 +482,7 @@ class ReActAgent(BaseAgent):
         ]
 
         if len(system_messages) > 0 and self._skill_util is not None and self._skill_util.has_skill():
+            await self._warn_missing_skill_read_file_tool()
             skill_prompt = self._skill_util.get_skill_prompt()
             last_msg = system_messages[-1]
             last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
