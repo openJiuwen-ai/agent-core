@@ -131,6 +131,8 @@ class LongTermMemory(metaclass=Singleton):
         if self.db_store:
             await create_tables(self.db_store)
 
+        self.set_config(MemoryEngineConfig())
+
     def set_config(self, config: MemoryEngineConfig):
         """
         Set configuration.
@@ -182,9 +184,11 @@ class LongTermMemory(metaclass=Singleton):
         )
         self.generator = Generator(data_id_generator=data_id_generator)
         # set init llm
-        llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
-                                                  model_client_config=config.default_model_client_cfg)
-        self._base_llm = (config.default_model_cfg.model_name, llm)
+        if config.default_model_cfg and config.default_model_client_cfg:
+            
+            llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
+                                                    model_client_config=config.default_model_client_cfg)
+            self._base_llm = (config.default_model_cfg.model_name, llm)
 
     async def set_scope_config(self, scope_id: str, memory_scope_config: MemoryScopeConfig) -> bool:
         """
