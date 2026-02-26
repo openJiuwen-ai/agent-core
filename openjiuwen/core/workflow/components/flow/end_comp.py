@@ -226,6 +226,10 @@ class End(WorkflowComponent):
                             component_type_str="End",
                             metadata={"error": str(e)}
                         )
+                        if not self._batch_template.is_rendered():
+                            answer = await self._batch_template.render(inputs, session)
+                            self._batch_template = None
+                            return {"response": answer}
                         return None
                 self._batch_template = None
                 return None
@@ -390,8 +394,13 @@ class TemplateBatchProcessor:
         self._template = template
         self._inputs = inputs if inputs is not None else {}
         self.condition = asyncio.Condition()
+        self._is_rendered = False
+
+    def is_rendered(self) -> bool:
+        return self._is_rendered
 
     async def render(self, inputs: dict, session: Session) -> str:
+        self._is_rendered = True
         if inputs is None:
             inputs = self._inputs
         else:

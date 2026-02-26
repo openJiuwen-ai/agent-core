@@ -22,7 +22,8 @@ from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import StreamMode, BaseStreamMode, OutputSchema
 from openjiuwen.core.workflow import Workflow, WorkflowOutput, WorkflowChunk
 from openjiuwen.core.workflow import ComponentAbility
-from tests.unit_tests.core.workflow.mock_nodes import ComputeComponent2, DualAbilityWithErrorComponent
+from tests.unit_tests.core.workflow.mock_nodes import (ComputeComponent2, DualAbilityWithErrorComponent,
+                                                       MockIntentNode, MockNodeWithAllAbility)
 
 pytestmark = pytest.mark.asyncio
 
@@ -980,3 +981,58 @@ async def test_stream_call_fast_than_call():
         chunks.append(chunk)
 
     assert chunks == expect_chunks
+
+
+def create_workflow_with_intent_node(mode, classification_id):
+    flow = Workflow()
+    flow.set_start_comp("start", Start(), inputs_schema={"query": "${query}"})
+    intent_component = MockIntentNode(classification_id=classification_id)
+    intent_component.add_branch("${intent.classification_id} == 0", ["node1"])
+    intent_component.add_branch("${intent.classification_id} == 1", ["node2"])
+
+    flow.add_workflow_comp("intent", intent_component, inputs_schema={"query": "${start.query}"})
+
+    flow.add_workflow_comp("node1", MockNodeWithAllAbility(), inputs_schema={"data": "${intent}"})
+    flow.add_workflow_comp("node2", MockNodeWithAllAbility(), inputs_schema={"value": "${intent.classification_id}"},
+                           comp_ability=[ComponentAbility.STREAM])
+    flow.add_workflow_comp("node3", MockNodeWithAllAbility(), stream_inputs_schema={"data3": "${node2.value}"})
+
+    flow.set_end_comp("end", End({"response_template": "输出:{{end_input}} 输出2:{{end_input2}}"}),
+                      response_mode=None,
+                      inputs_schema={"end_input": "${node1}"},
+                      stream_inputs_schema={"end_input2": "${node3}"})
+
+    flow.add_connection("start", "intent")
+
+    if mode == "node1":
+        flow.add_connection("node1", "end")
+
+    elif mode == "node2":
+        flow.add_stream_connection("node2", "node3")
+        flow.add_stream_connection("node3", "end")
+
+    else:
+        flow.add_connection("node1", "end")
+        flow.add_stream_connection("node2", "node3")
+        flow.add_stream_connection("node3", "end")
+
+    return flow
+
+
+async def test_workflow_with_intent_node():
+    flow = create_workflow_with_intent_node("node1", classification_id=0)
+    workflow_output = await flow.invoke({"query": "旅游"}, session=create_workflow_session())
+    assert workflow_output.result == {'response': "输出:{'data': {'classification_id': 0}} 输出2:"}
+
+    flow = create_workflow_with_intent_node("node2", classification_id=1)
+    workflow_output = await flow.invoke({"query": "旅游2"}, session=create_workflow_session())
+    assert workflow_output.result == {
+        'response': "输出: 输出2:{'data3': 0}{'data3': 1}{'data3': 2}{'data3': 3}{'data3': 4}"}
+
+    flow = create_workflow_with_intent_node("all", classification_id=0)
+    workflow_output = await flow.invoke({"query": "旅游"}, session=create_workflow_session())
+    assert workflow_output.result is None
+
+    flow = create_workflow_with_intent_node("all", classification_id=1)
+    workflow_output = await flow.invoke({"query": "旅游2"}, session=create_workflow_session())
+    assert workflow_output.result is None
