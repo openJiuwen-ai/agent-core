@@ -19,27 +19,36 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 
 DEFAULT_COMPRESSION_PROMPT: str = """
 You are a Context-Refinement Assistant.
-Your sole task: compress the conversation history below into **≤ 500 tokens** while keeping every fact, decision, constraint, and key value needed for future replies.
+Your task: compress the following message(s) into **≤ 30% of original length** while preserving all essential facts, decisions, constraints, and tool execution results needed for future replies.
 
 ---
 
 📌 Input Format Explanation:
 Each message follows the format: "role:<role_type>, content:<actual_content>"
-- role=assistant: The actual content is the AI's response/answer
-- role=tool: The actual content is the result of a tool execution
+- role=assistant: The AI's response/answer
+- role=tool: The result of a tool execution
 
 Your task is to:
 1. Identify the actual content within each message (ignore the "role:" prefix)
-2. Compress and summarize the actual content only
+2. Compress and summarize the content(s) only
+3. For tool messages: Explicitly state what tool was called and what result was obtained
 
 ---
 
 📌 Compression Rules (mandatory):
 - Use natural language; preserve business data structures (categories, differences, features)
-- Keep **all task-relevant specific points** 
-- Do not omit any content that answers sub-questions
-- For assistant messages: Preserve the key information, conclusions, decisions, and answers
-- For tool messages: Preserve the tool name, input parameters, and the result/output
+- Keep **all task-relevant specific points** (requirements, constraints, parameters, decisions)
+- For tool calls: MUST preserve the tool name, input parameters, and the result/output
+- For multiple messages: Maintain causal relationships and chronological logic
+- Preserve any numerical values, IDs, configuration parameters, and business rules
+
+---
+
+📌 Output Requirements:
+- Preserve key information, conclusions, decisions, and answers
+- For tool executions: Always include "Tool: <tool_name> → Result: <result_summary>"
+- If single message: Preserve key information, conclusions, and specific details
+- If multiple messages: Summarize the overall context, main decisions made, and any constraints established
 
 ---
 
@@ -130,7 +139,7 @@ class CurrentRoundCompressor(ContextProcessor):
         event = ContextEvent(event_type=self.processor_type())
         if self._single_multi_config:
             compressed_context = await self.multi_compress(
-                messages,
+                context_messages,
                 last_user_idx,
                 end_idx,
                 context
@@ -144,7 +153,7 @@ class CurrentRoundCompressor(ContextProcessor):
         else:
             try:
                 compressed_context = await self.single_compress(
-                    messages,
+                    context_messages,
                     last_user_idx,
                     end_idx,
                     context
@@ -155,9 +164,12 @@ class CurrentRoundCompressor(ContextProcessor):
                     error_msg=f"compress messages failed",
                     cause=e
                 ) from e
-            event.messages_to_modify += list(range(last_user_idx, end_idx))
-            context.set_messages(compressed_context)
-            return None, []
+            if compressed_context:
+                event.messages_to_modify += list(range(last_user_idx, end_idx))
+                context.set_messages(compressed_context)
+                return event, []
+            else:
+                return None, messages_to_add
 
 
     async def trigger_add_messages(
@@ -188,7 +200,7 @@ class CurrentRoundCompressor(ContextProcessor):
 
     async def get_compress_idx(self, messages: List[BaseMessage]) -> int:
         compressed_idx = -1
-        for i in range(len(messages) - 1, 0, -1):
+        for i in range(len(messages) - 1, -1, -1):
             if isinstance(messages[i], UserMessage):
                 compressed_idx = i
                 break
@@ -204,7 +216,7 @@ class CurrentRoundCompressor(ContextProcessor):
             else len(messages) - self._messages_to_keep
         )
 
-        if compressed_idx > keep_index:
+        if compressed_idx >= keep_index:
             return -1
 
         return compressed_idx
@@ -219,12 +231,11 @@ class CurrentRoundCompressor(ContextProcessor):
         start_idx = last_user_idx + 1
         end_idx = end_idx
         if end_idx >= start_idx:
-            if isinstance(context_messages[end_idx], AssistantMessage):
-                if context_messages[end_idx].tool_calls:
-                    end_idx = end_idx - 1
+            if isinstance(context_messages[end_idx], AssistantMessage) and context_messages[end_idx].tool_calls:
+                end_idx = end_idx - 1
             if end_idx < start_idx:
                 return None
-        messages_to_compress = context_messages[start_idx:end_idx]
+        messages_to_compress = context_messages[start_idx:end_idx + 1]
         compressed_context = await self.compress(messages_to_compress, context)
         if compressed_context:
             context_messages = ContextUtils.replace_messages(
@@ -248,7 +259,8 @@ class CurrentRoundCompressor(ContextProcessor):
         token_counter = context.token_counter()
         for idx in range(start_idx, end_idx + 1):
             msg = context_messages[idx]
-
+            if isinstance(msg, AssistantMessage) and msg.tool_calls:
+                continue
             context_token = token_counter.count_messages([msg])
             if context_token > self._large_message_threshold:
                 compressed_context = await self.compress([msg], context)

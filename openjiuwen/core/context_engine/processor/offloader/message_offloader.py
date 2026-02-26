@@ -11,6 +11,7 @@ from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import BaseMessage
 
 
@@ -138,6 +139,7 @@ class MessageOffloader(ContextProcessor):
             if (
                 msg.role not in self.config.offload_message_type
                 or len(msg.content) <= self.config.large_message_threshold
+                or isinstance(msg, OffloadMixin)
             ):
                 continue
             offload_msg = await self._offload_message(msg, context)
