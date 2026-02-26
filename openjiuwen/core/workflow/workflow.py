@@ -613,6 +613,8 @@ class Workflow:
                                                callback_manager=session.get_callback_manager())
             workflow_session.config().set_envs(session.get_envs())
             self._internal.auto_complete_abilities()
+            workflow_session.config().add_workflow_config(workflow_id=self._card.id,
+                                                          workflow_config=self._internal.config())
             mq_manager = ActorManager(self._internal.config().spec, self._internal.stream_actor(), sub_graph=False,
                                       session=workflow_session)
             workflow_session.set_actor_manager(mq_manager)
@@ -633,6 +635,8 @@ class Workflow:
                 workflow_id=self._card.id,
                 actor_manager=actor_manager
             )
+            sub_workflow_session.config().add_workflow_config(workflow_id=self._card.id,
+                                                              workflow_config=self._internal.config())
             return sub_workflow_session
 
     def _validate_inputs(self, inputs, **kwargs):

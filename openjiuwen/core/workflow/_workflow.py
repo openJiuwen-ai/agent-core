@@ -194,7 +194,6 @@ class BaseWorkflow:
     def compile(self, session: BaseSession, context: ModelContext = None) -> ExecutableGraph:
         if isinstance(session, WorkflowSession):
             session.set_workflow_id(self._workflow_config.card.id)
-        session.config().add_workflow_config(self._workflow_config.card.id, self._workflow_config)
         if isinstance(session, SubWorkflowSession):
             main_workflow_config = session.config().get_workflow_config(
                 session.main_workflow_id())

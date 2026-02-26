@@ -93,7 +93,7 @@ class TestTraceWorkflow:
             await inner_test(item)
 
     async def test_stream_workflow_with_trace(self):
-        workflow = Workflow(card=WorkflowCard(id="test"))
+        workflow = Workflow(card=WorkflowCard(id="test", version="1.0", name="test workflow"))
         workflow.set_start_comp("start", Start())
         workflow.add_workflow_comp("producer", Producer(), inputs_schema={"array": "${inputs}"})
         workflow.set_end_comp("end", End(), stream_inputs_schema={"output": "${producer.output}"},
@@ -101,7 +101,8 @@ class TestTraceWorkflow:
         workflow.add_connection("start", "producer")
         workflow.add_stream_connection("producer", "end")
         expect_chunks = [{'invokeId': 'test', 'status': 'start', 'inputs': {'inputs': [1, 2, 3]}, 'streamInputs': None,
-                          'outputs': None, 'streamOutputs': [], 'workflowId': 'test', 'componentId': None},
+                          'outputs': None, 'streamOutputs': [], 'workflowId': 'test', 'componentId': None,
+                          'workflowVersion': '1.0', 'workflowName': 'test workflow'},
                          {'invokeId': 'start', 'status': 'start', 'inputs': None, 'streamInputs': None, 'outputs': None,
                           'streamOutputs': None, 'workflowId': 'test', 'componentId': 'start'},
                          {'invokeId': 'start', 'status': 'finish', 'inputs': None, 'streamInputs': None,
@@ -124,7 +125,8 @@ class TestTraceWorkflow:
                               {'type': 'end node stream', 'index': 2, 'payload': {'output': {'output': 3}}}],
                           'workflowId': 'test', 'componentId': 'end'},
                          {'invokeId': 'test', 'status': 'finish', 'inputs': {'inputs': [1, 2, 3]}, 'streamInputs': None,
-                          'outputs': None, 'streamOutputs': [], 'workflowId': 'test', 'componentId': None}]
+                          'outputs': None, 'streamOutputs': [], 'workflowId': 'test', 'componentId': None,
+                          'workflowVersion': '1.0', 'workflowName': 'test workflow'}]
 
         chunks = []
         async for chunk in workflow.stream(inputs={"inputs": [1, 2, 3]}, session=create_workflow_session(),
@@ -133,6 +135,12 @@ class TestTraceWorkflow:
             selected_keys = ["invokeId", "status", 'inputs', 'streamInputs', "outputs", "streamOutputs", "workflowId",
                              "componentId"]
             payload = {k: payload.get(k) for k in selected_keys}
+
+            workflow_card_keys = ["workflowVersion", "workflowName"]
+            for key in workflow_card_keys:
+                if key in chunk.payload:
+                    payload[key] = chunk.payload.get(key)
+
             chunks.append(payload)
         assert chunks == expect_chunks
 
