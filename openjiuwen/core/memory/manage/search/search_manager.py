@@ -143,7 +143,7 @@ class SearchManager:
                                                                             scope_id=scope_id, name=var_name)
         if res is None:
             return None
-        return res[var_name]
+        return res[var_name] if var_name in res else None
 
     async def get_all_user_variable(self, user_id: str, scope_id: str) -> dict[str, Any]:
         if MemoryType.VARIABLE.value not in self.managers:
