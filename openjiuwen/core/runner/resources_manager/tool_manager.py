@@ -15,7 +15,8 @@ from openjiuwen.core.foundation.tool import (
     McpClient,
     SseClient,
     StdioClient,
-    PlaywrightClient
+    PlaywrightClient,
+    StreamableHttpClient,
 )
 
 
@@ -112,6 +113,9 @@ class ToolMgr:
             return StdioClient(config.server_path, config.server_name, config.params)
         elif config.client_type == "playwright":
             return PlaywrightClient(config.server_path, config.server_name)
+        elif config.client_type == "streamable-http":
+            return StreamableHttpClient(config.server_path, config.server_name,
+                                        config.auth_headers, config.auth_query_params)
         elif config.client_type == "openapi":
             from openjiuwen.core.foundation.tool.mcp.client import OpenApiClient
             return OpenApiClient(config.server_path, config.server_name)
