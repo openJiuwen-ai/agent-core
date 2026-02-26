@@ -80,7 +80,8 @@ class TraceAgentHandler(TraceBaseHandler):
         return TracerHandlerName.TRACE_AGENT.value
 
     def _format_data(self, span: TraceAgentSpan) -> dict:
-        span.status = self._get_node_status(span)
+        if span.status != NodeStatus.INTERRUPTED.value:
+            span.status = self._get_node_status(span)
         return {"type": self.event_name(), "payload": span.model_dump(by_alias=True)}
 
     def _get_tracer_agent_span(self, invoke_id: str) -> TraceAgentSpan:
@@ -335,7 +336,7 @@ class TraceWorkflowHandler(TraceBaseHandler):
             if isinstance(exception, BaseError):
                 span.error = {"error_code": exception.code, "message": exception.message}
             elif isinstance(exception, GraphInterrupt):
-                return
+                span.status = NodeStatus.INTERRUPTED.value
             else:
                 span.error = {"error_code": StatusCode.WORKFLOW_EXECUTION_ERROR.code,
                               "message": StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(reason=str(exception))}
