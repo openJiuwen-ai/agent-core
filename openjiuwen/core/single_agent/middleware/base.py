@@ -11,7 +11,9 @@ from typing import (
     Awaitable,
     TYPE_CHECKING,
 )
-from pydantic import BaseModel
+
+from openjiuwen.core.context_engine import ModelContext
+from openjiuwen.core.session.agent import Session
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent import BaseAgent
@@ -64,7 +66,9 @@ class AgentCallbackContext:
     agent: 'BaseAgent'
     event: AgentCallbackEvent
     inputs: Any = None
-    iteration: int = 0
+    config: Any = None
+    session: Session = None
+    context: ModelContext = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
 

@@ -3,7 +3,7 @@
 """AgentCallbackManager Class Definition
 """
 import asyncio
-from typing import Dict, List, Tuple, Optional
+from typing import Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent, AgentCallback, AgentMiddleware, \
@@ -15,14 +15,10 @@ class AgentCallbackManager:
 
     Supports both function-style and middleware-style callbacks with priority ordering.
     """
+    def __init__(self, agent_id):
+        self.agent_id = agent_id
 
-    def __init__(self):
-        self._callbacks: Dict[AgentCallbackEvent, List[Tuple[int, AgentCallback]]] = {
-            event: [] for event in AgentCallbackEvent
-        }
-        self._middlewares: List[AgentMiddleware] = []
-
-    def register_callback(
+    async def register_callback(
         self,
         event: AgentCallbackEvent,
         callback: AnyAgentCallback,
@@ -46,12 +42,12 @@ class AgentCallbackManager:
                 original(ctx)
             callback = async_wrapper
 
-        self._callbacks[event].append((priority, callback))
-        # Sort by priority
-        self._callbacks[event].sort(key=lambda x: x[0])
+        agent_event = self._get_agent_event(event)
+        from openjiuwen.core.runner import Runner
+        await Runner.callback_framework.register(agent_event, callback, priority=priority)
         return self
 
-    def register_middleware(self, middleware: AgentMiddleware) -> 'AgentCallbackManager':
+    async def register_middleware(self, middleware: AgentMiddleware) -> 'AgentCallbackManager':
         """Register a middleware instance.
 
         Args:
@@ -60,15 +56,13 @@ class AgentCallbackManager:
         Returns:
             self for chaining
         """
-        self._middlewares.append(middleware)
-
         # Extract and register hooks from plugin
         for event, callback in middleware.get_callbacks().items():
-            self.register_callback(event, callback, middleware.priority)
+            await self.register_callback(event, callback, middleware.priority)
 
         return self
 
-    def unregister(self, event: AgentCallbackEvent, callback: AnyAgentCallback) -> bool:
+    async def unregister(self, event: AgentCallbackEvent, callback: AnyAgentCallback) -> None:
         """Unregister a hook callback.
 
         Args:
@@ -78,24 +72,24 @@ class AgentCallbackManager:
         Returns:
             True if callback was found and removed
         """
-        original_len = len(self._callbacks[event])
-        self._callbacks[event] = [
-            (p, cb) for p, cb in self._callbacks[event]
-            if cb != callback
-        ]
-        return len(self._callbacks[event]) < original_len
+        agent_event = self._get_agent_event(event)
+        from openjiuwen.core.runner import Runner
+        await Runner.callback_framework.unregister(agent_event, callback)
 
-    def clear(self, event: Optional[AgentCallbackEvent] = None) -> None:
+    async def clear(self, event: Optional[AgentCallbackEvent] = None) -> None:
         """Clear hooks.
 
         Args:
             event: Specific event to clear, or None to clear all
         """
+        from openjiuwen.core.runner import Runner
         if event:
-            self._callbacks[event] = []
+            agent_event = self._get_agent_event(event)
+            await Runner.callback_framework.unregister_event(agent_event)
         else:
             for e in AgentCallbackEvent:
-                self._callbacks[e] = []
+                agent_event = self._get_agent_event(e)
+                await Runner.callback_framework.unregister_event(agent_event)
 
     def has_hooks(self, event: AgentCallbackEvent) -> bool:
         """Check if any hooks are registered for an event.
@@ -106,7 +100,9 @@ class AgentCallbackManager:
         Returns:
             True if hooks are registered
         """
-        return len(self._callbacks[event]) > 0
+        agent_event = self._get_agent_event(event)
+        from openjiuwen.core.runner import Runner
+        return len(Runner.callback_framework.list_callbacks(agent_event)) > 0
 
     async def execute(
         self,
@@ -122,10 +118,18 @@ class AgentCallbackManager:
         Returns:
             The (potentially modified) context
         """
-        for priority, callback in self._callbacks[event]:
-            try:
-                await callback(ctx)
-            except Exception as e:
-                logger.error(f"Hook error for {event.value}: {e}", exc_info=True)
-                raise
+        from openjiuwen.core.runner import Runner
+        agent_event = self._get_agent_event(event)
+        await Runner.callback_framework.trigger(agent_event, ctx)
         return ctx
+
+    def _get_agent_event(self, event: AgentCallbackEvent) -> str:
+        """Unified generation of event name with agent_id prefix to avoid duplicate name
+
+        Args:
+            event: Original callback event
+
+        Returns:
+            Event name string prefixed with agent_id
+        """
+        return f"{self.agent_id}_{event}"

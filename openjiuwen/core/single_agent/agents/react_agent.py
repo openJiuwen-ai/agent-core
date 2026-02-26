@@ -464,11 +464,17 @@ class ReActAgent(BaseAgent):
         else:
             raise ValueError("Input must be dict with 'query' or str")
 
-        # Hook: before invoke
-        await self._execute_callbacks(AgentCallbackEvent.BEFORE_INVOKE, inputs=inputs)
-
         # Get or create model context
         context = await self._init_context(session)
+
+        # Hook: before invoke
+        await self._execute_callbacks(
+            event=AgentCallbackEvent.BEFORE_INVOKE,
+            inputs=inputs,
+            config=self._config,
+            session=session,
+            context=context
+        )
 
         # Add user message to context
         await context.add_messages(UserMessage(content=user_input))
@@ -508,8 +514,9 @@ class ReActAgent(BaseAgent):
             await self._execute_callbacks(
                 AgentCallbackEvent.BEFORE_MODEL_CALL,
                 inputs=inputs,
-                iteration=iteration + 1,
-                messages=context_window.get_messages()
+                config=self._config,
+                session=session,
+                context=context
             )
 
             # Call LLM with messages and tools from context window
@@ -518,20 +525,21 @@ class ReActAgent(BaseAgent):
                 context_window.get_tools() or None
             )
 
-            # Hook: after model call
-            await self._execute_callbacks(
-                AgentCallbackEvent.AFTER_MODEL_CALL,
-                inputs=inputs,
-                iteration=iteration + 1,
-                response=ai_message
-            )
-
             # Add AI message to context
             ai_msg_for_context = AssistantMessage(
                 content=ai_message.content,
                 tool_calls=ai_message.tool_calls
             )
             await context.add_messages(ai_msg_for_context)
+
+            # Hook: after model call
+            await self._execute_callbacks(
+                AgentCallbackEvent.AFTER_MODEL_CALL,
+                inputs=inputs,
+                config=self._config,
+                session=session,
+                context=context
+            )
 
             # Check for tool calls
             if ai_message.tool_calls:
@@ -546,9 +554,9 @@ class ReActAgent(BaseAgent):
                     await self._execute_callbacks(
                         AgentCallbackEvent.BEFORE_TOOL_CALL,
                         inputs=inputs,
-                        iteration=iteration + 1,
-                        tool_name=tool_call.name,
-                        tool_args=tool_call.arguments
+                        config=self._config,
+                        session=session,
+                        context=context
                     )
 
                 # Execute tools using _execute_ability (supports parallel)
@@ -562,14 +570,12 @@ class ReActAgent(BaseAgent):
                     await context.add_messages(tool_msg)
 
                     # Hook: after tool call
-                    tool_call = ai_message.tool_calls[idx]
                     await self._execute_callbacks(
                         AgentCallbackEvent.AFTER_TOOL_CALL,
                         inputs=inputs,
-                        iteration=iteration + 1,
-                        tool_name=tool_call.name,
-                        tool_args=tool_call.arguments,
-                        tool_result=tool_result
+                        config=self._config,
+                        session=session,
+                        context=context
                     )
             else:
                 # No tool calls, return AI response
@@ -582,7 +588,9 @@ class ReActAgent(BaseAgent):
                 await self._execute_callbacks(
                     AgentCallbackEvent.AFTER_INVOKE,
                     inputs=inputs,
-                    result=result
+                    config=self._config,
+                    session=session,
+                    context=context,
                 )
                 return result
 
@@ -596,6 +604,9 @@ class ReActAgent(BaseAgent):
         await self._execute_callbacks(
             AgentCallbackEvent.AFTER_INVOKE,
             inputs=inputs,
+            config=self._config,
+            session=session,
+            context=context,
             result=result
         )
         return result

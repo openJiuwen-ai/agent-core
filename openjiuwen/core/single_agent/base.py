@@ -26,7 +26,7 @@ from typing import (
 )
 from pydantic import BaseModel
 
-from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine import ContextEngine, ModelContext
 from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.controller.base import Controller
@@ -74,7 +74,7 @@ class BaseAgent(ABC):
         """
         self.card = card
         self._ability_manager = AbilityManager()
-        self._agent_callback_manager = AgentCallbackManager()
+        self._agent_callback_manager = AgentCallbackManager(card.id)
         self._skill_util = None
         self.lazy_init_skill()
 
@@ -129,7 +129,7 @@ class BaseAgent(ABC):
         self.lazy_init_skill()
         await self._skill_util.register_remote_skills(skills_dir, github_tree, token=token)
 
-    def register_callback(
+    async def register_callback(
         self,
         event: AgentCallbackEvent,
         callback: AnyAgentCallback,
@@ -145,10 +145,10 @@ class BaseAgent(ABC):
         Returns:
             self for chaining
         """
-        self._agent_callback_manager.register_callback(event, callback, priority)
+        await self._agent_callback_manager.register_callback(event, callback, priority)
         return self
 
-    def register_middleware(self, middleware: AgentMiddleware) -> 'BaseAgent':
+    async def register_middleware(self, middleware: AgentMiddleware) -> 'BaseAgent':
         """Register a middleware instance.
 
         Args:
@@ -157,14 +157,16 @@ class BaseAgent(ABC):
         Returns:
             self for chaining
         """
-        self._agent_callback_manager.register_middleware(middleware)
+        await self._agent_callback_manager.register_middleware(middleware)
         return self
 
     async def _execute_callbacks(
         self,
         event: AgentCallbackEvent,
         inputs: Any = None,
-        iteration: int = 0,
+        config: Any = None,
+        session: Session = None,
+        context: ModelContext = None,
         **extra
     ) -> AgentCallbackContext:
         """Execute callbacks for a given event.
@@ -185,7 +187,9 @@ class BaseAgent(ABC):
             agent=self,
             event=event,
             inputs=inputs,
-            iteration=iteration,
+            config=config,
+            session=session,
+            context=context,
             extra=extra
         )
         return await self._agent_callback_manager.execute(event, ctx)
