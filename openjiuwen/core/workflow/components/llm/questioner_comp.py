@@ -29,12 +29,13 @@ END_STR = "end"
 USER_INTERACT_STR = "user_interact"
 
 SUB_PLACEHOLDER_PATTERN = r'\{\{([^}]*)\}\}'
-CONTINUE_ASK_STATEMENT = "请您提供{non_extracted_key_fields_names}相关的信息"
+CONTINUE_ASK_STATEMENT_ZH = "请您提供{non_extracted_key_fields_names}相关的信息"
+CONTINUE_ASK_STATEMENT_EN = "Please provide information related to: {non_extracted_key_fields_names}"
 WORKFLOW_CHAT_HISTORY = "workflow_chat_history"
 TEMPLATE_NAME = "questioner"
 QUESTIONER_STATE_KEY = "questioner_state"
 
-QUESTIONER_SYSTEM_TEMPLATE = """\
+QUESTIONER_SYSTEM_TEMPLATE_ZH = """\
 你是一个信息收集助手，你需要根据指定的参数收集用户的信息，然后提交到系统。
 请注意：不要使用任何工具、不用理会问题的具体含义，并保证你的输出仅有 JSON 格式的结果数据。
 请严格遵循如下规则：
@@ -53,18 +54,50 @@ QUESTIONER_SYSTEM_TEMPLATE = """\
 {{example}}
 """
 
-QUESTIONER_USER_TEMPLATE = """\
+QUESTIONER_USER_TEMPLATE_ZH = """\
 对话历史
 {{dialogue_history}}
 
 请充分考虑以上对话历史及用户输入，正确提取最符合约束要求的 JSON 格式参数。
 """
 
+QUESTIONER_SYSTEM_TEMPLATE_EN = """\
+You are an information collection assistant. You need to collect user information based on the specified parameters and submit it to the system.
+Please note: Do not use any tools, do not consider the specific meaning of the questions, and ensure your output contains only JSON-formatted result data.
+Strictly follow these rules:
+  1. Let's think step by step.
+  2. Parameters not mentioned in user input should be extracted as null, and directly ask the user for parameters not explicitly provided.
+  3. Extract {{required_name}} from the conversation history and current user input. Do not ask for any other information.
+  4. After parameter collection is complete, display the collected information in JSON format.
 
-def questioner_default_template():
+## Specified Parameters
+{{required_params_list}}
+
+## Constraints
+{{extra_info}}
+
+## Examples
+{{example}}
+"""
+
+QUESTIONER_USER_TEMPLATE_EN = """\
+Conversation History
+{{dialogue_history}}
+
+Please fully consider the above conversation history and user input, and correctly extract the JSON-formatted parameters that best meet the constraints.
+"""
+
+
+def questioner_default_template(accept_language: Literal['zh', 'en'] = 'zh'):
+    """Return prompt template based on accept_language."""
+    if accept_language == 'en':
+        return [
+            SystemMessage(content=QUESTIONER_SYSTEM_TEMPLATE_EN),
+            UserMessage(content=QUESTIONER_USER_TEMPLATE_EN),
+        ]
     return [
-        SystemMessage(content=QUESTIONER_SYSTEM_TEMPLATE),
-        UserMessage(content=QUESTIONER_USER_TEMPLATE),
+        SystemMessage(content=QUESTIONER_SYSTEM_TEMPLATE_ZH),
+        UserMessage(content=QUESTIONER_USER_TEMPLATE_ZH),
     ]
 
 
@@ -107,11 +140,16 @@ class QuestionerConfig(ComponentConfig):
     chat_history_max_rounds: int = field(default=5)
     extra_prompt_for_fields_extraction: str = field(default="")
     example_content: str = field(default="")
+    accept_language: Literal['zh', 'en'] = field(default="zh")
 
 
 @dataclass
 class QuestionerDefaultConfig:
-    prompt_template: List[BaseMessage] = field(default_factory=questioner_default_template)
+    prompt_template: List[BaseMessage] = field(default_factory=list)
+
+    @classmethod
+    def from_language(cls, accept_language: Literal['zh', 'en'] = 'zh') -> 'QuestionerDefaultConfig':
+        return cls(prompt_template=questioner_default_template(accept_language))
 
 
 class QuestionerInput(BaseModel):
@@ -231,12 +269,16 @@ class QuestionerUtils:
         return chat_messages[-rounds * 2 - 1:]
 
     @staticmethod
-    def format_continue_ask_question(non_extracted_key_fields: List[FieldInfo]):
+    def format_continue_ask_question(
+        non_extracted_key_fields: List[FieldInfo],
+        accept_language: Literal['zh', 'en'] = 'zh'
+    ):
         non_extracted_key_fields_names = list()
         for param in non_extracted_key_fields:
             non_extracted_key_fields_names.append(param.cn_field_name or param.description)
         result = ", ".join(non_extracted_key_fields_names)
-        return CONTINUE_ASK_STATEMENT.format(non_extracted_key_fields_names=result)
+        template = CONTINUE_ASK_STATEMENT_EN if accept_language == 'en' else CONTINUE_ASK_STATEMENT_ZH
+        return template.format(non_extracted_key_fields_names=result)
 
     @staticmethod
     def format_questioner_output(output_cache: OutputCache) -> Dict:
@@ -480,11 +522,15 @@ class QuestionerDirectReplyHandler:
             params_list.append(f"{param.field_name}: {param.description}")
             if param.required:
                 required_name_list.append(param.cn_field_name or param.description)
-        required_name_str = "、".join(required_name_list) + f"{len(required_name_list)}个必要信息"
-        all_param_str = "\n".join(params_list)
-        dialogue_history_str = "\n".join([f"{_.role}：{_.content}" for _ in chat_history])
+        lang = self._config.accept_language
+        if lang == 'en':
+            required_name_str = ", ".join(required_name_list) + f" ({len(required_name_list)} required field(s))"
+            dialogue_history_str = "\n".join([f"{_.role}: {_.content}" for _ in chat_history])
+        else:
+            required_name_str = "、".join(required_name_list) + f"{len(required_name_list)}个必要信息"
+            dialogue_history_str = "\n".join([f"{_.role}：{_.content}" for _ in chat_history])
 
-        return dict(required_name=required_name_str, required_params_list=all_param_str,
+        return dict(required_name=required_name_str, required_params_list="\n".join(params_list),
                     extra_info=self._config.extra_prompt_for_fields_extraction, example=self._config.example_content,
                     dialogue_history=dialogue_history_str)
 
@@ -620,7 +666,9 @@ class QuestionerDirectReplyHandler:
         non_extracted_key_fields: List[FieldInfo] = self._filter_non_extracted_key_fields()
         if non_extracted_key_fields:
             if not self._exceed_max_response():
-                output.question = QuestionerUtils.format_continue_ask_question(non_extracted_key_fields)
+                output.question = QuestionerUtils.format_continue_ask_question(
+                    non_extracted_key_fields, self._config.accept_language
+                )
                 is_continue_ask = True
             else:
                 raise build_error(
@@ -656,7 +704,7 @@ class QuestionerExecutable(ComponentExecutable):
         super().__init__()
         self._validate_config(config)
         self._config = config
-        self._default_config = QuestionerDefaultConfig()
+        self._default_config = QuestionerDefaultConfig.from_language(config.accept_language)
         self._llm: Union[Model, None] = None
         self._initialized: bool = False
         self._prompt: PromptTemplate = self._init_prompt()

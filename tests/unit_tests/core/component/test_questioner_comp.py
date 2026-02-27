@@ -261,6 +261,101 @@ class TestQuestionComp:
                                                                        tracer_chunks))
         print(tracer_chunks)
 
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
+    def test_questioner_accept_language_zh(self, mock_get_model, mock_init_prompt, mock_llm_inputs, mock_extraction):
+        """accept_language='zh' 时，LLM 返回中文 JSON 应正确提取"""
+        mock_get_model.return_value = MockLLMModel()
+        mock_init_prompt.return_value = PromptTemplate(name="test", content=[])
+        mock_llm_inputs.return_value = []
+        mock_extraction.return_value = dict(location="北京", date="2025-02-26")
+
+        context = Session(session_id="test")
+        flow = Workflow()
+        key_fields = [
+            FieldInfo(field_name="location", description="地点", required=True),
+            FieldInfo(field_name="date", description="日期", required=True, default_value="today"),
+        ]
+        questioner_config = QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=key_fields,
+            with_chat_history=False,
+            accept_language="zh",
+        )
+        questioner_component = QuestionerComponent(questioner_comp_config=questioner_config)
+        flow.set_start_comp("s", Start(), inputs_schema={"query": "${query}"})
+        flow.set_end_comp("e", End({"responseTemplate": "{{location}} | {{date}}"}),
+                          inputs_schema={"location": "${questioner.location}", "date": "${questioner.date}"})
+        flow.add_workflow_comp("questioner", questioner_component, inputs_schema={"query": "${s.query}"})
+        flow.add_connection("s", "questioner")
+        flow.add_connection("questioner", "e")
+
+        result = self.invoke_workflow({"query": "查询北京的天气"}, context, flow)
+        assert result.result.get("response") is not None
+        assert "北京" in result.result["response"]
+        assert "2025-02-26" in result.result["response"]
+
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp."
+           "QuestionerDirectReplyHandler._invoke_llm_for_extraction")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerDirectReplyHandler._build_llm_inputs")
+    @patch("openjiuwen.core.workflow.components.llm.questioner_comp.QuestionerExecutable._init_prompt")
+    @patch("openjiuwen.core.foundation.llm.model.Model")
+    def test_questioner_accept_language_en(self, mock_get_model, mock_init_prompt, mock_llm_inputs, mock_extraction):
+        """accept_language='en' 时，LLM 返回英文 JSON 应正确提取"""
+        mock_get_model.return_value = MockLLMModel()
+        mock_init_prompt.return_value = PromptTemplate(name="test", content=[])
+        mock_llm_inputs.return_value = []
+        mock_extraction.return_value = dict(location="Shanghai", date="2025-02-26")
+
+        context = Session(session_id="test")
+        flow = Workflow()
+        key_fields = [
+            FieldInfo(field_name="location", description="Location", required=True),
+            FieldInfo(field_name="date", description="Date", required=True, default_value="today"),
+        ]
+        questioner_config = QuestionerConfig(
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            question_content="",
+            extract_fields_from_response=True,
+            field_names=key_fields,
+            with_chat_history=False,
+            accept_language="en",
+        )
+        questioner_component = QuestionerComponent(questioner_comp_config=questioner_config)
+        flow.set_start_comp("s", Start(), inputs_schema={"query": "${query}"})
+        flow.set_end_comp("e", End({"responseTemplate": "{{location}} | {{date}}"}),
+                          inputs_schema={"location": "${questioner.location}", "date": "${questioner.date}"})
+        flow.add_workflow_comp("questioner", questioner_component, inputs_schema={"query": "${s.query}"})
+        flow.add_connection("s", "questioner")
+        flow.add_connection("questioner", "e")
+
+        result = self.invoke_workflow({"query": "What is the weather in Shanghai"}, context, flow)
+        assert result.result.get("response") is not None
+        assert "Shanghai" in result.result["response"]
+        assert "2025-02-26" in result.result["response"]
+
+    @staticmethod
+    def test_questioner_format_continue_ask_accept_language():
+        """accept_language 应影响 format_continue_ask_question 的输出语言"""
+        from openjiuwen.core.workflow.components.llm.questioner_comp import QuestionerUtils
+
+        key_fields = [
+            FieldInfo(field_name="location", description="Location", required=True),
+            FieldInfo(field_name="date", description="Date", required=True),
+        ]
+        result_en = QuestionerUtils.format_continue_ask_question(key_fields, accept_language="en")
+        result_zh = QuestionerUtils.format_continue_ask_question(key_fields, accept_language="zh")
+
+        assert "Please provide" in result_en
+        assert "请您提供" in result_zh
+
 
 class TestQuestionerStream:
 
