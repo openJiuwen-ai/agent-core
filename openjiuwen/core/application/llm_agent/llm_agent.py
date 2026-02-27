@@ -260,7 +260,7 @@ class LLMAgent(ControllerAgent):
                 scope_id=self._memory_scope_id,
                 session_id=session_id,
                 messages=message_list,
-                timestamp=datetime.datetime.now(tz=timezone.utc),
+                timestamp=datetime.datetime.now(tz=timezone.utc).astimezone(),
                 agent_config=self._memory_agent_config,
             )
         except Exception as e:

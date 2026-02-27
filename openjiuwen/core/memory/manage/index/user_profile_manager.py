@@ -173,7 +173,7 @@ class UserProfileManager(BaseMemoryManager):
                 )
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs) -> bool:
-        time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        time = datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
         encrypt_new_memory = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key, plaintext=new_memory)
         new_data = {'mem': encrypt_new_memory, 'time': time}
         await self.mem_store.update(mem_id=mem_id, user_id=user_id, scope_id=scope_id, data=new_data)
@@ -321,7 +321,7 @@ class UserProfileManager(BaseMemoryManager):
     async def _add_user_profile_memory(self, req: UserProfileSearchParams) -> str:
         mem_id = str(await self.date_user_profile_id.generate_next_id(user_id=req.user_id))
 
-        time = datetime.now(timezone.utc)
+        time = datetime.now(timezone.utc).astimezone()
         profile_mem = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key,
                                                                  plaintext=req.profile_mem)
         context_summary = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key,

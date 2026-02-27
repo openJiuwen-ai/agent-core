@@ -45,7 +45,7 @@ class SummaryManager(BaseMemoryManager):
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         """update memory by its id."""
-        time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        time = datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
         encrypt_new_memory = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key, plaintext=new_memory)
         new_data = {'mem': encrypt_new_memory, 'time': time}
         await self.mem_store.update(mem_id=mem_id, user_id=user_id, scope_id=scope_id, data=new_data)

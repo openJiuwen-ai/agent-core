@@ -397,7 +397,7 @@ class LongTermMemory(metaclass=Singleton):
             await self.scope_user_mapping_manager.add(user_id=user_id, scope_id=scope_id)
             # if timestamp is None, take the current time
             if not timestamp:
-                timestamp = datetime.now(timezone.utc)
+                timestamp = datetime.now(timezone.utc).astimezone()
             timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
             # when multi messages, use last msg_id
             for i, msg in enumerate(messages):

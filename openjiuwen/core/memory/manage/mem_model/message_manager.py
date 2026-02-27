@@ -20,7 +20,7 @@ class MessageAddRequest(BaseModel):
     content: Optional[str] = None
     role: Optional[str] = None
     session_id: Optional[str] = None
-    timestamp: Optional[datetime] = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: Optional[datetime] = Field(default_factory=lambda: datetime.now(timezone.utc).astimezone())
 
 ## DB-Based Message Management
 
@@ -55,7 +55,7 @@ class MessageManager:
                 error_msg=f"must provide content for add message",
             )
         message_id = str(await self.data_id.generate_next_id(user_id=req.user_id))
-        time = datetime.now(timezone.utc) if not req.timestamp else req.timestamp
+        time = datetime.now(timezone.utc).astimezone() if not req.timestamp else req.timestamp
         req.content = BaseMemoryManager.encrypt_memory_if_needed(self.crypto_key, req.content)
         data = {
             'message_id': message_id,

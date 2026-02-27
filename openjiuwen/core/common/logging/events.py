@@ -227,7 +227,7 @@ class BaseLogEvent:
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     event_type: LogEventType | str = LogEventType.SYSTEM_START
     log_level: LogLevel = LogLevel.INFO
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc).astimezone())
 
     # Module information
     module_type: ModuleType = ModuleType.SYSTEM
