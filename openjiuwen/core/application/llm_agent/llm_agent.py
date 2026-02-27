@@ -234,7 +234,7 @@ class LLMAgent(ControllerAgent):
 
     async def _write_messages_to_memory(self, inputs, result=None):
         user_id = inputs.get("user_id")
-
+        session_id = inputs.get("conversation_id", "default_session")
 
         if not user_id or not self._long_term_memory_instance:
             return
@@ -258,6 +258,7 @@ class LLMAgent(ControllerAgent):
             await self._long_term_memory_instance.add_messages(
                 user_id=user_id,
                 scope_id=self._memory_scope_id,
+                session_id=session_id,
                 messages=message_list,
                 timestamp=datetime.datetime.now(tz=timezone.utc),
                 agent_config=self._memory_agent_config,
