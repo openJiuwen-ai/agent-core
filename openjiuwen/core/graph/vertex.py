@@ -366,6 +366,9 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             for ability in call_ability:
                 current_ability = ability
                 await self._run_executable(ability, is_subgraph, config)
+            if len(call_ability) == 0:
+                await self.__trace_component_begin__()
+
         except ExecutionError as e:
             logger.error(
                 "Node ability call failed",

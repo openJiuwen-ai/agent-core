@@ -78,6 +78,10 @@ class InteractiveNode(WorkflowComponent):
         user_input = await session.interact("please input something")
         return {"user_input": user_input}
 
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        result = await self.invoke(inputs, session, context)
+        yield result
+
 
 class TestTraceWorkflow:
     async def test_any_type_trace(self):
@@ -633,7 +637,7 @@ class TestTraceWorkflow:
     async def test_interactive_workflow_with_trace(self):
         workflow = Workflow(card=WorkflowCard(id="test", version="1.0", name="test workflow"))
         workflow.set_start_comp("start", Start())
-        workflow.add_workflow_comp("interact", InteractiveNode())
+        workflow.add_workflow_comp("interact", InteractiveNode(), comp_ability=[ComponentAbility.INVOKE],)
         workflow.set_end_comp("end", End(), inputs_schema={"output": "${interact.user_input}"},
                               response_mode="streaming")
         workflow.add_connection("start", "interact")
@@ -730,3 +734,52 @@ class TestTraceWorkflow:
             chunks.append(payload)
 
         assert chunks == expect_chunks
+
+    async def test_sequence_interactive_workflow_with_trace(self):
+
+        def create_workflow():
+            _workflow = Workflow(card=WorkflowCard(id="test", version="1.0", name="test workflow"))
+            _workflow.set_start_comp("start", Start())
+            _workflow.add_workflow_comp("interact1", InteractiveNode(), comp_ability=[ComponentAbility.STREAM],)
+            _workflow.add_workflow_comp("interact2", InteractiveNode(), comp_ability=[ComponentAbility.INVOKE],)
+            _workflow.set_end_comp("end", End({"responseTemplate": "output: {{output}}"}),
+                                   stream_inputs_schema={"output": "${interact1.user_input}"},
+                                   response_mode="streaming")
+            _workflow.add_connection("start", "interact1")
+            _workflow.add_connection("interact1", "interact2")
+            _workflow.add_stream_connection("interact1", "end")
+            _workflow.add_connection("interact2", "end")
+            return _workflow
+
+        workflow = create_workflow()
+        session_id = uuid.uuid4().hex
+
+        output_check = False
+        async for chunk in workflow.stream(inputs={"inputs": [1, 2, 3]},
+                                       session=create_workflow_session(session_id=session_id),
+                                       stream_modes=[BaseStreamMode.TRACE, BaseStreamMode.OUTPUT]):
+            if isinstance(chunk, OutputSchema) and chunk.type == "__interaction__":
+                assert chunk.payload.id == "interact1"
+                output_check = True
+        assert output_check
+
+        workflow = create_workflow()
+        output_check = False
+        async for chunk in workflow.stream(inputs=InteractiveInput("hello1"),
+                                       session=create_workflow_session(session_id=session_id),
+                                       stream_modes=[BaseStreamMode.TRACE, BaseStreamMode.OUTPUT]):
+            if isinstance(chunk, OutputSchema) and chunk.type == "__interaction__":
+                assert chunk.payload.id == "interact2"
+                output_check = True
+        assert output_check
+
+        workflow = create_workflow()
+        async for chunk in workflow.stream(inputs=InteractiveInput("hello2"),
+                                           session=create_workflow_session(session_id=session_id),
+                                           stream_modes=[BaseStreamMode.TRACE, BaseStreamMode.OUTPUT]):
+            if not isinstance(chunk, TraceSchema):
+                continue
+            payload: dict = chunk.payload
+            if payload.get("invokeId") == "end":
+                print("chunk: ", chunk)
+                assert payload.get("componentType") is not None
