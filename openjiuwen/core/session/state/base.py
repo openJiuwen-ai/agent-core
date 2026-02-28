@@ -100,6 +100,10 @@ class State(RecoverableStateLike):
     def get(self, key: Union[str, list, dict] = None) -> Optional[Any]:
         pass
 
+    @abstractmethod
+    def dump(self) -> dict:
+        ...
+
 
 class InMemoryStateLike(StateLike):
     def __init__(self):
