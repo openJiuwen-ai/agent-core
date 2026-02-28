@@ -385,3 +385,16 @@ class TraceWorkflowHandler(TraceBaseHandler):
         await self._send_data(span)
         if span.component_type == "End" and span.end_time:
             self._span_manager.update_span(span, {})
+
+    @trigger_event
+    async def on_interact(self, invoke_id: str, inputs: Any, component_metadata: dict, need_send: bool = False,
+                            **kwargs):
+        span = self._get_tracer_workflow_span(invoke_id)
+
+        update_data = {
+            "interactive_inputs": inputs,
+            **component_metadata
+        }
+        self._span_manager.update_span(span, update_data)
+        if need_send:
+            await self._send_data(span, exclude={"outputs", "stream_outputs"})

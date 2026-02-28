@@ -105,7 +105,7 @@ def create_executable_id(node_id: str, parent_id: str):
 
 
 class NodeSession(BaseSession):
-    def __init__(self, session: BaseSession, node_id: str, node_type: str = None):
+    def __init__(self, session: BaseSession, node_id: str, node_type: str = None, skip_trace: bool = False):
         self._node_id = node_id
         self._node_type = node_type
         parent_id = create_parent_id(session)
@@ -118,6 +118,7 @@ class NodeSession(BaseSession):
         self._workflow_id = session.workflow_id()
         self._workflow_nesting_depth = session.workflow_nesting_depth()
         self._main_workflow_id = session.main_workflow_id()
+        self._skip_trace = skip_trace
 
     def node_id(self):
         return self._node_id
@@ -174,6 +175,9 @@ class NodeSession(BaseSession):
             return workflow_config.spec.comp_configs.get(self._node_id)
         else:
             return None
+
+    def skip_trace(self):
+        return self._skip_trace
 
 
 class SubWorkflowSession(NodeSession):

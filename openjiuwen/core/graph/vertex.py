@@ -48,7 +48,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         self._is_first_init = True
 
     def init(self, session: BaseSession, **kwargs) -> bool:
-        self._session = NodeSession(session, self._node_id, type(self._executable).__name__)
+        self._session = NodeSession(session, self._node_id, type(self._executable).__name__,
+                                    self._executable.skip_trace())
         self._context = kwargs.get("context")
         self._stream_called_timeout = session.config().get_env(COMP_STREAM_CALL_TIMEOUT_KEY)
         self._node_config = self._session.node_config()
