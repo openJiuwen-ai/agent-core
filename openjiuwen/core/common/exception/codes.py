@@ -546,6 +546,53 @@ class StatusCode(Enum):
         173002, "toolchain bad_case_template execution error, reason: {error_msg}"
     )
 
+    # Optimization Toolchain - Task Memory (Middleware/Service) 174000 - 174999
+    TOOLCHAIN_EVOLVING_MEMORY_RETRIEVE_EXECUTION_ERROR = (
+        174000, "toolchain evolving memory retrieve execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_SUMMARIZE_EXECUTION_ERROR = (
+        174001, "toolchain evolving memory summarize execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_ADD_EXECUTION_ERROR = (
+        174002, "toolchain evolving memory add memory execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_FETCH_EXECUTION_ERROR = (
+        174003, "toolchain evolving memory get playbook execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_CLEAR_EXECUTION_ERROR = (
+        174004, "toolchain evolving memory clear playbook execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_CONFIG_INVALID = (
+        174005, "toolchain evolving memory config is invalid, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_SERVICE_INIT_FAILED = (
+        174006, "toolchain evolving memory service initialization failed, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_EMBEDDING_EXECUTION_ERROR = (
+        174007, "toolchain evolving memory embedding execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_LLM_GENERATION_EXECUTION_ERROR = (
+        174008, "toolchain evolving memory llm generation execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_DB_CONNECTOR_EXECUTION_ERROR = (
+        174009, "toolchain evolving memory db connector execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_FILE_IO_EXECUTION_ERROR = (
+        174010, "toolchain evolving memory file I/O execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_VECTOR_STORE_EXECUTION_ERROR = (
+        174011, "toolchain evolving memory vector store execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_INJECTION_EXECUTION_ERROR = (
+        174012, "toolchain evolving memory prompt injection execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_STATE_RESTORE_EXECUTION_ERROR = (
+        174013, "toolchain evolving memory prompt state restore execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_INPUT_INVALID = (
+        174014, "toolchain evolving memory input is invalid, reason: {error_msg}"
+    )
+
     # =========================
     # Foundation 180000 – 189999
     # =========================
