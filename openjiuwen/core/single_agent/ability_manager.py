@@ -86,13 +86,13 @@ class AbilityManager:
         elif isinstance(name, list):
             result = []
             for item in name:
-                if name in self._tools:
+                if item in self._tools:
                     result.append(self._tools.pop(item, None))
-                if name in self._workflows:
+                if item in self._workflows:
                     result.append(self._workflows.pop(item, None))
-                if name in self._agents:
+                if item in self._agents:
                     result.append(self._agents.pop(item, None))
-                if name in self._mcp_servers:
+                if item in self._mcp_servers:
                     result.append(self._mcp_servers.pop(item, None))
                 return result
         else:
