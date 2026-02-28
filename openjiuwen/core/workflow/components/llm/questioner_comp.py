@@ -496,7 +496,8 @@ class QuestionerDirectReplyHandler:
         result = list()
         if self._config.with_chat_history and context is not None:
             context_window = await context.get_context_window(dialogue_round=self._config.chat_history_max_rounds)
-            result = context_window.get_messages()
+            if context_window is not None:
+                result = context_window.get_messages()
 
         if not result or result[-1].role in ["assistant"]:
             # make sure content is Union[str, List[Union[str, Dict]]]

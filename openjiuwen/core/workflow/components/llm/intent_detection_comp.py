@@ -239,7 +239,8 @@ class IntentDetectionExecutable(ComponentExecutable):
         chat_history = []
         if self._config.enable_history and context is not None:
             context_window = await context.get_context_window(dialogue_round=self._config.chat_history_max_turn)
-            chat_history = context_window.get_messages()
+            if context_window is not None:
+                chat_history = context_window.get_messages()
         return chat_history
 
     def _get_category_info(self):
