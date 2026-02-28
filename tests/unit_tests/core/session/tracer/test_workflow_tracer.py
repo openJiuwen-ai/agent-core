@@ -783,3 +783,35 @@ class TestTraceWorkflow:
             if payload.get("invokeId") == "end":
                 print("chunk: ", chunk)
                 assert payload.get("componentType") is not None
+
+    async def test_workflow_with_branch_with_tracer(self):
+        flow = Workflow()
+        flow.set_start_comp("start", Start())
+        flow.set_end_comp("end", End(),
+                          inputs_schema={"a": "${a.result}", "b": "${b.result}"})
+
+        from openjiuwen.core.workflow import BranchComponent
+
+        sw = BranchComponent()
+        sw.add_branch("${a} <= 10", ["b"], "1")
+        sw.add_branch("${a} > 10", ["a"], "2")
+
+        flow.add_workflow_comp("sw", sw)
+
+        flow.add_workflow_comp("a", CommonNode("a"),
+                               inputs_schema={"result": "${a}"})
+
+        flow.add_workflow_comp("b", AddTenNode("b"),
+                               inputs_schema={"source": "${a}"})
+
+        flow.add_connection("start", "sw")
+        flow.add_connection("a", "end")
+        flow.add_connection("b", "end")
+
+        async for chunk in flow.stream({"a": 2}, create_workflow_session(), stream_modes=[BaseStreamMode.TRACE]):
+            payload: dict = chunk.payload
+            if payload.get("invokeId") == "sw":
+                assert payload.get("startTime") is not None
+                assert payload.get("inputs") == {'branches': [
+                    {'branch_id': '1', 'condition': {'bool_expression': '${a} <= 10', 'inputs': {'${a}': 2}}},
+                    {'branch_id': '2', 'condition': {'bool_expression': '${a} > 10', 'inputs': {'${a}': 2}}}]}

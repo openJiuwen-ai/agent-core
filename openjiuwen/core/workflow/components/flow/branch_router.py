@@ -89,6 +89,7 @@ class BranchRouter:
                     "branch_id": branch.branch_id,
                     "condition": branch.trace_info(session)
                 })
+            await TracerWorkflowUtils.trace_component_begin(session)
             await TracerWorkflowUtils.trace_component_inputs(session, {"branches": branches})
         for branch in self._branches:
             if branch.evaluate(session):

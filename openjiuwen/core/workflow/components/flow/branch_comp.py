@@ -43,3 +43,6 @@ class BranchComponent(WorkflowComponent):
         graph.add_node(node_id, self.to_executable(), wait_for_all=wait_for_all)
         graph.add_conditional_edges(node_id, self.router())
 
+    def skip_trace(self) -> bool:
+        return True
+
