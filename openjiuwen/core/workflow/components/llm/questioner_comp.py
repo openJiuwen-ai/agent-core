@@ -265,10 +265,6 @@ class QuestionerUtils:
             return ""
 
     @staticmethod
-    def get_latest_k_rounds_chat(chat_messages, rounds):
-        return chat_messages[-rounds * 2 - 1:]
-
-    @staticmethod
     def format_continue_ask_question(
         non_extracted_key_fields: List[FieldInfo],
         accept_language: Literal['zh', 'en'] = 'zh'
@@ -421,7 +417,7 @@ class QuestionerDirectReplyHandler:
         questioner_input = QuestionerUtils.validate_inputs(inputs)
         output = OutputCache()
         self._query = questioner_input.query or ""
-        chat_history = self._get_latest_chat_history(context)
+        chat_history = await self._get_latest_chat_history(context)
         if self._is_set_question_content():
             user_fields = questioner_input.model_dump(exclude={'query'})
             output.question = QuestionerUtils.format_template(self._config.question_content, user_fields)
@@ -446,7 +442,7 @@ class QuestionerDirectReplyHandler:
         await self._get_latest_human_feedback(session)
         output = OutputCache(question=self._state.question, user_response=self._query)
 
-        chat_history = self._get_latest_chat_history(context)
+        chat_history = await self._get_latest_chat_history(context)
         user_response = chat_history[-1].content if chat_history else ""
 
         if self._is_set_question_content() and not self._need_extract_fields():
@@ -496,13 +492,12 @@ class QuestionerDirectReplyHandler:
 
         return self._check_if_continue_ask(output)
 
-    def _get_latest_chat_history(self, context) -> List:
+    async def _get_latest_chat_history(self, context) -> List:
         result = list()
         if self._config.with_chat_history and context is not None:
-            raw_chat_history = context.get_messages()
-            if raw_chat_history:
-                result = QuestionerUtils.get_latest_k_rounds_chat(raw_chat_history,
-                                                                  self._config.chat_history_max_rounds)
+            context_window = await context.get_context_window(dialogue_round=self._config.chat_history_max_rounds)
+            result = context_window.get_messages()
+
         if not result or result[-1].role in ["assistant"]:
             # make sure content is Union[str, List[Union[str, Dict]]]
             content = self._query

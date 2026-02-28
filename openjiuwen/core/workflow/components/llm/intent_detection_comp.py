@@ -194,13 +194,6 @@ class IntentDetectionExecutable(ComponentExecutable):
         self._router: Union[BranchRouter, None] = None
 
     @staticmethod
-    def _get_chat_history_from_context(context) -> List[BaseMessage]:
-        chat_history = []
-        if context is not None:
-            chat_history = context.get_messages()
-        return chat_history
-
-    @staticmethod
     def _refix_llm_output(input_str):
         json_path = r'\{.*\}'
         match = re.search(json_path, input_str, re.DOTALL)
@@ -217,7 +210,7 @@ class IntentDetectionExecutable(ComponentExecutable):
         self._set_session(session)
         self._router.set_session(session)
         await self._initialize_if_needed()
-        chat_history = self._get_chat_history_from_context(context)
+        chat_history = await self._get_chat_history_from_context(context)
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
         llm_output = await self._invoke_llm_and_get_result(current_inputs)
         workflow_logger.info(
@@ -241,6 +234,13 @@ class IntentDetectionExecutable(ComponentExecutable):
 
     def post_commit(self) -> bool:
         return True
+
+    async def _get_chat_history_from_context(self, context) -> List[BaseMessage]:
+        chat_history = []
+        if self._config.enable_history and context is not None:
+            context_window = await context.get_context_window(dialogue_round=self._config.chat_history_max_turn)
+            chat_history = context_window.get_messages()
+        return chat_history
 
     def _get_category_info(self):
         return "\n".join(f"{cid}: {cname}" for cid, cname in
