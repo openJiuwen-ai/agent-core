@@ -509,6 +509,10 @@ class StatusCode(Enum):
     MEMORY_STORE_INIT_FAILED = (158006, "failed to init {store_type}, reason: {error_msg}")
     MEMORY_CONNECT_STORE_EXECUTION_ERROR = (158007, "failed to connect {store_type}, reason: {error_msg}")
     MEMORY_STORE_VALIDATION_INVALID = (158008, "{store_type} validation failed, reason: {error_msg}")
+    MEMORY_REGISTER_OPERATION_VALIDATION_INVALID = (
+        158009,
+        "failed to register operation for {entity_key}:{schema_version}, reason: {error_msg}"
+    )
 
     # =========================
     # Foundation Tool 160000–169999
