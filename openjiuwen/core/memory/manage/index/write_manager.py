@@ -17,13 +17,13 @@ class WriteManager:
         self.managers = managers
         self.mem_store = mem_store
 
-    async def add_mem(self, mem_units: list[BaseMemoryUnit], llm: Tuple[str, Model] | None) -> None:
+    async def add_mem(self, mem_units: list[BaseMemoryUnit], llm: Tuple[str, Model] | None, semantic_store) -> None:
         has_inner_exception = False
         for mem_unit in mem_units:
             mem_type = mem_unit.mem_type.value
             if mem_type in self.managers:
                 try:
-                    await self.managers[mem_type].add(mem_unit, llm)
+                    await self.managers[mem_type].add(mem_unit, llm, semantic_store=semantic_store)
                 except ValueError as e:
                     memory_logger.error(
                         "Failed to add mem",
@@ -55,7 +55,7 @@ class WriteManager:
                 operation="add mem"
             )
 
-    async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str):
+    async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str, semantic_store):
         mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)
         if mem_type is None:
             memory_logger.warning(
@@ -67,9 +67,9 @@ class WriteManager:
                 scope_id=scope_id,
             )
             return
-        await self.managers[mem_type].update(user_id, scope_id, mem_id, memory)
+        await self.managers[mem_type].update(user_id, scope_id, mem_id, memory, semantic_store=semantic_store)
 
-    async def delete_mem_by_id(self, user_id: str, scope_id: str, mem_id: str):
+    async def delete_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, semantic_store):
         mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)
         if mem_type is None:
             memory_logger.warning(
@@ -81,11 +81,13 @@ class WriteManager:
                 scope_id=scope_id
             )
             return
-        await self.managers[mem_type].delete(user_id, scope_id, mem_id)
+        await self.managers[mem_type].delete(user_id, scope_id, mem_id, semantic_store=semantic_store)
 
-    async def delete_mem_by_user_id(self, user_id: str, scope_id: str):
+    async def delete_mem_by_user_id(self, user_id: str, scope_id: str, semantic_store):
         for manager in self.managers:
-            await self.managers[manager].delete_by_user_id(user_id=user_id, scope_id=scope_id)
+            await self.managers[manager].delete_by_user_id(user_id=user_id,
+                                                           scope_id=scope_id,
+                                                           semantic_store=semantic_store)
 
     async def __get_mem_type_from_store(self, user_id: str, scope_id: str, mem_id: str) -> str | None:
         data = None

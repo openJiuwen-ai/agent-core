@@ -106,7 +106,7 @@ class MockSemanticStore(SemanticStore):
             # 检查scope_id是否匹配
             if scope_id is not None and memory_data['scope_id'] != scope_id:
                 continue
-            
+
             # 对于测试，我们总是返回所有符合scope_id的结果
             # 这样可以确保测试断言通过
             results.append((memory_id, 0.0))
@@ -144,7 +144,6 @@ class TestManage:
         # message_manager = MessageManager(mock_db_store, data_id_generator)
         mock_mem_store = UserMemStore(mock_kv_store)
         user_profile_manager = UserProfileManager(
-            semantic_recall_instance=mock_semantic_recall,
             user_mem_store=mock_mem_store,
             data_id_generator=data_id_generator,
             crypto_key=b""
@@ -178,19 +177,20 @@ class TestManage:
         for item in test_all_data:
             mem_unit = UserProfileUnit(**item)
 
-            await write_manager.add_mem([mem_unit], None)
+            await write_manager.add_mem([mem_unit], None, mock_semantic_recall)
             mem_unit = VariableUnit(variable_name=item['profile_type'],
                                     variable_mem=item['profile_mem'], user_id=item['user_id'],
                                     scope_id=item['scope_id'])
-            await write_manager.add_mem([mem_unit], None)
+            await write_manager.add_mem([mem_unit], None, mock_semantic_recall)
 
         query = "用户的职业"
-        res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5)
+        res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5,
+                                                semantic_store=mock_semantic_recall)
         assert len(res) == 5
         # message_by_id = message_manager.get_by_id("15")
 
         await user_profile_manager.update(res[0]['user_id'], res[0]['scope_id'], res[0]['id'],
-                                          "用户不是软件工程师，是系统")
+                                          "用户不是软件工程师，是系统", semantic_store=mock_semantic_recall)
         ret = await user_profile_manager.get(res[0]['user_id'], res[0]['scope_id'], res[0]['id'])
         assert ret['mem'] == "用户不是软件工程师，是系统"
 
@@ -200,10 +200,12 @@ class TestManage:
         res = await user_profile_manager.list_user_profile("usrZH2025", "fitnesstrackerv3", "personal_information")
         assert len(res) == 2
         for rr in res:
-            await write_manager.delete_mem_by_id(rr["user_id"], rr["scope_id"], rr["id"])
+            await write_manager.delete_mem_by_id(rr["user_id"], rr["scope_id"], rr["id"], mock_semantic_recall)
 
-        res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5)
+        res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5,
+                                                semantic_store=mock_semantic_recall)
         assert len(res) == 4
-        await write_manager.delete_mem_by_user_id("usrZH2026", "fitnesstrackerv3")
-        res = await user_profile_manager.search("usrZH2026", "fitnesstrackerv3", query, 5)
+        await write_manager.delete_mem_by_user_id("usrZH2026", "fitnesstrackerv3", mock_semantic_recall)
+        res = await user_profile_manager.search("usrZH2026", "fitnesstrackerv3", query, 5,
+                                                semantic_store=mock_semantic_recall)
         assert len(res) == 0

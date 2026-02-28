@@ -98,7 +98,7 @@ async def test_set_scope_config_without_set_config():
         
         # 打印注册后的状态
         logger.info(f"注册后 - kv_store: {memory.kv_store is not None}")
-        logger.info(f"注册后 - semantic_store: {memory.semantic_store is not None}")
+        logger.info(f"注册后 - vector_store: {memory.vector_store is not None}")
         logger.info(f"注册后 - db_store: {memory.db_store is not None}")
 
         # 直接调用set_scope_config

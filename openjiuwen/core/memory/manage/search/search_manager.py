@@ -36,7 +36,7 @@ class SearchManager:
         self.mem_store = user_mem_store
         self.crypto_key = crypto_key
 
-    async def search(self, params: SearchParams, **kwargs) -> list[dict[str, Any]] | None:
+    async def search(self, params: SearchParams, semantic_store, **kwargs) -> list[dict[str, Any]] | None:
         user_id = params.user_id
         scope_id = params.scope_id
         query = params.query
@@ -62,13 +62,14 @@ class SearchManager:
         if search_type is None:
             for mem_type, manager in self.managers.items():
                 if mem_type in self.user_mem_manager_list:
-                    res = await manager.search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k, **kwargs)
+                    res = await manager.search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
+                                               semantic_store=semantic_store, **kwargs)
                     if res is not None:
                         result.extend(res)
         # call the manager corresponding to search_type
         else:
             res = await self.managers[search_type].search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
-                                                          **kwargs)
+                                                          semantic_store=semantic_store, **kwargs)
             if res:
                 result = res
         # sort and truncate multiple search_type results based on score

@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -20,6 +21,28 @@ from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 
 
+@dataclass
+class RecallParams:
+    """Parameters for vector recall operation"""
+    query: str
+    user_id: str
+    scope_id: str
+    semantic_store: SemanticStore
+    top_k: int = 5
+    mem_type: str = MemoryType.USER_PROFILE.value
+
+
+@dataclass
+class AddVectorParams:
+    """Parameters for adding vector memory operation"""
+    user_id: str
+    scope_id: str
+    memory_id: str
+    mem: str
+    semantic_store: SemanticStore
+    mem_type: str = MemoryType.USER_PROFILE.value
+
+
 class UserProfileSearchParams(BaseModel):
     is_implicit: bool = False
     mem_type: str = Field(default=MemoryType.USER_PROFILE.value)
@@ -36,12 +59,10 @@ class UserProfileManager(BaseMemoryManager):
     CHECK_CONFLICT_OLD_MEMORY_NUM = 5
 
     def __init__(self,
-                 semantic_recall_instance: SemanticStore,
                  user_mem_store: UserMemStore,
                  data_id_generator: DataIdManager,
                  crypto_key: bytes):
         self.mem_store = user_mem_store
-        self.semantic_recall = semantic_recall_instance
         self.date_user_profile_id = data_id_generator
         self.crypto_key = crypto_key
 
@@ -67,7 +88,8 @@ class UserProfileManager(BaseMemoryManager):
             })
         return process_conflict_info
 
-    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, Model] | None = None):
+    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, Model] | None = None, **kwargs):
+        semantic_store = self._get_semantic_store("add", **kwargs)
         if not isinstance(memory, UserProfileUnit):
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
@@ -98,7 +120,7 @@ class UserProfileManager(BaseMemoryManager):
                 memory_type="user profile",
                 error_msg=f"user_profile_manager add operation must pass profile_type",
             )
-        conflict_info = await self._get_conflict_info(memory=memory, llm=llm)
+        conflict_info = await self._get_conflict_info(memory=memory, llm=llm, semantic_store=semantic_store)
         for conflict in conflict_info:
             conf_id = conflict['id']
             conf_mem = conflict['text']
@@ -122,12 +144,22 @@ class UserProfileManager(BaseMemoryManager):
                     source_id=memory.message_mem_id
                 )
                 mem_id = await self._add_user_profile_memory(user_profile_search_param)
-                vector_success = await self._add_vector_user_profile_memory(user_id=memory.user_id,
-                                                                           scope_id=memory.scope_id,
-                                                                           memory_id=mem_id,
-                                                                           mem=conf_mem)
+                vector_success = await self._add_vector_user_profile_memory(
+                    AddVectorParams(
+                        user_id=memory.user_id,
+                        scope_id=memory.scope_id,
+                        memory_id=mem_id,
+                        mem=conf_mem,
+                        semantic_store=semantic_store
+                    )
+                )
                 if not vector_success:
-                    await self.delete(user_id=memory.user_id, scope_id=memory.scope_id, mem_id=mem_id)
+                    await self.delete(
+                        user_id=memory.user_id,
+                        scope_id=memory.scope_id,
+                        mem_id=mem_id,
+                        semantic_store=semantic_store
+                    )
                     raise build_error(
                         StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
                         memory_type="user profile",
@@ -151,7 +183,12 @@ class UserProfileManager(BaseMemoryManager):
                     user_id=memory.user_id,
                     scope_id=memory.scope_id
                 )
-                await self.update(memory.user_id, memory.scope_id, conf_id, memory.profile_mem)
+                await self.update(
+                    memory.user_id,
+                    memory.scope_id,
+                    conf_id,
+                    memory.profile_mem,
+                    semantic_store=semantic_store)
             elif conf_event == ConflictType.DELETE.value:
                 memory_logger.debug(
                     "Delete conflict info",
@@ -161,7 +198,7 @@ class UserProfileManager(BaseMemoryManager):
                     user_id=memory.user_id,
                     scope_id=memory.scope_id
                 )
-                await self.delete(memory.user_id, memory.scope_id, conf_id)
+                await self.delete(memory.user_id, memory.scope_id, conf_id, semantic_store=semantic_store)
             else:
                 memory_logger.debug(
                     "Unknown conflict event",
@@ -173,19 +210,30 @@ class UserProfileManager(BaseMemoryManager):
                 )
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs) -> bool:
+        semantic_store = self._get_semantic_store("update", **kwargs)
         time = datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
         encrypt_new_memory = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key, plaintext=new_memory)
         new_data = {'mem': encrypt_new_memory, 'time': time}
         await self.mem_store.update(mem_id=mem_id, user_id=user_id, scope_id=scope_id, data=new_data)
         table_name = generate_idx_name(user_id, scope_id, MemoryType.USER_PROFILE.value)
-        await self.semantic_recall.delete_docs([mem_id], table_name)
+        await semantic_store.delete_docs([mem_id], table_name)
         # semantic memory embedding must not encrypt
-        await self.semantic_recall.add_docs([(mem_id, new_memory)], table_name, scope_id=scope_id)
+        await semantic_store.add_docs([(mem_id, new_memory)], table_name, scope_id=scope_id)
         return True
 
     async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
+        semantic_store = self._get_semantic_store("search", **kwargs)
         mem_type = kwargs.get("mem_type", MemoryType.USER_PROFILE.value)
-        mem_ids, scores = await self._recall_by_vector(query, user_id, scope_id, top_k, mem_type)
+        mem_ids, scores = await self._recall_by_vector(
+            RecallParams(
+                query=query,
+                user_id=user_id,
+                scope_id=scope_id,
+                semantic_store=semantic_store,
+                top_k=top_k,
+                mem_type=mem_type
+            )
+        )
         retrieve_res = await self.mem_store.batch_get(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
         if retrieve_res is None:
             return None
@@ -207,6 +255,7 @@ class UserProfileManager(BaseMemoryManager):
         return retrieve_res
 
     async def delete(self, user_id: str, scope_id: str, mem_id: str, **kwargs):
+        semantic_store = self._get_semantic_store("delete", **kwargs)
         data = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
         if data is None:
             memory_logger.error(
@@ -220,11 +269,17 @@ class UserProfileManager(BaseMemoryManager):
             return False
         mem_type = kwargs.get("mem_type", MemoryType.USER_PROFILE.value)
         await self.mem_store.delete(mem_id=mem_id, user_id=user_id, scope_id=scope_id)
-        await self._delete_vector_user_profile_memory(memory_id=[mem_id], user_id=user_id,
-                                                      scope_id=scope_id, mem_type=mem_type)
+        await self._delete_vector_user_profile_memory(
+            memory_id=[mem_id],
+            user_id=user_id,
+            scope_id=scope_id,
+            mem_type=mem_type,
+            semantic_store=semantic_store
+        )
         return True
 
-    async def delete_by_user_id(self, user_id: str, scope_id: str):
+    async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
+        semantic_store = self._get_semantic_store("delete", **kwargs)
         data = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id, mem_type=MemoryType.USER_PROFILE.value)
         if data is None:
             memory_logger.error(
@@ -238,7 +293,7 @@ class UserProfileManager(BaseMemoryManager):
         mem_ids = [item['id'] for item in data]
         await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
         await self._delete_vector_store_table(user_id=user_id, scope_id=scope_id,
-                                              mem_type=MemoryType.USER_PROFILE.value)
+                                              mem_type=MemoryType.USER_PROFILE.value, semantic_store=semantic_store)
         return True
 
     async def list_user_profile(self, user_id: str, scope_id: str, profile_type: Optional[str] = None,
@@ -268,24 +323,32 @@ class UserProfileManager(BaseMemoryManager):
         new_datas.sort(key=lambda x: (x['mem'], x['timestamp']), reverse=True)
         return new_datas
 
-    async def _recall_by_vector(self, query: str, user_id: str, scope_id: str, top_k: int = 5,
-                                mem_type=MemoryType.USER_PROFILE.value) -> tuple[List[str], dict[str, float]]:
-        table_name = generate_idx_name(user_id, scope_id, mem_type)
-        memory_hit_info = await self.semantic_recall.search(query=query, table_name=table_name, top_k=top_k)
+    async def _recall_by_vector(
+            self,
+            params: RecallParams
+    ) -> tuple[List[str], dict[str, float]]:
+        table_name = generate_idx_name(params.user_id, params.scope_id, params.mem_type)
+        memory_hit_info = await params.semantic_store.search(
+            query=params.query,
+            table_name=table_name,
+            top_k=params.top_k
+        )
         return parse_memory_hit_infos(memory_hit_info)
 
     async def _get_conflict_input(
             self,
             user_id: str,
             scope_id: str,
-            new_memory: str
+            new_memory: str,
+            semantic_store: SemanticStore
     ):
         historical_profiles = []
         search_results = await self.search(
             user_id=user_id,
             scope_id=scope_id,
             query=new_memory,
-            top_k=UserProfileManager.CHECK_CONFLICT_OLD_MEMORY_NUM
+            top_k=UserProfileManager.CHECK_CONFLICT_OLD_MEMORY_NUM,
+            semantic_store=semantic_store
         )
         for search_result in search_results:
             historical_profiles.append((
@@ -306,17 +369,18 @@ class UserProfileManager(BaseMemoryManager):
     async def _get_conflict_info(self,
                                  memory: UserProfileUnit,
                                  llm: Tuple[str, Model] | None,
+                                 semantic_store: SemanticStore
                                  ) -> list[dict[str, Any]]:
         input_memories, input_memory_ids_map = await self._get_conflict_input(
             user_id=memory.user_id,
             scope_id=memory.scope_id,
-            new_memory=memory.profile_mem
+            new_memory=memory.profile_mem,
+            semantic_store=semantic_store
         )
         tmp_conflict_info = await ConflictResolution.check_conflict(old_messages=input_memories,
                                                                     new_message=memory.profile_mem,
                                                                     base_chat_model=llm)
         return UserProfileManager._process_conflict_info(tmp_conflict_info, input_memory_ids_map)
-
 
     async def _add_user_profile_memory(self, req: UserProfileSearchParams) -> str:
         mem_id = str(await self.date_user_profile_id.generate_next_id(user_id=req.user_id))
@@ -343,11 +407,14 @@ class UserProfileManager(BaseMemoryManager):
         return mem_id
 
     async def _add_vector_user_profile_memory(
-            self, user_id: str, scope_id: str, memory_id: str,
-            mem: str, mem_type: str = MemoryType.USER_PROFILE.value) -> bool:
-        if self.semantic_recall:
-            table_name = generate_idx_name(user_id, scope_id, mem_type)
-            return await self.semantic_recall.add_docs([(memory_id, mem)], table_name, scope_id=scope_id)
+            self, params: AddVectorParams) -> bool:
+        if params.semantic_store:
+            table_name = generate_idx_name(params.user_id, params.scope_id, params.mem_type)
+            return await params.semantic_store.add_docs(
+                [(params.memory_id, params.mem)],
+                table_name,
+                scope_id=params.scope_id
+            )
         else:
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
@@ -356,11 +423,16 @@ class UserProfileManager(BaseMemoryManager):
             )
 
     async def _delete_vector_user_profile_memory(
-            self, user_id: str, scope_id: str,
-            memory_id: List[str], mem_type: str = MemoryType.USER_PROFILE.value):
-        if self.semantic_recall:
+            self,
+            user_id: str,
+            scope_id: str,
+            memory_id: List[str],
+            semantic_store: SemanticStore,
+            mem_type: str = MemoryType.USER_PROFILE.value
+    ):
+        if semantic_store:
             table_name = generate_idx_name(user_id, scope_id, mem_type)
-            await self.semantic_recall.delete_docs(memory_id, table_name)
+            await semantic_store.delete_docs(memory_id, table_name)
         else:
             raise build_error(
                 StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
@@ -368,13 +440,49 @@ class UserProfileManager(BaseMemoryManager):
                 error_msg=f"vector store must not be None",
             )
 
-    async def _delete_vector_store_table(self, user_id: str, scope_id: str, mem_type):
-        if self.semantic_recall:
+    async def _delete_vector_store_table(
+            self,
+            user_id: str,
+            scope_id: str,
+            mem_type,
+            semantic_store: SemanticStore
+    ):
+        if semantic_store:
             table_name = generate_idx_name(usr_id=user_id, scope_id=scope_id, mem_type=mem_type)
-            await self.semantic_recall.delete_table(table_name=table_name)
+            await semantic_store.delete_table(table_name=table_name)
         else:
             raise build_error(
                 StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
                 memory_type="user profile",
                 error_msg=f"vector store must not be None",
             )
+
+    def _get_semantic_store(self, operation_type: str, **kwargs) -> SemanticStore:
+        """
+        Get semantic store from kwargs or raise appropriate error based on operation type.
+
+        Args:
+            operation_type: Type of operation being performed ("add", "update", "delete", "search")
+            **kwargs: Keyword arguments containing semantic_store
+
+        Returns:
+            SemanticStore: The semantic store instance
+
+        Raises:
+            Error: If semantic_store is not provided
+        """
+        semantic_store = kwargs.get('semantic_store')
+        if not semantic_store:
+            error_codes = {
+                "add": StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                "update": StatusCode.MEMORY_UPDATE_MEMORY_EXECUTION_ERROR,
+                "delete": StatusCode.MEMORY_DELETE_MEMORY_EXECUTION_ERROR,
+                "search": StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
+            }
+            error_code = error_codes.get(operation_type, StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR)
+            raise build_error(
+                error_code,
+                memory_type=MemoryType.USER_PROFILE.value,
+                error_msg="semantic_store is required",
+            )
+        return semantic_store

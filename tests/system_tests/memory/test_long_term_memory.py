@@ -74,10 +74,10 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
 
         # ---------- Store Configuration ----------
         # KV Store: InMemoryKVStore
-        kv_store = InMemoryKVStore()
+        self.kv_store = InMemoryKVStore()
 
         # Vector Store: Chroma (persist to resource_dir)
-        vector_store = create_vector_store(
+        self.vector_store = create_vector_store(
             "chroma",
             persist_directory=self.resource_dir
         )
@@ -89,7 +89,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
             pool_pre_ping=True,
             echo=False,
         )
-        db_store = DefaultDbStore(sqlite_engine)
+        self.db_store = DefaultDbStore(sqlite_engine)
 
         # ---------- Memory Engine Configuration ----------
         default_model_cfg = ModelRequestConfig(
@@ -114,14 +114,14 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         )
 
         # Create embedding model
-        embedding_model = APIEmbedding(config=embed_config)
+        self.embedding_model = APIEmbedding(config=embed_config)
 
         # ---------- Register Stores ----------
         await self.engine.register_store(
-            kv_store=kv_store,
-            vector_store=vector_store,
-            db_store=db_store,
-            embedding_model=embedding_model
+            kv_store=self.kv_store,
+            vector_store=self.vector_store,
+            db_store=self.db_store,
+            embedding_model=self.embedding_model
         )
 
         # ---------- Set Engine Config ----------
@@ -133,7 +133,7 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         """Clean up after each test."""
         # Clean up test data
         test_scope_id = "test_memory_scope"
-        test_user_id = "test_user_001"
+        test_user_id = "test_user_workflow"
 
         try:
             # Delete test user's memories
@@ -259,6 +259,217 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(variables["职业"], "数据分析师")
 
         logger.info("Test test_memory_sample passed")
+
+    async def test_scope_config_workflow(self):
+        """
+        Test the complete workflow with scope-specific configurations.
+
+        This test demonstrates:
+        1. Setting scope-specific configuration using set_scope_config
+        2. Adding messages and verifying memory operations with scope config
+        3. Deleting scope configuration using delete_scope_config
+        4. Verifying memory operations work after deleting scope config
+        """
+        scope_id = "test_memory_scope"
+        user_id = "test_user_workflow"
+
+        # ---------- 1. Set Scope Configuration ----------
+        logger.info("Step 1: Setting scope configuration")
+
+        scope_config = MemoryScopeConfig(
+            model_cfg=ModelRequestConfig(
+                model=os.getenv("LLM_MODEL_NAME", ""),
+                temperature=0.3,
+                top_p=0.8
+            ),
+            model_client_cfg=ModelClientConfig(
+                client_id="scope_test_client",
+                client_provider=os.getenv("LLM_PROVIDER", "xx"),
+                api_key=os.getenv("LLM_API_KEY", "xx"),
+                api_base=os.getenv("LLM_API_BASE", "xx"),
+                verify_ssl=False
+            ),
+            embedding_cfg=EmbeddingConfig(
+                model_name=os.getenv("EMBED_MODEL_NAME", "xx"),
+                api_key=os.getenv("EMBED_API_KEY", "xx"),
+                base_url=os.getenv("EMBED_API_BASE", "xx"),
+            )
+        )
+        # no default embedding model
+        await self.engine.register_store(
+            kv_store=self.kv_store,
+            vector_store=self.vector_store,
+            db_store=self.db_store,
+        )
+        set_success = await self.engine.set_scope_config(scope_id, scope_config)
+        self.assertTrue(set_success, "Failed to set scope configuration")
+        logger.info("Scope configuration set successfully")
+
+        # ---------- 2. Test Memory Operations with Scope Config ----------
+        logger.info("\nStep 2: Testing memory operations with scope config")
+
+        agent_cfg = AgentMemoryConfig(
+            mem_variables=[
+                Param.string("姓名", "用户姓名", required=False),
+                Param.string("爱好", "用户爱好", required=False),
+            ],
+            enable_long_term_mem=True,
+        )
+
+        messages = [
+            BaseMessage(role="user", content="你好，我是Alice，我喜欢旅行"),
+            BaseMessage(role="assistant", content="你好Alice，旅行是个很棒的爱好！"),
+        ]
+
+        await self.engine.add_messages(
+            user_id=user_id,
+            scope_id=scope_id,
+            session_id="scope_test_session_1",
+            messages=messages,
+            agent_config=agent_cfg
+        )
+        logger.info("Messages added successfully with scope config")
+
+        memories_page = await self.engine.get_user_mem_by_page(
+            user_id=user_id,
+            scope_id=scope_id,
+            page_size=10,
+            page_idx=1
+        )
+        self.assertGreater(len(memories_page), 0, "Should get memories with scope config")
+        logger.info(f"Get {len(memories_page)} memories with scope config")
+
+        # Test search_user_mem
+        search_results = await self.engine.search_user_mem(
+            query="用户的爱好",
+            num=3,
+            user_id=user_id,
+            scope_id=scope_id,
+            threshold=0.3
+        )
+        self.assertGreater(len(search_results), 0, "Should search results with scope config")
+        logger.info(f"Found {len(search_results)} search results with scope config")
+
+        # ---------- 3. Delete Scope Configuration ----------
+        logger.info("\nStep 3: Deleting scope configuration")
+
+        delete_success = await self.engine.delete_scope_config(scope_id)
+        self.assertTrue(delete_success, "Failed to delete scope configuration")
+        logger.info("Scope configuration deleted successfully")
+
+        # ---------- 4. Test Memory Operations without Scope Config ----------
+        logger.info("\nStep 4: Testing memory operations without scope config")
+
+        memories_page2 = await self.engine.get_user_mem_by_page(
+            user_id=user_id,
+            scope_id=scope_id,
+            page_size=20,
+            page_idx=1
+        )
+        self.assertGreater(len(memories_page2), 0, "Should get memories with scope configg")
+        logger.info(f"Get {len(memories_page2)} memories without scope config")
+
+        search_results2 = await self.engine.search_user_mem(
+            query="用户的爱好",
+            num=5,
+            user_id=user_id,
+            scope_id=scope_id,
+            threshold=0.3
+        )
+        self.assertEqual(len(search_results2), 0, "Should not search results without scope config")
+        logger.info(f"Found {len(search_results2)} search results without scope config")
+
+        logger.info("Test test_scope_config_workflow passed")
+
+    async def test_update_mem_by_id(self):
+        """
+        Test the update_mem_by_id functionality.
+
+        This test demonstrates:
+        1. Adding a memory
+        2. Getting the memory to obtain its ID
+        3. Updating the memory using update_mem_by_id
+        4. Verifying the update was successful
+        """
+        scope_id = "test_memory_scope"
+        user_id = "test_user_workflow"
+        # ---------- 1. Add a memory to update ----------
+        logger.info("Step 1: Adding a memory to update")
+        agent_cfg = AgentMemoryConfig(
+            mem_variables=[
+                Param.string("姓名", "用户姓名", required=False),
+                Param.string("职业", "用户职业", required=False),
+            ],
+            enable_long_term_mem=True,
+        )
+        messages = [
+            BaseMessage(role="user", content="你好，我是Bob，我是一名医生"),
+            BaseMessage(role="assistant", content="你好Bob，医生是个很有意义的职业！"),
+        ]
+        scope_config = MemoryScopeConfig(
+            model_cfg=ModelRequestConfig(
+                model=os.getenv("LLM_MODEL_NAME", ""),
+                temperature=0.3,
+                top_p=0.8
+            ),
+            model_client_cfg=ModelClientConfig(
+                client_id="scope_test_client",
+                client_provider=os.getenv("LLM_PROVIDER", "xx"),
+                api_key=os.getenv("LLM_API_KEY", "xx"),
+                api_base=os.getenv("LLM_API_BASE", "xx"),
+                verify_ssl=False
+            ),
+            embedding_cfg=EmbeddingConfig(
+                model_name=os.getenv("EMBED_MODEL_NAME", "xx"),
+                api_key=os.getenv("EMBED_API_KEY", "xx"),
+                base_url=os.getenv("EMBED_API_BASE", "xx"),
+            )
+        )
+        await self.engine.set_scope_config(scope_id, scope_config)
+        await self.engine.add_messages(
+            user_id=user_id,
+            scope_id=scope_id,
+            session_id="update_test_session",
+            messages=messages,
+            agent_config=agent_cfg
+        )
+        logger.info("Initial message added successfully")
+        # ---------- 2. Get the memory to update ----------
+        logger.info("Step 2: Getting the memory to update")
+        memories = await self.engine.get_user_mem_by_page(
+            user_id=user_id,
+            scope_id=scope_id,
+            page_size=10,
+            page_idx=1
+        )
+
+        self.assertGreater(len(memories), 0, "Should have at least one memory")
+        mem_to_update = memories[0]
+        original_content = mem_to_update.content
+        logger.info(f"Found memory to update: ID={mem_to_update.mem_id}, Content={original_content}")
+        # ---------- 3. Update the memory ----------
+        logger.info("Step 3: Updating the memory")
+        new_content = "你好，我是Bob，我是一名外科医生"
+        await self.engine.update_mem_by_id(
+            user_id=user_id,
+            scope_id=scope_id,
+            mem_id=mem_to_update.mem_id,
+            memory=new_content
+        )
+        logger.info(f"Memory updated successfully to: {new_content}")
+        # ---------- 4. Verify the update was successful ----------
+        logger.info("Step 4: Verifying the update was successful")
+        updated_memories = await self.engine.get_user_mem_by_page(
+            user_id=user_id,
+            scope_id=scope_id,
+            page_size=10,
+            page_idx=1
+        )
+        self.assertGreater(len(updated_memories), 0, "Should have memories after update")
+        updated_mem = next((m for m in updated_memories if m.mem_id == mem_to_update.mem_id), None)
+        self.assertIsNotNone(updated_mem, "Should find the updated memory")
+        self.assertEqual(updated_mem.content, new_content, "Memory content should be updated")
+
 
 
 def run_tests():

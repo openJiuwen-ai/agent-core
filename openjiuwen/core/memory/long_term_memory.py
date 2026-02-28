@@ -70,7 +70,7 @@ class LongTermMemory(metaclass=Singleton):
         self._scope_config: dict[str, MemoryScopeConfig] = {}
         # store
         self.kv_store: BaseKVStore | None = None
-        self.semantic_store: SemanticStore | None = None
+        self.vector_store: BaseVectorStore | None = None
         self.db_store: BaseDbStore | None = None
         # managers
         self.scope_user_mapping_manager = None
@@ -83,6 +83,8 @@ class LongTermMemory(metaclass=Singleton):
         self.generator = None
         # llm
         self._base_llm: Tuple[str, Model] | None = None
+        # embedding
+        self._base_embed: Embedding | None = None
         # embedding model cache
         self._scope_embedding: dict[str, Embedding] = {}
 
@@ -121,12 +123,9 @@ class LongTermMemory(metaclass=Singleton):
             )
 
         self.kv_store = kv_store
-        self.semantic_store = SemanticStore(vector_store=vector_store)
+        self.vector_store = vector_store
         self.db_store = db_store
-
-        if self.semantic_store and embedding_model is not None:
-            # Only temporarily initialize the embedding model of the semantic_store during the register_store process.
-            self.semantic_store.initialize_embedding_model(embedding_model)
+        self._base_embed = embedding_model
 
         if self.db_store:
             await create_tables(self.db_store)
@@ -140,7 +139,7 @@ class LongTermMemory(metaclass=Singleton):
         Args:
             config: memory engine configuration parameters
         """
-        if not self.kv_store or not self.semantic_store or not self.db_store:
+        if not self.kv_store or not self.db_store or not self.vector_store:
             raise build_error(
                 StatusCode.MEMORY_SET_CONFIG_EXECUTION_ERROR,
                 config_type="system",
@@ -159,7 +158,6 @@ class LongTermMemory(metaclass=Singleton):
                 config.crypto_key
             )
         self.user_profile_manager = UserProfileManager(
-            semantic_recall_instance=self.semantic_store,
             user_mem_store=user_mem_store,
             data_id_generator=data_id_generator,
             crypto_key=config.crypto_key
@@ -168,9 +166,10 @@ class LongTermMemory(metaclass=Singleton):
             self.kv_store,
             config.crypto_key
         )
-        self.summary_manager = SummaryManager(semantic_recall_instance=self.semantic_store,
-                                              user_mem_store=user_mem_store,
-                                              crypto_key=self._sys_mem_config.crypto_key)
+        self.summary_manager = SummaryManager(
+            user_mem_store=user_mem_store,
+            crypto_key=self._sys_mem_config.crypto_key
+        )
         managers = {
             MemoryType.USER_PROFILE.value: self.user_profile_manager,
             MemoryType.VARIABLE.value: self.variable_manager,
@@ -340,11 +339,16 @@ class LongTermMemory(metaclass=Singleton):
         scope_user_data = await self.scope_user_mapping_manager.get_by_scope_id(scope_id=scope_id)
         user_ids = [scope_user["user_id"] for scope_user in scope_user_data]
         # Use write_manager to delete all memories associated with the scope
+        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
         if self.write_manager:
             for user_id in user_ids:
                 lock = DistributedLock(self.kv_store, f"user/{user_id}")
                 async with lock:
-                    await self.write_manager.delete_mem_by_user_id(scope_id=scope_id, user_id=user_id)
+                    await self.write_manager.delete_mem_by_user_id(
+                        scope_id=scope_id,
+                        user_id=user_id,
+                        semantic_store=semantic_store
+                    )
         await self.scope_user_mapping_manager.delete_by_scope_id(scope_id=scope_id)
         memory_logger.debug(
             "Successfully deleted memories.",
@@ -375,8 +379,7 @@ class LongTermMemory(metaclass=Singleton):
             return
         msg_id = "-1"
         llm = await self._get_scope_llm(scope_id)
-        # Set the correct embedding model for this scope
-        await self._set_semantic_store_embedding_model(scope_id)
+        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
         # user level distributed lock
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
@@ -440,7 +443,7 @@ class LongTermMemory(metaclass=Singleton):
                 summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token
             )
             try:
-                await self.write_manager.add_mem(mem_units=all_memory, llm=llm)
+                await self.write_manager.add_mem(mem_units=all_memory, llm=llm, semantic_store=semantic_store)
                 memory_logger.debug(
                     "Successfully added memory units.",
                     event_type=LogEventType.MEMORY_STORE,
@@ -544,8 +547,7 @@ class LongTermMemory(metaclass=Singleton):
                 memory_id=[mem_id]
             )
             return
-        # Set the correct embedding model for this scope
-        await self._set_semantic_store_embedding_model(scope_id)
+        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
@@ -554,7 +556,12 @@ class LongTermMemory(metaclass=Singleton):
                     memory_type="all",
                     error_msg=f"write manager is not initialized",
                 )
-            await self.write_manager.delete_mem_by_id(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
+            await self.write_manager.delete_mem_by_id(
+                user_id=user_id,
+                scope_id=scope_id,
+                mem_id=mem_id,
+                semantic_store=semantic_store
+            )
 
     async def delete_mem_by_user_id(self,
                                     user_id: str = DEFAULT_VALUE,
@@ -576,8 +583,7 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id
             )
             return
-        # Set the correct embedding model for this scope
-        await self._set_semantic_store_embedding_model(scope_id)
+        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
@@ -586,7 +592,11 @@ class LongTermMemory(metaclass=Singleton):
                     memory_type="all",
                     error_msg=f"write manager is not initialized",
                 )
-            await self.write_manager.delete_mem_by_user_id(user_id=user_id, scope_id=scope_id)
+            await self.write_manager.delete_mem_by_user_id(
+                user_id=user_id,
+                scope_id=scope_id,
+                semantic_store=semantic_store
+            )
 
     async def update_mem_by_id(self,
                                mem_id: str,
@@ -611,8 +621,7 @@ class LongTermMemory(metaclass=Singleton):
                 memory_id=[mem_id]
             )
             return
-        # Set the correct embedding model for this scope
-        await self._set_semantic_store_embedding_model(scope_id)
+        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
         lock = DistributedLock(self.kv_store, f"user/{user_id}")
         async with lock:
             if not self.write_manager:
@@ -622,7 +631,7 @@ class LongTermMemory(metaclass=Singleton):
                     error_msg=f"write manager is not initialized",
                 )
             await self.write_manager.update_mem_by_id(user_id=user_id, scope_id=scope_id,
-                                                      mem_id=mem_id, memory=memory)
+                                                      mem_id=mem_id, memory=memory, semantic_store=semantic_store)
 
     async def get_variables(self,
                             names: list[str] | str | None = None,
@@ -693,8 +702,7 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id
             )
             return []
-        # Set the correct embedding model for this scope
-        await self._set_semantic_store_embedding_model(scope_id)
+        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
         if not self.search_manager:
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
@@ -709,7 +717,7 @@ class LongTermMemory(metaclass=Singleton):
             threshold=threshold
         )
         try:
-            search_data = await self.search_manager.search(params)
+            search_data = await self.search_manager.search(params, semantic_store)
             mem_results: list[MemResult] = [
                 MemResult(
                     mem_info=MemInfo(
@@ -787,8 +795,7 @@ class LongTermMemory(metaclass=Singleton):
                 scope_id=scope_id
             )
             return []
-        # Set the correct embedding model for this scope
-        await self._set_semantic_store_embedding_model(scope_id)
+        semantic_store = await self._create_semantic_store_with_embedding(scope_id)
         if not self.search_manager:
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
@@ -804,7 +811,7 @@ class LongTermMemory(metaclass=Singleton):
             search_type=MemoryType.SUMMARY.value
         )
         try:
-            search_data = await self.search_manager.search(params)
+            search_data = await self.search_manager.search(params, semantic_store)
             mem_results: list[MemResult] = [
                 MemResult(
                     mem_info=MemInfo(
@@ -1131,19 +1138,25 @@ class LongTermMemory(metaclass=Singleton):
             # If the LLM fails to be obtained, try to use the system default configuration.
             return self._base_llm
 
-    async def _set_semantic_store_embedding_model(self, scope_id: str):
+    async def _create_semantic_store_with_embedding(self, scope_id: str) -> SemanticStore:
         """
-        Set the embedding model for the semantic store based on the scope_id.
+        Create a new semantic store instance and initialize it with the appropriate embedding model.
 
         Args:
             scope_id: Scope identifier
-        """
-        if not self.semantic_store:
-            return
 
+        Returns:
+            SemanticStore: New semantic store instance with embedding model initialized
+        """
+        semantic_store = SemanticStore(vector_store=self.vector_store)
         embedding_model = await self._get_scope_embedding_model(scope_id)
         if embedding_model:
-            self.semantic_store.initialize_embedding_model(embedding_model)
+            semantic_store.initialize_embedding_model(embedding_model)
+        elif self._base_embed:
+            semantic_store.initialize_embedding_model(self._base_embed)
+        else:
+            pass
+        return semantic_store
 
     def _check_messages(self, messages: list[BaseMessage]) -> Tuple[bool, list[BaseMessage]]:
         out_messages = []

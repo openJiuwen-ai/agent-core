@@ -22,7 +22,7 @@ class BaseMemoryManager(ABC):
     TAG_HEX_LENGTH = TAG_LENGTH * 2  # hex_length = bytes_length * 2
 
     @abstractmethod
-    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, Model] | None = None):
+    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, Model] | None = None, **kwargs):
         """add memory."""
         pass
 
@@ -37,7 +37,7 @@ class BaseMemoryManager(ABC):
         pass
 
     @abstractmethod
-    async def delete_by_user_id(self, user_id: str, scope_id: str):
+    async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
         """delete memory by user id and app id."""
         pass
 

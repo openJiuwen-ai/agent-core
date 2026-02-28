@@ -20,7 +20,7 @@ class VariableManager(BaseMemoryManager):
         self.kv_store = kv_store
         self.crypto_key = crypto_key
 
-    async def add(self, memory: VariableUnit, llm: Tuple[str, Model] | None = None):
+    async def add(self, memory: VariableUnit, llm: Tuple[str, Model] | None = None, **kwargs):
         """add Variable memory"""
         if self.kv_store is None:
             memory_logger.error(
@@ -81,7 +81,7 @@ class VariableManager(BaseMemoryManager):
         )
         pass
 
-    async def delete_by_user_id(self, user_id: str, scope_id: str):
+    async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
         if self.kv_store is None:
             memory_logger.error(
                 "kv_store cannot be None",
