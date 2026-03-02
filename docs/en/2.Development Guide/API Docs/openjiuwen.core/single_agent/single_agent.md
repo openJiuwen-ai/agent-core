@@ -442,6 +442,18 @@ Retrieve state information during Agent execution. This method is used to query 
 - If `key` is a `str`, the value at the specified path is returned. If the path does not exist, `None` is returned.
 - If `key` is a `dict` or `list`, all variables wrapped in `"${}"` within the input `dict` or `list` are replaced with the values from their corresponding state paths. If a path does not exist, it is replaced with `None`. The final result after all substitutions is returned.
 
+### dump_state
+
+```python
+dump_state(self) -> dict
+```
+
+Exports the state information of the current agent.
+
+**Returns:**
+
+**dict**: A dictionary containing all current agent states.
+
 ### async write_stream(data: Union[dict, OutputSchema])
 
 Write streaming output data.
