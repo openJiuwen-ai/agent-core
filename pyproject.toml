@@ -51,6 +51,7 @@ dependencies = [
     "oauthlib>=3.3.1",
     "json-repair>=0.55.0",
     "tenacity>=9.1.2",
+    "alembic>=1.13.1",
 ]
 
 [project.optional-dependencies]
