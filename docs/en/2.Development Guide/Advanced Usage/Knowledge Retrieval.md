@@ -209,6 +209,74 @@ print(f"Index Info: {stats['index_info']}")
 print(f"Component Status: {stats}")
 ```
 
+## Agentic Retrieval
+
+Both `SimpleKnowledgeBase` and `GraphKnowledgeBase` support **agentic retrieval** — an LLM-powered iterative retrieval strategy that automatically rewrites queries and fuses results across multiple rounds for higher recall and precision.
+
+To enable agentic retrieval, set `agentic=True` in `RetrievalConfig` and provide an `llm_client` when creating the knowledge base:
+
+### Agentic retrieval with SimpleKnowledgeBase
+```python
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+
+# Create an LLM client for agentic retrieval
+llm_client = OpenAIModelClient(
+    api_key="sk-xxxxx",
+    base_url="http://xxxxx",
+    model="<model_name>",
+)
+
+# Pass llm_client when creating the knowledge base
+knowledge_base = SimpleKnowledgeBase(
+    config=kb_config,
+    vector_store=vector_store,
+    embed_model=embed_model,
+    llm_client=llm_client,  # Required for agentic retrieval
+)
+
+# Enable agentic retrieval via RetrievalConfig
+retrieval_config = RetrievalConfig(
+    top_k=5,
+    agentic=True,  # Enable agentic retrieval
+)
+
+results = await knowledge_base.retrieve("complex multi-hop question", config=retrieval_config)
+```
+
+### Agentic retrieval with GraphKnowledgeBase
+
+```python
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+
+# Create an LLM client for agentic retrieval
+llm_client = OpenAIModelClient(
+    api_key="sk-xxxxx",
+    base_url="http://xxxxx",
+    model="<model_name>",
+)
+
+graph_kb = GraphKnowledgeBase(
+    config=kb_config,
+    vector_store=vector_store,
+    embed_model=embed_model,
+    llm_client=llm_client,
+)
+
+# Enable agentic retrieval via RetrievalConfig
+retrieval_config = RetrievalConfig(
+    top_k=5,
+    agentic=True,
+    use_graph=True,
+    graph_expansion=True,
+)
+
+results = await graph_kb.retrieve("complex multi-hop question", config=retrieval_config)
+```
+
+Under the hood, the knowledge base wraps its internal retriever with an `AgenticRetriever`, which performs iterative query rewriting and RRF fusion. When used with `GraphKnowledgeBase`, graph-specific features such as graph expansion and triple linking are automatically enabled unless disabled through RetrievalConfig.
+
+> **Note**: Agentic retrieval requires an `llm_client` to be configured on the knowledge base. The `AgenticRetriever` itself accepts any `Retriever` subclass, so it works with vector, sparse, hybrid, and graph retrievers alike. To create kb_config, vector_store and embed_model, refer the complete knowledge base example below.
+
 # Complete Knowledge Base Usage Code Example
 
 ```python

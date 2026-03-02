@@ -2,22 +2,22 @@
 
 ## class openjiuwen.core.retrieval.retriever.agentic_retriever.AgenticRetriever
 
-Agentic retriever that adds LLM query rewriting and multi-round fusion capabilities on top of graph retrieval, improving retrieval effectiveness through multi-round retrieval and query optimization.
+Agentic retriever that adds LLM query rewriting and multi-round fusion capabilities on top of any retriever, improving retrieval effectiveness through iterative retrieval and query optimization.
+
+When the underlying retriever is a `GraphRetriever`, graph-specific features such as graph expansion and triple linking are enabled automatically. For any other `Retriever` subclass, the agent performs iterative query rewriting and result fusion directly.
 
 
 ```python
-AgenticRetriever(graph_retriever: GraphRetriever, llm_client: Any, llm_model_name: Optional[str] = None, max_iter: int = 3, agent_topk: int = 15)
+AgenticRetriever(retriever: Retriever, llm_client: BaseModelClient, max_iter: int = 2)
 ```
 
 Initialize agentic retriever.
 
 **Parameters**:
 
-* **graph_retriever**(GraphRetriever): Graph retriever instance.
-* **llm_client**(Any): LLM client instance (for query rewriting).
-* **llm_model_name**(str, optional): LLM model name. Default: None.
-* **max_iter**(int): Maximum number of iterations. Default: 3.
-* **agent_topk**(int): Number of results to return per round of retrieval. Default: 15.
+* **retriever**(Retriever): The underlying retriever instance. Accepts any `Retriever` subclass. When a `GraphRetriever` is supplied, graph-specific features are enabled automatically.
+* **llm_client**(BaseModelClient): LLM client instance used for triple extraction and query rewriting.
+* **max_iter**(int): Maximum number of agent iterations. Default: 2.
 
 ### async retrieve
 
@@ -45,25 +45,35 @@ Retrieve documents (agentic retrieval), optimizing retrieval effectiveness throu
 >>> import asyncio
 >>> from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 >>> from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
+>>> from openjiuwen.core.retrieval.retriever.vector_retriever import VectorRetriever
 >>> from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 >>> 
 >>> async def run():
-...     # Create graph retriever
-...     graph_retriever = GraphRetriever(...)
 ...     # Create LLM client
 ...     llm_client = OpenAIModelClient(...)
-...     # Create agentic retriever
-...     retriever = AgenticRetriever(
-...         graph_retriever=graph_retriever,
+...
+...     # Example 1: With a GraphRetriever (enables graph-specific features)
+...     graph_retriever = GraphRetriever(...)
+...     agentic = AgenticRetriever(
+...         retriever=graph_retriever,
 ...         llm_client=llm_client,
-...         llm_model_name="<model_name>",
-...         max_iter=3,
-...         agent_topk=15
+...         max_iter=2,
 ...     )
-...     results = await retriever.retrieve("test query", top_k=5)
-...     print(f"Retrieved {len(results)} results with agentic retrieval")
+...     results = await agentic.retrieve("test query", top_k=5)
+...     print(f"Retrieved {len(results)} results with graph-agentic retrieval")
+...
+...     # Example 2: With any other Retriever (e.g., VectorRetriever)
+...     vector_retriever = VectorRetriever(...)
+...     agentic = AgenticRetriever(
+...         retriever=vector_retriever,
+...         llm_client=llm_client,
+...         max_iter=2,
+...     )
+...     results = await agentic.retrieve("test query", top_k=5)
+...     print(f"Retrieved {len(results)} results with generic agentic retrieval")
 >>> asyncio.run(run())
-Retrieved 5 results with agentic retrieval
+Retrieved 5 results with graph-agentic retrieval
+Retrieved 5 results with generic agentic retrieval
 ```
 
 ### async batch_retrieve

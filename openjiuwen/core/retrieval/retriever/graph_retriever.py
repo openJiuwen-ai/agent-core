@@ -31,6 +31,7 @@ class TripleBeamSearch:
         num_candidates_per_beam: int = 100,
         max_length: int = 2,
         encoder_batch_size: int = 256,
+        **kwargs,
     ) -> None:
         if max_length < 1:
             raise build_error(

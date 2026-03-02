@@ -6,12 +6,14 @@ Simple Knowledge Base Implementation
 Provides complete knowledge base functionality including document parsing, chunking, index building, and retrieval.
 """
 
+import asyncio
 import uuid
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import BaseModelClient
 from openjiuwen.core.retrieval.common.config import IndexConfig, KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.common.retrieval_result import MultiKBRetrievalResult, RetrievalResult
@@ -21,6 +23,7 @@ from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
+from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
@@ -38,7 +41,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
         extractor: Optional[Extractor] = None,
         index_manager: Optional[Indexer] = None,
         retriever: Optional[Retriever] = None,
-        llm_client: Optional[Any] = None,
+        llm_client: Optional[BaseModelClient] = None,
         **kwargs,
     ):
         """
@@ -165,7 +168,17 @@ class SimpleKnowledgeBase(KnowledgeBase):
         elif self.config.index_type == "bm25":
             mode = "sparse"
 
-        results = await self.retriever.retrieve(
+        # Enable agentic retrieval based if needed based on retrieval config
+        if retrieval_config.agentic:
+            retriever = AgenticRetriever(
+                retriever=self.retriever,
+                llm_client=self.llm_client,
+                **kwargs,
+            )
+        else:
+            retriever = self.retriever
+
+        results = await retriever.retrieve(
             query=query,
             top_k=retrieval_config.top_k,
             score_threshold=retrieval_config.score_threshold,
@@ -287,8 +300,6 @@ async def retrieve_multi_kb(
             logger.warning("retrieve_multi_kb: kb_id=%s failed: %s", getattr(kb.config, "kb_id", None), e)
             return []
 
-    import asyncio
-
     all_results = await asyncio.gather(*[_retrieve_one(kb) for kb in kbs])
     merged: Dict[str, float] = {}
     for results in all_results:
@@ -322,8 +333,6 @@ async def retrieve_multi_kb_with_source(
         except Exception as e:  # noqa: BLE001
             logger.warning("retrieve_multi_kb_with_source: kb_id=%s failed: %s", getattr(kb.config, "kb_id", None), e)
             return []
-
-    import asyncio
 
     all_results = await asyncio.gather(*[_retrieve_one(kb) for kb in kbs])
     merged: Dict[str, Dict[str, Any]] = {}

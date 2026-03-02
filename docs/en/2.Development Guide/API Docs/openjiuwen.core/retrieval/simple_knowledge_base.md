@@ -8,7 +8,7 @@ Knowledge base implementation based on vector retrieval, providing complete know
 
 
 ```python
-SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, retriever: Optional[Retriever] = None, llm_client: Optional[Any] = None, **kwargs: Any)
+SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, retriever: Optional[Retriever] = None, llm_client: Optional[BaseModelClient] = None, **kwargs: Any)
 ```
 
 Initialize simple knowledge base.
@@ -23,7 +23,7 @@ Initialize simple knowledge base.
 * **extractor**(Extractor, optional): Extractor instance. Default: None.
 * **index_manager**(Indexer, optional): Index manager instance. Default: None.
 * **retriever**(Retriever, optional): Retriever instance (optional, will be automatically created based on index_type if not provided). Default: None.
-* **llm_client**(Any, optional): LLM client instance. Default: None.
+* **llm_client**(BaseModelClient, optional): LLM client instance (required for agentic retrieval). Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 ### async parse_files
@@ -105,7 +105,7 @@ Added 1 documents
 retrieve(query: str, config: Optional[RetrievalConfig] = None, **kwargs: Any) -> List[RetrievalResult]
 ```
 
-Retrieve relevant documents. If retriever is not provided, the corresponding retriever will be automatically created based on index_type.
+Retrieve relevant documents. If retriever is not provided, the corresponding retriever will be automatically created based on index_type. When `config.agentic` is True, an `AgenticRetriever` wraps the underlying retriever to perform iterative query rewriting and result fusion (requires `llm_client` to be configured).
 
 **Parameters**:
 

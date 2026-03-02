@@ -7,7 +7,7 @@
 > **参考实现**：基于 `SimpleKnowledgeBase` 的示例项目。该项目实现了一个持续更新的 PEP（Python Enhancement Proposals）知识库，用于为代码的审视与修复提供风格与规范层面的专业建议。详见 [TomatoReviewer](https://gitcode.com/SushiNinja/TomatoReviewer)。
 
 ```python
-SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, retriever: Optional[Retriever] = None, llm_client: Optional[Any] = None, **kwargs: Any)
+SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, retriever: Optional[Retriever] = None, llm_client: Optional[BaseModelClient] = None, **kwargs: Any)
 ```
 
 初始化简单知识库。
@@ -22,7 +22,7 @@ SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorSt
 * **extractor**(Extractor, 可选)：提取器实例。默认值：None。
 * **index_manager**(Indexer, 可选)：索引管理器实例。默认值：None。
 * **retriever**(Retriever, 可选)：检索器实例（可选，如果未提供将根据index_type自动创建）。默认值：None。
-* **llm_client**(Any, 可选)：LLM客户端实例。默认值：None。
+* **llm_client**(BaseModelClient, 可选)：LLM客户端实例（智能检索时必需）。默认值：None。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
 
 ### async parse_files
@@ -104,7 +104,7 @@ Added 1 documents
 retrieve(query: str, config: Optional[RetrievalConfig] = None, **kwargs: Any) -> List[RetrievalResult]
 ```
 
-检索相关文档。如果未提供retriever，将根据index_type自动创建相应的检索器。
+检索相关文档。如果未提供retriever，将根据index_type自动创建相应的检索器。当 `config.agentic` 为 True 时，`AgenticRetriever` 会包装底层检索器执行迭代查询重写和结果融合（需要配置 `llm_client`）。
 
 **参数**：
 

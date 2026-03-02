@@ -66,6 +66,11 @@
 | COMPONENT_QUESTIONER_RUNTIME_ERROR | 101074 | 提问器组件运行时错误。 | 检查是否超过最大追问次数,确认用户输入完整性。 |
 | COMPONENT_QUESTIONER_INVOKE_CALL_FAILED | 101075 | 提问器组件调用失败。 | 检查大模型服务配置和可用性。 |
 | COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR | 101076 | 提问器组件执行处理错误。 | 检查大模型响应格式和解析逻辑。 |
+| | **KnowledgeRetrieval组件 (101100 - 101149)** | | |
+| COMPONENT_KNOWLEDGE_RETRIEVAL_INVOKE_CALL_FAILED | 101100 | 知识检索组件调用失败。 | 检查知识库连接和大模型服务可用性。 |
+| COMPONENT_KNOWLEDGE_RETRIEVAL_EMBED_MODEL_INIT_ERROR | 101101 | 知识检索组件Embedding模型初始化错误。 | 检查Embedding模型配置是否正确。 |
+| COMPONENT_KNOWLEDGE_RETRIEVAL_INPUT_PARAM_ERROR | 101102 | 知识检索组件输入参数错误。 | 检查输入参数是否满足组件要求(如包含query)。 |
+| COMPONENT_KNOWLEDGE_RETRIEVAL_LLM_MODEL_INIT_ERROR | 101103 | 知识检索组件LLM模型初始化失败。 | 检查LLM模型配置和ApiKey。 |
 | | **Tool组件 (102000 - 102019)** | | |
 | COMPONENT_TOOL_EXECUTION_ERROR | 102000 | Tool组件执行错误。 | 检查工具执行逻辑和依赖服务可用性。 |
 | COMPONENT_TOOL_INPUT_PARAM_ERROR | 102001 | Tool组件输入参数错误。 | 检查输入参数是否符合工具定义的schema。 |
@@ -202,9 +207,10 @@
 | RETRIEVAL_RETRIEVER_CAPABILITY_NOT_SUPPORT | 155205 | 检索器能力不支持。 | 使用检索器支持的检索模式。 |
 | RETRIEVAL_RETRIEVER_VECTOR_STORE_NOT_FOUND | 155206 | 检索器向量存储未找到。 | 提供有效的向量存储实例。 |
 | RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND | 155207 | 检索器集合未找到。 | 提供有效的集合名称。 |
-| RETRIEVAL_RETRIEVER_GRAPH_RETRIEVER_NOT_FOUND | 155208 | 检索器图检索器未找到。 | 提供有效的图检索器实例。 |
+| RETRIEVAL_RETRIEVER_NOT_FOUND | 155208 | 检索器未找到。 | 提供有效的检索器实例。 |
 | RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND | 155209 | 检索器LLM客户端未找到。 | 提供有效的LLM客户端实例。 |
-| RETRIEVAL_RETRIEVER_TOP_K_NOT_FOUND | 155210 | 检索器top_k未找到。 | 提供有效的top_k参数(正整数)。 |
+| RETRIEVAL_RETRIEVER_TOP_K_INVALID | 155210 | 检索器top_k无效。 | 提供有效的top_k参数（正整数）。 |
+| RETRIEVAL_RETRIEVER_INVALID | 155211 | 检索器无效 | 检查检索器配置和初始化，查看错误信息。 |
 | | **Utils (155300 - 155399)** | | |
 | RETRIEVAL_UTILS_CONFIG_FILE_NOT_FOUND | 155300 | 检索工具配置文件未找到。 | 检查配置文件路径和权限。 |
 | RETRIEVAL_UTILS_PYYAML_NOT_FOUND | 155301 | 检索工具PyYAML未找到。 | 安装PyYAML: pip install PyYAML。 |

@@ -444,13 +444,18 @@ class StatusCode(Enum):
         155206,
         "retrieval retriever_vector_store not found, reason: {error_msg}",
     )
-    RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND = (155207, "retrieval retriever_collection not found, reason: {error_msg}")
-    RETRIEVAL_RETRIEVER_GRAPH_RETRIEVER_NOT_FOUND = (
+    RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND = (
+        155207, "retrieval retriever_collection not found, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_NOT_FOUND = (
         155208,
-        "retrieval retriever_graph_retriever not found, reason: {error_msg}",
+        "retrieval retriever not found, reason: {error_msg}",
     )
-    RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND = (155209, "retrieval retriever_llm_client not found, reason: {error_msg}")
-    RETRIEVAL_RETRIEVER_TOP_K_NOT_FOUND = (155210, "retrieval retriever_top_k not found, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND = (
+        155209, "retrieval retriever_llm_client not found, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_TOP_K_INVALID = (
+        155210, "retrieval retriever_top_k is invalid, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_INVALID = (
+        155211, "retrieval retriever is invalid, reason: {error_msg}")
 
     # KnowledgeBase Retrieval - Utils 155300 - 155399
     RETRIEVAL_UTILS_CONFIG_FILE_NOT_FOUND = (155300, "retrieval utils_config_file not found, reason: {error_msg}")

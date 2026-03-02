@@ -3,7 +3,7 @@
 Simple knowledge base implementation test cases
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -11,6 +11,8 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import (
     Document,
     KnowledgeBaseConfig,
+    RetrievalConfig,
+    RetrievalResult,
     SimpleKnowledgeBase,
     TextChunk,
     retrieve_multi_kb,
@@ -186,6 +188,44 @@ class TestSimpleKnowledgeBase:
         """Test retrieval with provided retriever"""
         kb = SimpleKnowledgeBase(config=mock_config, retriever=mock_retriever)
         results = await kb.retrieve("test query")
+        assert len(results) == 1
+        mock_retriever.retrieve.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_retrieve_with_agentic(self, mock_config, mock_retriever):
+        """Test using Agentic retrieval via SimpleKnowledgeBase"""
+        with patch("openjiuwen.core.retrieval.simple_knowledge_base.AgenticRetriever") as mock_agentic_class:
+            mock_agentic_retriever = AsyncMock()
+            mock_agentic_retriever.retrieve = AsyncMock(
+                return_value=[
+                    RetrievalResult(text="Agentic result", score=0.98),
+                ]
+            )
+            mock_agentic_class.return_value = mock_agentic_retriever
+
+            mock_llm_client = AsyncMock()
+            kb = SimpleKnowledgeBase(
+                config=mock_config,
+                retriever=mock_retriever,
+                llm_client=mock_llm_client,
+            )
+            config = RetrievalConfig(agentic=True, top_k=5)
+            results = await kb.retrieve("test query", config=config)
+            assert len(results) == 1
+            mock_agentic_class.assert_called_once()
+            # Verify AgenticRetriever is constructed with retriever= and llm_client=
+            call_kwargs = mock_agentic_class.call_args[1]
+            assert "retriever" in call_kwargs
+            assert "llm_client" in call_kwargs
+            assert call_kwargs["retriever"] == mock_retriever
+            assert call_kwargs["llm_client"] == mock_llm_client
+
+    @pytest.mark.asyncio
+    async def test_retrieve_without_agentic(self, mock_config, mock_retriever):
+        """Test retrieval without agentic flag uses the base retriever directly"""
+        kb = SimpleKnowledgeBase(config=mock_config, retriever=mock_retriever)
+        config = RetrievalConfig(agentic=False, top_k=5)
+        results = await kb.retrieve("test query", config=config)
         assert len(results) == 1
         mock_retriever.retrieve.assert_called_once()
 
