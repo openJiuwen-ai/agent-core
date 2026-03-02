@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.retrieval.indexing.indexer.milvus_indexer import MilvusIndexer
     from openjiuwen.core.retrieval.indexing.processor import parser
     from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
+    from openjiuwen.core.retrieval.query_rewriter.query_rewriter import QueryRewriter
     from openjiuwen.core.retrieval.reranker.chat_reranker import ChatReranker
     from openjiuwen.core.retrieval.reranker.standard_reranker import StandardReranker
     from openjiuwen.core.retrieval.simple_knowledge_base import (

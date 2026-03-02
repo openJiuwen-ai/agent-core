@@ -108,6 +108,9 @@ name = "aliyun"
 url = "https://mirrors.aliyun.com/pypi/simple"
 default = true
 
+[tool.setuptools.package-data]
+openjiuwen = ["**/prompts/**/*.md"]
+
 [tool.coverage.run]
 omit = ["tests/*"]
 

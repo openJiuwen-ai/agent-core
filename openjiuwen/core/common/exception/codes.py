@@ -501,6 +501,24 @@ class StatusCode(Enum):
     RETRIEVAL_RERANKER_UNREACHABLE_CALL_FAILED = (155601, "retrieval reranker call failed, reason: {error_msg}")
     RETRIEVAL_RERANKER_INPUT_INVALID = (155602, "retrieval reranker_input is invalid, reason: {error_msg}")
 
+    # KnowledgeBase Retrieval - Query Rewriter 155603 - 155609
+    RETRIEVAL_QUERY_REWRITER_PROMPT_NOT_FOUND = (
+        155603,
+        "retrieval query_rewriter prompt file not found, reason: {error_msg}",
+    )
+    RETRIEVAL_QUERY_REWRITER_OUTPUT_INVALID = (
+        155604,
+        "retrieval query_rewriter llm output is not valid JSON, reason: {error_msg}",
+    )
+    RETRIEVAL_QUERY_REWRITER_LLM_INVOKE_FAILED = (
+        155605,
+        "retrieval query_rewriter llm invoke failed, reason: {error_msg}",
+    )
+    RETRIEVAL_QUERY_REWRITER_INPUT_INVALID = (
+        155606,
+        "retrieval query_rewriter input is invalid, reason: {error_msg}",
+    )
+
     # =========================
     # Memory Engine 158000 – 159999
     # =========================
