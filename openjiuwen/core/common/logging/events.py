@@ -77,6 +77,7 @@ class LogEventType(Enum):
     STORE_LOAD = "store_load"  # Data store load collection
 
     # Memory related events
+    MEMORY_INIT = "memory_init"  # Memory initialization
     MEMORY_STORE = "memory_store"  # Memory stored
     MEMORY_RETRIEVE = "memory_retrieve"  # Memory retrieved
     MEMORY_DELETE = "memory_delete"  # Memory deleted
@@ -625,6 +626,7 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.TOOL_CALL_END: ToolEvent,
     LogEventType.TOOL_CALL_ERROR: ToolEvent,
     # Memory events
+    LogEventType.MEMORY_INIT: MemoryEvent,
     LogEventType.MEMORY_PROCESS: MemoryEvent,
     LogEventType.MEMORY_STORE: MemoryEvent,
     LogEventType.MEMORY_RETRIEVE: MemoryEvent,

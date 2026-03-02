@@ -1,13 +1,14 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
-from typing import Any
+from typing import Any, List
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
+from openjiuwen.core.memory.common.kv_prefix_registry import kv_prefix_registry
 
 
 class UserMemStore:
@@ -15,6 +16,7 @@ class UserMemStore:
     IDS_STR: str = "ids"
     USER_PROFILE_TOPIC_STR: str = "UPT"
     KEY_PREFIX_STR: str = "UMD"
+    LEGACY_PREFIXES: List[str] = []
     MEM_TYPE_FIELD_KEY: str = "mem_type"
     TOPIC_FIELD_KEY: str = "profile_type"
     SEPARATOR: str = "/"
@@ -27,6 +29,9 @@ class UserMemStore:
                 error_msg=f"kv store instance is None in UserMemStore"
             )
         self.kv_store = kv_store_instance
+        kv_prefix_registry.register_current(self.KEY_PREFIX_STR)
+        for legacy_prefix in self.LEGACY_PREFIXES:
+            kv_prefix_registry.register_legacy(legacy_prefix)
 
     async def write(self, user_id: str, scope_id: str, mem_id: str, data: dict[str, Any]) -> bool:
         """write data to store"""
