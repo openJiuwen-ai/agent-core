@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from abc import abstractmethod, ABC
 from typing import (
+    Dict,
     List,
     Any,
     AsyncIterator,
@@ -31,11 +32,15 @@ from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
-from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent, AgentCallbackContext, AgentMiddleware, \
-    AnyAgentCallback
+from openjiuwen.core.single_agent.middleware.base import (
+    AgentCallbackEvent, AgentCallbackContext, AgentMiddleware, AnyAgentCallback,
+    BeforeInvokeContext, AfterInvokeContext,
+    BeforeModelCallContext, AfterModelCallContext,
+    BeforeToolCallContext, AfterToolCallContext,
+)
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
 from openjiuwen.core.controller.config import ControllerConfig
@@ -43,6 +48,16 @@ from openjiuwen.core.common.exception.errors import build_error, BaseError
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.skills import GitHubTree
+
+# Dispatch map: event → typed context subclass
+_EVENT_CTX_MAP = {
+    AgentCallbackEvent.BEFORE_INVOKE: BeforeInvokeContext,
+    AgentCallbackEvent.AFTER_INVOKE: AfterInvokeContext,
+    AgentCallbackEvent.BEFORE_MODEL_CALL: BeforeModelCallContext,
+    AgentCallbackEvent.AFTER_MODEL_CALL: AfterModelCallContext,
+    AgentCallbackEvent.BEFORE_TOOL_CALL: BeforeToolCallContext,
+    AgentCallbackEvent.AFTER_TOOL_CALL: AfterToolCallContext,
+}
 
 
 # =============================================================================
@@ -163,36 +178,41 @@ class BaseAgent(ABC):
     async def _execute_callbacks(
         self,
         event: AgentCallbackEvent,
-        inputs: Any = None,
-        config: Any = None,
-        session: Session = None,
-        context: ModelContext = None,
-        **extra
-    ) -> AgentCallbackContext:
+        inputs: Dict[str, Any],
+        session: Optional[Any] = None,
+        context: Optional[ModelContext] = None,
+        **kwargs,
+    ) -> None:
         """Execute callbacks for a given event.
 
-        This method should be called by subclasses at appropriate points
-        in their execution flow.
+        ``inputs`` is a **mutable dict** shared between the caller and the
+        middleware chain.  Middleware may modify values in-place; those changes
+        are immediately visible to the caller through the same dict reference.
+
+        For *after_** events the operation result is included directly inside
+        ``inputs`` (no separate ``extra`` dict):
+            BEFORE_INVOKE      inputs={"query", "conversation_id"?}
+            AFTER_INVOKE       inputs={"query", "conversation_id"?, "result"}
+            BEFORE_MODEL_CALL  inputs={"messages", "tools"}
+            AFTER_MODEL_CALL   inputs={"messages", "tools", "response"}
+            BEFORE_TOOL_CALL   inputs={"tool_name", "tool_args"}
+            AFTER_TOOL_CALL    inputs={"tool_name", "tool_args", "tool_result", "tool_msg"}
 
         Args:
-            event: The agent callback event
-            inputs: Original inputs
-            iteration: Current iteration number
-            **extra: Additional context data
-
-        Returns:
-            AgentCallbackContext with potential modifications
+            event:   The agent callback event
+            inputs:  Mutable dict of event parameters (see table above)
+            session: Current Session object (None for before_invoke)
+            context: Current ModelContext (None for before_invoke)
         """
-        ctx = AgentCallbackContext(
+        ctx_class = _EVENT_CTX_MAP.get(event, AgentCallbackContext)
+        ctx = ctx_class(
             agent=self,
             event=event,
             inputs=inputs,
-            config=config,
             session=session,
             context=context,
-            extra=extra
         )
-        return await self._agent_callback_manager.execute(event, ctx)
+        await self._agent_callback_manager.execute(event, ctx)
 
     @abstractmethod
     async def invoke(
@@ -312,7 +332,7 @@ class ControllerAgent(BaseAgent):
                 session_id=session_id
             )
         from openjiuwen.core.runner import Runner
-        await Runner.release(session_id=session_id)
+        await Runner().release(session_id=session_id)
 
     async def invoke(
         self,
@@ -410,7 +430,6 @@ class ControllerAgent(BaseAgent):
                     StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="session is required",
                 )
-
             # Convert inputs to InputEvent
             input_event = InputEvent.from_user_input(user_input=inputs)
 

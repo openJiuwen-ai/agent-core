@@ -68,9 +68,6 @@ class AgentCallbackManager:
         Args:
             event: The hook event
             callback: The callback to remove
-
-        Returns:
-            True if callback was found and removed
         """
         agent_event = self._get_agent_event(event)
         from openjiuwen.core.runner import Runner
