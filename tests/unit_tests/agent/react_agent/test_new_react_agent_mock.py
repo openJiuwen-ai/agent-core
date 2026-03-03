@@ -907,5 +907,112 @@ class TestNewReActAgentToolTagIsolation(unittest.IsolatedAsyncioTestCase):
         assert "tool_a" not in names_b
 
 
+class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
+    """测试 AbilityManager 的 bug 修复和逻辑优化"""
+
+    def setUp(self):
+        """设置测试环境"""
+        from openjiuwen.core.single_agent import AbilityManager
+        self.ability_manager = AbilityManager()
+
+    def test_remove_batch_returns_complete_list(self):
+        """测试批量删除时返回完整列表（修复循环内 return 的 bug）"""
+        # 添加多个工具
+        tool1 = ToolCard(name="tool1", description="工具1")
+        tool2 = ToolCard(name="tool2", description="工具2")
+        tool3 = ToolCard(name="tool3", description="工具3")
+
+        self.ability_manager.add([tool1, tool2, tool3])
+
+        # 批量删除多个工具
+        result = self.ability_manager.remove(["tool1", "tool2"])
+
+        # 验证返回的是完整列表（不是第一次循环就返回）
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].name, "tool1")
+        self.assertEqual(result[1].name, "tool2")
+
+        # 验证剩余工具
+        remaining = self.ability_manager.list()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0].name, "tool3")
+
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_mcp_tool_infos')
+    async def test_list_tool_info_adds_mcp_tools_to_tools_dict(self, mock_get_mcp_tool_infos):
+        """测试 MCP 工具被添加到 _tools（用于映射 tool_name 到完整 ID）"""
+        # pylint: disable=protected-access
+        from openjiuwen.core.foundation.tool import McpServerConfig
+        from openjiuwen.core.foundation.tool.schema import ToolInfo
+
+        # Mock MCP 工具返回
+        mock_mcp_tool = ToolInfo(
+            name="mcp_tool",
+            description="MCP 工具",
+            parameters={}
+        )
+        mock_get_mcp_tool_infos.return_value = [mock_mcp_tool]
+
+        # 添加 MCP 服务器配置
+        mcp_config = McpServerConfig(
+            server_name="test_mcp",
+            server_id="mcp_001",
+            server_path="/test/path"
+        )
+        self.ability_manager.add(mcp_config)
+
+        # 获取 tool_infos
+        tool_infos = await self.ability_manager.list_tool_info()
+
+        # 验证 MCP 工具在返回列表中
+        self.assertEqual(len(tool_infos), 1)
+        self.assertEqual(tool_infos[0].name, "mcp_tool")
+
+        # 验证 MCP 工具被添加到 _tools 字典（用于映射）
+        self.assertEqual(len(self.ability_manager._tools), 1)
+        self.assertIn("mcp_tool", self.ability_manager._tools)
+        # 验证 ID 格式为 {server_id}.{server_name}.{tool_name}
+        self.assertEqual(self.ability_manager._tools["mcp_tool"].id, "mcp_001.test_mcp.mcp_tool")
+
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_mcp_tool_infos')
+    async def test_remove_mcp_server_also_removes_mcp_tools(self, mock_get_mcp_tool_infos):
+        """测试删除 MCP 服务器时同时删除对应的 MCP 工具"""
+        # pylint: disable=protected-access
+        from openjiuwen.core.foundation.tool import McpServerConfig
+        from openjiuwen.core.foundation.tool.schema import ToolInfo
+
+        # Mock MCP 工具返回
+        mock_mcp_tool1 = ToolInfo(name="tool1", description="工具1", parameters={})
+        mock_mcp_tool2 = ToolInfo(name="tool2", description="工具2", parameters={})
+        mock_get_mcp_tool_infos.return_value = [mock_mcp_tool1, mock_mcp_tool2]
+
+        # 添加 MCP 服务器配置
+        mcp_config = McpServerConfig(
+            server_name="test_mcp",
+            server_id="mcp_001",
+            server_path="/test/path"
+        )
+        self.ability_manager.add(mcp_config)
+
+        # 获取 tool_infos（触发 MCP 工具添加到 _tools）
+        await self.ability_manager.list_tool_info()
+
+        # 验证 MCP 工具被添加到 _tools
+        self.assertEqual(len(self.ability_manager._tools), 2)
+        self.assertIn("tool1", self.ability_manager._tools)
+        self.assertIn("tool2", self.ability_manager._tools)
+
+        # 删除 MCP 服务器
+        result = self.ability_manager.remove("test_mcp")
+
+        # 验证 MCP 服务器被删除
+        self.assertIsNotNone(result)
+        self.assertEqual(result.server_name, "test_mcp")
+
+        # 验证对应的 MCP 工具也被删除
+        self.assertEqual(len(self.ability_manager._tools), 0)
+        self.assertNotIn("tool1", self.ability_manager._tools)
+        self.assertNotIn("tool2", self.ability_manager._tools)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

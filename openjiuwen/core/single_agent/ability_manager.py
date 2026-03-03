@@ -74,27 +74,52 @@ class AbilityManager:
             Removed ability Card, or None if not found
         """
         if isinstance(name, str):
+            removed = None
             if name in self._tools:
-                return self._tools.pop(name, None)
+                removed = self._tools.pop(name, None)
             if name in self._workflows:
-                return self._workflows.pop(name, None)
+                removed = self._workflows.pop(name, None)
             if name in self._agents:
-                return self._agents.pop(name, None)
+                removed = self._agents.pop(name, None)
             if name in self._mcp_servers:
-                return self._mcp_servers.pop(name, None)
-            return None
+                # Remove MCP server and its tools
+                mcp_server = self._mcp_servers.pop(name, None)
+                if mcp_server:
+                    # Remove all tools belonging to this MCP server
+                    server_id = mcp_server.server_id
+                    tools_to_remove = [
+                        tool_name for tool_name, tool_card in self._tools.items()
+                        if tool_card.id and tool_card.id.startswith(f"{server_id}.")
+                    ]
+                    for tool_name in tools_to_remove:
+                        self._tools.pop(tool_name, None)
+                removed = mcp_server
+            return removed
         elif isinstance(name, list):
             result = []
             for item in name:
+                removed = None
                 if item in self._tools:
-                    result.append(self._tools.pop(item, None))
+                    removed = self._tools.pop(item, None)
                 if item in self._workflows:
-                    result.append(self._workflows.pop(item, None))
+                    removed = self._workflows.pop(item, None)
                 if item in self._agents:
-                    result.append(self._agents.pop(item, None))
+                    removed = self._agents.pop(item, None)
                 if item in self._mcp_servers:
-                    result.append(self._mcp_servers.pop(item, None))
-                return result
+                    # Remove MCP server and its tools
+                    mcp_server = self._mcp_servers.pop(item, None)
+                    if mcp_server:
+                        # Remove all tools belonging to this MCP server
+                        server_id = mcp_server.server_id
+                        tools_to_remove = [
+                            tool_name for tool_name, tool_card in self._tools.items()
+                            if tool_card.id and tool_card.id.startswith(f"{server_id}.")
+                        ]
+                        for tool_name in tools_to_remove:
+                            self._tools.pop(tool_name, None)
+                    removed = mcp_server
+                result.append(removed)
+            return result
         else:
             return None
 
