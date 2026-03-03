@@ -781,7 +781,6 @@ class TestTraceWorkflow:
                 continue
             payload: dict = chunk.payload
             if payload.get("invokeId") == "end":
-                print("chunk: ", chunk)
                 assert payload.get("componentType") is not None
 
     async def test_workflow_with_branch_with_tracer(self):
@@ -815,3 +814,45 @@ class TestTraceWorkflow:
                 assert payload.get("inputs") == {'branches': [
                     {'branch_id': '1', 'condition': {'bool_expression': '${a} <= 10', 'inputs': {'${a}': 2}}},
                     {'branch_id': '2', 'condition': {'bool_expression': '${a} > 10', 'inputs': {'${a}': 2}}}]}
+
+    async def test_sequence_interactive_workflow_reuse_with_trace(self):
+        workflow = Workflow(card=WorkflowCard(id="test", version="1.0", name="test workflow"))
+        workflow.set_start_comp("start", Start())
+        workflow.add_workflow_comp("interact1", InteractiveNode(), comp_ability=[ComponentAbility.STREAM],)
+        workflow.add_workflow_comp("interact2", InteractiveNode(), comp_ability=[ComponentAbility.INVOKE],)
+        workflow.set_end_comp("end", End({"responseTemplate": "output: {{output}}"}),
+                               stream_inputs_schema={"output": "${interact1.user_input}"},
+                               response_mode="streaming")
+        workflow.add_connection("start", "interact1")
+        workflow.add_connection("interact1", "interact2")
+        workflow.add_stream_connection("interact1", "end")
+        workflow.add_connection("interact2", "end")
+
+        session_id = uuid.uuid4().hex
+
+        output_check = False
+        async for chunk in workflow.stream(inputs={"inputs": [1, 2, 3]},
+                                       session=create_workflow_session(session_id=session_id),
+                                       stream_modes=[BaseStreamMode.TRACE, BaseStreamMode.OUTPUT]):
+            if isinstance(chunk, OutputSchema) and chunk.type == "__interaction__":
+                assert chunk.payload.id == "interact1"
+                output_check = True
+        assert output_check
+
+        output_check = False
+        async for chunk in workflow.stream(inputs=InteractiveInput("hello1"),
+                                       session=create_workflow_session(session_id=session_id),
+                                       stream_modes=[BaseStreamMode.TRACE, BaseStreamMode.OUTPUT]):
+            if isinstance(chunk, OutputSchema) and chunk.type == "__interaction__":
+                assert chunk.payload.id == "interact2"
+                output_check = True
+        assert output_check
+
+        async for chunk in workflow.stream(inputs=InteractiveInput("hello2"),
+                                           session=create_workflow_session(session_id=session_id),
+                                           stream_modes=[BaseStreamMode.TRACE, BaseStreamMode.OUTPUT]):
+            if not isinstance(chunk, TraceSchema):
+                continue
+            payload: dict = chunk.payload
+            if payload.get("invokeId") == "end":
+                assert payload.get("componentType") is not None

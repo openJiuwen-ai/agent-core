@@ -71,6 +71,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 self._node_config.stream_io_configs.inputs_schema is not None)
         if has_stream_inputs and hasattr(self._executable, "set_mix"):
             self._executable.set_mix()
+        self._is_started.clear()
         return True
 
     async def _run_executable(self, ability: ComponentAbility, is_subgraph: bool = False, config: Any = None,
