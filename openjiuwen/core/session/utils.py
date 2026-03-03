@@ -200,7 +200,7 @@ def update_by_key(key: Union[str, int], new_value: Any, source: dict) -> None:
         source[key] = expand_nested_structure(new_value)
         return
     if isinstance(source[key], dict) and isinstance(new_value, dict):
-        update_dict(new_value, source[key], ignore_delete=True)
+        update_dict(new_value, source[key], ignore_delete=False)
     else:
         source[key] = expand_nested_structure(new_value)
 

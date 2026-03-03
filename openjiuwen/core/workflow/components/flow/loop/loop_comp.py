@@ -420,10 +420,10 @@ class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, Ato
                 callback(OUT_LOOP, session)
 
         if not continue_loop:
-            session.state().update({INDEX: 0, BROKEN: False})
+            session.state().update({INDEX: None, BROKEN: False})
             self._post_body.set_finish_index(-1)
             session.parent().state().update({POST_BODY_NODE_ID: None})
-            session.state().set_outputs({INDEX: 0})
+            session.state().set_outputs({INDEX: None})
 
         return self._in_loop if continue_loop else self._out_loop
 
