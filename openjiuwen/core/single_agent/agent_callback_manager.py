@@ -5,8 +5,7 @@
 import asyncio
 from typing import Optional
 
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent, AgentCallback, AgentMiddleware, \
+from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent, AgentRail, \
     AnyAgentCallback, AgentCallbackContext
 
 
@@ -47,20 +46,46 @@ class AgentCallbackManager:
         await Runner.callback_framework.register(agent_event, callback, priority=priority)
         return self
 
-    async def register_middleware(self, middleware: AgentMiddleware) -> 'AgentCallbackManager':
-        """Register a middleware instance.
+    async def register_rail(self, rail: AgentRail, agent: 'object') -> 'AgentCallbackManager':
+        """Register a rail instance.
 
         Args:
-            middleware: AgentMiddle instance
+            rail: AgentRail instance
+            agent: BaseAgent instance (for tool registration)
 
         Returns:
             self for chaining
         """
-        # Extract and register hooks from plugin
-        for event, callback in middleware.get_callbacks().items():
-            await self.register_callback(event, callback, middleware.priority)
+        for event, callback in rail.get_callbacks().items():
+            await self.register_callback(event, callback, rail.priority)
+
+        # Register rail tools on the agent
+        if rail.tools:
+            ability_mgr = getattr(agent, 'ability_manager', None)
+            if ability_mgr:
+                for tool_card in rail.tools:
+                    ability_mgr.add(tool_card)
 
         return self
+
+    async def unregister_rail(self, rail: AgentRail, agent: 'object') -> None:
+        """Unregister a rail instance.
+
+        Args:
+            rail: AgentRail instance to remove
+            agent: BaseAgent instance (for tool removal)
+        """
+        for event, callback in rail.get_callbacks().items():
+            await self.unregister(event, callback)
+
+        # Remove rail tools from the agent
+        if rail.tools:
+            ability_mgr = getattr(agent, 'ability_manager', None)
+            if ability_mgr:
+                for tool_card in rail.tools:
+                    name = getattr(tool_card, 'name', None)
+                    if name:
+                        ability_mgr.remove(name)
 
     async def unregister(self, event: AgentCallbackEvent, callback: AnyAgentCallback) -> None:
         """Unregister a hook callback.

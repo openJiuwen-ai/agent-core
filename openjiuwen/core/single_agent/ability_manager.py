@@ -9,17 +9,48 @@ import json
 from typing import List, Any, Union, Optional, Tuple, Dict
 from pydantic import BaseModel
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import AgentError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentCallbackEvent,
+    ToolCallInputs,
+    rail,
+)
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
+
+
+class AbilityExecutionError(AgentError):
+    """Unified exception for ability execution failures."""
+
+    def __init__(
+            self,
+            status: StatusCode,
+            *,
+            msg: Optional[str] = None,
+            details: Optional[Any] = None,
+            cause: Optional[BaseException] = None,
+            tool_message: Optional[ToolMessage] = None,
+            **kwargs: Any,
+    ):
+        super().__init__(
+            status=status,
+            msg=msg,
+            details=details,
+            cause=cause,
+            **kwargs,
+        )
+        self.tool_message = tool_message
 
 
 class AbilityManager:
@@ -38,12 +69,43 @@ class AbilityManager:
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
 
+    @staticmethod
+    def _normalize_tool_calls(
+            tool_call: Union[ToolCall, List[ToolCall]],
+    ) -> List[ToolCall]:
+        tool_calls: List[ToolCall] = []
+        if isinstance(tool_call, list):
+            tool_calls.extend(tool_call)
+        elif isinstance(tool_call, ToolCall):
+            tool_calls.append(tool_call)
+        else:
+            logger.warning(
+                f"execute ability input tool call is invalid, {type(tool_call)}!"
+            )
+        return tool_calls
+
+    @staticmethod
+    def _build_execution_error(
+            tool_call: ToolCall,
+            message: str,
+    ) -> AbilityExecutionError:
+        return AbilityExecutionError(
+            status=StatusCode.AGENT_TOOL_EXECUTION_ERROR,
+            msg=message,
+            error_msg=message,
+            tool_message=ToolMessage(
+                content=message,
+                tool_call_id=tool_call.id,
+            ),
+        )
+
     def add(self, ability: Union[Ability, List[Ability]]) -> None:
         """Add an ability
 
         Args:
             ability: Ability Card to add
         """
+
         def add_single_ability(_ability: Ability):
             if isinstance(_ability, ToolCard):
                 self._tools[_ability.name] = _ability
@@ -229,57 +291,141 @@ class AbilityManager:
 
     async def execute(
             self,
+            ctx: AgentCallbackContext,
             tool_call: Union[ToolCall, List[ToolCall]],
             session: Session,
             tag=None
     ) -> List[Tuple[Any, ToolMessage]]:
-        """Execute an ability call
+        """Execute ability call(s) with per-tool rail hooks.
 
         Get instance from Runner.resource_mgr by card info, execute and return
 
         Args:
+            ctx: Shared callback context for tool-call lifecycle
             tool_call: Single tool call or list of tool calls
             session: Session instance
 
         Returns:
             List of (result, ToolMessage) tuples
         """
+        tool_calls = self._normalize_tool_calls(tool_call)
+        if not tool_calls:
+            return []
 
-        tool_calls = []
-        if isinstance(tool_call, list):
-            tool_calls.extend(tool_call)
-        elif isinstance(tool_call, ToolCall):
-            tool_calls.append(tool_call)
-        else:
-            logger.warning(f"execute ability input tool call is invalid, {type(tool_call)}!")
+        # Each tool call gets an isolated callback context to avoid races
+        # between concurrent BEFORE/AFTER_TOOL_CALL hooks.
+        tool_contexts: List[AgentCallbackContext] = []
+        tasks = []
+        for single_tool_call in tool_calls:
+            tool_ctx = AgentCallbackContext(
+                agent=ctx.agent,
+                inputs=ToolCallInputs(
+                    tool_call=single_tool_call,
+                    tool_name=single_tool_call.name,
+                    tool_args=single_tool_call.arguments,
+                ),
+                config=ctx.config,
+                session=session,
+                context=ctx.context,
+                extra=ctx.extra,
+            )
+            tool_contexts.append(tool_ctx)
+            tasks.append(
+                self._railed_execute_single_tool_call(
+                    ctx=tool_ctx,
+                    tool_call=single_tool_call,
+                    session=session,
+                    tag=tag,
+                )
+            )
 
-        # Execute all tool calls in parallel
-        tasks = [
-            self._execute_single_tool_call(tool_call, session, tag=tag)
-            for tool_call in tool_calls
-        ]
+        # Execute all tool calls in parallel.
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Process results
         final_results: List[Tuple[Any, ToolMessage]] = []
         for i, result in enumerate(results):
+            tool_ctx = tool_contexts[i]
             if isinstance(result, Exception):
                 # Handle exception
                 error_msg = f"Ability execution error: {str(result)}"
                 logger.error(error_msg)
-                tool_message = ToolMessage(
-                    content=error_msg,
-                    tool_call_id=tool_calls[i].id
+                tool_result = None
+                tool_message = None
+                if isinstance(tool_ctx.inputs, ToolCallInputs):
+                    tool_result = tool_ctx.inputs.tool_result
+                    tool_message = tool_ctx.inputs.tool_msg
+
+                if (
+                        tool_message is None
+                        and isinstance(result, AbilityExecutionError)
+                ):
+                    tool_message = result.tool_message
+
+                if tool_message is None:
+                    tool_message = ToolMessage(
+                        content=error_msg,
+                        tool_call_id=tool_calls[i].id
+                    )
+
+                final_results.append((tool_result, tool_message))
+                continue
+
+            # AFTER_TOOL_CALL rails can rewrite tool_result/tool_msg in ctx.inputs.
+            if isinstance(tool_ctx.inputs, ToolCallInputs):
+                tool_result = (
+                    tool_ctx.inputs.tool_result
+                    if tool_ctx.inputs.tool_result is not None
+                    else result[0]
                 )
-                final_results.append((None, tool_message))
-            else:
-                final_results.append(result)
+                tool_msg = (
+                    tool_ctx.inputs.tool_msg
+                    if tool_ctx.inputs.tool_msg is not None
+                    else result[1]
+                )
+                final_results.append((tool_result, tool_msg))
+                continue
+
+            final_results.append(result)
 
         return final_results
 
+    @rail(
+        before=AgentCallbackEvent.BEFORE_TOOL_CALL,
+        after=AgentCallbackEvent.AFTER_TOOL_CALL,
+        on_exception=AgentCallbackEvent.ON_TOOL_EXCEPTION,
+    )
+    async def _railed_execute_single_tool_call(
+            self,
+            ctx: AgentCallbackContext,
+            tool_call: ToolCall,
+            session: Session,
+            tag=None,
+    ) -> Tuple[Any, ToolMessage]:
+        """Execute one tool call under rail lifecycle events."""
+        if isinstance(ctx.inputs, ToolCallInputs):
+            if ctx.inputs.tool_name:
+                tool_call.name = ctx.inputs.tool_name
+            if ctx.inputs.tool_args is not None:
+                tool_call.arguments = ctx.inputs.tool_args
+
+        result, tool_msg = await self._execute_single_tool_call(
+            tool_call=tool_call,
+            session=session,
+            tag=tag,
+        )
+
+        if isinstance(ctx.inputs, ToolCallInputs):
+            ctx.inputs.tool_call = tool_call
+            ctx.inputs.tool_name = tool_call.name
+            ctx.inputs.tool_args = tool_call.arguments
+            ctx.inputs.tool_result = result
+            ctx.inputs.tool_msg = tool_msg
+
+        return result, tool_msg
+
     async def _execute_single_tool_call(self, tool_call: ToolCall, session: Session,
                                         tag=None) -> Tuple[Any, ToolMessage]:
-        result, error_msg = None, None
         tool_name = tool_call.name
 
         # Parse arguments
@@ -299,64 +445,87 @@ class AbilityManager:
             tool_id = tool_card.id or tool_card.name
             from openjiuwen.core.runner import Runner
             tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag, session=session)
-            if tool:
-                try:
-                    result = await tool.invoke(tool_args)
-                except Exception as e:
-                    error_msg = f"Tool execution error: {str(e)}"
-                    logger.error(error_msg)
-            else:
-                error_msg = f"Tool instance not found in resource_mgr: {tool_id}"
+            if not tool:
+                raise self._build_execution_error(
+                    tool_call,
+                    f"Tool instance not found in resource_mgr: {tool_id}",
+                )
+            try:
+                result = await tool.invoke(tool_args)
+            except Exception as e:
+                error_msg = f"Tool execution error: {str(e)}"
+                logger.error(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
         elif tool_name in self._workflows:
             # Execute Workflow - get instance from Runner.resource_mgr
             workflow_card = self._workflows[tool_name]
             workflow_id = workflow_card.id or workflow_card.name
             from openjiuwen.core.runner import Runner
             workflow = await Runner.resource_mgr.get_workflow(workflow_id=workflow_id, tag=tag, session=session)
-            if workflow:
-                try:
-                    result = await workflow.invoke(tool_args, session)
-                except Exception as e:
-                    error_msg = f"Workflow execution error: {str(e)}"
-                    logger.error(error_msg)
-            else:
-                error_msg = (
+            if not workflow:
+                raise self._build_execution_error(
+                    tool_call,
                     f"Workflow instance not found in resource_mgr: {workflow_id}"
                 )
+            try:
+                result = await workflow.invoke(tool_args, session)
+            except Exception as e:
+                error_msg = f"Workflow execution error: {str(e)}"
+                logger.error(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
         elif tool_name in self._agents:
             # Execute sub-Agent - get instance from Runner.resource_mgr
             agent_card = self._agents[tool_name]
             agent_id = agent_card.id or agent_card.name
             from openjiuwen.core.runner import Runner
             agent = await Runner.resource_mgr.get_agent(agent_id=agent_id, session=session)
-            if agent:
-                try:
-                    result = await agent.invoke(tool_args)
-                except Exception as e:
-                    error_msg = f"Agent execution error: {str(e)}"
-                    logger.error(error_msg)
-            else:
-                error_msg = (
+            if not agent:
+                raise self._build_execution_error(
+                    tool_call,
                     f"Agent instance not found in resource_mgr: {agent_id}"
                 )
+            try:
+                result = await agent.invoke(tool_args)
+            except Exception as e:
+                error_msg = f"Agent execution error: {str(e)}"
+                logger.error(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
         elif tool_name in self._mcp_servers:
             # Execute MCP tool
-            error_msg = f"MCP tool execution not yet implemented: {tool_name}"
+            raise self._build_execution_error(
+                tool_call,
+                f"MCP tool execution not yet implemented: {tool_name}",
+            )
         else:
             # Fallback: try to get tool from Runner.resource_mgr by name
             from openjiuwen.core.runner import Runner
             tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=tag, session=session)
-            if tool:
-                try:
-                    result = await tool.invoke(tool_args)
-                except Exception as e:
-                    error_msg = f"Tool execution error: {str(e)}"
-                    logger.error(error_msg)
-            else:
-                error_msg = f"Ability not found in resource_mgr: {tool_name}"
+            if not tool:
+                raise self._build_execution_error(
+                    tool_call,
+                    f"Ability not found in resource_mgr: {tool_name}",
+                )
+            try:
+                result = await tool.invoke(tool_args)
+            except Exception as e:
+                error_msg = f"Tool execution error: {str(e)}"
+                logger.error(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
 
-        # Build ToolMessage
-        content = str(result) if result is not None else (error_msg or "")
+        # Build ToolMessage for successful execution.
+        content = str(result)
         tool_message = ToolMessage(
             content=content,
             tool_call_id=tool_call.id

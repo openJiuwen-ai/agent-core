@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     pass
 
 
-
 class WorkflowFactory:
     """Workflow factory class that creates a new workflow instance on each call (concurrency-safe).
 
@@ -293,8 +292,10 @@ class BaseAgent(ABC):
 
         def make_workflow_provider(workflow):
             """Create a provider function that returns the workflow instance."""
+
             def provider():
                 return workflow
+
             return provider
 
         for item in workflows:
