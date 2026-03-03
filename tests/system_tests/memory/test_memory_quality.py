@@ -109,7 +109,8 @@ class TestMemoryQuality(unittest.IsolatedAsyncioTestCase):
             client_provider=os.getenv("LLM_PROVIDER", "xx"),
             api_key=os.getenv("LLM_API_KEY", "xx"),
             api_base=os.getenv("LLM_API_BASE", "xx"),
-            verify_ssl=False
+            verify_ssl=False,
+            timeout=120,
         )
 
         self.memory_engine_config = MemoryEngineConfig(
@@ -353,6 +354,131 @@ class TestMemoryQuality(unittest.IsolatedAsyncioTestCase):
         ]
         query_checklist = [
             ("水果", ["用户", "苹果"]),
+        ]
+        await self._user_mem_check(messages, query_checklist)
+
+    async def test_user_mem_episodic(self):
+        messages = [
+            BaseMessage(role="user", content="你好，我是Tom"),
+            BaseMessage(role="assistant", content="你好Tom，很高兴认识你"),
+            BaseMessage(role="user", content="我昨天去了北京旅游"),
+            BaseMessage(role="assistant", content="北京是个很棒的地方"),
+            BaseMessage(role="user", content="我参观了故宫博物院"),
+            BaseMessage(role="assistant", content="故宫是中国文化的瑰宝"),
+            BaseMessage(role="user", content="今天我买了一本新书"),
+            BaseMessage(role="assistant", content="阅读是个好习惯"),
+        ]
+        query_checklist = [
+            ("北京旅游", ["用户", "北京", "故宫博物院"]),
+            ("买了什么", ["用户", "新书"]),
+        ]
+        await self._user_mem_check(messages, query_checklist)
+
+    async def test_user_mem_episodic_conflict_real(self):
+        """
+        Test real conflicting memories that need to be updated.
+        Real conflicts: old memory should be deleted/replaced with new one.
+        Examples: job change, location change, status change.
+        """
+        messages = [
+            BaseMessage(role="user", content="你好，我是Tom"),
+            BaseMessage(role="assistant", content="你好Tom，很高兴认识你"),
+            BaseMessage(role="user", content="我上周和家人一起搬到了北京居住"),
+            BaseMessage(role="assistant", content="北京是个很棒的城市"),
+            BaseMessage(role="user", content="昨天我正式加入了A公司开始工作"),
+            BaseMessage(role="assistant", content="A公司是家很好的公司"),
+        ]
+        query_checklist = [
+            ("我住在哪里", "北京"),
+            ("我在哪里工作", "A公司"),
+            ("搬家", ["用户", "北京", "家人"]),
+            ("入职", ["用户", "A公司"]),
+        ]
+        await self._user_mem_check(messages, query_checklist)
+
+        messages = [
+            BaseMessage(role="user", content="昨天我和同事一起搬到了上海定居"),
+            BaseMessage(role="assistant", content="上海也是个很棒的城市"),
+            BaseMessage(role="user", content="今天我成功跳槽到了B公司并完成了入职手续"),
+            BaseMessage(role="assistant", content="恭喜你有了新的工作机会"),
+        ]
+        query_checklist = [
+            ("我住在哪里", "上海"),
+            ("我在哪里工作", "B公司"),
+            ("最近搬家", ["用户", "上海", "同事"]),
+            ("新工作", ["用户", "B公司", "入职手续"]),
+        ]
+        await self._user_mem_check(messages, query_checklist)
+
+    async def test_user_mem_episodic_conflict_false(self):
+        """
+        Test false conflicting memories that should coexist.
+        False conflicts: memories look similar but represent different events/times.
+        Examples: meals at different times, activities on different days.
+        """
+        messages = [
+            BaseMessage(role="user", content="你好，我是Tom"),
+            BaseMessage(role="assistant", content="你好Tom，很高兴认识你"),
+            BaseMessage(role="user", content="我今天中午吃了面条"),
+            BaseMessage(role="assistant", content="面条是不错的午餐选择"),
+            BaseMessage(role="user", content="晚上我吃了米饭"),
+            BaseMessage(role="assistant", content="米饭是很常见的主食"),
+        ]
+        query_checklist = [
+            ("中午吃了什么", "面条"),
+            ("晚上吃了什么", "米饭"),
+        ]
+        await self._user_mem_check(messages, query_checklist)
+
+        messages = [
+            BaseMessage(role="user", content="今天上午我去看了电影"),
+            BaseMessage(role="assistant", content="看电影是很好的娱乐活动"),
+            BaseMessage(role="user", content="今天下午我去逛了公园"),
+            BaseMessage(role="assistant", content="逛公园很放松身心"),
+        ]
+        query_checklist = [
+            ("今天上午做了什么", "电影"),
+            ("今天下午做了什么", "公园"),
+        ]
+        await self._user_mem_check(messages, query_checklist)
+
+    async def test_user_mem_semantic(self):
+        messages = [
+            BaseMessage(role="user", content="你好，我是Tom"),
+            BaseMessage(role="assistant", content="你好Tom，很高兴认识你"),
+            BaseMessage(role="user", content="地球是太阳系中的第三颗行星"),
+            BaseMessage(role="assistant", content="是的，地球是我们的家园"),
+            BaseMessage(role="user", content="水的化学式是H2O"),
+            BaseMessage(role="assistant", content="没错，这是水的化学表达式"),
+            BaseMessage(role="user", content="Python是一种流行的编程语言"),
+            BaseMessage(role="assistant", content="Python确实很受欢迎"),
+        ]
+        query_checklist = [
+            ("地球位置", ["太阳系", "第三颗行星"]),
+            ("水的化学式", "H2O"),
+            ("Python是什么", "编程语言"),
+        ]
+        await self._user_mem_check(messages, query_checklist)
+
+    async def test_user_mem_mixed(self):
+        messages = [
+            BaseMessage(role="user", content="你好，我是Tom"),
+            BaseMessage(role="assistant", content="你好Tom，很高兴认识你"),
+            BaseMessage(role="user", content="我是一名数据分析师"),
+            BaseMessage(role="assistant", content="数据分析是个很有前景的领域"),
+            BaseMessage(role="user", content="我上周参加了一个Python培训"),
+            BaseMessage(role="assistant", content="Python很适合数据分析"),
+            BaseMessage(role="user", content="Python是一种解释型编程语言"),
+            BaseMessage(role="assistant", content="是的，Python语法简洁易学"),
+            BaseMessage(role="user", content="我喜欢使用Python进行数据可视化"),
+            BaseMessage(role="assistant", content="数据可视化很重要"),
+        ]
+        query_checklist = [
+            ("我是谁", "Tom"),
+            ("我的职业", "数据分析师"),
+            ("参加了什么培训", ["用户", "Python"]),
+            ("Python是什么类型的语言", "解释型编程语言"),
+            ("Python用途", "数据可视化"),
         ]
         await self._user_mem_check(messages, query_checklist)
 
