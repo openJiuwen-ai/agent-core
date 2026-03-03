@@ -24,26 +24,24 @@ class SummaryManager(BaseMemoryManager):
         self.mem_store = user_mem_store
         self.crypto_key = crypto_key
 
-    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, Model] | None = None, **kwargs):
-        """add memory."""
+    async def add_memories(self, user_id: str, scope_id: str, memories: List[SummaryUnit],
+                           llm: Tuple[str, Model] | None = None, **kwargs):
+        """add memories in batch."""
         semantic_store = self._get_semantic_store("add", **kwargs)
-        if not isinstance(memory, SummaryUnit):
-            raise build_error(
-                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type="summary",
-                error_msg="summary add Must pass SummaryUnit class",
+        for memory in memories:
+            vector_success = await self._add_summary_memory_to_vector(
+                summary_unit=memory,
+                user_id=user_id,
+                scope_id=scope_id,
+                semantic_store=semantic_store
             )
-
-        vector_success = await self._add_summary_memory_to_vector(summary_unit=memory,
-                                                                  scope_id=memory.scope_id,
-                                                                  semantic_store=semantic_store)
-        if not vector_success:
-            raise build_error(
-                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type="summary",
-                error_msg="summary add to vector store failed",
-            )
-        await self._add_summary_memory_to_mem_store(memory)
+            if not vector_success:
+                raise build_error(
+                    StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
+                    memory_type="summary",
+                    error_msg="summary add to vector store failed",
+                )
+            await self._add_summary_memory_to_mem_store(user_id, scope_id, memory)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         """update memory by its id."""
@@ -118,30 +116,30 @@ class SummaryManager(BaseMemoryManager):
         retrieve_res.sort(key=lambda x: x["score"], reverse=True)
         return retrieve_res
 
-    async def _add_summary_memory_to_mem_store(self, summary_unit: SummaryUnit):
+    async def _add_summary_memory_to_mem_store(self, user_id: str, scope_id: str, summary_unit: SummaryUnit):
         """Encrypt and write summary memory to persistent storage."""
         mem = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key,
                                                          plaintext=summary_unit.summary)
         data = {
             'id': summary_unit.mem_id,
-            'user_id': summary_unit.user_id or '',
-            'scope_id': summary_unit.scope_id or '',
+            'user_id': user_id or '',
+            'scope_id': scope_id or '',
             'mem': mem,
             'source_id': summary_unit.message_mem_id,
             'mem_type': MemoryType.SUMMARY.value,
-            'timestamp': summary_unit.timestamp,
-            'context_summary': ''
+            'timestamp': summary_unit.timestamp
         }
-        await self.mem_store.write(user_id=summary_unit.user_id,
-                                   scope_id=summary_unit.scope_id,
+        await self.mem_store.write(user_id=user_id,
+                                   scope_id=scope_id,
                                    mem_id=summary_unit.mem_id,
                                    data=data)
 
     async def _add_summary_memory_to_vector(
-            self,
-            summary_unit: SummaryUnit,
-            scope_id: str,
-            semantic_store: SemanticStore
+        self,
+        summary_unit: SummaryUnit,
+        user_id: str,
+        scope_id: str,
+        semantic_store: SemanticStore
     ) -> bool:
         """Add plaintext summary to vector store for semantic recall."""
         if not semantic_store:
@@ -150,8 +148,8 @@ class SummaryManager(BaseMemoryManager):
                 memory_type="summary",
                 error_msg="vector store must not be None",
             )
-        table_name = generate_idx_name(usr_id=summary_unit.user_id,
-                                       scope_id=summary_unit.scope_id,
+        table_name = generate_idx_name(usr_id=user_id,
+                                       scope_id=scope_id,
                                        mem_type=MemoryType.SUMMARY.value)
         return await semantic_store.add_docs(
             docs=[(summary_unit.mem_id, summary_unit.summary)],

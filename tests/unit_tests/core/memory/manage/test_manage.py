@@ -10,10 +10,10 @@ from sqlalchemy import engine, text
 
 os.environ['HF_ENDPOINT'] = "https://hf-mirror.com"
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
-from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
+from openjiuwen.core.memory.manage.index.fragment_memory_manager import FragmentMemoryManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.index.write_manager import WriteManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import UserProfileUnit, VariableUnit
+from openjiuwen.core.memory.manage.mem_model.memory_unit import FragmentMemoryUnit, VariableUnit, MemoryType
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
@@ -143,45 +143,48 @@ class TestManage:
         # mock_db_store = SqlDbStore(conn)
         # message_manager = MessageManager(mock_db_store, data_id_generator)
         mock_mem_store = UserMemStore(mock_kv_store)
-        user_profile_manager = UserProfileManager(
+        user_profile_manager = FragmentMemoryManager(
             user_mem_store=mock_mem_store,
             data_id_generator=data_id_generator,
             crypto_key=b""
         )
         variable_manager = VariableManager(mock_kv_store, b"")
-        managers = {"user_profile": user_profile_manager, "variable": variable_manager}
+        managers = {MemoryType.FRAGMENT_MEMORY.value: user_profile_manager, MemoryType.VARIABLE.value: variable_manager}
         write_manager = WriteManager(managers, mock_mem_store)
         test_all_data = [
-            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
-             "profile_mem": "用户非常喜欢川菜，尤其是水煮鱼和麻婆豆腐"},
-            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "personal_information",
-             "profile_mem": "用户的职业是软件工程师，居住在北京市"},
-            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "personal_information",
-             "profile_mem": "用户的副业是抖音直播"},
-            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "assert_information",
-             "profile_mem": "用户的银行账户余额为10000元"},
-            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "social_information",
-             "profile_mem": "用户的朋友圈中有50个好友"},
-            {"user_id": "usrZH2025", "scope_id": "fitnesstrackerv3", "profile_type": "other_information",
-             "profile_mem": "用户的宠物是一只金毛犬"},
-            {"user_id": "usrZH2026", "scope_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
-             "profile_mem": "用户喜欢打篮球和阅读历史小说"},
-            {"user_id": "usrZH2026", "scope_id": "fitnesstrackerv3", "profile_type": "personal_information",
-             "profile_mem": "用户的生日是1990年1月1日"},
-            {"user_id": "usrZH2026", "scope_id": "fitnesstrackerv3", "profile_type": "assert_information",
-             "profile_mem": "用户的汽车型号是特斯拉Model 3"},
-            {"user_id": "usrZH2026", "scope_id": "fitnesstrackerv3", "profile_type": "interests_hobbies",
-             "profile_mem": "用户在Twitter上有200个关注者"},
+            {"mem_id": "1000", "fragment_type": "user_profile", "content": "用户非常喜欢川菜，尤其是水煮鱼和麻婆豆腐"},
+            {"mem_id": "1001", "fragment_type": "user_profile", "content": "用户的职业是软件工程师，居住在北京市"},
+            {"mem_id": "1002", "fragment_type": "user_profile", "content": "用户的副业是抖音直播"},
+            {"mem_id": "1003", "fragment_type": "user_profile", "content": "用户的银行账户余额为10000元"},
+            {"mem_id": "1004", "fragment_type": "user_profile", "content": "用户的朋友圈中有50个好友"},
+            {"mem_id": "1005", "fragment_type": "user_profile", "content": "用户的宠物是一只金毛犬"},
+        ]
+        test_all_data1 = [
+            {"mem_id": "1010", "fragment_type": "user_profile", "content": "用户喜欢打篮球和阅读历史小说"},
+            {"mem_id": "1011", "fragment_type": "user_profile", "content": "用户的生日是1990年1月1日"},
+            {"mem_id": "1012", "fragment_type": "user_profile", "content": "用户的汽车型号是特斯拉Model 3"},
+            {"mem_id": "1013", "fragment_type": "user_profile", "content": "用户在Twitter上有200个关注者"},
         ]
 
         for item in test_all_data:
-            mem_unit = UserProfileUnit(**item)
+            mem_unit = FragmentMemoryUnit(**item)
 
-            await write_manager.add_mem([mem_unit], None, mock_semantic_recall)
-            mem_unit = VariableUnit(variable_name=item['profile_type'],
-                                    variable_mem=item['profile_mem'], user_id=item['user_id'],
-                                    scope_id=item['scope_id'])
-            await write_manager.add_mem([mem_unit], None, mock_semantic_recall)
+            await write_manager.add_memories("usrZH2025", "fitnesstrackerv3", {mem_unit.mem_type.value: [mem_unit]},
+                                             None, mock_semantic_recall)
+            mem_unit = VariableUnit(variable_name=item['fragment_type'],
+                                    variable_mem=item['content'])
+            await write_manager.add_memories("usrZH2025", "fitnesstrackerv3", {mem_unit.mem_type.value: [mem_unit]},
+                                             None, mock_semantic_recall)
+
+        for item in test_all_data1:
+            mem_unit = FragmentMemoryUnit(**item)
+
+            await write_manager.add_memories("usrZH2026", "fitnesstrackerv3", {mem_unit.mem_type.value: [mem_unit]},
+                                             None, mock_semantic_recall)
+            mem_unit = VariableUnit(variable_name=item['fragment_type'],
+                                    variable_mem=item['content'])
+            await write_manager.add_memories("usrZH2026", "fitnesstrackerv3", {mem_unit.mem_type.value: [mem_unit]},
+                                             None, mock_semantic_recall)
 
         query = "用户的职业"
         res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5,
@@ -194,12 +197,9 @@ class TestManage:
         ret = await user_profile_manager.get(res[0]['user_id'], res[0]['scope_id'], res[0]['id'])
         assert ret['mem'] == "用户不是软件工程师，是系统"
 
-        res = await user_profile_manager.list_user_profile("usrZH2025", "fitnesstrackerv3")
+        res = await user_profile_manager.list_fragment_memories("usrZH2025", "fitnesstrackerv3")
         assert len(res) == 6
-
-        res = await user_profile_manager.list_user_profile("usrZH2025", "fitnesstrackerv3", "personal_information")
-        assert len(res) == 2
-        for rr in res:
+        for rr in res[0:2]:
             await write_manager.delete_mem_by_id(rr["user_id"], rr["scope_id"], rr["id"], mock_semantic_recall)
 
         res = await user_profile_manager.search("usrZH2025", "fitnesstrackerv3", query, 5,

@@ -6,8 +6,6 @@ from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryMa
 from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 
@@ -17,43 +15,32 @@ class WriteManager:
         self.managers = managers
         self.mem_store = mem_store
 
-    async def add_mem(self, mem_units: list[BaseMemoryUnit], llm: Tuple[str, Model] | None, semantic_store) -> None:
-        has_inner_exception = False
-        for mem_unit in mem_units:
-            mem_type = mem_unit.mem_type.value
+    async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
+                           llm: Tuple[str, Model] | None, semantic_store) -> None:
+        if not memories:
+            memory_logger.debug("No memory units to add", event_type=LogEventType.MEMORY_STORE)
+            return
+
+        for mem_type, units in memories.items():
             if mem_type in self.managers:
                 try:
-                    await self.managers[mem_type].add(mem_unit, llm, semantic_store=semantic_store)
-                except ValueError as e:
-                    memory_logger.error(
-                        "Failed to add mem",
-                        exception=str(e),
-                        memory_type=mem_type,
-                        event_type=LogEventType.MEMORY_STORE
-                    )
-                    has_inner_exception = True
+                    await self.managers[mem_type].add_memories(
+                        user_id, scope_id, units, llm, semantic_store=semantic_store)
                 except Exception as e:
                     memory_logger.error(
                         "Failed to add mem",
                         exception=str(e),
                         memory_type=mem_type,
-                        event_type=LogEventType.MEMORY_STORE
+                        event_type=LogEventType.MEMORY_STORE,
                     )
-                    has_inner_exception = True
+                    raise e
             else:
                 memory_logger.warning(
                     "Unsupported memory type",
                     memory_type=mem_type,
-                    event_type=LogEventType.MEMORY_STORE
+                    event_type=LogEventType.MEMORY_STORE,
                 )
 
-        if has_inner_exception:
-            raise build_error(
-                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type="user profile",
-                error_msg=f"memory engine add mem has exception",
-                operation="add mem"
-            )
 
     async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str, semantic_store):
         mem_type = await self.__get_mem_type_from_store(user_id, scope_id, mem_id)

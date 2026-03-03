@@ -11,7 +11,7 @@ from openjiuwen.core.memory.config.config import MemoryEngineConfig, MemoryScope
 from openjiuwen.core.memory.process.extract.generation import Generator
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
 from openjiuwen.core.memory.manage.mem_model.message_manager import MessageManager, MessageAddRequest
-from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
+from openjiuwen.core.memory.manage.index.fragment_memory_manager import FragmentMemoryManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.index.write_manager import WriteManager
 from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
@@ -39,7 +39,7 @@ from openjiuwen.core.common.logging.events import LogEventType
 class MemInfo(BaseModel):
     mem_id: str = Field(default="", description="memory id")
     content: str = Field(default="", description="memory content")
-    type: MemoryType = Field(default=MemoryType.USER_PROFILE, description="memory type")
+    type: MemoryType = Field(default=MemoryType.FRAGMENT_MEMORY, description="memory type")
 
 
 class MemResult(BaseModel):
@@ -74,7 +74,7 @@ class LongTermMemory(metaclass=Singleton):
         self.db_store: BaseDbStore | None = None
         # managers
         self.scope_user_mapping_manager = None
-        self.message_manager = None
+        self.message_manager: MessageManager | None = None
         self.user_profile_manager = None
         self.variable_manager = None
         self.write_manager = None
@@ -157,7 +157,7 @@ class LongTermMemory(metaclass=Singleton):
                 data_id_generator,
                 config.crypto_key
             )
-        self.user_profile_manager = UserProfileManager(
+        self.user_profile_manager = FragmentMemoryManager(
             user_mem_store=user_mem_store,
             data_id_generator=data_id_generator,
             crypto_key=config.crypto_key
@@ -171,7 +171,7 @@ class LongTermMemory(metaclass=Singleton):
             crypto_key=self._sys_mem_config.crypto_key
         )
         managers = {
-            MemoryType.USER_PROFILE.value: self.user_profile_manager,
+            MemoryType.FRAGMENT_MEMORY.value: self.user_profile_manager,
             MemoryType.VARIABLE.value: self.variable_manager,
             MemoryType.SUMMARY.value: self.summary_manager
         }
@@ -184,7 +184,6 @@ class LongTermMemory(metaclass=Singleton):
         self.generator = Generator(data_id_generator=data_id_generator)
         # set init llm
         if config.default_model_cfg and config.default_model_client_cfg:
-            
             llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
                                                     model_client_config=config.default_model_client_cfg)
             self._base_llm = (config.default_model_cfg.model_name, llm)
@@ -367,7 +366,7 @@ class LongTermMemory(metaclass=Singleton):
             session_id: str = DEFAULT_VALUE,
             timestamp: datetime | None = None,
             gen_mem: bool = True,
-            gen_mem_with_history_msg_num: int = 5
+            gen_mem_with_history_msg_num: int = 2
     ):
         if not self._validate_id(event_type=LogEventType.MEMORY_STORE, scope_id=scope_id):
             memory_logger.error(
@@ -430,7 +429,7 @@ class LongTermMemory(metaclass=Singleton):
                 )
                 return
 
-            all_memory: list[BaseMemoryUnit] = await self.generator.gen_all_memory(
+            all_memory = await self.generator.gen_all_memory(
                 scope_id=scope_id,
                 user_id=user_id,
                 messages=messages,
@@ -443,7 +442,13 @@ class LongTermMemory(metaclass=Singleton):
                 summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token
             )
             try:
-                await self.write_manager.add_mem(mem_units=all_memory, llm=llm, semantic_store=semantic_store)
+                await self.write_manager.add_memories(
+                    user_id=user_id,
+                    scope_id=scope_id,
+                    memories=all_memory,
+                    llm=llm,
+                    semantic_store=semantic_store
+                )
                 memory_logger.debug(
                     "Successfully added memory units.",
                     event_type=LogEventType.MEMORY_STORE,
@@ -525,6 +530,25 @@ class LongTermMemory(metaclass=Singleton):
             )
             return None
         return await self.message_manager.get_by_id(msg_id)
+
+    async def delete_messages_by_user_and_scope(
+        self,
+        user_id: str = DEFAULT_VALUE,
+        scope_id: str = DEFAULT_VALUE,
+    ):
+        if not self._validate_id(event_type=LogEventType.MEMORY_RETRIEVE, scope_id=scope_id):
+            memory_logger.error(
+                "Invalid scope_id format.",
+                event_type=LogEventType.MEMORY_RETRIEVE,
+                user_id=user_id,
+                scope_id=scope_id,
+                memory_type="message"
+            )
+            return
+        await self.message_manager.delete_by_user_and_scope(
+            user_id=user_id,
+            scope_id=scope_id
+        )
 
     async def delete_mem_by_id(self,
                                mem_id: str,
@@ -697,7 +721,7 @@ class LongTermMemory(metaclass=Singleton):
                 "Invalid scope_id format.",
                 event_type=LogEventType.MEMORY_RETRIEVE,
                 query=query,
-                memory_type=MemoryType.USER_PROFILE.value,
+                memory_type=MemoryType.FRAGMENT_MEMORY.value,
                 user_id=user_id,
                 scope_id=scope_id
             )
@@ -723,7 +747,7 @@ class LongTermMemory(metaclass=Singleton):
                     mem_info=MemInfo(
                         mem_id=item["id"],
                         content=item["mem"],
-                        type=item.get("mem_type", MemoryType.USER_PROFILE)
+                        type=item.get("mem_type", MemoryType.FRAGMENT_MEMORY)
                     ),
                     score=item.get("score", 0.0)
                 )
@@ -738,7 +762,7 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id,
                 query=query,
-                memory_type=MemoryType.USER_PROFILE.value
+                memory_type=MemoryType.FRAGMENT_MEMORY.value
             )
             return []
         except ValueError as e:
@@ -748,7 +772,7 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id,
                 exception=str(e),
-                memory_type=MemoryType.USER_PROFILE.value,
+                memory_type=MemoryType.FRAGMENT_MEMORY.value,
                 query=query
             )
             return []
@@ -759,7 +783,7 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id,
                 exception=str(e),
-                memory_type=MemoryType.USER_PROFILE.value,
+                memory_type=MemoryType.FRAGMENT_MEMORY.value,
                 query=query
             )
             return []
@@ -905,7 +929,7 @@ class LongTermMemory(metaclass=Singleton):
                 event_type=LogEventType.MEMORY_RETRIEVE,
                 user_id=user_id,
                 scope_id=scope_id,
-                memory_type=MemoryType.USER_PROFILE.value
+                memory_type=MemoryType.FRAGMENT_MEMORY.value
             )
             return []
         if not self.search_manager:

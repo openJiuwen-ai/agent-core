@@ -65,7 +65,7 @@ class UserMemStore:
             await self.kv_store.set(user_mem_ids_key, self.__write_id(user_mem_ids_value, mem_id))
 
             # user profile topic ids
-            if (data[UserMemStore.MEM_TYPE_FIELD_KEY] == MemoryType.USER_PROFILE.value and
+            if (data[UserMemStore.MEM_TYPE_FIELD_KEY] == MemoryType.FRAGMENT_MEMORY.value and
                     UserMemStore.TOPIC_FIELD_KEY in data.keys() and
                     data[UserMemStore.TOPIC_FIELD_KEY] is not None):
                 user_mem_topic_key = self.__get_concatenation_key([user_id, scope_id,
@@ -203,7 +203,7 @@ class UserMemStore:
                 await self.__delete_mem_id(user_mem_ids_key, mem_id)
 
                 # Delete user profile topic ids
-                if (dict_value[UserMemStore.MEM_TYPE_FIELD_KEY] == MemoryType.USER_PROFILE.value and
+                if (dict_value[UserMemStore.MEM_TYPE_FIELD_KEY] == MemoryType.FRAGMENT_MEMORY.value and
                         UserMemStore.TOPIC_FIELD_KEY in dict_value and
                         dict_value[UserMemStore.TOPIC_FIELD_KEY] is not None):
                     user_mem_topic_key = self.__get_concatenation_key([user_id, scope_id,

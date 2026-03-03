@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from abc import abstractmethod, ABC
-from typing import Any, Tuple
+from typing import Any, Tuple, List
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.common.crypto import encrypt, decrypt, NONCE_LENGTH, TAG_LENGTH
@@ -22,8 +22,9 @@ class BaseMemoryManager(ABC):
     TAG_HEX_LENGTH = TAG_LENGTH * 2  # hex_length = bytes_length * 2
 
     @abstractmethod
-    async def add(self, memory: BaseMemoryUnit, llm: Tuple[str, Model] | None = None, **kwargs):
-        """add memory."""
+    async def add_memories(self, user_id: str, scope_id: str, memories: List[BaseMemoryUnit],
+                           llm: Tuple[str, Model] | None = None, **kwargs):
+        """add memories in batch."""
         pass
 
     @abstractmethod

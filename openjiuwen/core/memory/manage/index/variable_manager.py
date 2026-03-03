@@ -28,27 +28,29 @@ class VariableManager(BaseMemoryManager):
         for legacy_prefix in self.LEGACY_PREFIXES:
             kv_prefix_registry.register_legacy(legacy_prefix)
 
-    async def add(self, memory: VariableUnit, llm: Tuple[str, Model] | None = None, **kwargs):
-        """add Variable memory"""
-        if self.kv_store is None:
-            memory_logger.error(
-                "kv_store cannot be None",
-                event_type=LogEventType.MEMORY_STORE,
-                memory_type="variable",
-                user_id=memory.user_id,
-                scope_id=memory.scope_id
+    async def add_memories(self, user_id: str, scope_id: str, memories: List[VariableUnit],
+                           llm: Tuple[str, Model] | None = None, **kwargs):
+        """add Variable memories in batch"""
+        for memory in memories:
+            if self.kv_store is None:
+                memory_logger.error(
+                    "kv_store cannot be None",
+                    event_type=LogEventType.MEMORY_STORE,
+                    memory_type="variable",
+                    user_id=user_id,
+                    scope_id=scope_id
+                )
+                return
+            key, value = self._make_variable_pairs(
+                user_id,
+                False,
+                scope_id,
+                memory.variable_name,
+                None,
+                memory.variable_mem,
+                None
             )
-            return
-        key, value = self._make_variable_pairs(
-            memory.user_id,
-            False,
-            memory.scope_id,
-            memory.variable_name,
-            None,
-            memory.variable_mem,
-            None
-        )
-        await self.kv_store.set(key, value)
+            await self.kv_store.set(key, value)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         memory_logger.warning(

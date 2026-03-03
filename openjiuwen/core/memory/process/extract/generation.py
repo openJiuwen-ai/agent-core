@@ -3,14 +3,14 @@
 from openjiuwen.core.memory.process.extract.common import ExtractMemoryParams
 from openjiuwen.core.memory.process.extract.long_term_memory_extractor import LongTermMemoryExtractor
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit, \
-    UserProfileUnit, SummaryUnit
+    FragmentMemoryUnit, SummaryUnit
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
 from openjiuwen.core.memory.process.extract.memory_analyzer import MemoryAnalyzer, VariableResult
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 
 category_to_class = {
-    "user_profile": MemoryType.USER_PROFILE
+    "user_profile": MemoryType.FRAGMENT_MEMORY
 }
 
 
@@ -18,7 +18,7 @@ class Generator:
     def __init__(self, data_id_generator: DataIdManager):
         self.data_id_generator = data_id_generator
 
-    async def gen_all_memory(self, **kwargs) -> list[BaseMemoryUnit]:
+    async def gen_all_memory(self, **kwargs) -> dict[str, list[BaseMemoryUnit]]:
         """Generate all memory units based on input"""
         messages = kwargs.get("messages")
         config = kwargs.get("config")
@@ -36,7 +36,7 @@ class Generator:
                 user_id=user_id,
                 scope_id=scope_id
             )
-            return []
+            return {}
 
         extract_memory_params = ExtractMemoryParams(
             user_id=user_id,
@@ -46,7 +46,7 @@ class Generator:
             base_chat_model=model
         )
 
-        all_memory_results = []
+        all_memory_results = {}
         memory_analyze_res = await MemoryAnalyzer.analyze(
             messages=messages,
             history_messages=history_messages,
@@ -55,11 +55,13 @@ class Generator:
             summary_max_token=summary_max_token
         )
         variable_units = self._process_extracted_data(
-            user_id=user_id,
-            scope_id=scope_id,
             variable_results=memory_analyze_res.variables,
         )
-        all_memory_results += variable_units
+        for unit in variable_units:
+            mem_type = unit.mem_type.value
+            if mem_type not in all_memory_results:
+                all_memory_results[mem_type] = []
+            all_memory_results[mem_type].append(unit)
 
         if not config.enable_long_term_mem:
             memory_logger.info(
@@ -70,15 +72,22 @@ class Generator:
             )
             return all_memory_results
 
-        summary_unit = await self._process_summary_data(user_id=user_id,
-                                                        scope_id=scope_id,
-                                                        message_mem_id=message_mem_id,
-                                                        summary=memory_analyze_res.summary,
-                                                        timestamp=timestamp)
-        all_memory_results.append(summary_unit)
+        summary_unit = await self._process_summary_data(
+            user_id=user_id,
+            message_mem_id=message_mem_id,
+            summary=memory_analyze_res.summary,
+            timestamp=timestamp
+        )
+        summary_type = summary_unit.mem_type.value
+        if summary_type not in all_memory_results:
+            all_memory_results[summary_type] = []
+        all_memory_results[summary_type].append(summary_unit)
+
+        if not memory_analyze_res.has_key_information:
+            return all_memory_results
+
         try:
             merged_units = await self._categories_to_memory_unit(
-                categories=memory_analyze_res.categories,
                 extract_memory_paras=extract_memory_params,
                 message_mem_id=message_mem_id,
                 timestamp=timestamp
@@ -110,7 +119,11 @@ class Generator:
                 exception=str(e)
             )
             return all_memory_results
-        all_memory_results += merged_units
+        for unit in merged_units:
+            mem_type = unit.mem_type.value
+            if mem_type not in all_memory_results:
+                all_memory_results[mem_type] = []
+            all_memory_results[mem_type].append(unit)
         memory_logger.info(
             "Memory units generated successfully",
             event_type=LogEventType.MEMORY_PROCESS,
@@ -120,21 +133,19 @@ class Generator:
         )
         return all_memory_results
 
-    async def _categories_to_memory_unit(self,
-                                         categories: list[str],
-                                         extract_memory_paras: ExtractMemoryParams,
-                                         message_mem_id: str,
-                                         timestamp: str
-                                         ) -> list[BaseMemoryUnit]:
+    async def _categories_to_memory_unit(
+        self,
+        extract_memory_paras: ExtractMemoryParams,
+        message_mem_id: str,
+        timestamp: str
+    ) -> list[BaseMemoryUnit]:
         memory_units = []
         memory_dict = await LongTermMemoryExtractor.extract_long_term_memory(
-            categories=categories,
             extract_memory_paras=extract_memory_paras,
             timestamp=timestamp,
         )
-        memory_units.extend(await self._get_user_profile_unit(
+        memory_units.extend(await self._get_fragment_memory_unit(
             user_id=extract_memory_paras.user_id,
-            scope_id=extract_memory_paras.scope_id,
             message_mem_id=message_mem_id,
             memory_dict=memory_dict,
             timestamp=timestamp,
@@ -142,18 +153,12 @@ class Generator:
         return memory_units
 
     @staticmethod
-    def _process_extracted_data(
-            user_id: str,
-            scope_id: str,
-            variable_results: list[VariableResult],
-    ) -> list[VariableUnit]:
+    def _process_extracted_data(variable_results: list[VariableResult]) -> list[VariableUnit]:
         variable_units = []
         for tmp_data in variable_results:
             if not tmp_data.variable_value:
                 continue
             variable_units.append(VariableUnit(
-                user_id=user_id,
-                scope_id=scope_id,
                 variable_name=tmp_data.variable_key,
                 variable_mem=tmp_data.variable_value
             ))
@@ -162,51 +167,35 @@ class Generator:
     async def _process_summary_data(
             self,
             user_id: str,
-            scope_id: str,
             message_mem_id: str,
             summary: str,
             timestamp: str,
     ) -> SummaryUnit:
         mem_id = str(await self.data_id_generator.generate_next_id(user_id=user_id))
         return SummaryUnit(
-            user_id=user_id,
-            scope_id=scope_id,
             mem_id=mem_id,
             summary=summary,
             message_mem_id=message_mem_id,
             timestamp=timestamp,
         )
 
-    async def _get_user_profile_unit(
+    async def _get_fragment_memory_unit(
             self,
             user_id: str,
-            scope_id: str,
             message_mem_id: str,
             memory_dict: dict,
             timestamp: str
-    ) -> list[UserProfileUnit]:
+    ) -> list[FragmentMemoryUnit]:
         """Generate user profile memory unit based on input"""
-        user_profile_data = []
-        user_profile_dict = memory_dict.get("user_profile", {})
-        for profile_type, profile_list in user_profile_dict.items():
-            if not isinstance(profile_list, list):
-                memory_logger.warning(
-                    "User profile extractor output format error: profile_list is not a list",
-                    event_type=LogEventType.MEMORY_PROCESS,
-                    user_id=user_id,
-                    scope_id=scope_id,
-                    metadata={"profile_list": profile_list}
-                )
-                continue
-            for profile in profile_list:
+        fragment_mem_units = []
+        for fragment_type, fragment_memories in memory_dict.items():
+            for mem_content in fragment_memories:
                 mem_id = str(await self.data_id_generator.generate_next_id(user_id=user_id))
-                user_profile_data.append(UserProfileUnit(
-                    user_id=user_id,
-                    scope_id=scope_id,
-                    profile_type=profile_type,
-                    profile_mem=profile,
+                fragment_mem_units.append(FragmentMemoryUnit(
+                    fragment_type=fragment_type,
+                    content=mem_content,
                     message_mem_id=message_mem_id,
                     timestamp=timestamp,
                     mem_id=mem_id,
                 ))
-        return user_profile_data
+        return fragment_mem_units

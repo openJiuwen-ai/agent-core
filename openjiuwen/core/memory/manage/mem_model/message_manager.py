@@ -105,3 +105,7 @@ class MessageManager:
             key=self.crypto_key,
             ciphertext=base_msg.content)
         return base_msg, msg_datetime
+
+    async def delete_by_user_and_scope(self, user_id: str, scope_id: str) -> bool:
+        conditions = {'user_id': user_id, 'scope_id': scope_id}
+        return await self.sql_db.delete(table=self.message_table, conditions=conditions)
