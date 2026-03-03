@@ -419,6 +419,87 @@ async def delete_docs_by_filters(
 - `filters: Dict[str, Any]`：标量字段过滤器（等值过滤）
 - `**kwargs: Any`：额外参数
 
+### abstractmethod async list_collection_names
+
+```python
+async def list_collection_names(self) -> List[str]
+```
+
+列出向量存储中的所有集合名称。
+
+该方法返回当前向量存储中所有集合的名称列表。
+
+**返回**：
+
+- `List[str]`：集合名称列表
+
+### abstractmethod async update_schema
+
+```python
+async def update_schema(
+    self,
+    collection_name: str,
+    operations: List[BaseOperation],
+) -> None
+```
+
+更新集合的 schema，用于向量数据迁移。
+
+该方法应用一系列 schema 迁移操作来修改集合的结构。支持的操作包括：
+- `AddScalarFieldOperation`：添加新的标量字段
+- `RenameScalarFieldOperation`：重命名现有标量字段
+- `UpdateScalarFieldTypeOperation`：更改标量字段的数据类型
+- `UpdateEmbeddingDimensionOperation`：修改向量嵌入的维度
+
+**参数**：
+
+- `collection_name: str`：要修改的集合名称
+- `operations: List[BaseOperation]`：要应用的迁移操作列表
+
+### abstractmethod async get_collection_metadata
+
+```python
+async def get_collection_metadata(
+    self,
+    collection_name: str,
+) -> Dict[str, Any]
+```
+
+获取集合的元数据信息。
+
+该方法返回集合的元数据，包括距离度量类型、向量字段名和 schema 版本等信息。实现类应当从本地缓存或 Milvus 集合属性中获取这些信息。
+
+**参数**：
+
+- `collection_name: str`：集合名称
+
+**返回**：
+
+- `Dict[str, Any]`：集合元数据字典，包含以下键：
+    - `distance_metric: str`：距离度量类型（如 "COSINE"、"L2"、"IP"）
+    - `vector_field: str`：向量字段名称
+    - `schema_version: int`：schema 版本号（未设置时为 0）
+
+### abstractmethod async update_collection_metadata
+
+```python
+async def update_collection_metadata(
+    self,
+    collection_name: str,
+    metadata: Dict[str, Any],
+) -> None
+```
+
+更新集合的元数据信息。
+
+该方法更新集合的元数据，将指定的键值对存储到 Milvus 集合属性中。所有值都会被转换为字符串存储。同时，本地缓存也会被更新以保持数据一致性。
+
+**参数**：
+
+- `collection_name: str`：集合名称
+- `metadata: Dict[str, Any]`：要更新的元数据字典，支持以下键：
+    - `schema_version: int`：schema 版本号（必须是非负整数）
+    - 其他自定义属性（所有值会被转换为字符串）
 ---
 
 ## function create_vector_store

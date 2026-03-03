@@ -536,6 +536,7 @@ class StatusCode(Enum):
         158009,
         "failed to register operation for {entity_key}:{schema_version}, reason: {error_msg}"
     )
+    MEMORY_MIGRATE_MEMORY_EXECUTION_ERROR = (158010, "failed to migrate memory, reason: {error_msg}")
 
     # =========================
     # Foundation Tool 160000–169999

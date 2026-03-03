@@ -21,6 +21,11 @@ class MemoryType(Enum):
     UNKNOWN = "unknown"
 
 
+class SupportMemoryType(Enum):
+    USER_PROFILE = "user_profile"
+    SUMMARY = "summary"
+
+
 @dataclass
 class BaseMemoryUnit:
     """a single memory data item"""

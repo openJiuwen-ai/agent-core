@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.store.vector.utils import (
     convert_l2_squared,
     convert_ip_distance,
 )
+from openjiuwen.core.memory.migration.operation.base_operation import BaseOperation
 
 
 class ChromaVectorStore(BaseVectorStore):
@@ -591,3 +592,15 @@ class ChromaVectorStore(BaseVectorStore):
             )
 
         await asyncio.to_thread(_delete)
+
+    async def update_collection_metadata(self, collection_name: str, metadata: Dict[str, Any]) -> None:
+        pass
+
+    async def get_collection_metadata(self, collection_name: str) -> int:
+        pass
+
+    async def list_collection_names(self) -> List[str]:
+        pass
+
+    async def update_schema(self, collection_name: str, operations: List[BaseOperation]):
+        pass

@@ -419,7 +419,106 @@ Delete documents by scalar field filters.
 - `filters: Dict[str, Any]`: Scalar field filters for matching documents to delete (equality filter only)
 - `**kwargs: Any`: Additional parameters
 
----
+### abstractmethod async list_collection_names
+
+```python
+async def list_collection_names(self) -> List[str]
+```
+
+List all collection names in the vector store.
+
+This method returns a list of all collection names currently in the vector store.
+
+**Returns**:
+
+- `List[str]`: A list of collection names
+
+### abstractmethod async update_schema
+
+```python
+async def update_schema(
+    self,
+    collection_name: str,
+    operations: List[BaseOperation],
+) -> None
+```
+
+Update the schema of a collection for vector data migration.
+
+This method applies a series of schema migration operations to modify the structure of a collection. Supported operations include:
+- `AddScalarFieldOperation`: Add a new scalar field
+- `RenameScalarFieldOperation`: Rename an existing scalar field
+- `UpdateScalarFieldTypeOperation`: Change the data type of a scalar field
+- `UpdateEmbeddingDimensionOperation`: Modify the dimension of vector embeddings
+
+**Parameters**:
+
+- `collection_name: str`: The name of the collection to modify
+- `operations: List[BaseOperation]`: A list of migration operations to apply
+
+### abstractmethod async get_collection_metadata
+
+```python
+async def get_collection_metadata(
+    self,
+    collection_name: str,
+) -> Dict[str, Any]
+```
+
+Get collection metadata including distance metric, vector field, and schema version.
+
+This method retrieves metadata about a collection, including:
+- distance_metric: The distance metric used for vector search (e.g., "COSINE", "L2", "IP")
+- vector_field: The name of the vector field in the collection
+- schema_version: The schema version stored in collection properties (0 if not set)
+
+Implementation should first check local cache, and if cache miss, fetch from
+the underlying storage (e.g., Milvus collection properties and schema).
+
+**Parameters**:
+
+- `collection_name: str`: Name of the collection to get metadata for
+
+**Returns**:
+
+- `Dict[str, Any]`: Dictionary containing collection metadata with keys:
+    - `distance_metric: str`: The distance metric type (e.g., "COSINE", "L2", "IP")
+    - `vector_field: str`: The vector field name
+    - `schema_version: int`: The schema version number (0 if not set)
+
+### abstractmethod async update_collection_metadata
+
+```python
+async def update_collection_metadata(
+    self,
+    collection_name: str,
+    metadata: Dict[str, Any],
+) -> None
+```
+
+Update collection metadata stored in the collection properties.
+
+This method updates metadata for a collection, storing the key-value pairs
+in the underlying storage's collection properties (e.g., Milvus collection
+properties). All values are converted to strings for storage.
+
+The metadata typically includes:
+- schema_version: The schema version number (must be a non-negative integer)
+- Other custom properties (all values will be converted to strings)
+
+Implementation should:
+1. Validate input (e.g., schema_version must be non-negative integer)
+2. Store metadata in underlying storage's collection properties
+3. Update local cache to keep it in sync
+
+**Parameters**:
+
+- `collection_name: str`: Name of the collection to update
+- `metadata: Dict[str, Any]`: Dictionary of metadata key-value pairs to update.
+    Supported keys include:
+    - `schema_version: int`: The schema version number (must be >= 0)
+    - Other custom properties (all values will be converted to strings)
+----
 
 ## function create_vector_store
 
