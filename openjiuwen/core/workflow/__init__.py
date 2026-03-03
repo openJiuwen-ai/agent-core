@@ -58,6 +58,7 @@ from openjiuwen.core.workflow.components.condition.array import ArrayCondition
 from openjiuwen.core.workflow.components.condition.number import NumberCondition
 
 from openjiuwen.core.session.workflow import Session, create_workflow_session
+from openjiuwen.core.workflow._workflow import execute_single_component
 
 
 _WORKFLOW_CLASSES = [
@@ -66,6 +67,7 @@ _WORKFLOW_CLASSES = [
     "WorkflowOutput",
     "WorkflowChunk",
     "WorkflowExecutionState",
+    "execute_single_component"
 ]
 
 _WORKFLOW_METHODS = [

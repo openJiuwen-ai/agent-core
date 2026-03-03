@@ -13,6 +13,7 @@ from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow import NumberCondition
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import WorkflowComponent
+from openjiuwen.core.workflow._workflow import execute_single_component, ComponentExecutionParams
 from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
 from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
 from openjiuwen.core.workflow import LoopGroup, LoopComponent
@@ -1368,6 +1369,39 @@ async def test_sub_flow_stream_output():
         "output": [{"result": "输出:"}, {"result": 1}, {"result": "+"}, {"result": 2}, {"result": "="},
     {"result": 3}, {"result": ";输出1:"}, {"result": 3}]}
     assert result.state == WorkflowExecutionState.COMPLETED
+
+
+async def test_single_component_execution():
+    class CustomComponent(WorkflowComponent):
+        async def invoke(self, inputs: Input, session: Session, context: ModelContext):
+            exec_id = session.get_executable_id()
+            logger.info(f"===================: {inputs}， invoke start")
+
+            logger.info(f"exec_id: {exec_id}， invoke done")
+            return {"result": "result"}
+    component = CustomComponent()
+    session = create_workflow_session()
+    # 3. create Vertex instance
+    node_id = "test_component"
+    inputs = {"a": "测试输入", "b": "测试输入2"}
+    inputs_schema = {"a": "${a}", "b": "${b}"}
+    outputs_schema = {"result": "${result}"}
+
+    # prepare param
+    params = ComponentExecutionParams(
+        node_id=node_id,
+        session=session,
+        executor=component,
+        inputs=inputs,
+        inputs_schema=inputs_schema,
+        outputs_schema=outputs_schema
+    )
+    # 4. call execute_single_component method
+    result = await execute_single_component(
+        params
+    )
+    assert result == {'result': 'result'}
+
 
 
 async def test_workflow_cancel():
