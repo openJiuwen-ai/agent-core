@@ -2,21 +2,21 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
-import os
-from typing import Optional, List
 import io
-from PIL import Image
+import os
+from typing import List, Optional
 
 from docx import Document
 from docx.oxml.ns import qn
-from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from PIL import Image
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import register_parser
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.captioner import ImageCaptioner
-from openjiuwen.core.foundation.llm.model import Model
 
 
 @register_parser([".docx", ".DOCX"])
@@ -82,7 +82,7 @@ class WordParser(Parser):
                 )
                 if elem_text:
                     content.extend(elem_text)
-            result = os.linesep.join([line for line in content if line.strip()])
+            result = "\n".join([line for line in content if line.strip()])
             return result if result else None
         except Exception as e:
             logger.error(f"Failed to parse DOCX {file_path}: {e}")
@@ -108,7 +108,7 @@ class WordParser(Parser):
         Returns:
             List[str]: _description_
         """
-
+        captions = []
         if element.tag == qn("w:p"):
             para_text = []
             elem_text = element.text.strip()
@@ -126,12 +126,12 @@ class WordParser(Parser):
                     para_text.append(caption)
             return para_text
 
-        elif element.tag == qn("w:tbl"):
+        if element.tag == qn("w:tbl"):
             for table in doc.tables:
-                if table._element == element:
+                if getattr(table, "_element", None) == element:
                     table_text = []
                     for row in table.rows:
                         row_cells = [cell.text.strip() for cell in row.cells]
                         table_text.append("\t".join(row_cells))
-                    return [os.linesep.join(table_text)]
+                    return ["\n".join(table_text)]
         return []

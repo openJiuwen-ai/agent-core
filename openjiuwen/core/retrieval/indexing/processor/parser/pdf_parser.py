@@ -2,15 +2,15 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import os
-from typing import Any, Optional, List
+from typing import List, Optional
 
 import pdfplumber
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import register_parser
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.captioner import ImageCaptioner
-from openjiuwen.core.foundation.llm.model import Model
 
 
 @register_parser([".pdf", ".PDF"])
@@ -40,7 +40,6 @@ class PDFParser(Parser):
         """
         images = []
         for img_index, img in enumerate(pdf_page.images):
-
             # Get bounding box
             x0 = img["x0"]
             top = img["top"]
@@ -53,9 +52,7 @@ class PDFParser(Parser):
             # Convert cropped region to a PIL image
             pil_image = cropped_page.to_image(resolution=300).original
             os.makedirs(output_dir, exist_ok=True)
-            image_path = os.path.join(
-                output_dir, f"{filename}__page_{pdf_page_num}__img_{img_index}.png"
-            )
+            image_path = os.path.join(output_dir, f"{filename}__page_{pdf_page_num}__img_{img_index}.png")
             images.append(image_path)
             pil_image.save(image_path)
         return images
@@ -66,6 +63,7 @@ class PDFParser(Parser):
             image_captioner = ImageCaptioner(llm_client=llm_client)
 
             async def _async_parse_pdf():
+                captions = []
                 content = []
                 with pdfplumber.open(file_path) as pdf:
                     for page_num, page in enumerate(pdf.pages, 1):
@@ -82,7 +80,7 @@ class PDFParser(Parser):
                         for caption in captions:
                             if caption:
                                 content.append(caption)
-                return os.linesep.join([line for line in content if line.strip()])
+                return "\n".join([line for line in content if line.strip()])
 
             result = await _async_parse_pdf()
             return result if result else None

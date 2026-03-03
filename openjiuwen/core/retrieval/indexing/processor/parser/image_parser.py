@@ -1,13 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import os
 from typing import Any, Optional
+
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import register_parser
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.captioner import ImageCaptioner
-from openjiuwen.core.foundation.llm.model import Model
 
 
 @register_parser([".png", ".jpg", ".jpeg", ".webp", ".gif", "jfif"])
@@ -23,9 +23,7 @@ class ImageParser(Parser):
             image_captioner = ImageCaptioner(llm_client=llm_client)
             image_captioner.cp_image(image_path)
             captions = await image_captioner.caption_images([image_path])
-            return (
-                os.linesep.join([caption for caption in captions if caption]) if captions else None
-            )
+            return "\n".join([caption for caption in captions if caption]) if captions else None
         except Exception as e:
             logger.error(f"Failed to parse image {image_path}: {e}")
             return None
