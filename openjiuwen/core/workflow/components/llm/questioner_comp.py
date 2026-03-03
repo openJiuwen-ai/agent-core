@@ -20,7 +20,7 @@ from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable, Input, Output
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
+    BaseMessage, UserMessage, SystemMessage, AssistantMessage, ModelRequestConfig, ModelClientConfig, Model
 )
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
@@ -417,12 +417,19 @@ class QuestionerDirectReplyHandler:
         questioner_input = QuestionerUtils.validate_inputs(inputs)
         output = OutputCache()
         self._query = questioner_input.query or ""
+
+        # Write user message to context at START state
+        await self._write_user_message_to_context(self._query, context)
+
         chat_history = await self._get_latest_chat_history(context)
         if self._is_set_question_content():
             user_fields = questioner_input.model_dump(exclude={'query'})
             output.question = QuestionerUtils.format_template(self._config.question_content, user_fields)
             self._update_questioner_states_question(output.question)
             self._state = self._state.handle_event(QuestionerEvent.USER_INTERACT_EVENT)
+
+            # Write assistant message (question) to context
+            await self._write_assistant_message_to_context(output.question, context)
             return QuestionerUtils.format_questioner_output(output)
 
         if self._need_extract_fields():
@@ -430,6 +437,8 @@ class QuestionerDirectReplyHandler:
             event = QuestionerEvent.USER_INTERACT_EVENT if is_continue_ask else QuestionerEvent.END_EVENT
             if is_continue_ask:
                 self._update_questioner_states_question(output.question)
+                # Write assistant message (question) to context
+                await self._write_assistant_message_to_context(output.question, context)
             self._state = self._state.handle_event(event)
         else:
             raise build_error(
@@ -441,6 +450,9 @@ class QuestionerDirectReplyHandler:
     async def _handle_user_interact_state(self, inputs, session: Session, context):
         await self._get_latest_human_feedback(session)
         output = OutputCache(question=self._state.question, user_response=self._query)
+
+        # Write user feedback message to context at USER_INTERACT state
+        await self._write_user_message_to_context(self._query, context)
 
         chat_history = await self._get_latest_chat_history(context)
         user_response = chat_history[-1].content if chat_history else ""
@@ -455,6 +467,8 @@ class QuestionerDirectReplyHandler:
             event = QuestionerEvent.USER_INTERACT_EVENT if is_continue_ask else QuestionerEvent.END_EVENT
             if is_continue_ask:
                 self._update_questioner_states_question(output.question)
+                # Write assistant message (question) to context
+                await self._write_assistant_message_to_context(output.question, context)
             self._state = self._state.handle_event(event)
         else:
             raise build_error(
@@ -693,6 +707,28 @@ class QuestionerDirectReplyHandler:
 
     def _update_questioner_states_question(self, question):
         self._state.question = question
+
+    async def _write_user_message_to_context(self, content, context):
+        """Write user message to context."""
+        if context is None or not self._config.with_chat_history:
+            return
+
+        if not content:
+            return
+
+        user_message = UserMessage(role="user", content=content)
+        await context.add_messages([user_message])
+
+    async def _write_assistant_message_to_context(self, content, context):
+        """Write assistant message (question) to context."""
+        if context is None or not self._config.with_chat_history:
+            return
+
+        if not content:
+            return
+
+        assistant_message = AssistantMessage(role="assistant", content=content)
+        await context.add_messages([assistant_message])
 
 
 class QuestionerExecutable(ComponentExecutable):

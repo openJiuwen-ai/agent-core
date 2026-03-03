@@ -454,12 +454,7 @@ class Workflow:
                 await task
                 results = session.state().get_outputs(self._end_comp_id)
                 if results:
-                    await self._add_messages_to_context(inputs, results, context)
                     yield OutputSchema(type="workflow_final", index=0, payload=results)
-                elif interaction_chuck_list:
-                    await self._add_messages_to_context(inputs, interaction_chuck_list, context)
-                else:
-                    await self._add_messages_to_context(inputs, chunks, context)
             except asyncio.CancelledError:
                 logger.warning(
                     "Workflow stream output be cancelled",
@@ -655,49 +650,6 @@ class Workflow:
                               reason="session is required for workflow execution",
                               workflow=self._card.str())
 
-    @staticmethod
-    async def _add_messages_to_context(inputs: Input, results: Union[dict, List[OutputSchema]], context):
-        if context is None:
-            return
-
-        user_messages = []
-        if isinstance(inputs, dict):
-            user_messages.append(UserMessage(content=inputs.get("query", "")))
-        elif isinstance(inputs, InteractiveInput):
-            sorted_user_feedback = OrderedDict(inputs.user_inputs)
-            user_feedback = "\n".join([str(feedback) for _, feedback in sorted_user_feedback.items()])
-            user_messages.append(UserMessage(content=user_feedback))
-
-        assistant_messages = []
-        if isinstance(results, dict):
-            workflow_result = json.dumps(results, ensure_ascii=False)
-            assistant_messages.append(AssistantMessage(content=workflow_result))
-        elif isinstance(results, list):
-            sorted_user_feedback = OrderedDict()
-            assistant_reply = ""
-            questions = ""
-            for item in results:
-                if not isinstance(item, OutputSchema):
-                    continue
-                if item.type == INTERACTION:
-                    sorted_user_feedback.update({item.payload.id: item.payload.value})
-                    for _, question in sorted_user_feedback.items():
-                        if isinstance(question, str):
-                            questions += f"{question}\n"
-                        elif isinstance(question, dict) and question.get("value", ""):
-                            questions += f"{str(question.get('value'))}\n"
-                    questions = questions.strip()
-                else:
-                    if isinstance(item.payload, dict):
-                        answer = item.payload.get("answer", "")
-                        if answer is not None:
-                            assistant_reply += str(answer)
-            if questions:
-                assistant_messages.append(AssistantMessage(content=questions))
-            if assistant_reply:
-                assistant_messages.append(AssistantMessage(content=assistant_reply))
-
-        await context.add_messages(user_messages + assistant_messages)
 
     @staticmethod
     def _install_asyncio_exception_handler():
