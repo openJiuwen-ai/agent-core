@@ -3,7 +3,8 @@
 
 import asyncio
 import json
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Callable
+import time
 
 import chromadb
 
@@ -21,6 +22,8 @@ from openjiuwen.core.foundation.store.vector.utils import (
     convert_cosine_distance,
     convert_l2_squared,
     convert_ip_distance,
+    compute_new_schema,
+    build_transform_func_for_operations
 )
 from openjiuwen.core.memory.migration.operation.base_operation import BaseOperation
 
@@ -593,14 +596,203 @@ class ChromaVectorStore(BaseVectorStore):
 
         await asyncio.to_thread(_delete)
 
-    async def update_collection_metadata(self, collection_name: str, metadata: Dict[str, Any]) -> None:
-        pass
-
-    async def get_collection_metadata(self, collection_name: str) -> int:
-        pass
-
     async def list_collection_names(self) -> List[str]:
-        pass
+        return [c.name for c in self._client.list_collections()]
+
+    async def get_all_documents(self, collection_name: str) -> List[Dict[str, Any]]:
+        """
+        Retrieve all documents from a collection for migration purposes.
+
+        Args:
+            collection_name: Name of the collection to retrieve documents from
+
+        Returns:
+            List of documents from the collection
+        """
+        collection = self._get_collection(collection_name)
+        metadata = collection.metadata or {}
+        field_mapping_str = metadata.get("field_mapping", "{}")
+        field_mapping = json.loads(field_mapping_str)
+
+        primary_key = field_mapping.get("primary_key", "id")
+        vector_field = field_mapping.get("vector_field", "embedding")
+        text_field = field_mapping.get("text_field", "text")
+
+        # Get all documents from the collection
+        results = await asyncio.to_thread(
+            collection.get,
+            include=["documents", "metadatas", "embeddings", "uris"]
+        )
+
+
+        documents = []
+        ids = results.get("ids", [])
+        documents_list = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+        embeddings = results.get("embeddings", [])
+
+        for i, doc_id in enumerate(ids):
+            doc = {
+                primary_key: doc_id,
+                text_field: documents_list[i] if i < len(documents_list) else "",
+                vector_field: embeddings[i].tolist() if i < len(embeddings) else [],
+            }
+
+            # Add metadata if available
+            if i < len(metadatas) and metadatas[i]:
+                doc.update(metadatas[i])
+
+            documents.append(doc)
+
+        return documents
+
+
+    async def get_collection_metadata(self, collection_name: str) -> Dict[str, Any]:
+        """
+        Get the metadata of a collection (e.g., distance_metric).
+        This is crucial for migration operations to preserve index settings.
+
+        Args:
+            collection_name: The name of the collection to get metadata from.
+
+        Returns:
+            A dictionary containing the collection's metadata.
+        """
+        collection = self._get_collection(collection_name)
+        metadata = collection.metadata or {}
+        if "distance_metric" not in metadata:
+            metadata["distance_metric"] = "cosine"
+        if "schema_version" not in metadata:
+            metadata["schema_version"] = 0
+        return metadata
+
+    async def _execute_migration(
+        self,
+        collection_name: str,
+        new_schema: CollectionSchema,
+        transform_func: Callable[[Dict[str, Any]], Dict[str, Any]],
+        new_collection_kwargs: Dict[str, Any],
+    ):
+        """
+        A generic helper to perform a schema migration on a collection for ChromaDB.
+
+        ChromaDB doesn't support schema changes directly, so this
+        implementation creates a temporary collection, migrates data, and then replaces
+        the old collection with the new one.
+
+        Args:
+            collection_name: The name of the original collection.
+            new_schema: The schema for the new collection.
+            transform_func: A function to apply to each document during migration.
+            new_collection_kwargs: Keyword arguments for creating the new collection (e.g., distance_metric).
+        """
+        # Generate a temporary collection name
+        temp_collection_name = f"{collection_name}_migration_{int(time.time())}"
+        store_logger.info(
+            f"Starting migration for '{collection_name}'. New collection: '{temp_collection_name}'.",
+            event_type=LogEventType.STORE_UPDATE,
+            table_name=collection_name
+        )
+
+        try:
+            # Create the new temporary collection
+            await self.create_collection(
+                temp_collection_name,
+                new_schema,
+                distance_metric=new_collection_kwargs.get("distance_metric", "cosine")
+            )
+
+            # Get all documents from the old collection
+            old_collection_data = await self.get_all_documents(collection_name)
+
+            # Transform and re-add all documents to the temporary collection
+            if old_collection_data:
+                transformed_docs = []
+                for doc in old_collection_data:
+                    transformed_doc = transform_func(doc)
+                    transformed_docs.append(transformed_doc)
+
+                await self.add_docs(temp_collection_name, transformed_docs)
+
+            # Drop the old collection
+            await self.delete_collection(collection_name)
+
+            # Rename the temporary collection to the original name
+            # ChromaDB doesn't support rename directly, so we need to:
+            # 1. Create a new collection with the original name using data from temp collection
+            # 2. Delete the temporary collection
+            temp_collection_data = await self.get_all_documents(temp_collection_name)
+            await self.create_collection(
+                collection_name,
+                new_schema,
+                distance_metric=new_collection_kwargs.get("distance_metric", "cosine")
+            )
+            if temp_collection_data:
+                await self.add_docs(collection_name, temp_collection_data)
+            await self.delete_collection(temp_collection_name)
+
+            store_logger.info(f"Migration for '{collection_name}' completed successfully.",
+                              event_type=LogEventType.STORE_UPDATE, table_name=collection_name)
+
+        except Exception as e:
+            store_logger.error(
+                f"Migration for '{collection_name}' failed: {e}. Cleaning up temporary collection.",
+                event_type=LogEventType.STORE_UPDATE,
+                table_name=collection_name,
+                exception=str(e)
+            )
+            # Clean up the temporary collection if it exists
+            if await self.collection_exists(temp_collection_name):
+                await self.delete_collection(temp_collection_name)
+            raise
 
     async def update_schema(self, collection_name: str, operations: List[BaseOperation]):
-        pass
+        """
+        Apply a list of schema migration operations to a collection.
+
+        This method processes all operations in batch, applying the necessary
+        changes to the collection schema in a single data migration. Supported operations include:
+        - AddScalarFieldOperation: Add a new scalar field to the collection
+        - RenameScalarFieldOperation: Rename an existing scalar field
+        - UpdateScalarFieldTypeOperation: Change the data type of a scalar field
+        - UpdateEmbeddingDimensionOperation: Modify the dimension of vector embeddings
+
+        Args:
+            collection_name: The name of the collection to modify.
+            operations: A list of migration operations to apply.
+
+        Raises:
+            Error: If an operation fails or is not supported.
+        """
+        if not operations:
+            return
+
+        # 1. Get current schema
+        old_schema = await self.get_schema(collection_name)
+
+        # 2. Compute the final new schema after applying all operations
+        new_schema = compute_new_schema(old_schema, operations)
+
+        # 3. Build a unified transform function for all operations
+        transform_func = build_transform_func_for_operations(operations)
+
+        # 4. Execute migration once with the final schema and unified transform
+        metadata = await self.get_collection_metadata(collection_name)
+        await self._execute_migration(collection_name, new_schema, transform_func, metadata)
+
+    async def update_collection_metadata(self, collection_name: str, metadata: Dict[str, Any]) -> None:
+        """
+        Update the schema version of a collection.
+        """
+        if "schema_version" in metadata:
+            version = metadata["schema_version"]
+            if not isinstance(version, int) or version < 0:
+                raise build_error(
+                    StatusCode.STORE_VECTOR_SCHEMA_INVALID,
+                    error_msg=f"schema_version must be a non-negative integer, got {version}"
+                )
+        # For ChromaDB, we can store schema version in collection metadata
+        collection = self._get_collection(collection_name)
+        current_metadata = collection.metadata or {}
+        current_metadata.update(metadata)
+        collection.modify(name=collection_name, metadata=current_metadata)
