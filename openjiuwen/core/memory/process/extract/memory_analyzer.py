@@ -90,7 +90,7 @@ class MemoryAnalyzer:
                 )
                 res = await parser.parse(response.content)
                 analyze_result = MemoryAnalyzerResult.model_validate(res)
-                if not memory_config.enable_long_term_mem:
+                if not memory_config.enable_long_term_mem or not memory_config.enable_summary_memory:
                     analyze_result.summary = ""
                 return analyze_result
             except json.JSONDecodeError as e:

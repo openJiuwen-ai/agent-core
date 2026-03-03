@@ -53,14 +53,14 @@ async def register_store(
 
 **参数**：
 
-* **kv_store**(BaseKVStore)：**必填**，键值存储实例，用于快速访问结构化数据（如 scope 配置、用户变量等）。若为 `None`，会抛出 `JiuWenBaseException`（`MEMORY_REGISTER_STORE_EXECUTION_ERROR`）。
+* **kv_store**(BaseKVStore)：**必填**，键值存储实例，用于快速访问结构化数据（如 scope 配置、用户变量等）。若为 `None`，会抛出 `build_error`（`MEMORY_REGISTER_STORE_EXECUTION_ERROR`）。
 * **vector_store**(BaseVectorStore | None, 可选)：向量存储实例，用于语义相似度检索。若为 `None`，则语义检索功能不可用。默认值：`None`。
 * **db_store**(BaseDbStore | None, 可选)：关系型数据库存储实例，用于持久化消息、scope-user 映射等。若为 `None`，则消息持久化功能不可用。默认值：`None`。
 * **embedding_model**(Embedding | None, 可选)：全局嵌入模型实例，用于在注册时初始化 `semantic_store` 的嵌入能力。若为 `None`，后续可通过 `set_scope_config` 为不同 scope 配置独立的嵌入模型。默认值：`None`。
 
 **异常**：
 
-* **JiuWenBaseException**：当 `kv_store` 为 `None` 或存储类型不匹配时抛出。
+* **build_error**：当 `kv_store` 为 `None` 或存储类型不匹配时抛出。
 
 **样例**：
 
@@ -135,11 +135,11 @@ def set_config(self, config: MemoryEngineConfig) -> None
 
 **前置条件**：
 
-- 必须已调用 `register_store` 注册 `kv_store`、`semantic_store`、`db_store`，否则会抛出 `JiuWenBaseException`（`MEMORY_SET_CONFIG_EXECUTION_ERROR`）。
+- 必须已调用 `register_store` 注册 `kv_store`、`semantic_store`、`db_store`，否则会抛出 `build_error`（`MEMORY_SET_CONFIG_EXECUTION_ERROR`）。
 
 **异常**：
 
-* **JiuWenBaseException**：当未调用 `register_store` 或配置无效时抛出。
+* **build_error**：当未调用 `register_store` 或配置无效时抛出。
 
 **样例**：
 
@@ -342,6 +342,8 @@ async def add_messages(
 * **agent_config**(AgentMemoryConfig)：Agent 记忆策略配置，包含：
   * `mem_variables: list[Param]`：需要提取的变量记忆配置（变量名、描述、类型等）；
   * `enable_long_term_mem: bool`：是否开启长期记忆生成（默认 `True`）。
+*   * `enable_fragment_memory: bool`：是否开启记忆片段生成（默认 `True`）。  
+*   * `enable_summary_memory: bool`：是否开启用户摘要记忆生成（默认 `True`）。  
 * **user_id**(str, 可选)：用户标识符。默认值：`"__default__"`。
 * **scope_id**(str, 可选)：作用域标识符；格式无效时直接返回，不抛异常。默认值：`"__default__"`。
 * **session_id**(str, 可选)：会话标识符。默认值：`"__default__"`。
@@ -351,7 +353,7 @@ async def add_messages(
 
 **异常**：
 
-* **JiuWenBaseException**：当写入记忆失败时抛出（`MEMORY_ADD_MEMORY_EXECUTION_ERROR`）。
+* **build_error**：当写入记忆失败时抛出（`MEMORY_ADD_MEMORY_EXECUTION_ERROR`）。
 
 **样例**：
 
@@ -378,6 +380,8 @@ async def add_messages(
 >>>         ),
 >>>     ],
 >>>     enable_long_term_mem=True,
+>>>     enable_fragment_memory=True,
+>>>     enable_summary_memory=True,
 >>> )
 >>> 
 >>> # 准备消息
@@ -497,7 +501,7 @@ async def delete_mem_by_id(
 
 **异常**：
 
-* **JiuWenBaseException**：当 `write_manager` 未初始化时抛出（`MEMORY_DELETE_MEMORY_EXECUTION_ERROR`）。
+* **build_error**：当 `write_manager` 未初始化时抛出（`MEMORY_DELETE_MEMORY_EXECUTION_ERROR`）。
 
 **样例**：
 
@@ -533,7 +537,7 @@ async def delete_mem_by_user_id(
 
 **异常**：
 
-* **JiuWenBaseException**：当 `write_manager` 未初始化时抛出。
+* **build_error**：当 `write_manager` 未初始化时抛出。
 
 **样例**：
 
@@ -572,7 +576,7 @@ async def update_mem_by_id(
 
 **异常**：
 
-* **JiuWenBaseException**：当 `write_manager` 未初始化时抛出（`MEMORY_UPDATE_MEMORY_EXECUTION_ERROR`）。
+* **build_error**：当 `write_manager` 未初始化时抛出（`MEMORY_UPDATE_MEMORY_EXECUTION_ERROR`）。
 
 **样例**：
 
@@ -619,7 +623,7 @@ async def get_variables(
 
 **异常**：
 
-* **JiuWenBaseException**：当 `search_manager` 未初始化或 `names` 类型不符合预期时抛出（`MEMORY_GET_MEMORY_EXECUTION_ERROR`）。
+* **build_error**：当 `search_manager` 未初始化或 `names` 类型不符合预期时抛出（`MEMORY_GET_MEMORY_EXECUTION_ERROR`）。
 
 **样例**：
 
@@ -683,7 +687,7 @@ async def search_user_mem(
 
 **异常**：
 
-* **JiuWenBaseException**：当 `search_manager` 未初始化时抛出。
+* **build_error**：当 `search_manager` 未初始化时抛出。
 
 **样例**：
 
@@ -743,6 +747,61 @@ async def user_mem_total_num(
 ```
 
 
+### async search_user_history_summary
+
+```
+async def search_user_history_summary(
+    self,
+    query: str,
+    num: int,
+    user_id: str = "__default__",
+    scope_id: str = "__default__",
+    threshold: float = 0.3,
+) -> list[MemResult]
+```
+
+基于语义相似度搜索用户摘要记忆，返回与查询最相关的 N 条摘要记忆。
+
+**参数**：
+
+* **query**(str)：搜索查询字符串。
+* **num**(int)：要返回的结果数量（top-k）。
+* **user_id**(str, 可选)：用户标识符。默认值：`"__default__"`。
+* **scope_id**(str, 可选)：作用域标识符；格式无效时返回空列表。默认值：`"__default__"`。
+* **threshold**(float, 可选)：结果的最小相似度阈值；低于该阈值的记忆会被过滤。默认值：0.3。
+
+**返回**：
+
+* **list[MemResult]**：记忆结果列表，每个 `MemResult` 包含：
+  * `mem_info: MemInfo`（`mem_id / content / type`）；
+  * `score: float`（相似度分数）。
+
+**异常**：
+
+* **build_error**：当 `search_manager` 未初始化时抛出。
+
+**样例**：
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> 
+>>> # 搜索用户摘要记忆
+>>> memory = LongTermMemory()
+>>> results = await memory.search_user_history_summary(
+>>>     query="最近关于工作的对话",
+>>>     num=5,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>>     threshold=0.4
+>>> )
+>>> 
+>>> for result in results:
+>>>     print(f"内容: {result.mem_info.content}")
+>>>     print(f"相似度: {result.score}")
+>>>     print("---")
+```
+
+
 ### async get_user_mem_by_page
 
 ```
@@ -775,7 +834,7 @@ async def get_user_mem_by_page(
 
 **异常**：
 
-* **JiuWenBaseException**：当 `search_manager` 未初始化时抛出（`MEMORY_GET_MEMORY_EXECUTION_ERROR`）。
+* **build_error**：当 `search_manager` 未初始化时抛出（`MEMORY_GET_MEMORY_EXECUTION_ERROR`）。
 
 **样例**：
 

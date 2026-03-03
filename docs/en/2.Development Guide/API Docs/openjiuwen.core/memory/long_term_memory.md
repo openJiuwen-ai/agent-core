@@ -53,14 +53,14 @@ Register underlying storage instances, must be completed before calling `set_con
 
 **Parameters**:
 
-* **kv_store** (BaseKVStore): **Required**, key-value storage instance for fast access to structured data (such as scope configuration, user variables, etc.). If `None`, will raise `JiuWenBaseException` (`MEMORY_REGISTER_STORE_EXECUTION_ERROR`).
+* **kv_store** (BaseKVStore): **Required**, key-value storage instance for fast access to structured data (such as scope configuration, user variables, etc.). If `None`, will raise `build_error` (`MEMORY_REGISTER_STORE_EXECUTION_ERROR`).
 * **vector_store** (BaseVectorStore | None, optional): Vector storage instance for semantic similarity retrieval. If `None`, semantic retrieval functionality is unavailable. Default value: `None`.
 * **db_store** (BaseDbStore | None, optional): Relational database storage instance for persisting messages, scope-user mappings, etc. If `None`, message persistence functionality is unavailable. Default value: `None`.
 * **embedding_model** (Embedding | None, optional): Global embedding model instance for initializing `semantic_store` embedding capability during registration. If `None`, independent embedding models can be configured for different scopes later through `set_scope_config`. Default value: `None`.
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when `kv_store` is `None` or storage types do not match.
+* **build_error**: Raised when `kv_store` is `None` or storage types do not match.
 
 **Example**:
 
@@ -135,11 +135,11 @@ Set global memory engine configuration and initialize internal managers.
 
 **Prerequisites**:
 
-- Must have called `register_store` to register `kv_store`, `semantic_store`, `db_store`, otherwise will raise `JiuWenBaseException` (`MEMORY_SET_CONFIG_EXECUTION_ERROR`).
+- Must have called `register_store` to register `kv_store`, `semantic_store`, `db_store`, otherwise will raise `build_error` (`MEMORY_SET_CONFIG_EXECUTION_ERROR`).
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when `register_store` has not been called or configuration is invalid.
+* **build_error**: Raised when `register_store` has not been called or configuration is invalid.
 
 **Example**:
 
@@ -342,6 +342,8 @@ Add conversation messages to the memory engine and generate memories (user profi
 * **agent_config** (AgentMemoryConfig): Agent memory strategy configuration, containing:
   * `mem_variables: list[Param]`: Variable memory configurations to extract (variable name, description, type, etc.);
   * `enable_long_term_mem: bool`: Whether to enable long-term memory generation (default `True`).
+  * `enable_fragment_memory: bool`: Whether to enable memory fragment generation (default `True`).  
+  * `enable_summary_memory: bool`: Whether to enable user summary memory generation (default `True`).
 * **user_id** (str, optional): User identifier. Default value: `"__default__"`.
 * **scope_id** (str, optional): Scope identifier; returns directly without exception if format is invalid. Default value: `"__default__"`.
 * **session_id** (str, optional): Session identifier. Default value: `"__default__"`.
@@ -351,7 +353,7 @@ Add conversation messages to the memory engine and generate memories (user profi
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when writing memory fails (`MEMORY_ADD_MEMORY_EXECUTION_ERROR`).
+* **build_error**: Raised when writing memory fails (`MEMORY_ADD_MEMORY_EXECUTION_ERROR`).
 
 **Example**:
 
@@ -378,6 +380,8 @@ Add conversation messages to the memory engine and generate memories (user profi
 >>>         ),
 >>>     ],
 >>>     enable_long_term_mem=True,
+>>>     enable_fragment_memory=True,
+>>>     enable_summary_memory=True,
 >>> )
 >>> 
 >>> # Prepare messages
@@ -497,7 +501,7 @@ Delete a memory entry (user profile or variable) by specified id.
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when `write_manager` is not initialized (`MEMORY_DELETE_MEMORY_EXECUTION_ERROR`).
+* **build_error**: Raised when `write_manager` is not initialized (`MEMORY_DELETE_MEMORY_EXECUTION_ERROR`).
 
 **Example**:
 
@@ -533,7 +537,7 @@ Delete all types of memories (user profiles, variables, etc.) for the specified 
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when `write_manager` is not initialized.
+* **build_error**: Raised when `write_manager` is not initialized.
 
 **Example**:
 
@@ -572,7 +576,7 @@ Update memory content by specified id.
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when `write_manager` is not initialized (`MEMORY_UPDATE_MEMORY_EXECUTION_ERROR`).
+* **build_error**: Raised when `write_manager` is not initialized (`MEMORY_UPDATE_MEMORY_EXECUTION_ERROR`).
 
 **Example**:
 
@@ -619,7 +623,7 @@ Get user variables (one or more).
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when `search_manager` is not initialized or `names` type does not meet expectations (`MEMORY_GET_MEMORY_EXECUTION_ERROR`).
+* **build_error**: Raised when `search_manager` is not initialized or `names` type does not meet expectations (`MEMORY_GET_MEMORY_EXECUTION_ERROR`).
 
 **Example**:
 
@@ -683,7 +687,7 @@ Search user memories (user profiles, variables, etc.) based on semantic similari
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when `search_manager` is not initialized.
+* **build_error**: Raised when `search_manager` is not initialized.
 
 **Example**:
 
@@ -743,6 +747,61 @@ Return the total number of memories for the specified user under a scope.
 ```
 
 
+### async search_user_history_summary
+
+```
+async def search_user_history_summary(
+    self,
+    query: str,
+    num: int,
+    user_id: str = "__default__",
+    scope_id: str = "__default__",
+    threshold: float = 0.3,
+) -> list[MemResult]
+```
+
+Search user summary memories based on semantic similarity, returning the N most relevant summary memories to the query.
+
+**Parameters**:
+
+* **query** (str): Search query string.
+* **num** (int): Number of results to return (top-k).
+* **user_id** (str, optional): User identifier. Default value: `"__default__"`.
+* **scope_id** (str, optional): Scope identifier; returns empty list if format is invalid. Default value: `"__default__"`.
+* **threshold** (float, optional): Minimum similarity threshold for results; memories below this threshold will be filtered. Default value: 0.3.
+
+**Returns**:
+
+* **list[MemResult]**: List of memory results, each `MemResult` contains:
+  * `mem_info: MemInfo` (`mem_id / content / type`);
+  * `score: float` (similarity score).
+
+**Exceptions**:
+
+* **build_error**: Raised when `search_manager` is not initialized.
+
+**Example**:
+
+```python
+>>> from openjiuwen.core.memory.long_term_memory import LongTermMemory
+>>> 
+>>> # Search user summary memories
+>>> memory = LongTermMemory()
+>>> results = await memory.search_user_history_summary(
+>>>     query="Recent conversations about work",
+>>>     num=5,
+>>>     user_id="user123",
+>>>     scope_id="my_scope",
+>>>     threshold=0.4
+>>> )
+>>> 
+>>> for result in results:
+>>>     print(f"Content: {result.mem_info.content}")
+>>>     print(f"Similarity: {result.score}")
+>>>     print("---")
+```
+
+
 ### async get_user_mem_by_page
 
 ```
@@ -775,7 +834,7 @@ Get memories for the specified user under a scope in pages.
 
 **Exceptions**:
 
-* **JiuWenBaseException**: Raised when `search_manager` is not initialized (`MEMORY_GET_MEMORY_EXECUTION_ERROR`).
+* **build_error**: Raised when `search_manager` is not initialized (`MEMORY_GET_MEMORY_EXECUTION_ERROR`).
 
 **Example**:
 

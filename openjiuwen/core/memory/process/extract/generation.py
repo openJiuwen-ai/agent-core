@@ -72,18 +72,19 @@ class Generator:
             )
             return all_memory_results
 
-        summary_unit = await self._process_summary_data(
-            user_id=user_id,
-            message_mem_id=message_mem_id,
-            summary=memory_analyze_res.summary,
-            timestamp=timestamp
-        )
-        summary_type = summary_unit.mem_type.value
-        if summary_type not in all_memory_results:
-            all_memory_results[summary_type] = []
-        all_memory_results[summary_type].append(summary_unit)
+        if config.enable_summary_memory:
+            summary_unit = await self._process_summary_data(
+                user_id=user_id,
+                message_mem_id=message_mem_id,
+                summary=memory_analyze_res.summary,
+                timestamp=timestamp
+            )
+            summary_type = summary_unit.mem_type.value
+            if summary_type not in all_memory_results:
+                all_memory_results[summary_type] = []
+            all_memory_results[summary_type].append(summary_unit)
 
-        if not memory_analyze_res.has_key_information:
+        if not memory_analyze_res.has_key_information or not config.enable_fragment_memory:
             return all_memory_results
 
         try:
