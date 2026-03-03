@@ -163,11 +163,12 @@ class SQLMigrator:
                 type_=new_column_type
             )
     
-    async def try_migrate(self, operations: List[BaseOperation]) -> bool:
+    async def try_migrate(self, entity_key: str, operations: List[BaseOperation]) -> bool:
         """
         Migrate table schema to target version
 
         Args:
+            entity_key: Table name to migrate
             operations: List containing migration operations
 
         Returns:
@@ -177,7 +178,7 @@ class SQLMigrator:
         if not operations:
             return True
 
-        table_name = operations[0].table
+        table_name = entity_key
         current_version = None
 
         try:
@@ -330,7 +331,7 @@ class SQLMigrator:
             table_name = migration.get('table_name')
             operations = migration.get('operations', [])
 
-            success = await self.try_migrate(operations=operations)
+            success = await self.try_migrate(entity_key=table_name, operations=operations)
 
             results[table_name] = success
         

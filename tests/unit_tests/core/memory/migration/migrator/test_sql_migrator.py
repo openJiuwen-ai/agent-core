@@ -72,7 +72,7 @@ class TestSQLMigrator:
     async def test_try_migrate_empty_operations(self, test_store):
         """Test migration with empty operations list"""
         migrator = SQLMigrator(test_store)
-        result = await migrator.try_migrate([])
+        result = await migrator.try_migrate("test_table", [])
         assert result is True
 
     @pytest.mark.asyncio
@@ -91,7 +91,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -120,7 +120,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("scope_user_mapping", operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -147,7 +147,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("unsupported_table", operations)
         assert result is False
 
     @pytest.mark.asyncio
@@ -170,7 +170,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -197,7 +197,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("unsupported_table", operations)
         assert result is False
 
     @pytest.mark.asyncio
@@ -220,7 +220,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -249,7 +249,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("unsupported_table", operations)
         assert result is False
 
     @pytest.mark.asyncio
@@ -278,7 +278,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -302,7 +302,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations_v4)
+        result = await migrator.try_migrate("user_message", operations_v4)
         assert result is True
 
     @pytest.mark.asyncio
@@ -331,7 +331,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -514,7 +514,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is False
 
     @pytest.mark.asyncio
@@ -533,7 +533,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
 
     @pytest.mark.asyncio
@@ -550,10 +550,10 @@ class TestSQLMigrator:
             )
         ]
         
-        result1 = await migrator.try_migrate(operations)
+        result1 = await migrator.try_migrate("user_message", operations)
         assert result1 is True
         
-        result2 = await migrator.try_migrate(operations)
+        result2 = await migrator.try_migrate("user_message", operations)
         assert result2 is True
 
     @pytest.mark.asyncio
@@ -583,7 +583,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         row = await test_store.condition_get("user_message", {"message_id": ["test_msg_1"]})
@@ -596,7 +596,7 @@ class TestSQLMigrator:
     async def test_empty_operations_list(self, test_store):
         """Test migration with completely empty operations list"""
         migrator = SQLMigrator(test_store)
-        result = await migrator.try_migrate([])
+        result = await migrator.try_migrate("test_table", [])
         assert result is True
 
     @pytest.mark.asyncio
@@ -629,7 +629,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -658,7 +658,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -682,7 +682,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(update_operations)
+        result = await migrator.try_migrate("user_message", update_operations)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -705,7 +705,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations_v1)
+        result = await migrator.try_migrate("user_message", operations_v1)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -727,7 +727,7 @@ class TestSQLMigrator:
             )
         ]
         
-        result = await migrator.try_migrate(operations_v2)
+        result = await migrator.try_migrate("user_message", operations_v2)
         assert result is True
         
         async with test_store.db_store.get_async_engine().begin() as conn:
@@ -740,7 +740,7 @@ class TestSQLMigrator:
             column_names = await conn.run_sync(check_columns)
             assert "column_v2" in column_names
         
-        result = await migrator.try_migrate(operations_v1)
+        result = await migrator.try_migrate("user_message", operations_v1)
         assert result is True
 
 
@@ -752,7 +752,7 @@ class TestSQLMigratorMySQL:
     async def test_try_migrate_empty_operations(self, mysql_store):
         """Test migration with empty operations list"""
         migrator = SQLMigrator(mysql_store)
-        result = await migrator.try_migrate([])
+        result = await migrator.try_migrate("test_table", [])
         assert result is True
 
     @pytest.mark.asyncio
@@ -771,7 +771,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -800,7 +800,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("scope_user_mapping", operations)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -833,7 +833,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -866,7 +866,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -907,7 +907,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -931,7 +931,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations_v4)
+        result = await migrator.try_migrate("user_message", operations_v4)
         assert result is True
 
     @pytest.mark.asyncio
@@ -960,7 +960,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -1028,7 +1028,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
 
     @pytest.mark.asyncio
@@ -1045,10 +1045,10 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
 
     @pytest.mark.asyncio
@@ -1065,7 +1065,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate("user_message", operations)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -1089,7 +1089,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(update_operations)
+        result = await migrator.try_migrate("user_message", update_operations)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -1114,7 +1114,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations_v1)
+        result = await migrator.try_migrate("user_message", operations_v1)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -1136,7 +1136,7 @@ class TestSQLMigratorMySQL:
             )
         ]
         
-        result = await migrator.try_migrate(operations_v2)
+        result = await migrator.try_migrate("user_message", operations_v2)
         assert result is True
         
         async with mysql_store.db_store.get_async_engine().begin() as conn:
@@ -1149,5 +1149,5 @@ class TestSQLMigratorMySQL:
             column_names = await conn.run_sync(check_columns)
             assert "mysql_column_v2" in column_names
         
-        result = await migrator.try_migrate(operations_v1)
+        result = await migrator.try_migrate("user_message", operations_v1)
         assert result is True

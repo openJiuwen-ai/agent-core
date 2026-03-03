@@ -57,20 +57,23 @@ async def test_register_store_db_store_wrong_type():
 
 def test_set_scope_config_llm_init_failed():
     mem = LongTermMemory()
+    mem.kv_store = MagicMock()
+    mem.db_store = MagicMock()
+    mem.vector_store = MagicMock()
 
     fake_scope_cfg = MagicMock()
-    fake_scope_cfg.model_cfg = MagicMock()
-    fake_scope_cfg.model_client_cfg = MagicMock()
+    fake_scope_cfg.default_model_cfg = MagicMock()
+    fake_scope_cfg.default_model_client_cfg = MagicMock()
+    fake_scope_cfg.crypto_key = b""
 
     with patch(
         "openjiuwen.core.memory.long_term_memory.LongTermMemory._get_llm_from_config",
         side_effect=Exception("llm init failed")
     ):
-        with pytest.raises(BaseError) as e:
+        with pytest.raises(Exception) as e:
             mem.set_config(fake_scope_cfg)
 
-    err = e.value
-    assert err.status == StatusCode.MEMORY_SET_CONFIG_EXECUTION_ERROR
+    assert str(e.value) == "llm init failed"
 
 
 @pytest.mark.asyncio

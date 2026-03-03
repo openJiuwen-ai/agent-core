@@ -34,6 +34,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
+from openjiuwen.core.memory.migration.run_migrations import run_kv_migrations, run_vector_migrations, run_sql_migrations
 
 
 class MemInfo(BaseModel):
@@ -131,6 +132,27 @@ class LongTermMemory(metaclass=Singleton):
             await create_tables(self.db_store)
 
         self.set_config(MemoryEngineConfig())
+
+        await self._run_migration(
+            migrate_func=run_kv_migrations,
+            store=self.kv_store,
+            store_type="kv store"
+        )
+
+        if self.vector_store:
+            await self._run_migration(
+                migrate_func=run_vector_migrations,
+                store=self.vector_store,
+                store_type="vector store"
+            )
+
+        if self.db_store:
+            sql_db_store = SqlDbStore(self.db_store)
+            await self._run_migration(
+                migrate_func=run_sql_migrations,
+                store=sql_db_store,
+                store_type="db store"
+            )
 
     def set_config(self, config: MemoryEngineConfig):
         """
@@ -1254,3 +1276,25 @@ class LongTermMemory(metaclass=Singleton):
             )
             return False
         return True
+
+    async def _run_migration(self, migrate_func, store, store_type: str):
+        """
+        Execute a migration with unified logging and error handling.
+
+        Args:
+            migrate_func: The migration function to execute
+            store: The store instance to pass to the migration function
+            store_type: Type of store for error messages and logging (e.g., "kv store")
+        """
+        try:
+            memory_logger.info(f"Starting {store_type} migration", event_type=LogEventType.MEMORY_INIT)
+            await migrate_func(store)
+            memory_logger.info(f"{store_type} migration completed successfully", event_type=LogEventType.MEMORY_INIT)
+        except Exception as e:
+            memory_logger.error(f"{store_type} migration failed", event_type=LogEventType.MEMORY_INIT, exception=str(e))
+            raise build_error(
+                StatusCode.MEMORY_REGISTER_STORE_EXECUTION_ERROR,
+                store_type=store_type,
+                error_msg=f"{store_type} migration failed: {str(e)}",
+                cause=e
+            ) from e

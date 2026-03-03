@@ -9,7 +9,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
 from openjiuwen.core.memory.migration.operation.base_operation import OperationMetadata
 from openjiuwen.core.memory.migration.operation.operations import UpdateKVOperation
-from openjiuwen.core.memory.migration.migrator.kv_migrator import KVMigrator, KV_SCHEMA_VERSION
+from openjiuwen.core.memory.migration.migrator.kv_migrator import KVMigrator, KV_SCHEMA_VERSION, KV_ENTITY_KEY
 
 
 class TestKVMigrator:
@@ -66,7 +66,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify migration results - old keys should be removed, new keys should exist
@@ -77,7 +77,7 @@ class TestKVMigrator:
         assert await kv_store.get(KV_SCHEMA_VERSION) == "2"
 
         # Test idempotency - running again should not change anything
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
     @pytest.mark.asyncio
@@ -153,7 +153,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify rename results
@@ -285,7 +285,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify merge results
@@ -402,7 +402,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify only v2 and v3 were executed
@@ -450,7 +450,7 @@ class TestKVMigrator:
 
         # Execute migration - should raise exception
         with pytest.raises(ValueError) as exc_info:
-            await migrator.try_migrate(operations)
+            await migrator.try_migrate(KV_ENTITY_KEY, operations)
 
         assert "Invalid SCHEMA_VERSION format" in str(exc_info.value)
         assert "invalid_version" in str(exc_info.value)
@@ -483,7 +483,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration - should succeed
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify migration executed
@@ -519,7 +519,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration - should succeed
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify migration executed
@@ -550,7 +550,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration - should succeed
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify operation executed
@@ -581,7 +581,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration - should succeed
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify migration executed
@@ -614,7 +614,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration - should succeed
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify migration executed
@@ -645,7 +645,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration - should succeed (negative numbers are allowed)
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify migration executed
@@ -677,7 +677,7 @@ class TestKVMigrator:
 
         # Execute migration - should raise exception
         with pytest.raises(ValueError) as exc_info:
-            await migrator.try_migrate(operations)
+            await migrator.try_migrate(KV_ENTITY_KEY, operations)
 
         assert "Invalid SCHEMA_VERSION type" in str(exc_info.value)
 
@@ -724,7 +724,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify rename results
@@ -769,7 +769,7 @@ class TestKVMigrator:
         ]
 
         # Execute migration (simulating resume from version 1)
-        result = await migrator.try_migrate(operations)
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify v2 and v3 executed
@@ -816,8 +816,8 @@ class TestKVMigrator:
             ),
         ]
 
-        # Execute migration (only v3 should execute)
-        result = await migrator.try_migrate(operations)
+        # Execute migration
+        result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
         assert result
 
         # Verify only v3 executed
@@ -825,6 +825,32 @@ class TestKVMigrator:
         assert await kv_store.get("key2") == "value2"
         assert await kv_store.get("key3") == "value3"
         assert await kv_store.get(KV_SCHEMA_VERSION) == "3"
+
+   
+
+    @pytest.mark.asyncio
+    async def test_migration_invalid_entity_key(self):
+        """
+        Test that invalid entity_key returns False
+        This test verifies that when entity_key is not KV_ENTITY_KEY,
+        the method returns False instead of raising exception.
+        """
+        kv_store = InMemoryKVStore()
+        migrator = KVMigrator(kv_store)
+
+        async def update_func(store):
+            await store.set("migrated", "true")
+
+        operations = [
+            UpdateKVOperation(
+                metadata=OperationMetadata(schema_version=1, description="Migrate"),
+                update_func=update_func
+            ),
+        ]
+
+        # Execute migration with invalid entity_key - should return False
+        result = await migrator.try_migrate("invalid_entity_key", operations)
+        assert result is False
 
     @pytest.mark.asyncio
     async def test_migration_failure_rolls_back_to_initial(self):
@@ -875,7 +901,7 @@ class TestKVMigrator:
             ]
 
             # Execute migration - should fail and rollback
-            result = await migrator.try_migrate(operations)
+            result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
             assert result is False
 
             # Verify rollback to initial state
@@ -931,7 +957,7 @@ class TestKVMigrator:
             ]
 
             # Execute migration - should fail and rollback
-            result = await migrator.try_migrate(operations)
+            result = await migrator.try_migrate(KV_ENTITY_KEY, operations)
             assert result is False
 
             # Verify rollback to initial state

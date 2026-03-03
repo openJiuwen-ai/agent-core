@@ -22,22 +22,30 @@ class KVMigrator:
     def __init__(self, kv_store: BaseKVStore):
         self.kv_store = kv_store
 
-    async def try_migrate(self, operations: List[BaseOperation]) -> bool:
+    async def try_migrate(self, entity_key: str, operations: List[BaseOperation]) -> bool:
         """
         Try to migrate KV data to target version by applying operations.
 
         This method:
-        1. Validates that all operations have schema_version in ascending order
-        2. Compares the last operation's schema_version with current store version
-        3. Only executes migration if needed
-        4. Creates backup before migration and rolls back on failure
+        1. Validates that entity_key matches KV_ENTITY_KEY
+        2. Validates that all operations have schema_version in ascending order
+        3. Compares the last operation's schema_version with current store version
+        4. Only executes migration if needed
+        5. Creates backup before migration and rolls back on failure
 
         Args:
+            entity_key: Entity key to validate (must be KV_ENTITY_KEY)
             operations: List of migration operations to execute
 
         Returns:
             bool: True if migration succeeded or not needed, yet False otherwise
         """
+        if entity_key != KV_ENTITY_KEY:
+            memory_logger.error(
+                f"Unsupported entity_key: '{entity_key}'. Expected: '{KV_ENTITY_KEY}'",
+                event_type=LogEventType.MEMORY_INIT
+            )
+            return False
         if not operations:
             return True
 

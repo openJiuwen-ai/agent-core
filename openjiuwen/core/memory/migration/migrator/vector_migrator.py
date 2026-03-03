@@ -14,7 +14,7 @@ class VectorMigrator:
     def __init__(self, vector_store: BaseVectorStore):
         self.vector_store = vector_store
 
-    async def try_migrate(self, entity_key: str, operations: List[BaseOperation]) -> None:
+    async def try_migrate(self, entity_key: str, operations: List[BaseOperation]) -> bool:
         """
         Apply the given list of schema operations to every collection
         whose name ends with the specified memory type.
@@ -29,6 +29,7 @@ class VectorMigrator:
         collection_names = await self._find_collections(entity_key)
         await self._migrate_collections(collection_names=collection_names,
                                         operations=operations)
+        return True
 
     async def _migrate_collections(self, collection_names: List[str], operations: List[BaseOperation]):
         """
