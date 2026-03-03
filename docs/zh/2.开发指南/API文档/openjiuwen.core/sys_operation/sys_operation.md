@@ -18,44 +18,6 @@
 * **shell_allowlist**(List[str], 可选)：允许执行的Shell命令前缀白名单。默认值：`["echo", "ls", "dir", "cd", "pwd", "python", "python3", "pip", "pip3", "npm", "node", "git", "cat", "type", "mkdir", "md", "rm", "rd", "cp", "copy", "mv", "move", "grep", "find", "curl", "wget", "ps", "df", "ping"]`。如果值为`None`，表示允许执行所有Shell命令，需要注意，这是不满足安全要求的，所以不建议设置为`None`。
 * **work_dir**(str, 可选)：本地工作目录路径。默认值：`None`。
 
-## class ToolIdProxy
-
-```python
-class ToolIdProxy(card_id: str, op_type: str)
-```
-
-工具ID代理类，通过属性访问方式动态生成工具ID的辅助类。
-
-**参数**：
-
-* **card_id**(str)：操作卡片的ID。
-* **op_type**(str)：操作类型，如 `"fs"`、`"shell"`、`"code"` 等。
-
-### \_\_getattr\_\_
-
-```python
-__getattr__(name: str) -> str
-```
-
-通过属性访问动态生成工具ID。
-
-**参数**：
-
-* **name**(str)：方法名称。
-
-**返回**：
-
-**str**，格式为 `"{card_id}.{op_type}.{name}"` 的工具ID字符串。
-
-**样例**：
-
-```python
->>> proxy = ToolIdProxy("sys_op", "shell")
->>> tool_id = proxy.execute_cmd  # 等价于 proxy.__getattr__("execute_cmd")
->>> print(tool_id)
-'sys_op.shell.execute_cmd'
-```
-
 ## class SysOperationCard
 
 ```python
@@ -70,92 +32,6 @@ class SysOperationCard(BaseCard)
 * **work_config**([LocalWorkConfig](#class-localworkconfig), 可选)：本地工作配置。默认值：`None`。
 * **gateway_config**(SandboxGatewayConfig, 可选)：沙箱网关配置。默认值：`None`。
 
-### **\_\_getattr\_\_**
-
-```python
-__getattr__(name: str) -> ToolIdProxy
-```
-
-动态获取对应操作类型工具的唯一ID。
-
-**参数**：
-
-* **name**(str)：动态属性名称，例如`"browser"`。
-
-**返回**：
-
-**[ToolIdProxy](#class-toolidproxy)**，通过属性访问方式动态生成工具ID的辅助实例。
-
-**样例**：
-
-```python
->>> card = SysOperationCard(id="sys_op")
->>> proxy = card.browser   # 等价于 card.__getattr__("browser")
->>> print(proxy.navigate)  # 快速获取工具 ID
-'sys_op.browser.navigate'
-```
-
-### property fs
-
-```python
-property fs() -> ToolIdProxy
-```
-
-快速获取文件系统工具的唯一ID。
-
-**返回**：
-
-**[ToolIdProxy](#class-toolidproxy)**，通过属性访问方式动态生成工具ID的辅助实例。
-
-**样例**：
-
-```python
->>> card = SysOperationCard(id="sys_op")
->>> proxy = card.fs         # 等价于 card.__getattr__("fs")
->>> print(proxy.read_file)  # 快速获取工具 ID
-'sys_op.fs.read_file'
-```
-### property shell
-
-```python
-property shell() -> ToolIdProxy
-```
-
-快速获取命令行执行工具的唯一ID。
-
-**返回**：
-
-**[ToolIdProxy](#class-toolidproxy)**，通过属性访问方式动态生成工具ID的辅助实例。
-
-**样例**：
-
-```python
->>> card = SysOperationCard(id="sys_op")
->>> proxy = card.shell             # 等价于 card.__getattr__("shell")
->>> print(card.shell.execute_cmd)  # 快速获取工具 ID
-'sys_op.shell.execute_cmd'
-```
-
-### property code
-
-```python
-property code() -> ToolIdProxy
-```
-
-快速获取代码执行工具的唯一ID。
-
-**返回**：
-
-**[ToolIdProxy](#class-toolidproxy)**，通过属性访问方式动态生成工具ID的辅助实例。
-
-**样例**：
-
-```python
->>> card = SysOperationCard(id="sys_op")
->>> proxy = card.code          # 等价于 card.__getattr__("code")
->>> print(proxy.execute_code)  # 快速获取工具 ID
-'sys_op.code.execute_code'
-```
 ### staticmethod generate_tool_id
 
 ```python

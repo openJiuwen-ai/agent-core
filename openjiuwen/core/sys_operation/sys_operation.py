@@ -54,7 +54,8 @@ class SysOperationCard(BaseCard):
         await op.fs().write_file("test.txt", "content")
 
         # 4. Call as LocalFunction Tool (Recommended for Agents)
-        tool = Runner.resource_mgr.get_tool(card.fs.read_file)
+        tool_id = SysOperationCard.generate_tool_id("sys_op", "fs", "read_file")
+        tool = Runner.resource_mgr.get_tool(tool_id)
         await tool.invoke({"path": "test.txt"})
     """
     mode: OperationMode = Field(

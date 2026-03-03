@@ -96,7 +96,8 @@ async def test_fs_resource_mgr_read_write_text(card, sys_op, work_dir):
     await sys_op.fs().write_file(test_file, content, prepend_newline=False)
 
     # Test read_file with different parameter counts
-    read_file_tool = rm.get_tool(card.fs.read_file)
+    read_file_tool_id = SysOperationCard.generate_tool_id(card.id, "fs", "read_file")
+    read_file_tool = rm.get_tool(read_file_tool_id)
     assert read_file_tool is not None
     assert read_file_tool.card.name == f"read_file"
 
@@ -117,7 +118,8 @@ async def test_fs_resource_mgr_read_write_text(card, sys_op, work_dir):
     assert "line 3" not in res.data.content  # Should not include line 3
 
     # Test write_file with different parameter counts
-    write_file_tool = rm.get_tool(card.fs.write_file)
+    write_file_tool_id = SysOperationCard.generate_tool_id(card.id, "fs", "write_file")
+    write_file_tool = rm.get_tool(write_file_tool_id)
     assert write_file_tool is not None
     assert write_file_tool.card.name == f"write_file"
 
@@ -139,7 +141,8 @@ async def test_fs_resource_mgr_read_write_binary(card, sys_op, work_dir):
     rm = Runner.resource_mgr
 
     # Test write_file with binary mode
-    write_file_tool = rm.get_tool(card.fs.write_file)
+    write_file_tool_id = SysOperationCard.generate_tool_id(card.id, "fs", "write_file")
+    write_file_tool = rm.get_tool(write_file_tool_id)
     assert write_file_tool is not None
 
     binary_test_file = "binary_test.bin"
@@ -148,7 +151,8 @@ async def test_fs_resource_mgr_read_write_binary(card, sys_op, work_dir):
     assert res.code == StatusCode.SUCCESS.code
 
     # Test read_file with binary mode
-    read_file_tool = rm.get_tool(card.fs.read_file)
+    read_file_tool_id = SysOperationCard.generate_tool_id(card.id, "fs", "read_file")
+    read_file_tool = rm.get_tool(read_file_tool_id)
     assert read_file_tool is not None
 
     res = await read_file_tool.invoke({"path": binary_test_file, "mode": "bytes"})
@@ -157,7 +161,8 @@ async def test_fs_resource_mgr_read_write_binary(card, sys_op, work_dir):
     assert res.data.mode == "bytes"
 
     # Test read_file_stream with binary mode
-    read_file_stream_tool = rm.get_tool(card.fs.read_file_stream)
+    read_file_stream_tool_id = SysOperationCard.generate_tool_id(card.id, "fs", "read_file_stream")
+    read_file_stream_tool = rm.get_tool(read_file_stream_tool_id)
     assert read_file_stream_tool is not None
 
     chunks = []
@@ -182,7 +187,8 @@ async def test_fs_resource_mgr_other_methods(card, sys_op, work_dir):
     await sys_op.fs().write_file(test_file2, "test content 2", prepend_newline=False)
 
     # Test list_files with different parameter counts
-    list_files_tool = rm.get_tool(card.fs.list_files)
+    list_files_tool_id = SysOperationCard.generate_tool_id(card.id, "fs", "list_files")
+    list_files_tool = rm.get_tool(list_files_tool_id)
     assert list_files_tool is not None
     assert list_files_tool.card.name == f"list_files"
 
@@ -200,7 +206,8 @@ async def test_fs_resource_mgr_other_methods(card, sys_op, work_dir):
     assert res.code == StatusCode.SUCCESS.code
 
     # Test search_files with different parameter counts
-    search_files_tool = rm.get_tool(card.fs.search_files)
+    search_files_tool_id = SysOperationCard.generate_tool_id(card.id, "fs", "search_files")
+    search_files_tool = rm.get_tool(search_files_tool_id)
     assert search_files_tool is not None
     assert search_files_tool.card.name == f"search_files"
 
@@ -214,7 +221,8 @@ async def test_shell_resource_mgr_integration(card, sys_op):
     """Test that Shell tools are automatically registered in ResourceMgr."""
     rm = Runner.resource_mgr
 
-    tool = rm.get_tool(card.shell.execute_cmd)
+    tool_id = SysOperationCard.generate_tool_id(card.id, "shell", "execute_cmd")
+    tool = rm.get_tool(tool_id)
     assert tool is not None
     assert tool.card.name == f"execute_cmd"
 
@@ -229,7 +237,8 @@ async def test_code_resource_mgr_integration(card, sys_op):
     """Test that Code tools are automatically registered in ResourceMgr."""
     rm = Runner.resource_mgr
 
-    tool = rm.get_tool(card.code.execute_code)
+    tool_id = SysOperationCard.generate_tool_id(card.id, "code", "execute_code")
+    tool = rm.get_tool(tool_id)
     assert tool is not None
     assert tool.card.name == f"execute_code"
 
@@ -270,9 +279,9 @@ async def test_batch_sys_operation_lifecycle(work_dir):
         assert all(op is not None for op in ops)
 
         # Verify tools are registered for all
-        assert rm.get_tool(card1.fs.read_file) is not None
-        assert rm.get_tool(card2.shell.execute_cmd) is not None
-        assert rm.get_tool(card3.code.execute_code) is not None
+        assert rm.get_tool(SysOperationCard.generate_tool_id(card1.id, "fs", "read_file")) is not None
+        assert rm.get_tool(SysOperationCard.generate_tool_id(card2.id, "shell", "execute_cmd")) is not None
+        assert rm.get_tool(SysOperationCard.generate_tool_id(card3.id, "code", "execute_code")) is not None
 
         # 4. Remove multiple sys operations in ONE call
         # Should return a list of Results
@@ -286,17 +295,17 @@ async def test_batch_sys_operation_lifecycle(work_dir):
         assert rm.get_sys_operation("batch_op_1") is None
         assert rm.get_sys_operation("batch_op_2") is None
         # Tools associated with removed operations should be gone
-        assert rm.get_tool(card1.fs.read_file) is None
-        assert rm.get_tool(card2.shell.execute_cmd) is None
+        assert rm.get_tool(SysOperationCard.generate_tool_id(card1.id, "fs", "read_file")) is None
+        assert rm.get_tool(SysOperationCard.generate_tool_id(card2.id, "shell", "execute_cmd")) is None
 
         # Operation 3 and its tools should still be there
         assert rm.get_sys_operation("batch_op_3") is not None
-        assert rm.get_tool(card3.code.execute_code) is not None
+        assert rm.get_tool(SysOperationCard.generate_tool_id(card3.id, "code", "execute_code")) is not None
 
         # Cleanup remaining via single ID call (works as before)
         rm.remove_sys_operation(sys_operation_id="batch_op_3")
         assert rm.get_sys_operation("batch_op_3") is None
-        assert rm.get_tool(card3.code.execute_code) is None
+        assert rm.get_tool(SysOperationCard.generate_tool_id(card3.id, "code", "execute_code")) is None
 
     finally:
         await Runner.stop()

@@ -162,24 +162,22 @@ This is the **standard usage in Agent mode**: registered SysOperation tools auto
 
 ### 3.1 Retrieve Tool ID
 
-There are two ways to retrieve a Tool ID:
+Generate Tool ID via static method:
 
 ```python
 card = SysOperationCard(id="my_sys_op")
 
-# Method 1: Via card shortcut properties (Recommended)
-tool_id = card.fs.read_file          # -> "my_sys_op.fs.read_file"
-tool_id = card.shell.execute_cmd     # -> "my_sys_op.shell.execute_cmd"
-tool_id = card.code.execute_code     # -> "my_sys_op.code.execute_code"
-
-# Method 2: Via static method generation
+# Via static method generation
 tool_id = SysOperationCard.generate_tool_id("my_sys_op", "fs", "read_file")
+tool_id = SysOperationCard.generate_tool_id("my_sys_op", "shell", "execute_cmd")
+tool_id = SysOperationCard.generate_tool_id("my_sys_op", "code", "execute_code")
 ```
 
 Retrieve the tool instance via `Runner.resource_mgr.get_tool()`:
 
 ```python
-read_file_tool = Runner.resource_mgr.get_tool(card.fs.read_file)
+tool_id = SysOperationCard.generate_tool_id("my_sys_op", "fs", "read_file")
+read_file_tool = Runner.resource_mgr.get_tool(tool_id)
 ```
 
 ### 3.2 Invoking Tool
@@ -267,12 +265,14 @@ async def main():
 
         # ---- 3. Call via Tool ID (Tool Mode) ----
         # Treats the operation as an atomic tool supporting invoke/stream calls
-        read_tool = Runner.resource_mgr.get_tool(card.fs.read_file)
+        read_tool_id = SysOperationCard.generate_tool_id("demo_op", "fs", "read_file")
+        read_tool = Runner.resource_mgr.get_tool(read_tool_id)
         tool_res = await read_tool.invoke({"path": "test.txt"})
         print(f"Tool call read result: {tool_res.data.content}")
 
         # Shell tool example
-        shell_tool = Runner.resource_mgr.get_tool(card.shell.execute_cmd)
+        shell_tool_id = SysOperationCard.generate_tool_id("demo_op", "shell", "execute_cmd")
+        shell_tool = Runner.resource_mgr.get_tool(shell_tool_id)
         shell_res = await shell_tool.invoke({"command": "echo Done"})
         print(f"Shell tool output: {shell_res.data.stdout.strip()}")
 
@@ -338,15 +338,18 @@ async def main():
         rm = Runner.resource_mgr
 
         # Add ToolCard objects
-        read_tool = rm.get_tool(sysop_card.fs.read_file)
+        read_tool_id = SysOperationCard.generate_tool_id("my_local_sys", "fs", "read_file")
+        read_tool = rm.get_tool(read_tool_id)
         if read_tool:
             agent.ability_manager.add(read_tool.card)
 
-        write_tool = rm.get_tool(sysop_card.fs.write_file)
+        write_tool_id = SysOperationCard.generate_tool_id("my_local_sys", "fs", "write_file")
+        write_tool = rm.get_tool(write_tool_id)
         if write_tool:
             agent.ability_manager.add(write_tool.card)
 
-        code_tool = rm.get_tool(sysop_card.code.execute_code)
+        code_tool_id = SysOperationCard.generate_tool_id("my_local_sys", "code", "execute_code")
+        code_tool = rm.get_tool(code_tool_id)
         if code_tool:
             agent.ability_manager.add(code_tool.card)
 

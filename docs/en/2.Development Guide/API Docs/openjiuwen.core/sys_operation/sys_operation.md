@@ -18,43 +18,7 @@ Represents the local work environment configuration used when system operations 
 * **shell_allowlist** (List[str], optional): Whitelist of allowed Shell command prefixes. Default value: `["echo", "ls", "dir", "cd", "pwd", "python", "python3", "pip", "pip3", "npm", "node", "git", "cat", "type", "mkdir", "md", "rm", "rd", "cp", "copy", "mv", "move", "grep", "find", "curl", "wget", "ps", "df", "ping"]`. If value is `None`, it means all Shell commands are allowed. Note that this does not meet security requirements, so it is not recommended to set it to `None`.
 * **work_dir** (str, optional): Local working directory path. Default value: `None`.
 
-## class ToolIdProxy
 
-```python
-class ToolIdProxy(card_id: str, op_type: str)
-```
-
-Tool ID proxy class, an auxiliary class for dynamically generating tool IDs through attribute access.
-
-**Parameters**:
-
-* **card_id** (str): The ID of the operation card.
-* **op_type** (str): Operation type, such as `"fs"`, `"shell"`, `"code"`, etc.
-
-### __getattr__
-
-```python
-__getattr__(name: str) -> str
-```
-
-Dynamically generate tool IDs through attribute access.
-
-**Parameters**:
-
-* **name** (str): Method name.
-
-**Returns**:
-
-**str**, the tool ID string in the format `"{card_id}.{op_type}.{name}"`.
-
-**Example**:
-
-```python
->>> proxy = ToolIdProxy("sys_op", "shell")
->>> tool_id = proxy.execute_cmd  # equivalent to proxy.__getattr__("execute_cmd")
->>> print(tool_id)
-'sys_op.shell.execute_cmd'
-```
 
 ## class SysOperationCard
 
@@ -70,93 +34,7 @@ class SysOperationCard(BaseCard)
 * **work_config** ([LocalWorkConfig](#class-localworkconfig), optional): Local work configuration. Default value: `None`.
 * **gateway_config** (SandboxGatewayConfig, optional): Sandbox gateway configuration. Default value: `None`.
 
-### __getattr__
 
-```python
-__getattr__(name: str) -> ToolIdProxy
-```
-
-Dynamically get the unique ID of the corresponding operation type tool.
-
-**Parameters**:
-
-* **name** (str): Dynamic attribute name, for example `"browser"`.
-
-**Returns**:
-
-**[ToolIdProxy](#class-toolidproxy)**, an auxiliary instance that dynamically generates tool IDs through attribute access.
-
-**Example**:
-
-```python
->>> card = SysOperationCard(id="sys_op")
->>> proxy = card.browser   # equivalent to card.__getattr__("browser")
->>> print(proxy.navigate)  # quickly get tool ID
-'sys_op.browser.navigate'
-```
-
-### property fs
-
-```python
-property fs() -> ToolIdProxy
-```
-
-Quickly get the unique ID of the file system tool.
-
-**Returns**:
-
-**[ToolIdProxy](#class-toolidproxy)**, an auxiliary instance that dynamically generates tool IDs through attribute access.
-
-**Example**:
-
-```python
->>> card = SysOperationCard(id="sys_op")
->>> proxy = card.fs         # equivalent to card.__getattr__("fs")
->>> print(proxy.read_file)  # quickly get tool ID
-'sys_op.fs.read_file'
-```
-
-### property shell
-
-```python
-property shell() -> ToolIdProxy
-```
-
-Quickly get the unique ID of the command line execution tool.
-
-**Returns**:
-
-**[ToolIdProxy](#class-toolidproxy)**, an auxiliary instance that dynamically generates tool IDs through attribute access.
-
-**Example**:
-
-```python
->>> card = SysOperationCard(id="sys_op")
->>> proxy = card.shell             # equivalent to card.__getattr__("shell")
->>> print(card.shell.execute_cmd)  # quickly get tool ID
-'sys_op.shell.execute_cmd'
-```
-
-### property code
-
-```python
-property code() -> ToolIdProxy
-```
-
-Quickly get the unique ID of the code execution tool.
-
-**Returns**:
-
-**[ToolIdProxy](#class-toolidproxy)**, an auxiliary instance that dynamically generates tool IDs through attribute access.
-
-**Example**:
-
-```python
->>> card = SysOperationCard(id="sys_op")
->>> proxy = card.code          # equivalent to card.__getattr__("code")
->>> print(proxy.execute_code)  # quickly get tool ID
-'sys_op.code.execute_code'
-```
 
 ### staticmethod generate_tool_id
 

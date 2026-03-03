@@ -147,6 +147,9 @@ class CodeOperation(BaseCodeOperation):
             env = OperationUtils.prepare_environment(environment)
             if language == "javascript":
                 env["NODE_DISABLE_COLORS"] = "1"
+            elif language == "python":
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -284,6 +287,9 @@ class CodeOperation(BaseCodeOperation):
             env = OperationUtils.prepare_environment(environment)
             if language == "javascript":
                 env["NODE_DISABLE_COLORS"] = "1"
+            elif language == "python":
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUTF8"] = "1"
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,

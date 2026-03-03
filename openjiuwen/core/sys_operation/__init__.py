@@ -3,7 +3,7 @@
 
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
-from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, SysOperation, ToolIdProxy
+from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, SysOperation
 
 __all__ = [
     "OperationMode",
@@ -11,5 +11,4 @@ __all__ = [
     "SandboxGatewayConfig",
     "SysOperationCard",
     "SysOperation",
-    "ToolIdProxy",
 ]
