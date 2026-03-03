@@ -9,7 +9,7 @@ Supports vector search, sparse search (BM25), and hybrid search.
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
+from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker, WeightedRanker
 from pymilvus.client.types import LoadState
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -23,9 +23,13 @@ from openjiuwen.core.foundation.store.vector.utils import (
 )
 from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
+from openjiuwen.core.retrieval.common.result_ranking import register_result_ranker_cls
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
+
+# Register ranker support
+register_result_ranker_cls(name="milvus", weighted=WeightedRanker, rrf=RRFRanker)
 
 
 class MilvusVectorStore(VectorStore):

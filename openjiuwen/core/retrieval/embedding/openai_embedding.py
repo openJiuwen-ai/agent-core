@@ -16,7 +16,7 @@ from openai.types import CreateEmbeddingResponse
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.common.config import EmbeddingConfig
+from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.core.retrieval.embedding.utils import parse_base64_embedding
 

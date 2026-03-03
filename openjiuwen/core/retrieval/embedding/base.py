@@ -6,27 +6,6 @@ Embedding Model Abstract Base Class
 Provides a unified interface for embedding models.
 """
 
-from abc import ABC, abstractmethod
-from typing import List, Optional
+__all__ = ["Embedding"]
 
-
-class Embedding(ABC):
-    """Embedding model abstract base class"""
-
-    @abstractmethod
-    async def embed_query(self, text: str, **kwargs) -> List[float]:
-        """Embed query text"""
-
-    @abstractmethod
-    async def embed_documents(
-        self,
-        texts: List[str],
-        batch_size: Optional[int] = None,
-        **kwargs,
-    ) -> List[List[float]]:
-        """Embed document texts"""
-
-    @property
-    @abstractmethod
-    def dimension(self) -> int:
-        """Return embedding dimension"""
+from openjiuwen.core.foundation.store.base_embedding import Embedding
