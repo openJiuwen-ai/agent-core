@@ -275,11 +275,12 @@ class TraceWorkflowHandler(TraceBaseHandler):
         return TracerHandlerName.TRACER_WORKFLOW.value
 
     def _format_data(self, span: TraceWorkflowSpan) -> dict:
+        if span.status != NodeStatus.INTERRUPTED.value:
+            span.status = self._get_node_status(span)
         span.status = self._get_node_status(span)
         result = span.model_dump(exclude_none=True, by_alias=True, exclude={"child_invokes_id", "llm_invoke_data"})
         return {"type": self.event_name(),
                 "payload": result}
-
 
     def _get_tracer_workflow_span(self, invoke_id: str) -> TraceWorkflowSpan:
         span = self._span_manager.get_span(invoke_id)
@@ -388,7 +389,7 @@ class TraceWorkflowHandler(TraceBaseHandler):
 
     @trigger_event
     async def on_interact(self, invoke_id: str, inputs: Any, component_metadata: dict, need_send: bool = False,
-                            **kwargs):
+                          **kwargs):
         span = self._get_tracer_workflow_span(invoke_id)
 
         update_data = {
