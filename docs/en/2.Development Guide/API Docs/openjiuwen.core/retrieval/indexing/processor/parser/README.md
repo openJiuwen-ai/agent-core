@@ -7,7 +7,9 @@
 | CLASS | DESCRIPTION | Detailed API |
 |-------|-------------|---------------|
 | **Parser** | Document parser abstract base class. | [base.md](./base.md) |
-| **AutoFileParser** | Auto file parser. | [auto_file_parser.md](./auto_file_parser.md) |
+| **AutoParser** | Unified parser (files and URLs). | [auto_parser.md](./auto_parser.md) |
+| **AutoLinkParser** | Link parser (WeChat articles, web pages). | [auto_link_parser.md](./auto_link_parser.md) |
+| **AutoFileParser** | Auto file parser (by extension). | [auto_file_parser.md](./auto_file_parser.md) |
 | **JSONParser** | JSON parser. | [json_parser.md](./json_parser.md) |
 | **PDFParser** | PDF parser. | [pdf_parser.md](./pdf_parser.md) |
 | **TxtMdParser** | Text and Markdown parser. | [txt_md_parser.md](./txt_md_parser.md) |

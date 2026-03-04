@@ -4,6 +4,7 @@
 
 自动文件解析器，使用插件架构，根据文件格式自动选择合适的解析器。支持通过@register_parser装饰器注册新的解析器。
 
+**当前内置支持格式**：PDF（.pdf）、文本/Markdown（.txt / .md / .markdown）、Word（.docx）、Excel/CSV/TSV（.xlsx / .csv / .tsv）、JSON（.json）、图片（.png / .jpg / .jpeg / .webp / .gif / .jfif）。可通过 `AutoFileParser.get_supported_formats()` 获取完整列表，或使用 `@register_parser` 扩展新格式。相关：统一入口（文件+链接）见 [AutoParser](auto_parser.md)，仅链接解析见 [AutoLinkParser](auto_link_parser.md)。
 
 ```python
 AutoFileParser(**kwargs: Any)
@@ -57,8 +58,8 @@ register_parser(file_extensions: List[str])
 >>> 
 >>> @register_parser([".custom"])
 ... class CustomParser(Parser):
-...     async def _parse(self, file_path: str):
-...         # 实现自定义解析逻辑
-...         pass
+...     async def _parse(self, file_path: str, llm_client=None):
+...         # 实现自定义解析逻辑，返回文本内容或 None
+...         return None
 ```
 

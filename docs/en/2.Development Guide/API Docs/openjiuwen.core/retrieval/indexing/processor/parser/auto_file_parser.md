@@ -4,6 +4,7 @@
 
 Auto file parser that uses plugin architecture to automatically select appropriate parser based on file format. Supports registering new parsers via @register_parser decorator.
 
+**Built-in supported formats**: PDF (.pdf), text/Markdown (.txt / .md / .markdown), Word (.docx), Excel/CSV/TSV (.xlsx / .csv / .tsv), JSON (.json), images (.png / .jpg / .jpeg / .webp / .gif / .jfif). Use `AutoFileParser.get_supported_formats()` for the full list, or extend with `@register_parser`. Related: [AutoParser](auto_parser.md) for a single entry (files + URLs), [AutoLinkParser](auto_link_parser.md) for URL-only parsing.
 
 ```python
 AutoFileParser(**kwargs: Any)
@@ -57,8 +58,8 @@ Decorator function.
 >>> 
 >>> @register_parser([".custom"])
 ... class CustomParser(Parser):
-...     async def _parse(self, file_path: str):
-...         # Implement custom parsing logic
-...         pass
+...     async def _parse(self, file_path: str, llm_client=None):
+...         # Implement custom parsing logic; return text content or None
+...         return None
 ```
 

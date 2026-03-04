@@ -100,6 +100,28 @@ async def create_kb() -> None:
     return knowledge_base
 ```
 
+## Document Parsers (Parser)
+
+The knowledge base supports different parsers for different document sources:
+
+| Parser | Description | Use case |
+|--------|-------------|----------|
+| **AutoFileParser** | Selects a parser by file extension; supports multiple local file formats | Use when processing local files only |
+| **AutoLinkParser** | Selects a parser by URL; supports WeChat articles (mp.weixin.qq.com) and web pages (http(s)) | Use when processing URLs only |
+| **AutoParser** | Single entry: routes URLs to link parsing and local paths to file parsing; supports both files and links | Use when you need both local files and web/WeChat links |
+
+**Formats supported by AutoFileParser**: PDF (.pdf), text/Markdown (.txt / .md / .markdown), Word (.docx), Excel/CSV/TSV (.xlsx / .csv / .tsv), JSON (.json), images (.png / .jpg / .jpeg / .webp / .gif / .jfif). New formats can be registered via the `@register_parser` decorator.
+
+To support both local files and web links, set `parser` to `AutoParser()` and import from `openjiuwen.core.retrieval`. With `AutoParser`, you can pass a single mixed list of local paths and URLs to `parse_files`:
+
+```python
+from openjiuwen.core.retrieval import AutoParser
+
+parser = AutoParser()
+# You can then pass a mixed list to parse_files, e.g.:
+# documents = await knowledge_base.parse_files(["./doc1.pdf", "https://mp.weixin.qq.com/...", "./doc2.txt"])
+```
+
 # Use Knowledge Base Instance
 
 The knowledge base supports main operations such as adding documents, retrieving documents, deleting documents, and updating documents.
@@ -171,7 +193,7 @@ async def delete_document_id(knowledge_base: SimpleKnowledgeBase) -> None:
 `openjiuwen.core.retrieval.simple_knowledge_base` also provides helper functions for multi-knowledge base retrieval, suitable for querying multiple `KnowledgeBase` instances in a single request:
 
 - `retrieve_multi_kb(kbs: list[KnowledgeBase], query: str, config: RetrievalConfig | None = None, top_k: int | None = None) -> list[str]`
-- `retrieve_multi_kb_with_source(kbs: list[KnowledgeBase], query: str, config: RetrievalConfig | None = None, top_k: int | None = None) -> list[dict]`
+- `retrieve_multi_kb_with_source(kbs: list[KnowledgeBase], query: str, config: RetrievalConfig | None = None, top_k: int | None = None) -> list[MultiKBRetrievalResult]`
 
 Example:
 
@@ -190,10 +212,10 @@ async def search_across_kbs(kbs: list[SimpleKnowledgeBase]) -> None:
     for i, t in enumerate(texts, 1):
         print(f"{i}. {t}")
 
-    # Return results with source information
+    # Return results with source information (each item is a MultiKBRetrievalResult)
     results = await retrieve_multi_kb_with_source(kbs, query, config=RetrievalConfig(top_k=5))
     for item in results:
-        print(f"text={item['text']}, score={item['score']}, kb_ids={list(item['kb_ids'])}")
+        print(f"text={item.text}, score={item.score}, kb_ids={list(item.kb_ids)}")
 ```
 
 ## Get Statistics

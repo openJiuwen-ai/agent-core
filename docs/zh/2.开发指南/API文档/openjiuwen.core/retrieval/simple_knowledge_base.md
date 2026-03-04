@@ -31,11 +31,11 @@ SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorSt
 parse_files(file_paths: List[str], **kwargs: Any) -> List[Document]
 ```
 
-从文件路径解析文件，返回Document对象列表。
+从文件路径或 URL 解析为 Document 列表。当 `parser` 为 `AutoParser` 时，`file_paths` 可同时包含本地文件路径与 URL。
 
 **参数**：
 
-* **file_paths**(List[str])：文件路径列表。
+* **file_paths**(List[str])：文件路径或 URL 列表。
 * **kwargs**(Any)：可变参数，可包含file_name和file_id参数。
 
 **返回**：

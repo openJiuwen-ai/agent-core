@@ -176,6 +176,8 @@
               - [triple_extractor](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/extractor/triple_extractor.md)
             - [parser](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/README.md)
               - [auto_file_parser](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/auto_file_parser.md)
+              - [auto_link_parser](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/auto_link_parser.md)
+              - [auto_parser](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/auto_parser.md)
               - [base](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/base.md)
               - [json_parser](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/json_parser.md)
               - [pdf_parser](2.开发指南/API文档/openjiuwen.core/retrieval/indexing/processor/parser/pdf_parser.md)

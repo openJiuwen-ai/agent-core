@@ -30,11 +30,11 @@ Initialize knowledge base.
 parse_files(file_paths: List[str], **kwargs: Any) -> List[Document]
 ```
 
-Parse files from file paths and return a list of Document objects.
+Parse file paths or URLs into a list of Document objects. When `parser` is `AutoParser`, `file_paths` may contain both local paths and URLs.
 
 **Parameters**:
 
-* **file_paths**(List[str]): List of file paths.
+* **file_paths**(List[str]): List of file paths or URLs.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 **Returns**:

@@ -35,7 +35,9 @@
 | [MilvusIndexer](./retrieval/indexing/indexer/milvus_indexer.md)| Milvus index manager implementation.   |
 | [Processor](./retrieval/indexing/processor/base.md)                | Processor abstract base class.         |
 | [Parser](./retrieval/indexing/processor/parser/base.md)           | Document parser abstract base class.     |
-| [AutoFileParser](./retrieval/indexing/processor/parser/auto_file_parser.md) | Auto file parser.         |
+| [AutoParser](./retrieval/indexing/processor/parser/auto_parser.md) | Unified parser (files and URLs). |
+| [AutoLinkParser](./retrieval/indexing/processor/parser/auto_link_parser.md) | Link parser (WeChat articles, web pages). |
+| [AutoFileParser](./retrieval/indexing/processor/parser/auto_file_parser.md) | Auto file parser (by extension).         |
 | [Chunker](./retrieval/indexing/processor/chunker/base.md)         | Text chunker abstract base class.     |
 | [CharChunker](./retrieval/indexing/processor/chunker/char_chunker.md) | Character-based chunker.       |
 | [TokenizerChunker](./retrieval/indexing/processor/chunker/tokenizer_chunker.md) | Tokenizer-based chunker. |

@@ -35,7 +35,9 @@
 | [MilvusIndexer](./retrieval/indexing/indexer/milvus_indexer.md)| Milvus索引管理器实现。   |
 | [Processor](./retrieval/indexing/processor/base.md)                | 处理器抽象基类。         |
 | [Parser](./retrieval/indexing/processor/parser/base.md)           | 文档解析器抽象基类。     |
-| [AutoFileParser](./retrieval/indexing/processor/parser/auto_file_parser.md) | 自动文件解析器。         |
+| [AutoParser](./retrieval/indexing/processor/parser/auto_parser.md) | 统一解析器（文件与 URL 均可）。 |
+| [AutoLinkParser](./retrieval/indexing/processor/parser/auto_link_parser.md) | 链接解析器（微信公众号、网页）。 |
+| [AutoFileParser](./retrieval/indexing/processor/parser/auto_file_parser.md) | 自动文件解析器（按扩展名选择格式）。         |
 | [Chunker](./retrieval/indexing/processor/chunker/base.md)         | 文本分块器抽象基类。     |
 | [CharChunker](./retrieval/indexing/processor/chunker/char_chunker.md) | 基于字符的分块器。       |
 | [TokenizerChunker](./retrieval/indexing/processor/chunker/tokenizer_chunker.md) | 基于tokenizer的分块器。 |
