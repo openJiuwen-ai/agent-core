@@ -275,7 +275,7 @@ class TestDecator:
         for item in results:
             print(item)
         assert len(results) == 2
-        assert results[0][2].get("instance_info", {}).get("class_name", "") == "mock tool"
+        assert results[0][2].get("instance_info", {}).get("class_name", "") == "test_tool"
 
     async def test_decorate_workflow(self):
         workflow = MockWorkflow()

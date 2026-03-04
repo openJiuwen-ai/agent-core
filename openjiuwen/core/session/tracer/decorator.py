@@ -44,7 +44,7 @@ def decorate_tool_with_trace(tool, agent_session):
         return tool
     session = getattr(agent_session, "_inner")
     wrapped_tool = create_wrapper_class(tool, "WrappedTool")
-    instance_info = {"class_name": tool.name if hasattr(tool, "name") else type(tool).__name__, "type": "tool"}
+    instance_info = {"class_name": tool.card.name if hasattr(tool, "card") else type(tool).__name__, "type": "tool"}
     wrapped_tool.invoke = MethodType(
         async_trace(wrapped_tool.invoke, session, InvokeType.PLUGIN, instance_info), wrapped_tool
     )
