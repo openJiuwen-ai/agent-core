@@ -247,9 +247,10 @@ class ReActAgentConfig(BaseModel):
             api_base=api_base,
             verify_ssl=verify_ssl
         )
-        self.model_config_obj = ModelRequestConfig(
-            model_name=model_name
-        )
+        if self.model_config_obj is None:
+            self.model_config_obj = ModelRequestConfig(model_name=model_name)
+        else:
+            self.model_config_obj.model_name = model_name
         return self
 
     def configure_context_processors(
