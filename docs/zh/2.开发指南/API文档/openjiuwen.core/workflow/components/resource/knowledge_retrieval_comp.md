@@ -59,6 +59,8 @@ to_executable() -> KnowledgeRetrievalExecutable
 |------|------|------|
 | `query` | str | 用于检索文档的查询字符串。 |
 
+> **Query 重写**：未启用智能检索时，本组件不会对 query 进行重写。多轮对话场景下，可先使用 [QueryRewriter](../../../retrieval/query_rewriter/query_rewriter.md) 对用户消息进行重写，将返回的 `standalone_query` 作为 `query` 传入。详见 openJiuwen [知识检索](../../../../../../高阶用法/知识检索.md) 文档。
+
 **输出**：
 
 | 字段 | 类型 | 说明 |

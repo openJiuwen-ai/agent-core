@@ -194,6 +194,7 @@
           - [hybrid_retriever](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/retriever/hybrid_retriever.md)
           - [sparse_retriever](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/retriever/sparse_retriever.md)
           - [vector_retriever](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/retriever/vector_retriever.md)
+        - [query_rewriter](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/query_rewriter/query_rewriter.md)
         - [vector_store](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/vector_store/README.md)
           - [base](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/vector_store/base.md)
           - [chroma_store](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/vector_store/chroma_store.md)

@@ -177,6 +177,13 @@ async def retrieval(knowledge_base: SimpleKnowledgeBase) -> None:
         print(f"  Chunk ID: {result.chunk_id}")
 ```
 
+## Query Rewriter for multi-turn retrieval
+
+When you are not using agentic retrieval, you can still improve retrieval in multi-turn dialogue by using the standalone **QueryRewriter**. It resolves pronouns, formalizes colloquial expressions, and disambiguates the user query using the conversation context (via the context engine). For each turn, call `await rewriter.rewrite(user_message)` first to get a `standalone_query`, then pass that to `knowledge_base.retrieve(standalone_query, ...)`. The rewriter does not update the context itself; the caller should append user and assistant messages to the context after each turn.
+
+- API: [QueryRewriter](../API%20Docs/openjiuwen.core/retrieval/query_rewriter/query_rewriter.md)
+- Example: For more usage examples, please refer to the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under `examples/retrieval/`, including: `showcase_query_rewriter.py` (Query Rewriter usage in multi-turn retrieval).
+
 ## Delete Documents
 
 Documents in the knowledge base can be deleted through the ```delete_documents``` method.

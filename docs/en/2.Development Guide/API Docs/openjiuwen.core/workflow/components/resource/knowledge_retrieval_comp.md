@@ -59,6 +59,8 @@ Convert the composable component into its executable counterpart.
 |-------|------|-------------|
 | `query` | str | The query string to retrieve documents for. |
 
+> **Query rewriting**: When agentic retrieval is not enabled, the component does not rewrite the query. For multi-turn dialogue, pre-rewrite the user message with [QueryRewriter](../../../retrieval/query_rewriter/query_rewriter.md) and pass the returned `standalone_query` as `query`. See the openJiuwen [Knowledge Retrieval](../../../../../../Advanced%20Usage/Knowledge%20Retrieval.md) guide.
+
 **Output**:
 
 | Field | Type | Description |

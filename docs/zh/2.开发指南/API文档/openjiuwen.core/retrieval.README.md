@@ -6,6 +6,7 @@
 > - `showcase_text_embedding.py` - 文本嵌入示例
 > - `showcase_multimodal_embedding.py` - 多模态嵌入示例
 > - `showcase_reranker.py` - 重排序器示例
+> - `showcase_query_rewriter.py` - Query 重写器示例（多轮检索）
 
 **Classes**：
 
@@ -20,6 +21,7 @@
 | [HybridRetriever](./retrieval/retriever/hybrid_retriever.md)  | 混合检索器。            |
 | [GraphRetriever](./retrieval/retriever/graph_retriever.md)    | 图检索器。              |
 | [AgenticRetriever](./retrieval/retriever/agentic_retriever.md)| 智能检索器。            |
+| [QueryRewriter](./retrieval/query_rewriter/query_rewriter.md) | 面向上下文检索的 Query 重写器。 |
 | [VectorStore](./retrieval/vector_store/base.md)               | 向量存储抽象基类。       |
 | [ChromaVectorStore](./retrieval/vector_store/chroma_store.md) | ChromaDB向量存储实现。   |
 | [MilvusVectorStore](./retrieval/vector_store/milvus_store.md)| Milvus向量存储实现。     |
