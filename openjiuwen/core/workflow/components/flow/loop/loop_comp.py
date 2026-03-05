@@ -443,7 +443,8 @@ class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, Ato
 
         loop_session.state().set_outputs({LOOP_ID: self._node_id})
         state = loop_session.state()._io_state.get_state()
-        if self._node_id in state:
+        state = state.get(session.parent_id()) if session.parent_id() else state
+        if state and self._node_id in state:
             del state[self._node_id]
         loop_session.state().set_outputs(state)
         loop_session.state().commit()
