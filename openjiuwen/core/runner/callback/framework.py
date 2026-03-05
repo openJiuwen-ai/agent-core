@@ -24,12 +24,14 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Optional,
     Set,
 )
 
 from openjiuwen.core.runner.callback.chain import CallbackChain
 from openjiuwen.core.runner.callback.decorator import (
+    _TRANSFORM_NOOP,
     create_emit_around_decorator,
     create_emits_decorator,
     create_emits_stream_decorator,
@@ -160,7 +162,8 @@ class AsyncCallbackFramework:
             error_handler: Optional[Callable] = None,
             max_retries: int = 0,
             retry_delay: float = 0.0,
-            timeout: Optional[float] = None
+            timeout: Optional[float] = None,
+            callback_type: str = "",
     ):
         """Decorator to register an async callback.
 
@@ -182,6 +185,7 @@ class AsyncCallbackFramework:
             max_retries: Maximum retry attempts
             retry_delay: Delay between retries in seconds
             timeout: Execution timeout in seconds
+            callback_type: Semantic type marker, e.g. "transform"
 
         Returns:
             Decorator function
@@ -199,6 +203,7 @@ class AsyncCallbackFramework:
             max_retries=max_retries,
             retry_delay=retry_delay,
             timeout=timeout,
+            callback_type=callback_type,
         )
 
     def register_sync(
@@ -215,7 +220,8 @@ class AsyncCallbackFramework:
             error_handler: Optional[Callable] = None,
             max_retries: int = 0,
             retry_delay: float = 0.0,
-            timeout: Optional[float] = None
+            timeout: Optional[float] = None,
+            callback_type: str = "",
     ) -> 'CallbackInfo':
         """Synchronous registration method for decorator use.
 
@@ -233,7 +239,8 @@ class AsyncCallbackFramework:
             tags=tags or set(),
             max_retries=max_retries,
             retry_delay=retry_delay,
-            timeout=timeout
+            timeout=timeout,
+            callback_type=callback_type,
         )
 
         self._callbacks[event].append(callback_info)
@@ -394,6 +401,7 @@ class AsyncCallbackFramework:
             result_key: str = "result",
             input_transform: Optional[InputTransform] = None,
             output_transform: Optional[OutputTransform] = None,
+            output_mode: Literal["frame", "generator"] = "frame",
     ):
         """Decorator to transform function inputs and outputs via callbacks.
 
@@ -402,6 +410,17 @@ class AsyncCallbackFramework:
         events and uses the last callback return value as the transformed
         input or output. Otherwise uses input_transform/output_transform
         callables directly.
+
+        ``output_mode`` controls how the output transform is applied to
+        generator functions:
+
+        * ``'frame'`` (default): output transform is applied once per yielded
+          item. For event mode, output_event fires per item.
+        * ``'generator'``: output transform receives the entire source async
+          iterator. For direct callable mode, output_transform must be an
+          async generator function. For event mode, output_event fires once
+          with the source; the callback should return an async iterable.
+          Sync generator functions are automatically promoted to async.
 
         Event-based example:
             >>> @framework.on("transform_input")
@@ -437,6 +456,9 @@ class AsyncCallbackFramework:
                 (new_args, new_kwargs). Used when input_event is not set.
             output_transform: Optional direct callback value -> new_value.
                 Used when output_event is not set.
+            output_mode: ``'frame'`` (default) or ``'generator'``. Controls
+                how output transform is applied to generator functions.
+                Raises ``ValueError`` if used with non-generator functions.
 
         Returns:
             Decorator that applies input/output transformation via
@@ -448,10 +470,12 @@ class AsyncCallbackFramework:
                 input_event=input_event,
                 output_event=output_event,
                 result_key=result_key,
+                output_mode=output_mode,
             )
         return create_transform_io_decorator(
             input_transform=input_transform,
             output_transform=output_transform,
+            output_mode=output_mode,
         )
 
     def on_wrap(
@@ -538,6 +562,61 @@ class AsyncCallbackFramework:
             Decorator that wraps the function with the dynamic handler chain.
         """
         return create_wrap_by_event_decorator(self, event)
+
+    def on_transform(
+        self,
+        event: str,
+        *,
+        priority: int = 0,
+    ):
+        """Convenience decorator that registers a transform-type callback.
+
+        Equivalent to ``on(event, callback_type="transform", priority=priority)``.
+        Transform callbacks are exclusively invoked by :meth:`trigger_transform`
+        and are used by :meth:`transform_io` to modify inputs and outputs.
+
+        Example::
+
+            @framework.on_transform(ToolCallEvents.TOOL_INVOKE_INPUT)
+            async def preprocess(inputs, **kwargs):
+                return ((modified_inputs,), kwargs)
+
+        Args:
+            event: Event name to listen for.
+            priority: Execution priority (higher first).
+
+        Returns:
+            Decorator function.
+        """
+        return self.on(event, callback_type="transform", priority=priority)
+
+    async def trigger_transform(self, event: str, *args, **kwargs) -> Any:
+        """Trigger only transform-type callbacks and return the last result.
+
+        Unlike :meth:`trigger`, this method runs only callbacks registered with
+        ``callback_type="transform"``.  When no such callbacks exist, returns the
+        sentinel :data:`_TRANSFORM_NOOP` so callers can detect a no-op and pass
+        through the original value unchanged.
+
+        Args:
+            event: Event name to trigger.
+            *args: Positional arguments forwarded to callbacks.
+            **kwargs: Keyword arguments forwarded to callbacks.
+
+        Returns:
+            The return value of the last transform callback, or
+            ``_TRANSFORM_NOOP`` when no transform callbacks are registered.
+        """
+        callbacks = [
+            info for info in self._callbacks.get(event, [])
+            if info.enabled and info.callback_type == "transform"
+        ]
+        if not callbacks:
+            return _TRANSFORM_NOOP
+        result: Any = _TRANSFORM_NOOP
+        for info in callbacks:
+            result = await info.callback(*args, **kwargs)
+        return result
 
     async def register(
             self,

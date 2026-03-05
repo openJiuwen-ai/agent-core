@@ -29,12 +29,16 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
+    Literal,
     Optional,
     Protocol,
     Set,
 )
 
 from openjiuwen.core.runner.callback.filters import EventFilter
+
+# Sentinel value returned by trigger_transform when no transform callbacks are registered.
+_TRANSFORM_NOOP = object()
 
 # Type aliases for transform callables (sync or async).
 InputTransform = Callable[
@@ -124,6 +128,7 @@ def create_on_decorator(
     max_retries: int = 0,
     retry_delay: float = 0.0,
     timeout: Optional[float] = None,
+    callback_type: str = "",
 ) -> Callable[[Callable[..., Awaitable[Any]]], Callable]:
     """Create decorator that registers an async callback with the framework.
 
@@ -143,6 +148,7 @@ def create_on_decorator(
         max_retries: Maximum retry attempts.
         retry_delay: Delay between retries in seconds.
         timeout: Execution timeout in seconds.
+        callback_type: Semantic type marker, e.g. "transform".
 
     Returns:
         A decorator that registers the wrapped function and returns the wrapper.
@@ -162,6 +168,7 @@ def create_on_decorator(
             max_retries=max_retries,
             retry_delay=retry_delay,
             timeout=timeout,
+            callback_type=callback_type,
         )
 
         @wraps(func)
@@ -371,6 +378,7 @@ def create_transform_io_decorator(
     *,
     input_transform: Optional[InputTransform] = None,
     output_transform: Optional[OutputTransform] = None,
+    output_mode: Literal["frame", "generator"] = "frame",
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Create a decorator that can modify function inputs and/or outputs.
 
@@ -379,11 +387,22 @@ def create_transform_io_decorator(
     transform is applied to the return value, or to each yielded item when
     the function returns a generator. Transforms may be sync or async.
 
-    Example:
-        >>> def add_one(args, kwargs):
-        ...     a, k = list(args), dict(kwargs)
+    ``output_mode`` controls how ``output_transform`` is applied to generator
+    functions:
+
+    * ``'frame'`` (default): ``output_transform(item)`` is called once per
+      yielded item. The transform may be sync or async.
+    * ``'generator'``: ``output_transform(source)`` is called once with the
+      entire source async iterator. The transform must be an async generator
+      function that iterates *source* and yields new items. This allows
+      stateful transformations, filtering, and 1-to-N item expansion.
+      Sync generator functions are automatically promoted to async.
+
+    Example (frame mode):
+        >>> def add_one(*args, **kwargs):
+        ...     k = dict(kwargs)
         ...     k["n"] = k.get("n", 0) + 1
-        ...     return (tuple(a), k)
+        ...     return (args, k)
         >>> def double(x):
         ...     return x * 2
         >>> @create_transform_io_decorator(
@@ -395,12 +414,31 @@ def create_transform_io_decorator(
         >>> await compute(0)  # input n becomes 1, output 1*2 -> 2
         2
 
+    Example (generator mode):
+        >>> async def expand(source):
+        ...     async for item in source:
+        ...         yield item
+        ...         yield item  # duplicate each item
+        >>> @create_transform_io_decorator(
+        ...     output_transform=expand,
+        ...     output_mode='generator',
+        ... )
+        ... async def gen():
+        ...     yield 1
+        ...     yield 2
+        >>> [item async for item in gen()]
+        [1, 1, 2, 2]
+
     Args:
         input_transform: Optional. (args, kwargs) -> (new_args, new_kwargs).
             May be sync or async. Called before invoking the wrapped function.
-        output_transform: Optional. value -> new_value. Applied to the
-            return value, or to each yielded item when the function returns
-            an async/sync generator. May be sync or async.
+        output_transform: Optional. In ``'frame'`` mode: value -> new_value,
+            applied to each yielded item or the return value; may be sync or
+            async. In ``'generator'`` mode: async generator function
+            ``(source: AsyncIterator) -> AsyncIterator``, receives the full
+            source iterator and yields transformed items.
+        output_mode: ``'frame'`` (default) or ``'generator'``. Only affects
+            generator functions; raises ``ValueError`` for non-generators.
 
     Returns:
         A decorator that wraps the function with input/output transformation.
@@ -410,6 +448,12 @@ def create_transform_io_decorator(
         func_async_gen = inspect.isasyncgenfunction(func)
         func_async = inspect.iscoroutinefunction(func)
         func_sync_gen = inspect.isgeneratorfunction(func)
+
+        if output_mode == "generator" and not func_async_gen and not func_sync_gen:
+            raise ValueError(
+                "output_mode='generator' is only supported for generator "
+                f"functions; got {func!r}"
+            )
 
         async def _run_input_transform(
             args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -434,8 +478,26 @@ def create_transform_io_decorator(
                 )
             return out  # type: ignore[return-value]
 
-        # Async generator: wrapper must be an async generator function so
-        # that calling it returns an async generator, not a coroutine.
+        # Async generator — generator mode: pass the entire source to output_transform.
+        if func_async_gen and output_mode == "generator":
+
+            @wraps(func)
+            async def async_gen_wrapper_gen_mode(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _run_input_transform(args, kwargs)
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                source = func(*call_args, **call_kwargs)
+                if output_transform is None:
+                    async for item in source:
+                        yield item
+                else:
+                    async for item in output_transform(source):
+                        yield item
+
+            return async_gen_wrapper_gen_mode  # type: ignore[return-value]
+
+        # Async generator — frame mode (default): apply output_transform per item.
         if func_async_gen:
 
             @wraps(func)
@@ -482,7 +544,31 @@ def create_transform_io_decorator(
 
             return async_wrapper  # type: ignore[return-value]
 
-        # Sync generator function.
+        # Sync generator — generator mode: wrap in async gen and pass source to output_transform.
+        if func_sync_gen and output_mode == "generator":
+
+            @wraps(func)
+            async def sync_gen_gen_mode_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _run_input_transform(args, kwargs)
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                gen = func(*call_args, **call_kwargs)
+
+                async def _async_adapter() -> Any:
+                    for item in gen:
+                        yield item
+
+                if output_transform is None:
+                    async for item in _async_adapter():
+                        yield item
+                else:
+                    async for item in output_transform(_async_adapter()):
+                        yield item
+
+            return sync_gen_gen_mode_wrapper  # type: ignore[return-value]
+
+        # Sync generator — frame mode (default): apply output_transform per item.
         if func_sync_gen:
 
             @wraps(func)
@@ -542,24 +628,38 @@ def create_transform_io_by_events_decorator(
     input_event: Optional[str] = None,
     output_event: Optional[str] = None,
     result_key: str = "result",
+    output_mode: Literal["frame", "generator"] = "frame",
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Create transform_io decorator driven by event callbacks.
 
     Before calling the wrapped function, triggers input_event with
     (*args, **kwargs); the last callback return value is used as
-    (new_args, new_kwargs).     After the function returns (or for each
-    yielded item), triggers output_event with result_key=<value>; the last
-    callback return value is used as the transformed output. Callbacks
-    must be async and return the transformed value.
+    (new_args, new_kwargs). After the function returns (or for each yielded
+    item), triggers output_event; the last callback return value is used as
+    the transformed output. Callbacks must be async.
+
+    ``output_mode`` controls how output_event is triggered for generator
+    functions:
+
+    * ``'frame'`` (default): output_event is triggered once per yielded item.
+      Callbacks receive ``result_key=<item>`` and return the transformed item.
+    * ``'generator'``: output_event is triggered once with the entire source
+      async iterator as ``result_key=<source>``. Callbacks should return an
+      async iterable. If no callbacks are registered, the source is passed
+      through unchanged. Sync generator functions are promoted to async.
 
     Args:
-        framework: AsyncCallbackFramework instance (has trigger).
+        framework: AsyncCallbackFramework instance (has trigger_transform).
         input_event: Event name for input transform. Callbacks receive
             (*args, **kwargs) and must return (new_args, new_kwargs).
-        output_event: Event name for output transform. Callbacks receive
-            result_key=<value> and must return the transformed value.
+        output_event: Event name for output transform. In ``'frame'`` mode:
+            callbacks receive result_key=<item> and return transformed item.
+            In ``'generator'`` mode: callbacks receive result_key=<source>
+            and return an async iterable.
         result_key: Keyword used when triggering output_event (default:
             "result").
+        output_mode: ``'frame'`` (default) or ``'generator'``. Only affects
+            generator functions; raises ``ValueError`` for non-generators.
 
     Returns:
         A decorator that uses event callbacks for input/output transform.
@@ -570,29 +670,58 @@ def create_transform_io_by_events_decorator(
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         if not input_event:
             return args, kwargs
-        results = await framework.trigger(input_event, *args, **kwargs)
-        if not results:
+        result = await framework.trigger_transform(input_event, *args, **kwargs)
+        if result is _TRANSFORM_NOOP:
             return args, kwargs
-        out = results[-1]
-        if isinstance(out, (tuple, list)) and len(out) == 2:
-            return (tuple(out[0]), dict(out[1]))
+        if isinstance(result, (tuple, list)) and len(result) == 2:
+            return (tuple(result[0]), dict(result[1]))
         return args, kwargs
 
     async def _output_from_events(value: Any) -> Any:
         if not output_event:
             return value
-        results = await framework.trigger(
+        result = await framework.trigger_transform(
             output_event, **{result_key: value}
         )
-        if not results:
+        if result is _TRANSFORM_NOOP:
             return value
-        return results[-1]
+        return result
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         func_async_gen = inspect.isasyncgenfunction(func)
         func_async = inspect.iscoroutinefunction(func)
         func_sync_gen = inspect.isgeneratorfunction(func)
 
+        if output_mode == "generator" and not func_async_gen and not func_sync_gen:
+            raise ValueError(
+                "output_mode='generator' is only supported for generator "
+                f"functions; got {func!r}"
+            )
+
+        # Async generator — generator mode: trigger output_event once with the source.
+        if func_async_gen and output_mode == "generator":
+
+            @wraps(func)
+            async def async_gen_wrapper_gen_mode(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _input_from_events(args, kwargs)
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                source = func(*call_args, **call_kwargs)
+                if not output_event:
+                    async for item in source:
+                        yield item
+                    return
+                transformed = await framework.trigger_transform(
+                    output_event, **{result_key: source}
+                )
+                iterable = source if transformed is _TRANSFORM_NOOP else transformed
+                async for item in iterable:
+                    yield item
+
+            return async_gen_wrapper_gen_mode  # type: ignore[return-value]
+
+        # Async generator — frame mode: trigger output_event per item.
         if func_async_gen:
 
             @wraps(func)
@@ -625,6 +754,36 @@ def create_transform_io_by_events_decorator(
 
             return async_wrapper  # type: ignore[return-value]
 
+        # Sync generator — generator mode: promote to async gen, trigger output_event once.
+        if func_sync_gen and output_mode == "generator":
+
+            @wraps(func)
+            async def sync_gen_gen_mode_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = await _input_from_events(args, kwargs)
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                gen = func(*call_args, **call_kwargs)
+
+                async def _async_adapter() -> Any:
+                    for item in gen:
+                        yield item
+
+                source = _async_adapter()
+                if not output_event:
+                    async for item in source:
+                        yield item
+                    return
+                transformed = await framework.trigger_transform(
+                    output_event, **{result_key: source}
+                )
+                iterable = source if transformed is _TRANSFORM_NOOP else transformed
+                async for item in iterable:
+                    yield item
+
+            return sync_gen_gen_mode_wrapper  # type: ignore[return-value]
+
+        # Sync generator — frame mode: promote to async gen, trigger output_event per item.
         if func_sync_gen:
 
             @wraps(func)

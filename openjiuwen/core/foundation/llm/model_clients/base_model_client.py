@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from abc import ABC, abstractmethod
+from abc import ABCMeta, abstractmethod
 from typing import List, Optional, AsyncIterator, Union, Dict, Any
 
 from openjiuwen.core.common.exception.errors import build_error
@@ -20,7 +20,24 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
 )
 
 
-class BaseModelClient(ABC):
+class _BaseModelClientMeta(ABCMeta):
+    def __call__(cls, *args, **kwargs):
+        instance = super().__call__(*args, **kwargs)
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.callback.events import LLMCallEvents
+        _fw = Runner.callback_framework
+        instance.invoke = _fw.transform_io(
+            input_event=LLMCallEvents.LLM_INVOKE_INPUT,
+            output_event=LLMCallEvents.LLM_INVOKE_OUTPUT,
+        )(instance.invoke)
+        instance.stream = _fw.transform_io(
+            input_event=LLMCallEvents.LLM_STREAM_INPUT,
+            output_event=LLMCallEvents.LLM_STREAM_OUTPUT,
+        )(instance.stream)
+        return instance
+
+
+class BaseModelClient(metaclass=_BaseModelClientMeta):
     """LLM Model Client Abstract Base Class
 
     All Model Client implementations must inherit from this class and implement the abstract methods.

@@ -37,9 +37,27 @@ from openjiuwen.core.workflow.workflow_config import WorkflowConfig
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.graph.graph import PregelGraph
 from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage
+from abc import ABCMeta
 
 
-class Workflow:
+class _WorkflowMeta(ABCMeta):
+    def __call__(cls, *args, **kwargs):
+        instance = super().__call__(*args, **kwargs)
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.callback.events import WorkflowEvents
+        _fw = Runner.callback_framework
+        instance.invoke = _fw.transform_io(
+            input_event=WorkflowEvents.WORKFLOW_INVOKE_INPUT,
+            output_event=WorkflowEvents.WORKFLOW_INVOKE_OUTPUT,
+        )(instance.invoke)
+        instance.stream = _fw.transform_io(
+            input_event=WorkflowEvents.WORKFLOW_STREAM_INPUT,
+            output_event=WorkflowEvents.WORKFLOW_STREAM_OUTPUT,
+        )(instance.stream)
+        return instance
+
+
+class Workflow(metaclass=_WorkflowMeta):
     """
     A workflow represents a directed graph of components that process data.
 

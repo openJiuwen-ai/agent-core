@@ -212,6 +212,7 @@ class CallbackInfo:
         timeout: Execution timeout in seconds
         created_at: Timestamp when callback was registered
         wrapper: Optional wrapper function returned by decorator (for unregistering)
+        callback_type: Semantic type marker, e.g. "transform"
     """
     callback: Callable[..., Awaitable[Any]]
     priority: int
@@ -224,6 +225,7 @@ class CallbackInfo:
     timeout: Optional[float] = None
     created_at: float = field(default_factory=time.time)
     wrapper: Optional[Callable[..., Awaitable[Any]]] = None
+    callback_type: str = ""
 
     def __hash__(self) -> int:
         """Hash based on callback identity.
