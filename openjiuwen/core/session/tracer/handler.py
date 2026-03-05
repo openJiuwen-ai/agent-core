@@ -277,7 +277,8 @@ class TraceWorkflowHandler(TraceBaseHandler):
     def _format_data(self, span: TraceWorkflowSpan) -> dict:
         if span.status != NodeStatus.INTERRUPTED.value:
             span.status = self._get_node_status(span)
-        span.status = self._get_node_status(span)
+        else:
+            span.status = self._get_node_status(span)
         result = span.model_dump(exclude_none=True, by_alias=True, exclude={"child_invokes_id", "llm_invoke_data"})
         return {"type": self.event_name(),
                 "payload": result}

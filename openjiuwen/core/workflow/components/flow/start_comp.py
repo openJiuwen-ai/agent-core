@@ -12,5 +12,4 @@ class Start(WorkflowComponent):
         super().__init__()
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-        session.update_global_state({session.get_executable_id(): {"output": "llm"}})
         return inputs
