@@ -14,7 +14,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm import Model, JsonOutputParser
-from openjiuwen.core.memory.prompt.prompt_applier import PromptApplier
+from openjiuwen.core.memory.prompts.prompt_applier import PromptApplier
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 

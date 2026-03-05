@@ -4,7 +4,7 @@ import json
 from typing import Dict, Any
 from openjiuwen.core.foundation.llm import JsonOutputParser
 from openjiuwen.core.memory.process.extract.common import ExtractMemoryParams
-from openjiuwen.core.memory.prompt.prompt_applier import PromptApplier
+from openjiuwen.core.memory.prompts.prompt_applier import PromptApplier
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 

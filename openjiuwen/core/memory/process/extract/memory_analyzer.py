@@ -9,7 +9,7 @@ from openjiuwen.core.foundation.llm.schema.message import BaseMessage
 from openjiuwen.core.memory.config.config import AgentMemoryConfig
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
-from openjiuwen.core.memory.prompt.prompt_applier import PromptApplier
+from openjiuwen.core.memory.prompts.prompt_applier import PromptApplier
 
 
 class VariableResult(BaseModel):
