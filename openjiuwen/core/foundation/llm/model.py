@@ -304,3 +304,53 @@ class Model:
             seed=seed,
             **kwargs
         )
+
+
+def init_model(
+    provider: str,
+    model_name: str,
+    api_key: str,
+    api_base: str,
+    *,
+    temperature: float = 0.95,
+    top_p: float = 0.1,
+    max_tokens: Optional[int] = None,
+    timeout: float = 60.0,
+    max_retries: int = 3,
+    verify_ssl: bool = False,
+) -> Model:
+    """Convenience factory to create a Model instance.
+
+    Args:
+        provider: Model provider name (e.g. "OpenAI").
+        model_name: Model name (e.g. "gpt-4").
+        api_key: API key.
+        api_base: API base URL.
+        temperature: Sampling temperature.
+        top_p: Top-p sampling parameter.
+        max_tokens: Maximum tokens to generate.
+        timeout: Request timeout in seconds.
+        max_retries: Maximum number of retries.
+        verify_ssl: Whether to verify SSL certificates.
+
+    Returns:
+        Configured Model instance.
+    """
+    client_config = ModelClientConfig(
+        client_provider=provider,
+        api_key=api_key,
+        api_base=api_base,
+        timeout=timeout,
+        max_retries=max_retries,
+        verify_ssl=verify_ssl,
+    )
+    request_config = ModelRequestConfig(
+        model_name=model_name,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+    return Model(
+        model_client_config=client_config,
+        model_config=request_config,
+    )

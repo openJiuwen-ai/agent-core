@@ -188,6 +188,13 @@ class StatusCode(Enum):
     AGENT_CONTROLLER_EVENT_HANDLER_ERROR = (123009, "controller event handler error, reason: {error_msg}")
     AGENT_CONTROLLER_EVENT_QUEUE_ERROR = (123010, "agent controller event queue execution error, reason: {error_msg}")
 
+    # DeepAgent 123020 - 123039
+    DEEPAGENT_CONFIG_PARAM_ERROR = (123020, "deepagent config parameter error, reason: {error_msg}")
+    DEEPAGENT_INPUT_PARAM_ERROR = (123021, "deepagent input parameter error, reason: {error_msg}")
+    DEEPAGENT_CONTEXT_PARAM_ERROR = (123022, "deepagent callback context parameter error, reason: {error_msg}")
+    DEEPAGENT_RUNTIME_ERROR = (123023, "deepagent runtime error, reason: {error_msg}")
+    DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED = (123024, "deepagent task loop not implemented, reason: {error_msg}")
+
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999
     # =============================================================================================================

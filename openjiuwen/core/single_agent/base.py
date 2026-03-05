@@ -116,6 +116,12 @@ class BaseAgent(ABC):
     def ability_manager(self) -> AbilityManager:
         return self._ability_manager
 
+    @ability_manager.setter
+    def ability_manager(
+        self, value: AbilityManager
+    ) -> None:
+        self._ability_manager = value
+
     @property
     def agent_callback_manager(self) -> AgentCallbackManager:
         """Access the hook registry for advanced registration."""

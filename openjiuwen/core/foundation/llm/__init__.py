@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 # Core classes
-from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.model import Model, init_model
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 
@@ -36,6 +36,7 @@ from openjiuwen.core.foundation.llm.output_parsers.markdown_output_parser import
 # Core classes
 _CORE_CLASSES = [
     "Model",
+    "init_model",
     "BaseModelClient",
     "BaseOutputParser",
 ]

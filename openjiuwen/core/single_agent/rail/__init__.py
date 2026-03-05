@@ -12,6 +12,7 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
+    TaskIterationInputs,
     EventInputs,
     rail,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "InvokeInputs",
     "ModelCallInputs",
     "ToolCallInputs",
+    "TaskIterationInputs",
     "EventInputs",
     "rail",
 ]

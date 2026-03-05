@@ -44,7 +44,7 @@ from tests.unit_tests.fixtures.mock_llm import (
 # ============================================================
 
 class LogRail(AgentRail):
-    """Rail that logs all 8 events."""
+    """Rail that logs core invoke/model/tool events."""
 
     def __init__(self):
         super().__init__()
@@ -197,6 +197,9 @@ def _make_agent():
     agent = ReActAgent(card=card).configure(config)
     tool = _create_add_tool()
     agent.ability_manager.add(tool.card)
+    from openjiuwen.core.runner import Runner
+    if Runner.resource_mgr.get_tool(tool.card.id) is None:
+        Runner.resource_mgr.add_tool(tool)
     return agent, tool
 
 
@@ -225,7 +228,7 @@ class TestRailRegistration(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_agent_rail_8_events(self):
-        """All 8 events can be triggered."""
+        """Core invoke/model/tool events can be triggered."""
         agent, _ = _make_agent()
         log_rail = LogRail()
         await agent.register_rail(log_rail)

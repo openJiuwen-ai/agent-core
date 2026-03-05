@@ -346,6 +346,14 @@ class ReActAgent(BaseAgent):
 
         return self
 
+    def set_llm(self, llm: Model) -> None:
+        """Set LLM model instance directly.
+
+        Args:
+            llm: Pre-built Model instance to use.
+        """
+        self._llm = llm
+
     def _get_llm(self) -> Model:
         """Get LLM instance (lazy initialization)
 

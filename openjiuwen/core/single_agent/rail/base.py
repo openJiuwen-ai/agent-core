@@ -3,7 +3,7 @@
 """Rail & Callback base definitions for Agent lifecycle hooks.
 
 Main classes included:
- - AgentCallbackEvent: 8 lifecycle event types
+ - AgentCallbackEvent: lifecycle event types
  - AgentCallbackContext: Unified callback context
  - AgentRail: Class-based rail with tools/skills support
  - rail: Decorator for before/after/on_exception events
@@ -89,6 +89,25 @@ class ToolCallInputs:
 
 
 @dataclass
+class TaskIterationInputs:
+    """Input data for task-iteration lifecycle events.
+
+    Used by agents that support an outer task loop
+    (for example DeepAgent extensions).
+
+    Attributes:
+        iteration: 1-based outer-loop iteration index
+        loop_event: Event object that triggered this iteration
+        conversation_id: Optional conversation/session ID
+        result: Iteration result (filled after iteration)
+    """
+    iteration: int
+    loop_event: Any
+    conversation_id: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+
+
+@dataclass
 class RetryRequest:
     """Retry directive produced by on_exception rails."""
 
@@ -100,6 +119,7 @@ EventInputs = Union[
     InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
+    TaskIterationInputs,
     Dict[str, Any],
 ]
 
@@ -113,6 +133,8 @@ class AgentCallbackEvent(str, Enum):
     Lifecycle Callbacks:
         BEFORE_INVOKE: Before agent.invoke() starts
         AFTER_INVOKE: After agent.invoke() completes
+        BEFORE_TASK_ITERATION: Before one outer task-loop iteration starts
+        AFTER_TASK_ITERATION: After one outer task-loop iteration completes
 
     Model Interaction Callbacks:
         BEFORE_MODEL_CALL: Before LLM is called
@@ -126,6 +148,8 @@ class AgentCallbackEvent(str, Enum):
     """
     BEFORE_INVOKE = "before_invoke"
     AFTER_INVOKE = "after_invoke"
+    BEFORE_TASK_ITERATION = "before_task_iteration"
+    AFTER_TASK_ITERATION = "after_task_iteration"
     BEFORE_MODEL_CALL = "before_model_call"
     AFTER_MODEL_CALL = "after_model_call"
     ON_MODEL_EXCEPTION = "on_model_exception"
@@ -443,8 +467,7 @@ def rail(
                 finally:
                     if after:
                         await ctx.fire(after)
-        wrapper.rail_events = (
-            before, after, on_exception
-        )
+        events = (before, after, on_exception)
+        wrapper.rail_events = events
         return wrapper
     return decorator
