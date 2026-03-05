@@ -21,7 +21,7 @@ from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Output, Input
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
+    BaseMessage, UserMessage, SystemMessage, AssistantMessage, ModelRequestConfig, ModelClientConfig, Model
 )
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.common.security.user_config import UserConfig
@@ -206,10 +206,10 @@ class IntentDetectionExecutable(ComponentExecutable):
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         """Invoke IntentDetection node"""
-        # Extract context data
         self._set_session(session)
         self._router.set_session(session)
         await self._initialize_if_needed()
+        await self._write_user_message_to_context(inputs, context)
         chat_history = await self._get_chat_history_from_context(context)
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
         llm_output = await self._invoke_llm_and_get_result(current_inputs)
@@ -225,6 +225,7 @@ class IntentDetectionExecutable(ComponentExecutable):
                 "sensitive_mode": UserConfig.is_sensitive()
             }
         )
+        await self._write_assistant_message_to_context(llm_output, context)
         intent_res = self._parse_detection_result(llm_output)
         return intent_res
 
@@ -441,6 +442,22 @@ class IntentDetectionExecutable(ComponentExecutable):
         )
         for index, _ in enumerate(component_config.category_name_list, start=1):
             self._default_config.category_list.append(f"{category_prefix}{index}")
+
+    async def _write_user_message_to_context(self, inputs, context):
+        if context is None or not self._config.enable_history:
+            return
+        try:
+            query = IntentDetectionInput.model_validate(inputs).query or ""
+        except ValidationError:
+            return
+        if query:
+            await context.add_messages([UserMessage(content=query)])
+
+    async def _write_assistant_message_to_context(self, content: str, context):
+        if context is None or not self._config.enable_history:
+            return
+        if content:
+            await context.add_messages([AssistantMessage(content=content)])
 
 
 class IntentDetectionComponent(ComponentComposable):

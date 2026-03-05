@@ -18,7 +18,7 @@ from openjiuwen.core.graph.executable import Input, Output
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, SystemMessage, UserMessage, ModelRequestConfig, ModelClientConfig, Model
+    BaseMessage, SystemMessage, UserMessage, AssistantMessage, ModelRequestConfig, ModelClientConfig, Model
 )
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
@@ -537,6 +537,7 @@ class LLMExecutable(ComponentExecutable):
                 "sensitive_mode": UserConfig.is_sensitive()
             }
         )
+        await self._write_user_message_to_context(model_inputs, context)
         response = ""
         try:
             llm_response = await self._llm.invoke(messages=model_inputs)
@@ -567,6 +568,7 @@ class LLMExecutable(ComponentExecutable):
                 "sensitive_mode": UserConfig.is_sensitive()
             }
         )
+        await self._write_assistant_message_to_context(response, context)
         return self._create_output(response)
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
@@ -716,36 +718,38 @@ class LLMExecutable(ComponentExecutable):
                 "sensitive_mode": UserConfig.is_sensitive()
             }
         )
-        llm_output = await self._llm.invoke(messages=model_inputs) # Add await if invoke is async
+        await self._write_user_message_to_context(model_inputs, self._context)
+        llm_output = await self._llm.invoke(messages=model_inputs)
         llm_output_content = llm_output.content
 
         if self._config.cache_stream:
             self._state.accumulate_content(llm_output_content)
 
+        await self._write_assistant_message_to_context(llm_output_content, self._context)
         output = self._create_output(llm_output_content)
-        
+
         yield output
 
     async def _stream_with_chunks(self, inputs: Input) -> AsyncIterator[Output]:
         model_inputs = await self._prepare_model_inputs(inputs)
+        await self._write_user_message_to_context(model_inputs, self._context)
+        accumulated_content = ""
         try:
             async for chunk in self._llm.stream(messages=model_inputs):
                 content = WorkflowLLMUtils.extract_content(chunk)
                 if content:
-                    # Accumulate content if cache_stream is enabled
                     if self._config.cache_stream:
                         self._state.accumulate_content(content)
-                    
+                    accumulated_content += content
                     formatted_res = OutputFormatter.format_response(content,
                                                                     self._config.response_format,
                                                                     self._config.output_config)
-                    stream_out = formatted_res
-                    yield stream_out
+                    yield formatted_res
         except Exception:
-            # Clear state on error
             if self._config.cache_stream:
                 self._state.clear()
             raise
+        await self._write_assistant_message_to_context(accumulated_content, self._context)
 
     def _build_system_prompt(self, inputs: dict):
         system_prompt_template = getattr(self._config, "system_prompt_template", None)
@@ -763,6 +767,22 @@ class LLMExecutable(ComponentExecutable):
             else:
                 break
         return PromptTemplate(content=system_prompt).format(inputs).to_messages()
+
+    async def _write_user_message_to_context(self, model_inputs: list, context):
+        if context is None or not self._config.enable_history:
+            return
+        # Find the last user message from model_inputs
+        for msg in reversed(model_inputs):
+            if getattr(msg, "role", None) == "user":
+                if msg.content:
+                    await context.add_messages([UserMessage(content=msg.content)])
+                break
+
+    async def _write_assistant_message_to_context(self, content: str, context):
+        if context is None or not self._config.enable_history:
+            return
+        if content:
+            await context.add_messages([AssistantMessage(content=content)])
 
     def _validate_config(self, config: LLMCompConfig):
         self._validate_template(config.template_content, config.system_prompt_template, config.user_prompt_template)
