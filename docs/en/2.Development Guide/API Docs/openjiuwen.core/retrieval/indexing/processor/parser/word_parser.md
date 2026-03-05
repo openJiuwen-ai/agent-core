@@ -18,14 +18,15 @@ Initialize Word parser.
 ### async _parse
 
 ```python
-_parse(file_path: str) -> Optional[str]
+_parse(file_path: str, llm_client: Optional[Model] = None) -> Optional[str]
 ```
 
-Parse DOCX file.
+Parse DOCX file. Extracts paragraphs, tables, and embedded images; images are captioned via [ImageCaptioner](./captioner.md). Pass `llm_client` to enable image captioning.
 
 **Parameters**:
 
 * **file_path**(str): DOCX file path.
+* **llm_client**(Optional[Model], optional): LLM client (VLM) for image captioning. Default: None.
 
 **Returns**:
 
@@ -35,4 +36,4 @@ Parse DOCX file.
 
 * Supported file extensions: `.docx`, `.DOCX`
 * Uses python-docx library to extract DOCX text
-* Supports extracting paragraph and table content
+* Supports extracting paragraph and table content; embedded images can be captioned via [ImageCaptioner](./captioner.md) when `llm_client` is provided

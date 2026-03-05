@@ -7,7 +7,7 @@ Document parser abstract base class, inherits from Processor, provides document 
 ### async parse
 
 ```python
-parse(doc: str, doc_id: str = "", **kwargs: Any) -> List[Document]
+parse(doc: str, doc_id: str = "", llm_client: Optional[Model] = None, **kwargs: Any) -> List[Document]
 ```
 
 Parse document.
@@ -16,6 +16,7 @@ Parse document.
 
 * **doc**(str): Document source (file path, URL, etc.).
 * **doc_id**(str): Document ID. Default: "".
+* **llm_client**(Optional[Model], optional): LLM client for captioning or other LLM-based processing. Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 **Returns**:

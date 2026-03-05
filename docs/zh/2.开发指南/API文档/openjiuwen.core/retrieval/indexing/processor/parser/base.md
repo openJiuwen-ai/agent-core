@@ -7,7 +7,7 @@
 ### async parse
 
 ```python
-parse(doc: str, doc_id: str = "", **kwargs: Any) -> List[Document]
+parse(doc: str, doc_id: str = "", llm_client: Optional[Model] = None, **kwargs: Any) -> List[Document]
 ```
 
 解析文档。
@@ -16,6 +16,7 @@ parse(doc: str, doc_id: str = "", **kwargs: Any) -> List[Document]
 
 * **doc**(str)：文档源（文件路径、URL等）。
 * **doc_id**(str)：文档ID。默认值：""。
+* **llm_client**(Optional[Model], 可选)：用于 caption 等 LLM 相关处理的客户端。默认值：None。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
 
 **返回**：

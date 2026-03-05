@@ -18,14 +18,15 @@ Initialize PDF parser.
 ### async _parse
 
 ```python
-_parse(file_path: str) -> Optional[str]
+_parse(file_path: str, llm_client: Optional[Model] = None) -> Optional[str]
 ```
 
-Parse PDF file.
+Parse PDF file. Extracts text and embedded images; images are captioned via [ImageCaptioner](./captioner.md). Pass `llm_client` to enable image captioning.
 
 **Parameters**:
 
 * **file_path**(str): PDF file path.
+* **llm_client**(Optional[Model], optional): LLM client (VLM) for image captioning. Default: None.
 
 **Returns**:
 
@@ -35,4 +36,4 @@ Parse PDF file.
 
 * Supported file extensions: `.pdf`, `.PDF`
 * Uses pdfplumber library to extract PDF text
-* Extracts text page by page and merges the content
+* Extracts text page by page and merges the content; embedded images can be captioned via [ImageCaptioner](./captioner.md) when `llm_client` is provided

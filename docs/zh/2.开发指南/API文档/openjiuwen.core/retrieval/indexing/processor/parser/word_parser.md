@@ -18,14 +18,15 @@ WordParser(**kwargs: Any)
 ### async _parse
 
 ```python
-_parse(file_path: str) -> Optional[str]
+_parse(file_path: str, llm_client: Optional[Model] = None) -> Optional[str]
 ```
 
-解析 DOCX 文件。
+解析 DOCX 文件。会提取段落、表格与内嵌图片；图片会通过 [ImageCaptioner](./captioner.md) 生成 caption，需传入 `llm_client` 以启用图片描述。
 
 **参数**：
 
 * **file_path**(str)：DOCX 文件路径。
+* **llm_client**(Optional[Model], 可选)：用于图片 caption 的 LLM 客户端（VLM）。默认值：None。
 
 **返回**：
 
@@ -35,4 +36,4 @@ _parse(file_path: str) -> Optional[str]
 
 * 支持的文件扩展名：`.docx`, `.DOCX`
 * 使用 python-docx 库提取 DOCX 文本
-* 支持提取段落和表格内容
+* 支持提取段落和表格内容；内嵌图片可经 `llm_client` 调用 [ImageCaptioner](./captioner.md) 生成描述
