@@ -8,11 +8,12 @@ Uses plugin architecture, supports registering new file format parsers via decor
 """
 
 import os
-from typing import Callable, Dict, List, Type
+from typing import Callable, Dict, List, Optional, Type
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 
@@ -72,7 +73,7 @@ class AutoFileParser(Parser):
         except ImportError as e:
             logger.warning(f"Failed to import some parser modules: {e}")
 
-    async def parse(self, doc: str, doc_id: str = "", **kwargs) -> List[Document]:
+    async def parse(self, doc: str, doc_id: str = "", llm_client: Optional[Model] = None, **kwargs) -> List[Document]:
         """
         Automatically select appropriate parser based on file format
 
@@ -108,7 +109,7 @@ class AutoFileParser(Parser):
         logger.info(f"Using {parser.__class__.__name__} to parse {doc}")
 
         # Use corresponding parser to parse and get document object list
-        documents = await parser.parse(doc, doc_id, **kwargs)
+        documents = await parser.parse(doc, doc_id, llm_client=llm_client, **kwargs)
 
         if not documents:
             return []

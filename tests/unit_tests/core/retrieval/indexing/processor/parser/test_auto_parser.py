@@ -60,7 +60,7 @@ class TestAutoParser:
         parser = AutoParser(link_parser=link_parser, file_parser=file_parser)
         result = await parser.parse("https://example.com/page", doc_id="id1")
         assert result == [doc]
-        link_parser.parse.assert_awaited_once_with("https://example.com/page", doc_id="id1")
+        link_parser.parse.assert_awaited_once_with("https://example.com/page", doc_id="id1", llm_client=None)
         file_parser.parse.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -85,7 +85,7 @@ class TestAutoParser:
         try:
             result = await parser.parse(path, doc_id="id2")
             assert result == [doc]
-            file_parser.parse.assert_awaited_once_with(path, doc_id="id2")
+            file_parser.parse.assert_awaited_once_with(path, doc_id="id2", llm_client=None)
             link_parser.parse.assert_not_awaited()
         finally:
             os.unlink(path)

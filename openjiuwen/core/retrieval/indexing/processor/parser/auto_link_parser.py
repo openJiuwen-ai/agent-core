@@ -9,7 +9,7 @@ Use one KB + AutoLinkParser so any URL (wechat or web) is auto-detected and pars
 """
 
 import re
-from typing import Callable, List, Tuple, Union
+from typing import Any, Callable, List, Tuple, Union
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import Document
@@ -58,7 +58,7 @@ class AutoLinkParser(Parser):
             return False
         return any(_match_doc(pat, doc) for pat, _ in self.routes)
 
-    async def parse(self, doc: str, doc_id: str = "", **kwargs) -> List[Document]:
+    async def parse(self, doc: str, doc_id: str = "", llm_client: Any = None, **kwargs) -> List[Document]:
         for pattern_or_callable, parser in self.routes:
             if _match_doc(pattern_or_callable, doc):
                 logger.debug("AutoLinkParser delegating to %s", type(parser).__name__)

@@ -7,9 +7,10 @@ Routes to AutoLinkParser (URLs) or AutoFileParser (local files). One entry point
 Use one KB + AutoParser to accept both links (wechat, web) and files without separate APIs.
 """
 
-from typing import List
+from typing import List, Optional
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.retrieval.common.document import Document
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_file_parser import AutoFileParser
 from openjiuwen.core.retrieval.indexing.processor.parser.auto_link_parser import (
@@ -44,11 +45,11 @@ class AutoParser(Parser):
             return self._link_parser.supports(doc)
         return self._file_parser.supports(doc)
 
-    async def parse(self, doc: str, doc_id: str = "", **kwargs) -> List[Document]:
+    async def parse(self, doc: str, doc_id: str = "", llm_client: Optional[Model] = None, **kwargs) -> List[Document]:
         if _is_likely_url(doc) and self._link_parser.supports(doc):
             logger.debug("AutoParser delegating to link parser")
-            return await self._link_parser.parse(doc, doc_id=doc_id, **kwargs)
+            return await self._link_parser.parse(doc, doc_id=doc_id, llm_client=llm_client, **kwargs)
         if self._file_parser.supports(doc):
             logger.debug("AutoParser delegating to file parser")
-            return await self._file_parser.parse(doc, doc_id=doc_id, **kwargs)
+            return await self._file_parser.parse(doc, doc_id=doc_id, llm_client=llm_client, **kwargs)
         return []
