@@ -830,6 +830,9 @@ class AsyncCallbackFramework:
             if not callback_info.enabled:
                 continue
 
+            if callback_info.callback_type == "transform":
+                continue
+
             callback = callback_info.callback
 
             try:

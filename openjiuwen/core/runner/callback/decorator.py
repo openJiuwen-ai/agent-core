@@ -203,6 +203,18 @@ def create_trigger_on_call_decorator(
     """
 
     def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
+        if inspect.isasyncgenfunction(func):
+            @wraps(func)
+            async def gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                if pass_args:
+                    await framework.trigger(event, *args, **kwargs)
+                else:
+                    await framework.trigger(event)
+                async for item in func(*args, **kwargs):
+                    yield item
+
+            return gen_wrapper
+
         @wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             if pass_args:

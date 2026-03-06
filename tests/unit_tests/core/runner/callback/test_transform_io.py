@@ -77,7 +77,7 @@ async def test_trigger_transform_returns_last_result():
 
 @pytest.mark.asyncio
 async def test_trigger_transform_coexists_with_regular_trigger():
-    """trigger() runs all callbacks; trigger_transform() runs only transform-type ones."""
+    """trigger() skips transform callbacks; trigger_transform() runs only transform-type ones."""
     fw = AsyncCallbackFramework(enable_logging=False)
     regular_called = []
     transform_called = []
@@ -91,16 +91,16 @@ async def test_trigger_transform_coexists_with_regular_trigger():
         transform_called.append(x)
         return x
 
-    # trigger() fires all callbacks regardless of callback_type
+    # trigger() fires only non-transform callbacks; skips callback_type="transform"
     await fw.trigger("ev", 7)
     assert regular_called == [7]
-    assert transform_called == [7]
+    assert transform_called == []  # skipped by trigger()
 
-    # trigger_transform() fires only transform-type; regular callback not called again
+    # trigger_transform() fires only transform-type; regular callback not called
     result = await fw.trigger_transform("ev", 9)
     assert result == 9
     assert regular_called == [7]   # still unchanged — trigger_transform skips it
-    assert transform_called == [7, 9]
+    assert transform_called == [9]
 
 
 # === on_transform convenience decorator ===
@@ -118,9 +118,9 @@ async def test_on_transform_registers_transform_type():
     result = await fw.trigger_transform("ev", 5)
     assert result == 15
 
-    # trigger() also runs it (trigger does not filter by callback_type)
+    # trigger() skips transform-type callbacks
     results = await fw.trigger("ev", 5)
-    assert results == [15]
+    assert results == []
 
 
 # === transform_io via events — no registered callbacks ===

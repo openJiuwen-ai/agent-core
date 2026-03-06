@@ -26,14 +26,23 @@ class _BaseModelClientMeta(ABCMeta):
         from openjiuwen.core.runner import Runner
         from openjiuwen.core.runner.callback.events import LLMCallEvents
         _fw = Runner.callback_framework
-        instance.invoke = _fw.transform_io(
+        fn = instance.invoke
+        fn = _fw.trigger_on_call(LLMCallEvents.LLM_INVOKE_INPUT)(fn)
+        fn = _fw.transform_io(
             input_event=LLMCallEvents.LLM_INVOKE_INPUT,
             output_event=LLMCallEvents.LLM_INVOKE_OUTPUT,
-        )(instance.invoke)
-        instance.stream = _fw.transform_io(
+        )(fn)
+        fn = _fw.emits(LLMCallEvents.LLM_INVOKE_OUTPUT)(fn)
+        instance.invoke = fn
+
+        fn = instance.stream
+        fn = _fw.trigger_on_call(LLMCallEvents.LLM_STREAM_INPUT)(fn)
+        fn = _fw.transform_io(
             input_event=LLMCallEvents.LLM_STREAM_INPUT,
             output_event=LLMCallEvents.LLM_STREAM_OUTPUT,
-        )(instance.stream)
+        )(fn)
+        fn = _fw.emits_stream(LLMCallEvents.LLM_STREAM_OUTPUT, item_key="result")(fn)
+        instance.stream = fn
         return instance
 
 
