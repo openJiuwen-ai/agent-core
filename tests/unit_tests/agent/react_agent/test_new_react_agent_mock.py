@@ -345,6 +345,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
     def _create_mock_session(self):
         """创建 mock session"""
         mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
         return mock_session
 
 
@@ -421,6 +423,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock session
         mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
         mock_tool = MagicMock()
         mock_tool.invoke = AsyncMock(return_value=3)
 
@@ -471,6 +475,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock session
         mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
 
         def get_tool_side_effect(name):
             mock_tool = MagicMock()
@@ -531,6 +537,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock session
         mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
         mock_tool = MagicMock()
         mock_tool.invoke = AsyncMock(return_value=3)
         mock_get_tool.return_value = MagicMock(return_value=mock_tool)
@@ -654,7 +662,10 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
     def _create_mock_session(self):
         """创建 mock session，模拟真实 Session 的 write_stream/stream_iterator 行为"""
         import asyncio
-        mock_session = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.update_state.return_value = None
+        mock_session.pre_run = AsyncMock()
         data_queue = asyncio.Queue()
 
         async def mock_write_stream(data):

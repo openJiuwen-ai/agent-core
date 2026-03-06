@@ -68,6 +68,10 @@ class AbilityManager:
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
+        self._context_engine = None
+
+    def set_context_engine(self, context_engine) -> None:
+        self._context_engine = context_engine
 
     @staticmethod
     def _normalize_tool_calls(
@@ -424,6 +428,44 @@ class AbilityManager:
 
         return result, tool_msg
 
+    async def _run_workflow(
+            self,
+            workflow: Any,
+            workflow_id: str,
+            tool_args: Any,
+            session: Session,
+            tool_call: ToolCall,
+    ) -> Tuple[Any, Optional[ToolMessage]]:
+        """Run a workflow and return (result, tool_message).
+
+        Returns (WorkflowOutput, None) when INPUT_REQUIRED (interruption).
+        Returns (result, ToolMessage) on successful completion.
+        Raises AbilityExecutionError on failure (caller wraps in try/except).
+        """
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
+
+        workflow_session = session.create_workflow_session() if session is not None else None
+        workflow_context = (
+            await self._context_engine.create_context(context_id=workflow_id, session=session)
+            if self._context_engine is not None
+            else None
+        )
+        workflow_output = await Runner.run_workflow(
+            workflow,
+            inputs=tool_args,
+            session=workflow_session,
+            context=workflow_context,
+        )
+        if (
+            isinstance(workflow_output, WorkflowOutput)
+            and workflow_output.state == WorkflowExecutionState.INPUT_REQUIRED
+        ):
+            return workflow_output, None
+
+        result = workflow_output.result if isinstance(workflow_output, WorkflowOutput) else workflow_output
+        return result, ToolMessage(content=str(result), tool_call_id=tool_call.id)
+
     async def _execute_single_tool_call(self, tool_call: ToolCall, session: Session,
                                         tag=None) -> Tuple[Any, ToolMessage]:
         tool_name = tool_call.name
@@ -460,7 +502,6 @@ class AbilityManager:
                     error_msg,
                 ) from e
         elif tool_name in self._workflows:
-            # Execute Workflow - get instance from Runner.resource_mgr
             workflow_card = self._workflows[tool_name]
             workflow_id = workflow_card.id or workflow_card.name
             from openjiuwen.core.runner import Runner
@@ -471,14 +512,11 @@ class AbilityManager:
                     f"Workflow instance not found in resource_mgr: {workflow_id}"
                 )
             try:
-                result = await workflow.invoke(tool_args, session)
+                return await self._run_workflow(workflow, workflow_id, tool_args, session, tool_call)
             except Exception as e:
                 error_msg = f"Workflow execution error: {str(e)}"
                 logger.error(error_msg)
-                raise self._build_execution_error(
-                    tool_call,
-                    error_msg,
-                ) from e
+                raise self._build_execution_error(tool_call, error_msg) from e
         elif tool_name in self._agents:
             # Execute sub-Agent - get instance from Runner.resource_mgr
             agent_card = self._agents[tool_name]

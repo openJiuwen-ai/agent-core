@@ -9,6 +9,7 @@ Author: huenrui1@huawei.com
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from pydantic import Field, BaseModel
@@ -26,6 +27,7 @@ from openjiuwen.core.context_engine import (
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
+    ToolMessage,
     UserMessage,
     SystemMessage
 )
@@ -261,6 +263,33 @@ class ReActAgentConfig(BaseModel):
         return self
 
 
+_INTERRUPTION_KEY = "__react_agent_interruption__"
+
+
+@dataclass
+class WorkflowInterruptEntry:
+    """Per-workflow interruption record."""
+    tool_call: Any
+    component_ids: List[str]
+    workflow_execution_state: Any
+    collected_input: Any = None  # None means not yet collected
+
+
+@dataclass
+class InterruptionState:
+    """Workflow interruption state for resume support.
+
+    interrupted_workflows: per-workflow entries keyed by workflow_id
+    pending_workflow_id: workflow_id currently waiting for user feedback
+    pending_component_id: component_id currently waiting for user feedback
+    """
+    ai_message: AssistantMessage
+    iteration: int
+    interrupted_workflows: Dict[str, WorkflowInterruptEntry]
+    pending_workflow_id: str
+    pending_component_id: str
+
+
 class ReActAgent(BaseAgent):
     """ReAct paradigm Agent implementation
     ReAct loop: Reasoning -> Acting -> Observation -> Repeat
@@ -293,6 +322,7 @@ class ReActAgent(BaseAgent):
         self._llm = None
         self._init_memory_scope()
         super().__init__(card)
+        self._ability_manager.set_context_engine(self.context_engine)
 
     def _init_memory_scope(self) -> None:
         """Initialize memory scope (subclass can override configuration)"""
@@ -335,7 +365,7 @@ class ReActAgent(BaseAgent):
             self.context_engine = ContextEngine(
                 config.context_engine_config
             )
-
+            self._ability_manager.set_context_engine(self.context_engine)
         # Update memory_scope if memory scope ID changed
         if old_config.mem_scope_id != config.mem_scope_id:
             self._init_memory_scope()
@@ -411,14 +441,59 @@ class ReActAgent(BaseAgent):
     async def _railed_model_call(self, ctx: AgentCallbackContext) -> AssistantMessage:
         """Execute LLM call with @rail before/after/on_exception hooks.
 
+        Uses llm.stream() when session is present, falls back to llm.invoke() otherwise.
         Rail hooks may have modified ctx.inputs.messages / ctx.inputs.tools.
         """
         llm = self._get_llm()
-        ai_message = await llm.invoke(
+        session = ctx.session
+
+        if session is None:
+            ai_message = await llm.invoke(
+                model=self._config.model_name,
+                messages=ctx.inputs.messages,
+                tools=ctx.inputs.tools or None,
+            )
+            ctx.inputs.response = ai_message
+            return ai_message
+
+        # Streaming path: accumulate chunks via __add__, write to session in real-time
+        accumulated_chunk = None
+        chunk_index = 0
+
+        async for chunk in llm.stream(
             model=self._config.model_name,
             messages=ctx.inputs.messages,
             tools=ctx.inputs.tools or None,
-        )
+        ):
+            if accumulated_chunk is None:
+                accumulated_chunk = chunk
+            else:
+                accumulated_chunk = accumulated_chunk + chunk
+
+            if chunk.reasoning_content:
+                await session.write_stream(OutputSchema(
+                    type="llm_reasoning",
+                    index=chunk_index,
+                    payload={"content": chunk.reasoning_content},
+                ))
+                chunk_index += 1
+            if chunk.content:
+                await session.write_stream(OutputSchema(
+                    type="llm_output",
+                    index=chunk_index,
+                    payload={"content": chunk.content},
+                ))
+                chunk_index += 1
+
+        if accumulated_chunk is None:
+            ai_message = AssistantMessage(content="", tool_calls=[])
+        else:
+            ai_message = AssistantMessage(
+                content=accumulated_chunk.content or "",
+                tool_calls=accumulated_chunk.tool_calls or [],
+                usage_metadata=accumulated_chunk.usage_metadata,
+                reasoning_content=accumulated_chunk.reasoning_content,
+            )
         ctx.inputs.response = ai_message
         return ai_message
 
@@ -428,32 +503,242 @@ class ReActAgent(BaseAgent):
             tool_calls: List,
             session: Optional[Session],
             context: ModelContext,
-    ) -> None:
-        """Execute tool calls and commit tool messages into context.
+    ) -> list:
+        """Execute tool calls in parallel and commit tool messages into context.
 
-        Args:
-            ctx: Shared AgentCallbackContext for this invoke
-            tool_calls: List of tool call objects from the LLM response
-            session: Session object (required for tool execution)
-            context: ModelContext to commit tool messages into
+        Returns:
+            List of (tool_result, tool_message) tuples from ability_manager
         """
-        for tool_call in tool_calls:
-            logger.info(
-                f"Executing tool: {tool_call.name} "
-                f"with args: {tool_call.arguments}"
-            )
-
         if not tool_calls:
-            return
+            return []
 
-        results = await self.ability_manager.execute(
-            ctx=ctx,
-            tool_call=tool_calls,
-            session=session,
-        )
+        for tool_call in tool_calls:
+            logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
+
+        results = await self.ability_manager.execute(ctx=ctx, tool_call=tool_calls, session=session)
 
         for _, tool_message in results:
-            await context.add_messages(tool_message)
+            if tool_message is not None:
+                await context.add_messages(tool_message)
+
+        return results
+
+    def _is_interrupted(self, tool_result: Any) -> bool:
+        """Detect whether a tool result signals workflow interruption."""
+        from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
+        if isinstance(tool_result, WorkflowOutput):
+            return tool_result.state == WorkflowExecutionState.INPUT_REQUIRED
+        if isinstance(tool_result, list):
+            return any(
+                hasattr(item, "type") and item.type == "__interaction__"
+                for item in tool_result
+            )
+        return False
+
+    def _extract_component_ids(self, tool_result: Any) -> List[str]:
+        """Extract component IDs from an interrupted workflow result, sorted for stability."""
+        from openjiuwen.core.workflow import WorkflowOutput
+        if isinstance(tool_result, WorkflowOutput) and isinstance(tool_result.result, list):
+            ids = []
+            for item in tool_result.result:
+                if (hasattr(item, "type") and item.type == "__interaction__" and
+                        hasattr(item, "payload") and hasattr(item.payload, "id")):
+                    ids.append(item.payload.id)
+            return sorted(ids)
+        if isinstance(tool_result, list):
+            ids = []
+            for item in tool_result:
+                if (hasattr(item, "type") and item.type == "__interaction__" and
+                        hasattr(item, "payload") and isinstance(item.payload, dict)):
+                    ids.append(item.payload.get("component_id", ""))
+            return sorted(ids)
+        return []
+
+    def _extract_workflow_id(self, tool_call: Any) -> str:
+        """Resolve workflow_id from tool_call.name via ability_manager."""
+        for ability in self._ability_manager.list():
+            if ability.name == tool_call.name:
+                return ability.id
+        return tool_call.name  # fallback
+
+    def _after_execute_tool_call(
+            self,
+            results: list,
+            tool_calls: list,
+            ai_message: AssistantMessage,
+            iteration: int,
+    ) -> Optional[InterruptionState]:
+        """Check tool results for interruption and build InterruptionState if found.
+
+        Collects ALL interrupted workflows into interrupted_workflows dict.
+        Sets pending_workflow_id/pending_component_id to the first interrupted one.
+
+        Returns:
+            InterruptionState if any result is interrupted, else None
+        """
+        interrupted: Dict[str, WorkflowInterruptEntry] = {}
+        first_workflow_id = None
+        first_component_id = None
+
+        for i, (tool_result, _) in enumerate(results):
+            if self._is_interrupted(tool_result):
+                workflow_id = self._extract_workflow_id(tool_calls[i])
+                component_ids = self._extract_component_ids(tool_result)
+                interrupted[workflow_id] = WorkflowInterruptEntry(
+                    tool_call=tool_calls[i],
+                    component_ids=component_ids,
+                    workflow_execution_state=tool_result,
+                )
+                if first_workflow_id is None:
+                    first_workflow_id = workflow_id
+                    first_component_id = component_ids[0] if component_ids else ""
+
+        if not interrupted:
+            return None
+
+        return InterruptionState(
+            ai_message=ai_message,
+            iteration=iteration,
+            interrupted_workflows=interrupted,
+            pending_workflow_id=first_workflow_id,
+            pending_component_id=first_component_id,
+        )
+
+    def _save_interruption_state(self, state: InterruptionState, session) -> None:
+        if session:
+            session.update_state({_INTERRUPTION_KEY: state})
+
+    def _load_interruption_state(self, session) -> Optional[InterruptionState]:
+        if session:
+            return session.get_state(_INTERRUPTION_KEY)
+        return None
+
+    def _clear_interruption_state(self, session) -> None:
+        if session:
+            session.update_state({_INTERRUPTION_KEY: None})
+
+    def _build_interrupt_result(self, state: InterruptionState) -> Dict[str, Any]:
+        """Build the interrupt result dict returned to the caller."""
+        pending_entry = state.interrupted_workflows[state.pending_workflow_id]
+        return {
+            "result_type": "interrupt",
+            "workflow_execution_state": pending_entry.workflow_execution_state,
+            "component_ids": [state.pending_component_id],
+        }
+
+    async def _commit_interrupt(
+            self,
+            interrupt: InterruptionState,
+            context: ModelContext,
+            session: Optional[Session],
+            invoke_inputs: InvokeInputs,
+    ) -> Dict[str, Any]:
+        """Persist interruption state and return the interrupt result dict.
+
+        Writes a single placeholder ToolMessage for the pending workflow's tool_call.
+        """
+        pending_entry = interrupt.interrupted_workflows[interrupt.pending_workflow_id]
+        await context.add_messages(ToolMessage(
+            tool_call_id=pending_entry.tool_call.id,
+            content="[INTERRUPTED - Waiting for user input]",
+        ))
+        await self.context_engine.save_contexts(session)
+        self._save_interruption_state(interrupt, session)
+        result = self._build_interrupt_result(interrupt)
+        invoke_inputs.result = result
+        return result
+
+    async def _handle_resume(
+            self,
+            interruption_state: InterruptionState,
+            user_input: Any,
+            ctx: AgentCallbackContext,
+            context: ModelContext,
+            session: Optional[Session],
+            *,
+            invoke_inputs: InvokeInputs,
+    ) -> Optional[Dict[str, Any]]:
+        """Process one resume step.
+
+        Collects user feedback for the pending workflow/component.
+        Triggers concurrent resume only when ALL interrupted workflows have feedback.
+
+        Returns interrupt result dict if still waiting, or None to continue ReAct loop.
+        """
+        import copy
+
+        resume_iteration = interruption_state.iteration
+        logger.info(f"Resuming ReAct from iteration {resume_iteration + 1}")
+
+        # Step 1: record feedback for the current pending workflow
+        pending_wf_id = interruption_state.pending_workflow_id
+        pending_comp_id = interruption_state.pending_component_id
+        pending_entry = interruption_state.interrupted_workflows[pending_wf_id]
+
+        interactive_input = self._build_interactive_input(user_input, [pending_comp_id])
+        pending_entry.collected_input = interactive_input
+
+        # Step 2: check if all interrupted workflows have collected feedback
+        all_collected = all(
+            entry.collected_input is not None
+            for entry in interruption_state.interrupted_workflows.values()
+        )
+
+        if not all_collected:
+            # Find next workflow without feedback and commit interrupt for it
+            for wf_id, entry in interruption_state.interrupted_workflows.items():
+                if entry.collected_input is None:
+                    next_comp_id = entry.component_ids[0] if entry.component_ids else ""
+                    interruption_state.pending_workflow_id = wf_id
+                    interruption_state.pending_component_id = next_comp_id
+                    return await self._commit_interrupt(interruption_state, context, session, invoke_inputs)
+
+        # Step 3: all feedbacks collected — write ai_message and concurrently resume all workflows
+        resume_ai_message = copy.deepcopy(interruption_state.ai_message)
+        await context.add_messages(resume_ai_message)
+
+        all_tool_calls = []
+        for entry in interruption_state.interrupted_workflows.values():
+            tc_copy = copy.deepcopy(entry.tool_call)
+            tc_copy.arguments = entry.collected_input
+            all_tool_calls.append(tc_copy)
+
+        results = await self._execute_tool_call(ctx, all_tool_calls, session, context)
+        interrupt = self._after_execute_tool_call(results, all_tool_calls, resume_ai_message, resume_iteration)
+        if interrupt:
+            return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+
+        # All workflows completed — continue ReAct loop from next iteration
+        ctx.extra["_resume_start_iteration"] = resume_iteration + 1
+        return None
+
+    def _extract_user_text(self, user_input: Any) -> str:
+        """Extract plain text from user_input (supports InteractiveInput or str)."""
+        from openjiuwen.core.session import InteractiveInput
+        if isinstance(user_input, InteractiveInput):
+            if user_input.user_inputs:
+                return str(next(iter(user_input.user_inputs.values())))
+            if user_input.raw_inputs is not None:
+                return str(user_input.raw_inputs)
+            return ""
+        return str(user_input)
+
+    def _build_interactive_input(self, user_query: Any, component_ids: List[str]) -> Any:
+        """Build an InteractiveInput from user feedback and component IDs."""
+        from openjiuwen.core.session import InteractiveInput
+        if isinstance(user_query, InteractiveInput):
+            provided_ids = set(user_query.user_inputs.keys())
+            fallback = next(iter(user_query.user_inputs.values()), "") if provided_ids else ""
+            for comp_id in component_ids:
+                if comp_id not in provided_ids:
+                    user_query.update(comp_id, fallback)
+            return user_query
+        if component_ids:
+            interactive_input = InteractiveInput()
+            for comp_id in component_ids:
+                interactive_input.update(comp_id, str(user_query))
+            return interactive_input
+        return InteractiveInput(raw_inputs=str(user_query))
 
     async def _warn_missing_skill_read_file_tool(self) -> None:
         """
@@ -531,7 +816,6 @@ class ReActAgent(BaseAgent):
         if not isinstance(inputs, (dict, str)):
             raise ValueError("Input must be dict with 'query' or str")
 
-        # Build typed InvokeInputs
         if isinstance(inputs, dict):
             query = inputs.get("query", "")
             conversation_id = inputs.get("conversation_id")
@@ -539,78 +823,100 @@ class ReActAgent(BaseAgent):
             query = inputs
             conversation_id = None
 
-        invoke_inputs = InvokeInputs(
-            query=query,
-            conversation_id=conversation_id,
-        )
+        invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
+        ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
 
-        # Create shared context for the entire invoke lifecycle
-        ctx = AgentCallbackContext(
-            agent=self,
-            inputs=invoke_inputs,
-            session=session,
-        )
-
-        async with ctx.lifecycle(
-                AgentCallbackEvent.BEFORE_INVOKE,
-                AgentCallbackEvent.AFTER_INVOKE,
-        ):
-            # Extract user_input AFTER before_invoke so rail modifications take effect
+        async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
             user_input = ctx.inputs.query
             if not user_input:
                 raise ValueError("Input must contain 'query'")
 
-            # Get or create model context
+            interruption_state = self._load_interruption_state(session)
+            if interruption_state is not None:
+                self._clear_interruption_state(session)
+
             context = await self._init_context(session)
             ctx.context = context
 
-            # Add user message to context
-            await context.add_messages(UserMessage(content=user_input))
-
-            # Build system messages from prompt template
-            # prompt_template is List[Dict], access via dict keys
             system_messages = [
                 SystemMessage(role=msg["role"], content=msg["content"])
                 for msg in self._config.prompt_template
                 if msg.get("role") == "system"
             ]
-
-            if len(system_messages) > 0 and self._skill_util is not None and self._skill_util.has_skill():
+            if system_messages and self._skill_util is not None and self._skill_util.has_skill():
                 await self._warn_missing_skill_read_file_tool()
                 skill_prompt = self._skill_util.get_skill_prompt()
-                last_msg = system_messages[-1]
-                last_msg.content = (last_msg.content or "") + "\n" + skill_prompt
+                system_messages[-1].content = (system_messages[-1].content or "") + "\n" + skill_prompt
 
-            # Get tool info from _ability_manager
             tools = await self.ability_manager.list_tool_info()
+            await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
 
-            # ReAct loop
-            for iteration in range(self._config.max_iterations):
-                logger.info(
-                    f"ReAct iteration {iteration + 1}/{self._config.max_iterations}"
+            start_iteration = 0
+            if interruption_state is not None:
+                resume_result = await self._handle_resume(
+                    interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                 )
+                if resume_result is not None:
+                    return resume_result
+                start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
 
-                # Model call (BEFORE/AFTER_MODEL_CALL hooks fire inside _call_model)
+            for iteration in range(start_iteration, self._config.max_iterations):
+                logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+
                 ai_message = await self._call_model(ctx, context, system_messages, tools)
-
                 await context.add_messages(
                     AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
                 )
 
-                if ai_message.tool_calls:
-                    # Tool execution (BEFORE/AFTER_TOOL_CALL hooks fire inside __execute_tool_call)
-                    await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
-                else:
+                if not ai_message.tool_calls:
                     await self.context_engine.save_contexts(session)
                     result = {"output": ai_message.content, "result_type": "answer"}
                     invoke_inputs.result = result
                     return result
 
-            # Max iterations reached
+                results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+                interrupt = self._after_execute_tool_call(results, ai_message.tool_calls, ai_message, iteration)
+                if interrupt:
+                    return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+
             await self.context_engine.save_contexts(session)
             result = {"output": "Max iterations reached without completion", "result_type": "error"}
             invoke_inputs.result = result
             return result
+
+    async def _write_invoke_result_to_stream(
+            self,
+            result: Dict[str, Any],
+            session: Session,
+    ) -> None:
+        """Write the final invoke result to the session stream.
+
+        For interrupt results, only emit the single OutputSchema whose payload.id
+        matches the pending_component_id, so callers see exactly one interaction chunk.
+        """
+        result_type = result.get("result_type", "")
+        if result_type == "interrupt":
+            workflow_state = result.get("workflow_execution_state")
+            component_ids = result.get("component_ids", [])
+            pending_id = component_ids[0] if component_ids else None
+            schemas = (
+                workflow_state.result
+                if workflow_state is not None
+                and isinstance(getattr(workflow_state, "result", None), list)
+                else []
+            )
+            for schema in schemas:
+                if (pending_id is None
+                        or (hasattr(schema, "payload")
+                            and hasattr(schema.payload, "id")
+                            and schema.payload.id == pending_id)):
+                    await session.write_stream(schema)
+        else:
+            await session.write_stream(OutputSchema(
+                type="answer",
+                index=0,
+                payload={"output": result.get("output", ""), "result_type": result_type},
+            ))
 
     async def stream(
             self,
@@ -637,24 +943,12 @@ class ReActAgent(BaseAgent):
             try:
                 final_result = await self.invoke(inputs, session)
                 final_result_holder["result"] = final_result
-                # Write to session stream if available
                 if session is not None:
-                    await session.write_stream(OutputSchema(
-                        type="answer",
-                        index=0,
-                        payload={
-                            "output": final_result,
-                            "result_type": "answer"
-                        }
-                    ))
+                    await self._write_invoke_result_to_stream(final_result, session)
             except Exception as e:
                 logger.error(f"ReActAgent stream error: {e}")
-                final_result_holder["result"] = {
-                    "output": str(e),
-                    "result_type": "error"
-                }
+                final_result_holder["result"] = {"output": str(e), "result_type": "error"}
             finally:
-                # Close stream
                 if session is not None:
                     await self.context_engine.save_contexts(session)
                     await session.post_run()
