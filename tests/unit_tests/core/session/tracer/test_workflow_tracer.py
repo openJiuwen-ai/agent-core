@@ -652,7 +652,7 @@ class TestTraceWorkflow:
                          {'invokeId': 'interact', 'status': 'start', 'inputs': None,
                           'streamInputs': None, 'outputs': None, 'streamOutputs': None, 'workflowId': 'test',
                           'componentId': 'interact'},
-                         {'invokeId': 'interact', 'status': 'finish', 'inputs': None,
+                         {'invokeId': 'interact', 'status': 'interrupted', 'inputs': None,
                           'streamInputs': None, 'outputs': None,
                           'streamOutputs': [], 'workflowId': 'test',
                           'componentId': 'interact'},
