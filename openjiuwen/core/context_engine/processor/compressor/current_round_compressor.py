@@ -12,55 +12,67 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor, Cont
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.foundation.llm import (
     BaseMessage, AssistantMessage, SystemMessage, UserMessage,
-    ModelRequestConfig, ModelClientConfig, Model, JsonOutputParser
+    ModelRequestConfig, ModelClientConfig, Model, JsonOutputParser, ToolMessage
 )
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 
 
 DEFAULT_COMPRESSION_PROMPT: str = """
-You are a Context-Refinement Assistant.
-Your task: compress the following message(s) into **≤ 30% of original length** while preserving all essential facts, decisions, constraints, and tool execution results needed for future replies.
+You are a context refinement assistant.
+Your sole task: Compress the following conversation history into **≤ 500 tokens**, while retaining all facts, decisions, constraints, and key values needed for future replies.
 
 ---
-
 📌 Input Format Explanation:
 Each message follows the format: "role:<role_type>, content:<actual_content>"
-- role=assistant: The AI's response/answer
-- role=tool: The result of a tool execution
+- role=assistant: The actual content is the AI's response/answer, which may contain tool calls (tool_calls field)
+- role=tool: The actual content is the result of a tool execution
 
 Your task is to:
 1. Identify the actual content within each message (ignore the "role:" prefix)
-2. Compress and summarize the content(s) only
-3. For tool messages: Explicitly state what tool was called and what result was obtained
+2. Only compress and summarize the actual content
 
 ---
 
 📌 Compression Rules (mandatory):
 - Use natural language; preserve business data structures (categories, differences, features)
-- Keep **all task-relevant specific points** (requirements, constraints, parameters, decisions)
-- For tool calls: MUST preserve the tool name, input parameters, and the result/output
-- For multiple messages: Maintain causal relationships and chronological logic
-- Preserve any numerical values, IDs, configuration parameters, and business rules
+- Retain **all task-relevant specific points**
+- Do not omit any content that answers sub-questions
+---
+
+📌 MANDATORY REQUIREMENT - Tool Call Information (must be explicitly retained):
+
+**Step 1: Extract Tool Calls from Assistant Messages**
+For all messages with role=assistant that contain tool_calls, you MUST extract:
+1. **Tool ID**: The unique identifier for each tool call (e.g., `tool_call_id_001`)
+2. **Tool Name**: The specific name of the tool being called (e.g., `add`, `search`, `weather`)
+
+**Step 2: Match with Tool Results**
+- Match each tool call with its corresponding tool result (role=tool message)
+- Record what result was obtained from each executed tool
+
+**Step 3: Summarize Execution Status**
+You MUST explicitly state the following in your summary:
+1. **Executed Tools**: List all tools that have been called AND executed, including:
+   - Tool ID
+   - Tool Name
+   - Result obtained
+2. **Pending Tools**: List any tools that were called but NOT yet executed (if any)
+3. **Completion Status**: State whether ALL tool calls have been executed or there are pending ones
+
+**Output Format Example**:
+- Original assistant message contains: tool_calls: [{"id": "call_001", "name": "add", "arguments": "3+5"}]
+- Original tool result: "tool: Result of call_001: 8"
+- Compressed must contain: "Tool call: call_001 -> add(3+5), Executed, Result: 8"
 
 ---
 
 📌 Output Requirements:
-- Preserve key information, conclusions, decisions, and answers
-- For tool executions: Always include "Tool: <tool_name> → Result: <result_summary>"
-- If single message: Preserve key information, conclusions, and specific details
-- If multiple messages: Summarize the overall context, main decisions made, and any constraints established
+- Retain key information, conclusions, decisions, and answers
+- **For tool messages, must explicitly state: what tool was called, what parameters were passed, what result was obtained**
+- **For assistant messages with tool_calls, must track: which tools have been executed, which are pending, and the final status**
+- Prefix format: "Through <tool_name> tool, obtained: <compressed_text>"
 
----
-
-📌 Strict output format:
-- Valid JSON wrapped in ```json``` code block:
-```json
-{
-    "summary": "<refined_text>"
-}
-```
-- The <refined_text> should be in natural language, NOT include any JSON syntax or markdown
-- Output MUST be exactly in the format above, no extra text outside the JSON
+Output valid JSON: {"summary": "<compressed_text>"}
 """
 
 
@@ -71,7 +83,7 @@ class CurrentRoundCompressorConfig(BaseModel):
     tokens_threshold: int = Field(default=10000, gt=0)
     """Maximum accumulated token count before offloading is triggered."""
 
-    messages_to_keep: int = Field(default=None, gt=0)
+    messages_to_keep: int | None = Field(default=None, gt=0)
     """Guaranteed number of most-recent messages to retain, regardless of any other threshold."""
     large_message_threshold: int = Field(default=1000, gt=0)
 
@@ -184,7 +196,7 @@ class CurrentRoundCompressor(ContextProcessor):
             logger.info(f"[{self.processor_type()} triggered] context messages num {message_size} "
                         f"exceeds threshold of {config.messages_threshold}")
             return True
-        if message_size < self._messages_to_keep:
+        if self._messages_to_keep and message_size < self._messages_to_keep:
             return False
         token_counter = context.token_counter()
         tokens = 0
@@ -278,8 +290,16 @@ class CurrentRoundCompressor(ContextProcessor):
             messages_to_compress: List[BaseMessage],
             context: ModelContext
     ) -> Optional[BaseMessage]:
+        ai_count = 0
+        tool_count = 0
+        for msg in messages_to_compress:
+            if isinstance(msg, AssistantMessage):
+                ai_count += 1
+            if isinstance(msg, ToolMessage):
+                tool_count += 1
+        all_count = ai_count + tool_count
         processed_messages = [
-            UserMessage(content=f"role:{msg.role}, content:{msg.content}")
+            UserMessage(content=f"role:{msg.role}, content:{msg}")
             for msg in messages_to_compress
         ]
         response = await self._model.invoke(
@@ -294,7 +314,8 @@ class CurrentRoundCompressor(ContextProcessor):
             summary = summary.get("summary", "")
             offload_message = await self.offload_messages(
                 role="user",
-                content=summary,
+                content=f"[This is the compressed message, and a total of {all_count} messages have been compressed."
+                        f"It includes {ai_count} assistant messages and {tool_count} tool messages.]" + summary,
                 messages=messages_to_compress,
                 context=context
             )
