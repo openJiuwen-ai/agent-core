@@ -7,7 +7,20 @@ import mimetypes
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 
-IMAGE_CAPTION_PROMPT = "Write a short caption describing the provided image."
+# The captioning prompt below is directly informed by:
+# - General multimodal RAG conventions of declaring purpose ("for retrieval")
+# - Emphasis on qualitative summaries of document visuals for retrieval (https://openreview.net/forum?id=ogjBpZ8uSi)
+# - "Beyond Text"'s instruction to produce summaries well optimized for retrieval (https://arxiv.org/abs/2410.21943)
+# - Embodied-RAG's dense detail captioning strategy used during indexing
+
+IMAGE_CAPTION_PROMPT = (
+    "You are an assistant specialized in document and image analysis. "
+    "Your task is to provide a detailed, qualitative description of the provided image "
+    "so that it can be embedded and used for semantic retrieval. "
+    "Describe all visible content including text, figures, charts, tables, diagrams, and layout. "
+    "Focus on what the image conveys and means, not just what it literally depicts. "
+    "Do not include any preamble — output only the description."
+)
 SAVED_IMAGE_DIR = "images"
 
 # Adding missing MIME type for .jfif files mapping them to "image/jpeg"
