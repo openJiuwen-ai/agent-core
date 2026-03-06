@@ -240,12 +240,14 @@ class AbilityManager:
         # Convert ToolCards to ToolInfo
         for name, tool_card in self._tools.items():
             if names is None or name in names:
-                tool_info = ToolInfo(
-                    name=tool_card.name,
-                    description=tool_card.description or "",
-                    parameters=tool_card.input_params or {}
-                )
-                tool_infos.append(tool_info)
+                id_in_tool_card = tool_card.id
+                if not self._is_tool_in_mcp_server(id_in_tool_card):
+                    tool_info = ToolInfo(
+                        name=tool_card.name,
+                        description=tool_card.description or "",
+                        parameters=tool_card.input_params or {}
+                    )
+                    tool_infos.append(tool_info)
 
         # Convert WorkflowCards to ToolInfo
         for name, workflow_card in self._workflows.items():
@@ -570,3 +572,7 @@ class AbilityManager:
         )
 
         return result, tool_message
+
+    def _is_tool_in_mcp_server(self, id_in_tool_card):
+        mcp_server_id = [mcp_server.server_id for _, mcp_server in self._mcp_servers.items()]
+        return any([id_in_tool_card.startswith(f"{mid}.") for mid in mcp_server_id])
