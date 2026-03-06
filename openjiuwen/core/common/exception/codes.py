@@ -568,6 +568,7 @@ class StatusCode(Enum):
     TOOLCHAIN_TRAINER_EXECUTION_ERROR = (170005, "toolchain trainer execution error, reason: {error_msg}")
 
     # Optimization Toolchain - End-to-end Performance Optimization 171000 - 171999
+
     # Optimization Toolchain - AgentRL 172000 - 172999
 
     # Optimization Toolchain - Prompt Builder 173000 - 173999
@@ -581,7 +582,7 @@ class StatusCode(Enum):
         173002, "toolchain bad_case_template execution error, reason: {error_msg}"
     )
 
-    # Optimization Toolchain - Task Memory (Middleware/Service) 174000 - 174999
+    # Optimization Toolchain - Task Memory (Middleware/Service) 174000 - 174025
     TOOLCHAIN_EVOLVING_MEMORY_RETRIEVE_EXECUTION_ERROR = (
         174000, "toolchain evolving memory retrieve execution error, reason: {error_msg}"
     )
@@ -626,6 +627,46 @@ class StatusCode(Enum):
     )
     TOOLCHAIN_EVOLVING_MEMORY_INPUT_INVALID = (
         174014, "toolchain evolving memory input is invalid, reason: {error_msg}"
+    )
+
+    # Optimization Toolchain - Tool Self-optimization 174025 - 174049
+    TOOLCHAIN_EVOLVING_TOOL_CALL_CONFIG_ERROR = (
+        174025, "toolchain optimizer tool_call config error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_PARAM_ERROR = (
+        174026, "toolchain optimizer tool_call parameter error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_RUNTIME_ERROR = (
+        174027, "toolchain optimizer tool_call runtime error, reason: {error_msg}"
+    )
+
+    TOOLCHAIN_EVOLVING_TOOL_CALL_EXAMPLE_STAGE_EXECUTION_ERROR = (
+        174028, "toolchain optimizer tool_call example_stage execution error, reason: {error_msg}"
+    )
+
+    TOOLCHAIN_EVOLVING_TOOL_CALL_BEAM_SEARCH_EXECUTION_ERROR = (
+        174029, "toolchain optimizer tool_call beam_search execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_EVALUATOR_EXECUTION_ERROR = (
+        174030, "toolchain optimizer tool_call evaluator execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR = (
+        174031, "toolchain optimizer tool_call llm_call execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_REVIEWER_EXECUTION_ERROR = (
+        174032, "toolchain optimizer tool_call reviewer execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_SCHEMA_EXTRACT_EXECUTION_ERROR = (
+        174033, "toolchain optimizer tool_call schema_extract execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_OUTPUT_PARSE_ERROR = (
+        174034, "toolchain optimizer tool_call output parse error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_LOGGING_EXECUTION_ERROR = (
+        174035, "toolchain optimizer tool_call logging execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_RESULT_PERSIST_EXECUTION_ERROR = (
+        174036, "toolchain optimizer tool_call result persist execution error, reason: {error_msg}"
     )
 
     # =========================
