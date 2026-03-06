@@ -97,6 +97,8 @@ checkpointer = await CheckpointerFactory.create(config)
 - `db_enable_wal`: 是否启用 SQLite WAL（Write-Ahead Logging）模式，默认 `True`。WAL 模式可提高写入性能
 
 # 使用 Shelve 存储
+
+```
 config = CheckpointerConfig(
     type="persistence",
     conf={

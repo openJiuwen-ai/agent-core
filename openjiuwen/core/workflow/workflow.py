@@ -1,43 +1,69 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
-import json
 import uuid
-
-from collections import OrderedDict
-from typing import Self, Union, AsyncIterator, List, Tuple
+from abc import ABCMeta
+from typing import (
+    AsyncIterator,
+    Self,
+)
 
 from openjiuwen.core.common.constants.constant import INTERACTION
-from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import LogEventType
-from openjiuwen.core.common.logging import workflow_logger as logger
+from openjiuwen.core.common.exception.errors import (
+    BaseError,
+    build_error,
+)
+from openjiuwen.core.common.logging import (
+    LogEventType,
+    workflow_logger as logger,
+)
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
-from openjiuwen.core.workflow.base import WorkflowCard, WorkflowChunk, WorkflowExecutionState, \
-    WorkflowOutput
-from openjiuwen.core.workflow._workflow import BaseWorkflow
-from openjiuwen.core.workflow.components.component import ComponentComposable
-from openjiuwen.core.workflow.components.flow.end_comp import End
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.graph.base import Router, INPUTS_KEY, CONFIG_KEY
-from openjiuwen.core.graph.executable import Executable, Input, Output
-from openjiuwen.core.session import WORKFLOW_EXECUTE_TIMEOUT, \
-    WORKFLOW_STREAM_FRAME_TIMEOUT, WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT, WorkflowSession
-from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.session import Transformer
-from openjiuwen.core.session import SubWorkflowSession, NodeSession
-from openjiuwen.core.session.stream import StreamMode, BaseStreamMode, OutputSchema
-from openjiuwen.core.session.stream import StreamEmitter
-from openjiuwen.core.session.stream import StreamWriterManager
-from openjiuwen.core.session.workflow import Session
-from openjiuwen.core.graph.stream_actor.manager import ActorManager
-from openjiuwen.core.session.tracer import Tracer
-from openjiuwen.core.session.tracer import TracerWorkflowUtils
-from openjiuwen.core.workflow.workflow_config import WorkflowConfig
-from openjiuwen.core.workflow.components.base import ComponentAbility
+from openjiuwen.core.graph.base import (
+    CONFIG_KEY,
+    INPUTS_KEY,
+    Router,
+)
+from openjiuwen.core.graph.executable import (
+    Executable,
+    Input,
+    Output,
+)
 from openjiuwen.core.graph.graph import PregelGraph
-from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage
-from abc import ABCMeta
+from openjiuwen.core.graph.stream_actor.manager import ActorManager
+from openjiuwen.core.session import (
+    InteractiveInput,
+    NodeSession,
+    SubWorkflowSession,
+    Transformer,
+    WORKFLOW_EXECUTE_TIMEOUT,
+    WORKFLOW_STREAM_FIRST_FRAME_TIMEOUT,
+    WORKFLOW_STREAM_FRAME_TIMEOUT,
+    WorkflowSession,
+)
+from openjiuwen.core.session.stream import (
+    BaseStreamMode,
+    OutputSchema,
+    StreamEmitter,
+    StreamMode,
+    StreamWriterManager,
+)
+from openjiuwen.core.session.tracer import (
+    Tracer,
+    TracerWorkflowUtils,
+)
+from openjiuwen.core.session.workflow import Session
+from openjiuwen.core.workflow._workflow import BaseWorkflow
+from openjiuwen.core.workflow.base import (
+    WorkflowCard,
+    WorkflowChunk,
+    WorkflowExecutionState,
+    WorkflowOutput,
+)
+from openjiuwen.core.workflow.components.base import ComponentAbility
+from openjiuwen.core.workflow.components.component import ComponentComposable
+from openjiuwen.core.workflow.workflow_config import WorkflowConfig
 
 
 class _WorkflowMeta(ABCMeta):
@@ -47,21 +73,21 @@ class _WorkflowMeta(ABCMeta):
         from openjiuwen.core.runner.callback.events import WorkflowEvents
         _fw = Runner.callback_framework
         fn = instance.invoke
-        fn = _fw.trigger_on_call(WorkflowEvents.WORKFLOW_INVOKE_INPUT)(fn)
+        fn = _fw.emit_before(WorkflowEvents.WORKFLOW_INVOKE_INPUT)(fn)
         fn = _fw.transform_io(
             input_event=WorkflowEvents.WORKFLOW_INVOKE_INPUT,
             output_event=WorkflowEvents.WORKFLOW_INVOKE_OUTPUT,
         )(fn)
-        fn = _fw.emits(WorkflowEvents.WORKFLOW_INVOKE_OUTPUT)(fn)
+        fn = _fw.emit_after(WorkflowEvents.WORKFLOW_INVOKE_OUTPUT)(fn)
         instance.invoke = fn
 
         fn = instance.stream
-        fn = _fw.trigger_on_call(WorkflowEvents.WORKFLOW_STREAM_INPUT)(fn)
+        fn = _fw.emit_before(WorkflowEvents.WORKFLOW_STREAM_INPUT)(fn)
         fn = _fw.transform_io(
             input_event=WorkflowEvents.WORKFLOW_STREAM_INPUT,
             output_event=WorkflowEvents.WORKFLOW_STREAM_OUTPUT,
         )(fn)
-        fn = _fw.emits_stream(WorkflowEvents.WORKFLOW_STREAM_OUTPUT, item_key="result")(fn)
+        fn = _fw.emit_after(WorkflowEvents.WORKFLOW_STREAM_OUTPUT, item_key="result")(fn)
         instance.stream = fn
         return instance
 

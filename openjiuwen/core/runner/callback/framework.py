@@ -32,14 +32,13 @@ from typing import (
 from openjiuwen.core.runner.callback.chain import CallbackChain
 from openjiuwen.core.runner.callback.decorator import (
     _TRANSFORM_NOOP,
+    create_emit_after_decorator,
     create_emit_around_decorator,
-    create_emits_decorator,
-    create_emits_stream_decorator,
+    create_emit_before_decorator,
     create_on_decorator,
     create_on_wrap_decorator,
     create_transform_io_by_events_decorator,
     create_transform_io_decorator,
-    create_trigger_on_call_decorator,
     create_wrap_by_event_decorator,
     InputTransform,
     OutputTransform,
@@ -264,79 +263,67 @@ class AsyncCallbackFramework:
 
         return callback_info
 
-    def trigger_on_call(
+    def emit_before(
             self,
             event: str,
-            pass_result: bool = False,
+            *,
             pass_args: bool = True
     ):
-        """Decorator to automatically trigger event when function is called.
+        """Decorator to trigger event BEFORE the decorated function is called.
 
-        Triggers the event before executing the decorated function.
+        Supports async functions, async generators, sync functions (promoted
+        to async), and sync generators (promoted to async generators).
 
-        Example:
-            >>> @framework.trigger_on_call("processing_started")
+        Example (async):
+            >>> @framework.emit_before("processing_started")
             >>> async def process_data(data):
             >>>     return {"processed": data}
 
+        Example (sync — promoted to async):
+            >>> @framework.emit_before("processing_started")
+            >>> def process_data(data):
+            >>>     return {"processed": data}
+            >>> # Must be awaited: result = await process_data(data)
+
         Args:
             event: Event name to trigger
-            pass_result: Whether to pass function result to callbacks
             pass_args: Whether to pass function arguments to callbacks
 
         Returns:
             Decorator function
         """
-        return create_trigger_on_call_decorator(
-            self, event, pass_result=pass_result, pass_args=pass_args
-        )
+        return create_emit_before_decorator(self, event, pass_args=pass_args)
 
-    def emits(
+    def emit_after(
             self,
             event: str,
+            *,
             result_key: str = "result",
-            include_args: bool = False
+            item_key: str = "item",
+            pass_args: bool = False,
+            stream_mode: Literal["per_item", "once"] = "per_item",
     ):
-        """Decorator to trigger event with function result after execution.
+        """Decorator to trigger event AFTER the decorated function completes.
 
-        Triggers the event after the function completes, passing the result.
+        For regular functions: triggers event with the result.
+        For generators: triggers event for each yielded item (per_item mode)
+        or once with all collected items (once mode).
 
-        Example:
-            >>> @framework.emits("data_processed")
+        Supports async functions, async generators, sync functions (promoted
+        to async), and sync generators (promoted to async generators).
+
+        Example (regular function):
+            >>> @framework.emit_after("data_processed")
             >>> async def process_data(data):
             >>>     return {"processed": data}
-            >>>
             >>> # Callbacks receive: result={"processed": data}
 
-        Args:
-            event: Event name to trigger
-            result_key: Keyword argument name for the result
-            include_args: Whether to include original args in event
-
-        Returns:
-            Decorator function
-        """
-        return create_emits_decorator(
-            self, event, result_key=result_key, include_args=include_args
-        )
-
-    def emits_stream(
-            self,
-            event: str,
-            item_key: str = "item"
-    ) -> Callable:
-        """Decorator to emit events for each item yielded by async generator.
-
-        When decorating an async generator function, this will automatically
-        trigger an event for each item that is yielded. The original items
-        are still yielded to the caller.
-
-        Example:
+        Example (stream per_item):
             >>> @framework.on("chunk_ready")
             >>> async def save_chunk(item: dict):
             >>>     print(f"Saving: {item}")
             >>>
-            >>> @framework.emits_stream("chunk_ready")
+            >>> @framework.emit_after("chunk_ready")
             >>> async def process_file(filepath: str):
             >>>     with open(filepath, 'r') as f:
             >>>         for line in f:
@@ -346,14 +333,31 @@ class AsyncCallbackFramework:
             >>> async for chunk in process_file("data.txt"):
             >>>     pass  # chunk_ready event triggered for each chunk
 
+        Example (stream once):
+            >>> @framework.emit_after("all_chunks_done", stream_mode="once")
+            >>> async def process_file(filepath: str):
+            >>>     for line in open(filepath):
+            >>>         yield {"line": line.strip()}
+            >>> # Callbacks receive: result=[{"line": ...}, {"line": ...}, ...]
+
         Args:
-            event: Event name to trigger for each yielded item
-            item_key: Keyword argument name for the yielded item (default: "item")
+            event: Event name to trigger
+            result_key: Keyword argument name for the result (regular functions)
+            item_key: Keyword argument name for each yielded item (generators)
+            pass_args: Whether to include original args in event
+            stream_mode: For generators - "per_item" triggers per item, "once"
+                triggers after all items are yielded with collected results
 
         Returns:
-            Decorated async generator function
+            Decorator function
         """
-        return create_emits_stream_decorator(self, event, item_key=item_key)
+        return create_emit_after_decorator(
+            self, event,
+            result_key=result_key,
+            item_key=item_key,
+            pass_args=pass_args,
+            stream_mode=stream_mode,
+        )
 
     def emit_around(
             self,
@@ -368,11 +372,20 @@ class AsyncCallbackFramework:
         Triggers before_event before execution and after_event after completion.
         Optionally triggers on_error_event if an exception occurs.
 
-        Example:
+        Supports async functions, async generators, sync functions (promoted
+        to async), and sync generators (promoted to async generators).
+
+        Example (async):
             >>> @framework.emit_around("process_start", "process_end",
             >>>                        on_error_event="process_error")
             >>> async def process_data(data):
             >>>     return {"processed": data}
+
+        Example (sync — promoted to async):
+            >>> @framework.emit_around("start", "end")
+            >>> def compute(x):
+            >>>     return x * 2
+            >>> # Must be awaited: result = await compute(5)
 
         Args:
             before_event: Event to trigger before execution

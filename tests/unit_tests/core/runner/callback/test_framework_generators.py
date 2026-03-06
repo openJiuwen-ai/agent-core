@@ -208,8 +208,8 @@ async def test_trigger_generator_handles_errors(framework):
 
 
 @pytest.mark.asyncio
-async def test_emits_stream_basic(framework):
-    """Test emits_stream triggers event for each yielded item."""
+async def test_emit_after_stream_basic(framework):
+    """Test emit_after with stream triggers event for each yielded item."""
 
     event_items = []
 
@@ -217,7 +217,7 @@ async def test_emits_stream_basic(framework):
     async def on_chunk(item: dict):
         event_items.append(item)
 
-    @framework.emits_stream("chunk_ready")
+    @framework.emit_after("chunk_ready")
     async def process():
         for i in range(3):
             yield {"index": i}
@@ -226,18 +226,16 @@ async def test_emits_stream_basic(framework):
     async for item in process():
         consumed.append(item)
 
-    # Both should have 3 items
     assert len(event_items) == 3
     assert len(consumed) == 3
 
-    # Items should match
     for i in range(3):
         assert event_items[i] == consumed[i]
 
 
 @pytest.mark.asyncio
-async def test_emits_stream_custom_item_key(framework):
-    """Test emits_stream with custom item key."""
+async def test_emit_after_stream_custom_item_key(framework):
+    """Test emit_after with stream and custom item key."""
 
     received_kwargs = []
 
@@ -245,7 +243,7 @@ async def test_emits_stream_custom_item_key(framework):
     async def handler(**kwargs):
         received_kwargs.append(kwargs)
 
-    @framework.emits_stream("event", item_key="data")
+    @framework.emit_after("event", item_key="data")
     async def generate():
         yield {"value": 1}
         yield {"value": 2}
@@ -258,8 +256,8 @@ async def test_emits_stream_custom_item_key(framework):
 
 
 @pytest.mark.asyncio
-async def test_emits_stream_multiple_handlers(framework):
-    """Test emits_stream triggers multiple handlers."""
+async def test_emit_after_stream_multiple_handlers(framework):
+    """Test emit_after with stream triggers multiple handlers."""
 
     handler1_items = []
     handler2_items = []
@@ -272,7 +270,7 @@ async def test_emits_stream_multiple_handlers(framework):
     async def handler2(item):
         handler2_items.append(item)
 
-    @framework.emits_stream("event")
+    @framework.emit_after("event")
     async def generate():
         yield "item1"
         yield "item2"
@@ -285,8 +283,8 @@ async def test_emits_stream_multiple_handlers(framework):
 
 
 @pytest.mark.asyncio
-async def test_emits_stream_preserves_generator(framework):
-    """Test emits_stream doesn't modify yielded items."""
+async def test_emit_after_stream_preserves_generator(framework):
+    """Test emit_after with stream doesn't modify yielded items."""
 
     original_items = [{"id": 1}, {"id": 2}, {"id": 3}]
 
@@ -294,7 +292,7 @@ async def test_emits_stream_preserves_generator(framework):
     async def handler(item):
         pass
 
-    @framework.emits_stream("event")
+    @framework.emit_after("event")
     async def generate():
         for item in original_items:
             yield item
@@ -307,8 +305,8 @@ async def test_emits_stream_preserves_generator(framework):
 
 
 @pytest.mark.asyncio
-async def test_emits_stream_with_exception(framework):
-    """Test emits_stream propagates exceptions."""
+async def test_emit_after_stream_with_exception(framework):
+    """Test emit_after with stream propagates exceptions."""
 
     event_count = 0
 
@@ -317,7 +315,7 @@ async def test_emits_stream_with_exception(framework):
         nonlocal event_count
         event_count += 1
 
-    @framework.emits_stream("event")
+    @framework.emit_after("event")
     async def failing_generator():
         yield {"id": 1}
         raise ValueError("Generator error!")
@@ -326,21 +324,7 @@ async def test_emits_stream_with_exception(framework):
         async for _ in failing_generator():
             pass
 
-    # First item should have triggered the event
     assert event_count == 1
-
-
-@pytest.mark.asyncio
-async def test_emits_stream_type_check(framework):
-    """Test emits_stream raises error for non-generators."""
-
-    @framework.emits_stream("event")
-    async def not_a_generator():
-        return "not a generator"
-
-    with pytest.raises(TypeError, match="async generator"):
-        async for _ in not_a_generator():
-            pass
 
 
 @pytest.mark.asyncio
@@ -365,25 +349,21 @@ async def test_trigger_stream_logs_and_raises_error(framework_with_logging, capl
 
 
 @pytest.mark.asyncio
-async def test_emits_stream_logs_error(framework_with_logging, caplog):
-    """Test emits_stream logs errors before re-raising."""
-    import logging
+async def test_emit_after_stream_reraises_error(framework_with_logging):
+    """Test emit_after with stream re-raises errors from the generator."""
 
     @framework_with_logging.on("event")
     async def handler(item):
         pass
 
-    @framework_with_logging.emits_stream("event")
+    @framework_with_logging.emit_after("event")
     async def failing_generator():
         yield {"id": 1}
         raise ValueError("Generator failed!")
 
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(ValueError, match="Generator failed"):
-            async for _ in failing_generator():
-                pass
-
-    assert any("Error in emits_stream" in record.message for record in caplog.records)
+    with pytest.raises(ValueError, match="Generator failed"):
+        async for _ in failing_generator():
+            pass
 
 
 @pytest.mark.asyncio

@@ -1,23 +1,44 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from abc import ABCMeta, abstractmethod
-from typing import List, Optional, AsyncIterator, Union, Dict, Any
-
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.exception.codes import StatusCode
-
-from openjiuwen.core.common.logging import llm_logger, LogEventType
-from openjiuwen.core.common.security.user_config import UserConfig
-from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, ToolMessage, UserMessage
-from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
-from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
-from openjiuwen.core.foundation.llm.schema.generation_response import (
-    ImageGenerationResponse,
-    AudioGenerationResponse,
-    VideoGenerationResponse
+from abc import (
+    ABC,
+    ABCMeta,
+    abstractmethod,
 )
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Union,
+)
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import (
+    llm_logger,
+    LogEventType,
+)
+from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema.config import (
+    ModelClientConfig,
+    ModelRequestConfig,
+)
+from openjiuwen.core.foundation.llm.schema.generation_response import (
+    AudioGenerationResponse,
+    ImageGenerationResponse,
+    VideoGenerationResponse,
+)
+from openjiuwen.core.foundation.llm.schema.message import (
+    AssistantMessage,
+    BaseMessage,
+    ToolMessage,
+    UserMessage,
+)
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.tool import ToolInfo
 
 
 class _BaseModelClientMeta(ABCMeta):
@@ -27,26 +48,26 @@ class _BaseModelClientMeta(ABCMeta):
         from openjiuwen.core.runner.callback.events import LLMCallEvents
         _fw = Runner.callback_framework
         fn = instance.invoke
-        fn = _fw.trigger_on_call(LLMCallEvents.LLM_INVOKE_INPUT)(fn)
+        fn = _fw.emit_before(LLMCallEvents.LLM_INVOKE_INPUT)(fn)
         fn = _fw.transform_io(
             input_event=LLMCallEvents.LLM_INVOKE_INPUT,
             output_event=LLMCallEvents.LLM_INVOKE_OUTPUT,
         )(fn)
-        fn = _fw.emits(LLMCallEvents.LLM_INVOKE_OUTPUT)(fn)
+        fn = _fw.emit_after(LLMCallEvents.LLM_INVOKE_OUTPUT)(fn)
         instance.invoke = fn
 
         fn = instance.stream
-        fn = _fw.trigger_on_call(LLMCallEvents.LLM_STREAM_INPUT)(fn)
+        fn = _fw.emit_before(LLMCallEvents.LLM_STREAM_INPUT)(fn)
         fn = _fw.transform_io(
             input_event=LLMCallEvents.LLM_STREAM_INPUT,
             output_event=LLMCallEvents.LLM_STREAM_OUTPUT,
         )(fn)
-        fn = _fw.emits_stream(LLMCallEvents.LLM_STREAM_OUTPUT, item_key="result")(fn)
+        fn = _fw.emit_after(LLMCallEvents.LLM_STREAM_OUTPUT, item_key="result")(fn)
         instance.stream = fn
         return instance
 
 
-class BaseModelClient(metaclass=_BaseModelClientMeta):
+class BaseModelClient(ABC, metaclass=_BaseModelClientMeta):
     """LLM Model Client Abstract Base Class
 
     All Model Client implementations must inherit from this class and implement the abstract methods.
@@ -91,7 +112,8 @@ class BaseModelClient(metaclass=_BaseModelClientMeta):
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config ssl_cert is required when verify_ssl is True.")
 
-    def _convert_messages_to_dict(self, messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
+    @staticmethod
+    def _convert_messages_to_dict(messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
         """Convert messages to specific API format
 
         Args:
@@ -146,7 +168,8 @@ class BaseModelClient(metaclass=_BaseModelClientMeta):
 
         return result
 
-    def _convert_tools_to_dict(self, tools: Union[List[ToolInfo], List[dict], None]) -> Optional[List[dict]]:
+    @staticmethod
+    def _convert_tools_to_dict(tools: Union[List[ToolInfo], List[dict], None]) -> Optional[List[dict]]:
         """Convert to OpenAI format: [{"type": "function", "function": {...}}]
 
         Args:

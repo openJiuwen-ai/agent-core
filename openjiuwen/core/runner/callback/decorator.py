@@ -4,9 +4,9 @@
 """
 Decorator implementations for AsyncCallbackFramework.
 
-Extracted decorator logic for on(), trigger_on_call(), emits(),
-emits_stream(), and emit_around() to keep framework.py focused on
-registration and execution flow.
+Extracted decorator logic for on(), emit_before(), emit_after(),
+and emit_around() to keep framework.py focused on registration and
+execution flow.
 
 Also provides transform_io decorator for modifying function inputs/outputs
 with full async and generator support. Transform logic can be provided
@@ -48,6 +48,7 @@ InputTransform = Callable[
 ]
 OutputTransform = Callable[[Any], Any | Awaitable[Any]]
 
+
 class WrapHandler(Protocol):
     """Callable placed in a wrap chain around another function.
 
@@ -73,7 +74,8 @@ class WrapHandler(Protocol):
         /,
         *args: Any,
         **kwargs: Any,
-    ) -> Awaitable[Any] | AsyncIterator[Any]: ...
+    ) -> Awaitable[Any] | AsyncIterator[Any]:
+        ...
 
 
 def _bind_args_no_duplicate(
@@ -181,131 +183,194 @@ def create_on_decorator(
     return decorator
 
 
-def create_trigger_on_call_decorator(
+async def _do_trigger(
     framework: Any,
     event: str,
-    pass_result: bool = False,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
     pass_args: bool = True,
-) -> Callable[[Callable[..., Awaitable[Any]]], Callable]:
-    """Create decorator that triggers event when the decorated function is called.
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    """Unified trigger helper to eliminate repetitive patterns."""
+    merged = {**kwargs, **(extra or {})}
+    if pass_args:
+        await framework.trigger(event, *args, **merged)
+    else:
+        await framework.trigger(event, **merged)
 
-    Triggers the event before executing the decorated function; optionally
-    triggers again with result if pass_result is True.
+
+def create_emit_before_decorator(
+    framework: Any,
+    event: str,
+    *,
+    pass_args: bool = True,
+) -> Callable[[Callable[..., Any]], Callable]:
+    """Create decorator that triggers event BEFORE the decorated function is called.
+
+    Supports async functions, async generators, sync functions (promoted to
+    async), and sync generators (promoted to async generators).
 
     Args:
         framework: AsyncCallbackFramework instance (has trigger).
         event: Event name to trigger.
-        pass_result: Whether to pass function result to callbacks.
         pass_args: Whether to pass function arguments to callbacks.
 
     Returns:
         A decorator that triggers the event then runs the wrapped function.
     """
 
-    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
+    def decorator(func: Callable[..., Any]) -> Callable:
         if inspect.isasyncgenfunction(func):
             @wraps(func)
-            async def gen_wrapper(*args: Any, **kwargs: Any) -> Any:
-                if pass_args:
-                    await framework.trigger(event, *args, **kwargs)
-                else:
-                    await framework.trigger(event)
+            async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args)
                 async for item in func(*args, **kwargs):
                     yield item
 
-            return gen_wrapper
+            return async_gen_wrapper
+
+        if inspect.iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args)
+                return await func(*args, **kwargs)
+
+            return async_wrapper
+
+        if inspect.isgeneratorfunction(func):
+            @wraps(func)
+            async def sync_gen_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
+                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args)
+                for item in func(*args, **kwargs):
+                    yield item
+
+            return sync_gen_promoted_wrapper
 
         @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if pass_args:
-                await framework.trigger(event, *args, **kwargs)
-            else:
-                await framework.trigger(event)
+        async def sync_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
+            await _do_trigger(framework, event, args, kwargs, pass_args=pass_args)
+            return func(*args, **kwargs)
 
-            result = await func(*args, **kwargs)
-
-            if pass_result:
-                await framework.trigger(event, result=result)
-
-            return result
-
-        return wrapper
+        return sync_promoted_wrapper
 
     return decorator
 
 
-def create_emits_decorator(
+def create_emit_after_decorator(
     framework: Any,
     event: str,
+    *,
     result_key: str = "result",
-    include_args: bool = False,
-) -> Callable[[Callable[..., Awaitable[Any]]], Callable]:
-    """Create decorator that triggers event with function result after execution.
+    item_key: str = "item",
+    pass_args: bool = False,
+    stream_mode: Literal["per_item", "once"] = "per_item",
+) -> Callable[[Callable[..., Any]], Callable]:
+    """Create decorator that triggers event AFTER the decorated function completes.
+
+    For regular functions: triggers event with the result.
+    For generators: triggers event for each yielded item (per_item mode)
+    or once with all collected items (once mode).
+
+    Supports async functions, async generators, sync functions (promoted to
+    async), and sync generators (promoted to async generators).
 
     Args:
-        framework: AsyncCallbackFramework instance (has trigger).
+        framework: AsyncCallbackFramework instance (has trigger, enable_logging, logger).
         event: Event name to trigger.
-        result_key: Keyword argument name for the result.
-        include_args: Whether to include original args in event.
+        result_key: Keyword argument name for the result (regular functions).
+        item_key: Keyword argument name for each yielded item (generators).
+        pass_args: Whether to include original args in event.
+        stream_mode: For generators - "per_item" triggers per item, "once" triggers
+            after all items are yielded with collected results.
 
     Returns:
         A decorator that runs the function then triggers the event with result.
     """
 
-    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
+    def decorator(func: Callable[..., Any]) -> Callable:
+        if inspect.isasyncgenfunction(func):
+            if stream_mode == "once":
+
+                @wraps(func)
+                async def async_gen_once_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    collected: list[Any] = []
+                    async for item in func(*args, **kwargs):
+                        collected.append(item)
+                        yield item
+                    await _do_trigger(
+                        framework, event, args, kwargs,
+                        pass_args=pass_args,
+                        extra={result_key: collected},
+                    )
+
+                return async_gen_once_wrapper
+
+            @wraps(func)
+            async def async_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
+                async for item in func(*args, **kwargs):
+                    await _do_trigger(
+                        framework, event, (), {},
+                        pass_args=False,
+                        extra={item_key: item},
+                    )
+                    yield item
+
+            return async_gen_per_item_wrapper
+
+        if inspect.iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                result = await func(*args, **kwargs)
+                await _do_trigger(
+                    framework, event, args, kwargs,
+                    pass_args=pass_args,
+                    extra={result_key: result},
+                )
+                return result
+
+            return async_wrapper
+
+        if inspect.isgeneratorfunction(func):
+            if stream_mode == "once":
+
+                @wraps(func)
+                async def sync_gen_once_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    collected: list[Any] = []
+                    for item in func(*args, **kwargs):
+                        collected.append(item)
+                        yield item
+                    await _do_trigger(
+                        framework, event, args, kwargs,
+                        pass_args=pass_args,
+                        extra={result_key: collected},
+                    )
+
+                return sync_gen_once_wrapper
+
+            @wraps(func)
+            async def sync_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
+                for item in func(*args, **kwargs):
+                    await _do_trigger(
+                        framework, event, (), {},
+                        pass_args=False,
+                        extra={item_key: item},
+                    )
+                    yield item
+
+            return sync_gen_per_item_wrapper
+
         @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            result = await func(*args, **kwargs)
-            event_kwargs: dict[str, Any] = {result_key: result}
-            if include_args:
-                event_kwargs.update(kwargs)
-                await framework.trigger(event, *args, **event_kwargs)
-            else:
-                await framework.trigger(event, **event_kwargs)
+        async def sync_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
+            result = func(*args, **kwargs)
+            await _do_trigger(
+                framework, event, args, kwargs,
+                pass_args=pass_args,
+                extra={result_key: result},
+            )
             return result
 
-        return wrapper
-
-    return decorator
-
-
-def create_emits_stream_decorator(
-    framework: Any,
-    event: str,
-    item_key: str = "item",
-) -> Callable[[Callable], Callable]:
-    """Create decorator that emits event for each item yielded by async generator.
-
-    Args:
-        framework: AsyncCallbackFramework instance (has trigger, enable_logging, logger).
-        event: Event name to trigger for each yielded item.
-        item_key: Keyword argument name for the yielded item.
-
-    Returns:
-        A decorator that wraps an async generator and triggers event per item.
-    """
-
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            async_gen = func(*args, **kwargs)
-            if not inspect.isasyncgen(async_gen):
-                raise TypeError(
-                    "emits_stream can only decorate async generator functions, "
-                    f"got {type(async_gen)}"
-                )
-            try:
-                async for item in async_gen:
-                    await framework.trigger(event, **{item_key: item})
-                    yield item
-            except Exception as e:
-                if framework.enable_logging:
-                    framework.logger.error(
-                        f"Error in emits_stream for event '{event}': {e}"
-                    )
-                raise
-
-        return wrapper
+        return sync_promoted_wrapper
 
     return decorator
 
@@ -318,8 +383,13 @@ def create_emit_around_decorator(
     pass_args: bool = True,
     pass_result: bool = True,
     on_error_event: Optional[str] = None,
-) -> Callable[[Callable[..., Awaitable[Any]]], Callable]:
+) -> Callable[[Callable[..., Any]], Callable]:
     """Create decorator that triggers events before and after function execution.
+
+    Supports async functions, async generators, sync functions (promoted to
+    async), and sync generators (promoted to async generators). For generators,
+    after_event is triggered after all items are yielded (with collected results
+    if pass_result=True).
 
     Args:
         framework: AsyncCallbackFramework instance (has trigger).
@@ -333,45 +403,87 @@ def create_emit_around_decorator(
         A decorator that triggers before/after/error events around the function.
     """
 
-    def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
+    async def _trigger_after(
+        args: tuple[Any, ...], kwargs: dict[str, Any], result: Any
+    ) -> None:
+        if pass_result:
+            await _do_trigger(
+                framework, after_event, args, kwargs,
+                pass_args=pass_args,
+                extra={"result": result},
+            )
+        else:
+            await _do_trigger(framework, after_event, args, kwargs, pass_args=pass_args)
+
+    async def _trigger_error(
+        args: tuple[Any, ...], kwargs: dict[str, Any], e: Exception
+    ) -> None:
+        if on_error_event:
+            await _do_trigger(
+                framework, on_error_event, args, kwargs,
+                pass_args=pass_args,
+                extra={"error": e},
+            )
+
+    def decorator(func: Callable[..., Any]) -> Callable:
+        if inspect.isasyncgenfunction(func):
+            @wraps(func)
+            async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                await _do_trigger(framework, before_event, args, kwargs, pass_args=pass_args)
+                collected: list[Any] = []
+                try:
+                    async for item in func(*args, **kwargs):
+                        collected.append(item)
+                        yield item
+                    await _trigger_after(args, kwargs, collected)
+                except Exception as e:
+                    await _trigger_error(args, kwargs, e)
+                    raise
+
+            return async_gen_wrapper
+
+        if inspect.iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                await _do_trigger(framework, before_event, args, kwargs, pass_args=pass_args)
+                try:
+                    result = await func(*args, **kwargs)
+                    await _trigger_after(args, kwargs, result)
+                    return result
+                except Exception as e:
+                    await _trigger_error(args, kwargs, e)
+                    raise
+
+            return async_wrapper
+
+        if inspect.isgeneratorfunction(func):
+            @wraps(func)
+            async def sync_gen_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
+                await _do_trigger(framework, before_event, args, kwargs, pass_args=pass_args)
+                collected: list[Any] = []
+                try:
+                    for item in func(*args, **kwargs):
+                        collected.append(item)
+                        yield item
+                    await _trigger_after(args, kwargs, collected)
+                except Exception as e:
+                    await _trigger_error(args, kwargs, e)
+                    raise
+
+            return sync_gen_promoted_wrapper
+
         @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if pass_args:
-                await framework.trigger(before_event, *args, **kwargs)
-            else:
-                await framework.trigger(before_event)
-
+        async def sync_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
+            await _do_trigger(framework, before_event, args, kwargs, pass_args=pass_args)
             try:
-                result = await func(*args, **kwargs)
-
-                if pass_result:
-                    after_kwargs = dict(kwargs)
-                    after_kwargs["result"] = result
-                    if pass_args:
-                        await framework.trigger(after_event, *args, **after_kwargs)
-                    else:
-                        await framework.trigger(after_event, result=result)
-                else:
-                    if pass_args:
-                        await framework.trigger(after_event, *args, **kwargs)
-                    else:
-                        await framework.trigger(after_event)
-
+                result = func(*args, **kwargs)
+                await _trigger_after(args, kwargs, result)
                 return result
-
             except Exception as e:
-                if on_error_event:
-                    error_kwargs = dict(kwargs)
-                    error_kwargs["error"] = e
-                    if pass_args:
-                        await framework.trigger(
-                            on_error_event, *args, **error_kwargs
-                        )
-                    else:
-                        await framework.trigger(on_error_event, error=e)
+                await _trigger_error(args, kwargs, e)
                 raise
 
-        return wrapper
+        return sync_promoted_wrapper
 
     return decorator
 
@@ -384,6 +496,152 @@ async def _apply_output_transform(
     if inspect.iscoroutine(out):
         return await out
     return out
+
+
+def _make_transform_io_decorator(
+    func: Callable[..., Any],
+    *,
+    input_fn: Callable[
+        [tuple[Any, ...], dict[str, Any]],
+        Awaitable[tuple[tuple[Any, ...], dict[str, Any]]],
+    ],
+    output_fn: Callable[[Any], Awaitable[Any]],
+    output_source_fn: Optional[Callable],
+    output_mode: Literal["frame", "generator"],
+) -> Callable[..., Any]:
+    """Core builder for transform_io wrappers (both direct and event-based).
+
+    Args:
+        func: The function to wrap.
+        input_fn: Async callable transforming (args, kwargs) -> (new_args, new_kwargs).
+        output_fn: Async callable transforming a single output value.
+        output_source_fn: Async callable receiving an AsyncIterator source and
+            returning an async iterable (generator mode only). None = passthrough.
+        output_mode: "frame" applies output_fn per item; "generator" passes the
+            entire source to output_source_fn.
+
+    Returns:
+        Wrapped function preserving func's metadata via functools.wraps.
+    """
+    func_async_gen = inspect.isasyncgenfunction(func)
+    func_async = inspect.iscoroutinefunction(func)
+    func_sync_gen = inspect.isgeneratorfunction(func)
+
+    if output_mode == "generator" and not func_async_gen and not func_sync_gen:
+        raise ValueError(
+            "output_mode='generator' is only supported for generator "
+            f"functions; got {func!r}"
+        )
+
+    # Branch 1: async gen + generator mode
+    if func_async_gen and output_mode == "generator":
+
+        @wraps(func)
+        async def async_gen_wrapper_gen_mode(*args: Any, **kwargs: Any) -> Any:
+            new_args, new_kwargs = await input_fn(args, kwargs)
+            call_args, call_kwargs = _bind_args_no_duplicate(
+                func, new_args, new_kwargs
+            )
+            source = func(*call_args, **call_kwargs)
+            if output_source_fn is None:
+                async for item in source:
+                    yield item
+            else:
+                iterable = await output_source_fn(source)
+                async for item in iterable:
+                    yield item
+
+        return async_gen_wrapper_gen_mode  # type: ignore[return-value]
+
+    # Branch 2: async gen + frame mode
+    if func_async_gen:
+
+        @wraps(func)
+        async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+            new_args, new_kwargs = await input_fn(args, kwargs)
+            call_args, call_kwargs = _bind_args_no_duplicate(
+                func, new_args, new_kwargs
+            )
+            async_gen = func(*call_args, **call_kwargs)
+            if not inspect.isasyncgen(async_gen):
+                raise TypeError(
+                    "expected async generator function, "
+                    f"got {type(async_gen)}"
+                )
+            async for item in async_gen:
+                yield await output_fn(item)
+
+        return async_gen_wrapper  # type: ignore[return-value]
+
+    # Branch 3: async function
+    if func_async:
+
+        @wraps(func)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            new_args, new_kwargs = await input_fn(args, kwargs)
+            call_args, call_kwargs = _bind_args_no_duplicate(
+                func, new_args, new_kwargs
+            )
+            result = await func(*call_args, **call_kwargs)
+            return await output_fn(result)
+
+        return async_wrapper  # type: ignore[return-value]
+
+    # Branch 4: sync gen + generator mode
+    if func_sync_gen and output_mode == "generator":
+
+        @wraps(func)
+        async def sync_gen_promoted_gen_mode(*args: Any, **kwargs: Any) -> Any:
+            new_args, new_kwargs = await input_fn(args, kwargs)
+            call_args, call_kwargs = _bind_args_no_duplicate(
+                func, new_args, new_kwargs
+            )
+            gen = func(*call_args, **call_kwargs)
+
+            async def _async_adapter() -> Any:
+                for item in gen:
+                    yield item
+
+            if output_source_fn is None:
+                async for item in _async_adapter():
+                    yield item
+            else:
+                iterable = await output_source_fn(_async_adapter())
+                async for item in iterable:
+                    yield item
+
+        return sync_gen_promoted_gen_mode  # type: ignore[return-value]
+
+    # Branch 5: sync gen + frame mode (promoted)
+    if func_sync_gen:
+
+        @wraps(func)
+        async def sync_gen_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
+            new_args, new_kwargs = await input_fn(args, kwargs)
+            call_args, call_kwargs = _bind_args_no_duplicate(
+                func, new_args, new_kwargs
+            )
+            gen = func(*call_args, **call_kwargs)
+            if not inspect.isgenerator(gen):
+                raise TypeError(
+                    "expected generator function, got " f"{type(gen)}"
+                )
+            for item in gen:
+                yield await output_fn(item)
+
+        return sync_gen_promoted_wrapper  # type: ignore[return-value]
+
+    # Branch 6: sync plain (promoted)
+    @wraps(func)
+    async def sync_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
+        new_args, new_kwargs = await input_fn(args, kwargs)
+        call_args, call_kwargs = _bind_args_no_duplicate(
+            func, new_args, new_kwargs
+        )
+        result = func(*call_args, **call_kwargs)
+        return await output_fn(result)
+
+    return sync_promoted_wrapper
 
 
 def create_transform_io_decorator(
@@ -457,25 +715,11 @@ def create_transform_io_decorator(
     """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        func_async_gen = inspect.isasyncgenfunction(func)
-        func_async = inspect.iscoroutinefunction(func)
         func_sync_gen = inspect.isgeneratorfunction(func)
+        func_async = inspect.iscoroutinefunction(func)
+        func_async_gen = inspect.isasyncgenfunction(func)
 
-        if output_mode == "generator" and not func_async_gen and not func_sync_gen:
-            raise ValueError(
-                "output_mode='generator' is only supported for generator "
-                f"functions; got {func!r}"
-            )
-
-        async def _run_input_transform(
-            args: tuple[Any, ...], kwargs: dict[str, Any]
-        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-            if input_transform is None:
-                return args, kwargs
-            out = input_transform(*args, **kwargs)
-            if inspect.iscoroutine(out):
-                return await out
-            return out  # type: ignore[return-value]
+        # --- sync paths (kept pure sync to preserve generator/function nature) ---
 
         def _run_input_transform_sync(
             args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -490,98 +734,8 @@ def create_transform_io_decorator(
                 )
             return out  # type: ignore[return-value]
 
-        # Async generator — generator mode: pass the entire source to output_transform.
-        if func_async_gen and output_mode == "generator":
-
-            @wraps(func)
-            async def async_gen_wrapper_gen_mode(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _run_input_transform(args, kwargs)
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                source = func(*call_args, **call_kwargs)
-                if output_transform is None:
-                    async for item in source:
-                        yield item
-                else:
-                    async for item in output_transform(source):
-                        yield item
-
-            return async_gen_wrapper_gen_mode  # type: ignore[return-value]
-
-        # Async generator — frame mode (default): apply output_transform per item.
-        if func_async_gen:
-
-            @wraps(func)
-            async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _run_input_transform(
-                    args, kwargs
-                )
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                async_gen = func(*call_args, **call_kwargs)
-                if not inspect.isasyncgen(async_gen):
-                    raise TypeError(
-                        "expected async generator function, "
-                        f"got {type(async_gen)}"
-                    )
-                async for item in async_gen:
-                    if output_transform is None:
-                        yield item
-                    else:
-                        yield await _apply_output_transform(
-                            item, output_transform
-                        )
-
-            return async_gen_wrapper  # type: ignore[return-value]
-
-        # Async (coroutine) function.
-        if func_async:
-
-            @wraps(func)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _run_input_transform(
-                    args, kwargs
-                )
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                result = await func(*call_args, **call_kwargs)
-                if output_transform is None:
-                    return result
-                return await _apply_output_transform(
-                    result, output_transform
-                )
-
-            return async_wrapper  # type: ignore[return-value]
-
-        # Sync generator — generator mode: wrap in async gen and pass source to output_transform.
-        if func_sync_gen and output_mode == "generator":
-
-            @wraps(func)
-            async def sync_gen_gen_mode_wrapper(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _run_input_transform(args, kwargs)
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                gen = func(*call_args, **call_kwargs)
-
-                async def _async_adapter() -> Any:
-                    for item in gen:
-                        yield item
-
-                if output_transform is None:
-                    async for item in _async_adapter():
-                        yield item
-                else:
-                    async for item in output_transform(_async_adapter()):
-                        yield item
-
-            return sync_gen_gen_mode_wrapper  # type: ignore[return-value]
-
-        # Sync generator — frame mode (default): apply output_transform per item.
-        if func_sync_gen:
+        # Sync generator — frame mode: stay pure sync.
+        if func_sync_gen and output_mode != "generator":
 
             @wraps(func)
             def sync_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -611,25 +765,60 @@ def create_transform_io_decorator(
 
             return sync_gen_wrapper  # type: ignore[return-value]
 
-        # Sync (plain) function.
-        @wraps(func)
-        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            new_args, new_kwargs = _run_input_transform_sync(args, kwargs)
-            call_args, call_kwargs = _bind_args_no_duplicate(
-                func, new_args, new_kwargs
-            )
-            result = func(*call_args, **call_kwargs)
-            if output_transform is None:
-                return result
-            out = output_transform(result)
-            if inspect.iscoroutine(out):
-                raise TypeError(
-                    "output_transform returned a coroutine but wrapped "
-                    "function is sync; use async decorated function"
-                )
-            return out
+        # Sync plain function: stay pure sync.
+        if not func_async and not func_async_gen and not func_sync_gen:
 
-        return sync_wrapper
+            @wraps(func)
+            def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                new_args, new_kwargs = _run_input_transform_sync(args, kwargs)
+                call_args, call_kwargs = _bind_args_no_duplicate(
+                    func, new_args, new_kwargs
+                )
+                result = func(*call_args, **call_kwargs)
+                if output_transform is None:
+                    return result
+                out = output_transform(result)
+                if inspect.iscoroutine(out):
+                    raise TypeError(
+                        "output_transform returned a coroutine but wrapped "
+                        "function is sync; use async decorated function"
+                    )
+                return out
+
+            return sync_wrapper
+
+        # --- async paths: delegate to _make_transform_io_decorator ---
+
+        async def _direct_input_fn(
+            args: tuple[Any, ...], kwargs: dict[str, Any]
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            if input_transform is None:
+                return args, kwargs
+            out = input_transform(*args, **kwargs)
+            if inspect.iscoroutine(out):
+                return await out
+            return out  # type: ignore[return-value]
+
+        async def _direct_output_fn(value: Any) -> Any:
+            if output_transform is None:
+                return value
+            return await _apply_output_transform(value, output_transform)
+
+        output_source_fn: Optional[Callable] = None
+        if output_mode == "generator" and output_transform is not None:
+
+            async def _direct_output_source(source: Any) -> Any:
+                return output_transform(source)
+
+            output_source_fn = _direct_output_source
+
+        return _make_transform_io_decorator(
+            func,
+            input_fn=_direct_input_fn,
+            output_fn=_direct_output_fn,
+            output_source_fn=output_source_fn,
+            output_mode=output_mode,
+        )
 
     return decorator
 
@@ -699,131 +888,25 @@ def create_transform_io_by_events_decorator(
             return value
         return result
 
+    output_source_fn: Optional[Callable] = None
+    if output_event:
+
+        async def _output_source_from_events(source: Any) -> Any:
+            transformed = await framework.trigger_transform(
+                output_event, **{result_key: source}
+            )
+            return source if transformed is _TRANSFORM_NOOP else transformed
+
+        output_source_fn = _output_source_from_events
+
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        func_async_gen = inspect.isasyncgenfunction(func)
-        func_async = inspect.iscoroutinefunction(func)
-        func_sync_gen = inspect.isgeneratorfunction(func)
-
-        if output_mode == "generator" and not func_async_gen and not func_sync_gen:
-            raise ValueError(
-                "output_mode='generator' is only supported for generator "
-                f"functions; got {func!r}"
-            )
-
-        # Async generator — generator mode: trigger output_event once with the source.
-        if func_async_gen and output_mode == "generator":
-
-            @wraps(func)
-            async def async_gen_wrapper_gen_mode(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _input_from_events(args, kwargs)
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                source = func(*call_args, **call_kwargs)
-                if not output_event:
-                    async for item in source:
-                        yield item
-                    return
-                transformed = await framework.trigger_transform(
-                    output_event, **{result_key: source}
-                )
-                iterable = source if transformed is _TRANSFORM_NOOP else transformed
-                async for item in iterable:
-                    yield item
-
-            return async_gen_wrapper_gen_mode  # type: ignore[return-value]
-
-        # Async generator — frame mode: trigger output_event per item.
-        if func_async_gen:
-
-            @wraps(func)
-            async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _input_from_events(args, kwargs)
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                async_gen = func(*call_args, **call_kwargs)
-                if not inspect.isasyncgen(async_gen):
-                    raise TypeError(
-                        "expected async generator function, "
-                        f"got {type(async_gen)}"
-                    )
-                async for item in async_gen:
-                    yield await _output_from_events(item)
-
-            return async_gen_wrapper  # type: ignore[return-value]
-
-        if func_async:
-
-            @wraps(func)
-            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _input_from_events(args, kwargs)
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                result = await func(*call_args, **call_kwargs)
-                return await _output_from_events(result)
-
-            return async_wrapper  # type: ignore[return-value]
-
-        # Sync generator — generator mode: promote to async gen, trigger output_event once.
-        if func_sync_gen and output_mode == "generator":
-
-            @wraps(func)
-            async def sync_gen_gen_mode_wrapper(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _input_from_events(args, kwargs)
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                gen = func(*call_args, **call_kwargs)
-
-                async def _async_adapter() -> Any:
-                    for item in gen:
-                        yield item
-
-                source = _async_adapter()
-                if not output_event:
-                    async for item in source:
-                        yield item
-                    return
-                transformed = await framework.trigger_transform(
-                    output_event, **{result_key: source}
-                )
-                iterable = source if transformed is _TRANSFORM_NOOP else transformed
-                async for item in iterable:
-                    yield item
-
-            return sync_gen_gen_mode_wrapper  # type: ignore[return-value]
-
-        # Sync generator — frame mode: promote to async gen, trigger output_event per item.
-        if func_sync_gen:
-
-            @wraps(func)
-            async def sync_gen_async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                new_args, new_kwargs = await _input_from_events(args, kwargs)
-                call_args, call_kwargs = _bind_args_no_duplicate(
-                    func, new_args, new_kwargs
-                )
-                gen = func(*call_args, **call_kwargs)
-                if not inspect.isgenerator(gen):
-                    raise TypeError(
-                        "expected generator function, got " f"{type(gen)}"
-                    )
-                for item in gen:
-                    yield await _output_from_events(item)
-
-            return sync_gen_async_wrapper  # type: ignore[return-value]
-
-        @wraps(func)
-        async def sync_async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            new_args, new_kwargs = await _input_from_events(args, kwargs)
-            call_args, call_kwargs = _bind_args_no_duplicate(
-                func, new_args, new_kwargs
-            )
-            result = func(*call_args, **call_kwargs)
-            return await _output_from_events(result)
-
-        return sync_async_wrapper
+        return _make_transform_io_decorator(
+            func,
+            input_fn=_input_from_events,
+            output_fn=_output_from_events,
+            output_source_fn=output_source_fn,
+            output_mode=output_mode,
+        )
 
     return decorator
 

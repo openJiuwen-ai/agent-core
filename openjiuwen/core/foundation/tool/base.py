@@ -30,21 +30,21 @@ class _ToolMeta(ABCMeta):
         from openjiuwen.core.runner.callback.events import ToolCallEvents
         _fw = Runner.callback_framework
         fn = instance.invoke
-        fn = _fw.trigger_on_call(ToolCallEvents.TOOL_INVOKE_INPUT)(fn)
+        fn = _fw.emit_before(ToolCallEvents.TOOL_INVOKE_INPUT)(fn)
         fn = _fw.transform_io(
             input_event=ToolCallEvents.TOOL_INVOKE_INPUT,
             output_event=ToolCallEvents.TOOL_INVOKE_OUTPUT,
         )(fn)
-        fn = _fw.emits(ToolCallEvents.TOOL_INVOKE_OUTPUT)(fn)
+        fn = _fw.emit_after(ToolCallEvents.TOOL_INVOKE_OUTPUT)(fn)
         instance.invoke = fn
 
         fn = instance.stream
-        fn = _fw.trigger_on_call(ToolCallEvents.TOOL_STREAM_INPUT)(fn)
+        fn = _fw.emit_before(ToolCallEvents.TOOL_STREAM_INPUT)(fn)
         fn = _fw.transform_io(
             input_event=ToolCallEvents.TOOL_STREAM_INPUT,
             output_event=ToolCallEvents.TOOL_STREAM_OUTPUT,
         )(fn)
-        fn = _fw.emits_stream(ToolCallEvents.TOOL_STREAM_OUTPUT, item_key="result")(fn)
+        fn = _fw.emit_after(ToolCallEvents.TOOL_STREAM_OUTPUT, item_key="result")(fn)
         instance.stream = fn
         return instance
 

@@ -5,8 +5,8 @@
 Tests for metaclass-applied callback stacking on Tool, Workflow, and BaseModelClient.
 
 Verifies that:
-- trigger_on_call fires for INPUT events with already-transformed args
-- emits / emits_stream fires for OUTPUT events with already-transformed values
+- emit_before fires for INPUT events with already-transformed args
+- emit_after fires for OUTPUT events with already-transformed values
 - trigger() skips transform-type callbacks (no double-execution)
 - transform fires before trigger for the same event
 """
@@ -115,7 +115,7 @@ async def test_trigger_skips_transform_callbacks():
 
 
 @pytest.mark.asyncio
-async def test_tool_invoke_trigger_on_call_with_transformed_input():
+async def test_tool_invoke_emit_before_with_transformed_input():
     """Normal INPUT callback receives already-transformed input args."""
     fw = Runner.callback_framework
     tool = _make_tool()
@@ -135,7 +135,7 @@ async def test_tool_invoke_trigger_on_call_with_transformed_input():
 
 
 @pytest.mark.asyncio
-async def test_tool_invoke_emits_with_transformed_output():
+async def test_tool_invoke_emit_after_with_transformed_output():
     """Normal OUTPUT callback receives already-transformed result."""
     fw = Runner.callback_framework
     tool = _make_tool()
@@ -188,7 +188,7 @@ async def test_tool_invoke_both_transforms_applied():
 
 
 @pytest.mark.asyncio
-async def test_tool_stream_trigger_on_call_with_transformed_input():
+async def test_tool_stream_emit_before_with_transformed_input():
     """Normal INPUT callback on stream receives transformed input."""
     fw = Runner.callback_framework
     tool = _make_tool()
@@ -211,7 +211,7 @@ async def test_tool_stream_trigger_on_call_with_transformed_input():
 
 
 @pytest.mark.asyncio
-async def test_tool_stream_emits_stream_per_item_with_transformed_output():
+async def test_tool_stream_emit_after_per_item_with_transformed_output():
     """Normal OUTPUT callback fires per item with the transformed value."""
     fw = Runner.callback_framework
     tool = _make_tool()
