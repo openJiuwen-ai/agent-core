@@ -65,7 +65,8 @@ def on(
     error_handler: Optional[Callable] = None,
     max_retries: int = 0,
     retry_delay: float = 0.0,
-    timeout: Optional[float] = None
+    timeout: Optional[float] = None,
+    callback_type: str = ""
 )
 ```
 
@@ -84,6 +85,24 @@ Decorator to register an async function as a callback for an event. Higher prior
 * **max_retries** (int, optional): Max retries. Default: 0.
 * **retry_delay** (float, optional): Retry delay in seconds. Default: 0.0.
 * **timeout** (Optional[float], optional): Execution timeout in seconds. Default: None.
+* **callback_type** (str, optional): Semantic type marker, e.g. "transform". Default: "".
+
+**Returns**: Decorator function.
+
+---
+
+### on_transform
+
+```python
+def on_transform(self, event: str, *, priority: int = 0)
+```
+
+Convenience decorator for registering transform-type callbacks. Equivalent to `on(event, callback_type="transform", priority=priority)`. Only triggered by `trigger_transform` and the event mode of `transform_io`; a regular `trigger` call will not invoke these callbacks.
+
+**Parameters**:
+
+* **event** (str): Event name.
+* **priority** (int, optional): Priority. Default: 0.
 
 **Returns**: Decorator function.
 
@@ -180,10 +199,16 @@ def transform_io(
     result_key: str = "result",
     input_transform: Optional[InputTransform] = None,
     output_transform: Optional[OutputTransform] = None,
+    output_mode: Literal["frame", "generator"] = "frame",
 )
 ```
 
-Decorator to transform function inputs and outputs. Two modes: **event mode** (set input_event/output_event; framework triggers events and uses last callback return as transformed input or result); **direct callback mode** (set input_transform/output_transform; input_transform(*args, **kwargs) returns (new_args, new_kwargs), output_transform(value) returns new value). Supports async functions and async generators (output transform applied per item for generators).
+Decorator to transform function inputs and outputs. Two modes: **event mode** (set input_event/output_event; framework triggers events and uses last callback return as transformed input or result); **direct callback mode** (set input_transform/output_transform; input_transform(*args, **kwargs) returns (new_args, new_kwargs), output_transform(value) returns new value). Supports async functions and async generators.
+
+`output_mode` controls how the output transform is applied to generator functions:
+
+* **`'frame'`** (default): output transform is called once per yielded item. For event mode, output_event fires per item.
+* **`'generator'`**: output transform receives the entire source async iterator. For direct callback mode, `output_transform` must be an async generator function `(source: AsyncIterator) -> AsyncIterator`; it may yield 0, 1, or many items per input item, enabling filtering, expansion, and stateful transforms. For event mode, output_event fires once with the source; the callback should return an async iterable. Sync generator functions are automatically promoted to async. Raises `ValueError` if used with non-generator functions.
 
 **Parameters**:
 
@@ -192,6 +217,7 @@ Decorator to transform function inputs and outputs. Two modes: **event mode** (s
 * **result_key** (str, optional): Key for output event payload. Default: "result".
 * **input_transform** (InputTransform, optional): Direct input transform. Default: None.
 * **output_transform** (OutputTransform, optional): Direct output transform. Default: None.
+* **output_mode** (Literal["frame", "generator"], optional): Output transform mode for generator functions. Default: "frame".
 
 **Returns**: Decorator that applies input/output transformation.
 
@@ -294,6 +320,24 @@ Trigger the event: run all registered callbacks in priority order (with filters,
 * **\*\*kwargs**: Keyword arguments for callbacks.
 
 **Returns**: **List[Any]**, list of results from executed callbacks.
+
+---
+
+### trigger_transform
+
+```python
+async def trigger_transform(self, event: str, *args, **kwargs) -> Any
+```
+
+Trigger only callbacks with `callback_type="transform"` and return the result of the last one. If no transform callbacks are registered, returns an internal sentinel; callers should pass through the original value in that case. You typically do not need to call this directly — `transform_io` event mode uses it internally.
+
+**Parameters**:
+
+* **event** (str): Event name.
+* **\*args**: Arguments for callbacks.
+* **\*\*kwargs**: Keyword arguments for callbacks.
+
+**Returns**: **Any**, result of the last transform callback, or an internal sentinel if no transform callbacks exist.
 
 ---
 
