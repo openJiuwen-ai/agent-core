@@ -24,6 +24,7 @@ from openjiuwen.core.retrieval.common.config import (
     EmbeddingConfig,
     KnowledgeBaseConfig,
     RetrievalConfig,
+    StoreType,
     VectorStoreConfig,
 )
 from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
@@ -48,6 +49,7 @@ async def create_kb() -> None:
     # Create vector store
     # milvus_uri represents the host address of the Milvus service (default is http://localhost:19530), milvus_token is the key for authentication (default is empty)
     vector_store_config = VectorStoreConfig(
+        store_provider=StoreType.Milvus,
         collection_name=f"kb_{kb_config.kb_id}_chunks",
         distance_metric="cosine",
     )
@@ -315,6 +317,7 @@ from openjiuwen.core.retrieval.common.config import (
     EmbeddingConfig,
     KnowledgeBaseConfig,
     RetrievalConfig,
+    StoreType,
     VectorStoreConfig,
 )
 from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
@@ -339,6 +342,7 @@ async def create_kb() -> None:
     # Create vector store
     # milvus_uri represents the host address of the Milvus service (default is http://localhost:19530), milvus_token is the key for authentication (default is empty)
     vector_store_config = VectorStoreConfig(
+        store_provider=StoreType.Milvus,
         collection_name=f"kb_{kb_config.kb_id}_chunks",
         distance_metric="cosine",
     )

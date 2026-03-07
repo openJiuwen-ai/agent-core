@@ -1,9 +1,5 @@
 # openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp
 
-> **参考示例**：更多使用示例请参考 [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) 仓库中 `examples/retrieval/` 目录下的示例代码，包括：
-> - `retrieval_workflow_demo_chroma.py` — 使用 ChromaDB 的 RAG 工作流示例
-> - `retrieval_workflow_demo_milvus.py` — 使用 Milvus 的 RAG 工作流示例（支持图索引和智能检索）
-
 ## class KnowledgeRetrievalCompConfig
 
 `KnowledgeRetrievalComponent` 的配置数据类，继承自 `ComponentConfig`。

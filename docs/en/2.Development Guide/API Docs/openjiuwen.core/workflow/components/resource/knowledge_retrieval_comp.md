@@ -1,9 +1,5 @@
 # openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp
 
-> **Reference Examples**: For more usage examples, please refer to the example code in the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under the `examples/retrieval/` directory, including:
-> - `retrieval_workflow_demo_chroma.py` — RAG workflow demo using ChromaDB
-> - `retrieval_workflow_demo_milvus.py` — RAG workflow demo using Milvus (with graph indexing and agentic retrieval)
-
 ## class KnowledgeRetrievalCompConfig
 
 Configuration dataclass for the `KnowledgeRetrievalComponent`. Extends `ComponentConfig`.
