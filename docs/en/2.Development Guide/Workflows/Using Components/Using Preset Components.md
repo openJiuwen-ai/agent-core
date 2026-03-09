@@ -865,6 +865,7 @@ When a user invokes the workflow, the following results will be output depending
   ```
 
 - When the user input is irrelevant information (e.g., `"Help me book a flight"`), and the parameter extraction is incomplete, if the maximum number of follow-up rounds has been reached, an exception is thrown.
+- The current agent does not support this type of exception scenario when invoking workflows that include question components. Please take note during invocation.
   
   ```text
   错误码为101074
