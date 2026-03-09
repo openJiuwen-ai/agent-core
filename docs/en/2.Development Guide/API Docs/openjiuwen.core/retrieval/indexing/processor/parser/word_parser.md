@@ -36,4 +36,5 @@ Parse DOCX file. Extracts paragraphs, tables, and embedded images; images are ca
 
 * Supported file extensions: `.docx`, `.DOCX`
 * Uses python-docx library to extract DOCX text
-* Supports extracting paragraph and table content; embedded images can be captioned via [ImageCaptioner](./captioner.md) when `llm_client` is provided
+* Output is markdown-like: plain paragraphs are emitted as-is; paragraphs with style "Title" or "Heading 1" through "Heading 9" are converted to markdown headings (`#` / `##` / …); tables are emitted as markdown tables (with header separator row)
+* Embedded images can be captioned via [ImageCaptioner](./captioner.md) when `llm_client` is provided

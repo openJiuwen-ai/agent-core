@@ -36,4 +36,5 @@ _parse(file_path: str, llm_client: Optional[Model] = None) -> Optional[str]
 
 * 支持的文件扩展名：`.docx`, `.DOCX`
 * 使用 python-docx 库提取 DOCX 文本
-* 支持提取段落和表格内容；内嵌图片可经 `llm_client` 调用 [ImageCaptioner](./captioner.md) 生成描述
+* 输出为类 Markdown 文本：普通段落按原文输出；样式为「标题」(Title) 或「标题 1」～「标题 9」(Heading 1–9) 的段落会转换为 Markdown 标题（`#` / `##` / …）；表格输出为 Markdown 表格（带表头分隔行）
+* 内嵌图片可经 `llm_client` 调用 [ImageCaptioner](./captioner.md) 生成描述
