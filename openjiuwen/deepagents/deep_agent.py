@@ -95,6 +95,11 @@ class DeepAgent(BaseAgent):
         """Whether lazy rail initialization is completed."""
         return self._initialized
 
+    @property
+    def deep_config(self) -> DeepAgentConfig:
+        """deep_config carried by this agent."""
+        return self._deep_config
+
     def drain_pending_external_events(self) -> List[DeepLoopEvent]:
         """Return and clear external loop events queued via follow_up/steer/abort."""
         queued = list(self._pending_external_events)
@@ -183,6 +188,7 @@ class DeepAgent(BaseAgent):
 
     async def register_rail(self, rail: AgentRail) -> "DeepAgent":
         """Register a rail with selective routing."""
+        rail.init(self)
         await self._register_rail_selective(rail)
         return self
 
@@ -199,6 +205,7 @@ class DeepAgent(BaseAgent):
             await self._react_agent.agent_callback_manager.unregister_rail(
                 rail, self._react_agent
             )
+        rail.uninit(self)
         return self
 
     async def _register_rail_selective(self, rail: AgentRail) -> None:
@@ -219,9 +226,6 @@ class DeepAgent(BaseAgent):
                 f"Unknown rail event {event}, registering on outer DeepAgent"
             )
             await self.register_callback(event, callback, rail.priority)
-
-        for tool in rail.tools:
-            self._ability_manager.add(tool)
 
     async def _run_single_round_invoke(
         self, ctx: AgentCallbackContext, session: Optional[Session]

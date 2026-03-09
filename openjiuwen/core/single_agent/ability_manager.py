@@ -498,7 +498,7 @@ class AbilityManager:
                     f"Tool instance not found in resource_mgr: {tool_id}",
                 )
             try:
-                result = await tool.invoke(tool_args)
+                result = await tool.invoke(tool_args, session=session)
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)
@@ -558,7 +558,7 @@ class AbilityManager:
                     f"Ability not found in resource_mgr: {tool_name}",
                 )
             try:
-                result = await tool.invoke(tool_args)
+                result = await tool.invoke(tool_args, session=session)
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)

@@ -59,13 +59,6 @@ class AgentCallbackManager:
         for event, callback in rail.get_callbacks().items():
             await self.register_callback(event, callback, rail.priority)
 
-        # Register rail tools on the agent
-        if rail.tools:
-            ability_mgr = getattr(agent, 'ability_manager', None)
-            if ability_mgr:
-                for tool_card in rail.tools:
-                    ability_mgr.add(tool_card)
-
         return self
 
     async def unregister_rail(self, rail: AgentRail, agent: 'object') -> None:
@@ -77,15 +70,6 @@ class AgentCallbackManager:
         """
         for event, callback in rail.get_callbacks().items():
             await self.unregister(event, callback)
-
-        # Remove rail tools from the agent
-        if rail.tools:
-            ability_mgr = getattr(agent, 'ability_manager', None)
-            if ability_mgr:
-                for tool_card in rail.tools:
-                    name = getattr(tool_card, 'name', None)
-                    if name:
-                        ability_mgr.remove(name)
 
     async def unregister(self, event: AgentCallbackEvent, callback: AnyAgentCallback) -> None:
         """Unregister a hook callback.

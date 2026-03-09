@@ -121,9 +121,20 @@ class ExtraReaderRail(AgentRail):
 
 class ToolCarryingRail(AgentRail):
     """Rail that carries tools."""
+    def init(self, agent):
+        tool_card = ToolCard(
+            id="rail_tool",
+            name="rail_tool",
+            description="A rail tool",
+            input_params={
+                "type": "object",
+                "properties": {},
+            },
+        )
+        agent.ability_manager.add(tool_card)
 
-    def __init__(self, tool_card):
-        super().__init__(tools=[tool_card])
+    def uninit(self, agent):
+        agent.ability_manager.remove("rail_tool")
 
     async def before_invoke(self, ctx):
         pass
@@ -502,16 +513,7 @@ class TestRailToolsRegistration(
     async def test_rail_tools_auto_registration(self):
         """Rail tools are auto-registered."""
         agent, _ = _make_agent()
-        tool_card = ToolCard(
-            id="rail_tool",
-            name="rail_tool",
-            description="A rail tool",
-            input_params={
-                "type": "object",
-                "properties": {},
-            },
-        )
-        tr = ToolCarryingRail(tool_card)
+        tr = ToolCarryingRail()
         await agent.register_rail(tr)
 
         names = []
@@ -519,32 +521,25 @@ class TestRailToolsRegistration(
             names.append(card.name)
         assert "rail_tool" in names
 
+        await agent.unregister_rail(tr)
+
     async def test_rail_unregister_removes_tools(self):
         """Unregister removes rail tools."""
         agent, _ = _make_agent()
-        tool_card = ToolCard(
-            id="rail_tool2",
-            name="rail_tool2",
-            description="Another rail tool",
-            input_params={
-                "type": "object",
-                "properties": {},
-            },
-        )
-        tr = ToolCarryingRail(tool_card)
+        tr = ToolCarryingRail()
         await agent.register_rail(tr)
 
         names_before = []
         for card in agent.ability_manager.list():
             names_before.append(card.name)
-        assert "rail_tool2" in names_before
+        assert "rail_tool" in names_before
 
         await agent.unregister_rail(tr)
 
         names_after = []
         for card in agent.ability_manager.list():
             names_after.append(card.name)
-        assert "rail_tool2" not in names_after
+        assert "rail_tool" not in names_after
 
 
 class TestRailDecorator(

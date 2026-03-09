@@ -80,11 +80,18 @@ class FakeReactAgent:
 
 
 class CountingRail(AgentRail):
-    def __init__(self, tools: Optional[List[ToolCard]] = None) -> None:
-        super().__init__(tools=tools)
+    def __init__(self) -> None:
+        super().__init__()
         self.before_invoke_count = 0
         self.after_invoke_count = 0
         self.before_tool_call_count = 0
+
+    def init(self, agent):
+        rail_tool = _build_tool_card("rail_tool")
+        agent.ability_manager.add(rail_tool)
+
+    def uninit(self, agent):
+        agent.ability_manager.remove("rail_tool")
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         _ = ctx
@@ -130,8 +137,7 @@ async def test_add_rail_lazy_register_on_first_invoke() -> None:
     fake_react = FakeReactAgent()
     agent.set_react_agent(fake_react, initialized=False)
 
-    rail_tool = _build_tool_card("rail_tool")
-    rail = CountingRail(tools=[rail_tool])
+    rail = CountingRail()
     assert agent.add_rail(rail) is agent
 
     result = await agent.invoke(
@@ -150,8 +156,6 @@ async def test_add_rail_lazy_register_on_first_invoke() -> None:
     bridged_events = [item[0] for item in fake_react.registered_callbacks]
     assert AgentCallbackEvent.BEFORE_TOOL_CALL in bridged_events
     assert AgentCallbackEvent.BEFORE_INVOKE not in bridged_events
-
-    assert agent.ability_manager.get("rail_tool") is rail_tool
 
 
 @pytest.mark.asyncio

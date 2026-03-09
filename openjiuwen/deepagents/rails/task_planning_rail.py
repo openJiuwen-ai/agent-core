@@ -8,7 +8,10 @@ Planning/replanning strategies are intentionally deferred.
 from __future__ import annotations
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.deepagents import DeepAgent
 from openjiuwen.deepagents.rails.base import DeepAgentRail
+from openjiuwen.deepagents.tools.todo import create_todos_tool
 
 
 class TaskPlanningRail(DeepAgentRail):
@@ -22,6 +25,27 @@ class TaskPlanningRail(DeepAgentRail):
     """
 
     priority = 90
+
+    def __init__(self, operation: SysOperation):
+        super().__init__()
+        self.tools = None
+        self.workspace = None
+        self.sys_operation = operation
+
+    def init(self, agent):
+        if isinstance(agent, DeepAgent) and agent.deep_config.workspace and hasattr(agent, 'ability_manager'):
+            self.workspace = agent.deep_config.workspace
+            tools = create_todos_tool(self.sys_operation, self.workspace)
+            self.tools = tools
+            for tool in tools:
+                agent.ability_manager.add(tool.card)
+
+    def uninit(self, agent):
+        if self.tools and hasattr(agent, 'ability_manager'):
+            for tool in self.tools:
+                name = getattr(tool, 'name', None)
+                if name:
+                    agent.ability_manager.remove(name)
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Invoke-start placeholder."""

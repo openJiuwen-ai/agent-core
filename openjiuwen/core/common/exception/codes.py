@@ -724,6 +724,13 @@ class StatusCode(Enum):
     # 4. openapi tool 182400 - 182499
     TOOL_OPENAPI_CLIENT_EXECUTION_ERROR = (182400, "openapi client execute error, error='{reason}'")
 
+    # 5. deepagents tool 182500 - 182699
+    TOOL_TODOS_LOAD_FAILED = (182500, "todo tool loads failed, error='{reason}'")
+    TOOL_TODOS_SAVE_FAILED = (182501, "todo tool saves failed, error='{reason}'")
+    TOOL_TODOS_CLEAR_FAILED = (182502, "todo tool clears failed, error='{reason}'")
+    TOOL_TODOS_VALIDATION_INVALID = (182503, "todo tool validation invalid, error='{reason}'")
+    TOOL_TODOS_INVOKE_FAILED = (182504, "todo tool invoke failed, error='{reason}'")
+
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
     COMMON_LOG_PATH_INIT_FAILED = (183001, "common log_path initialization failed, reason: {error_msg}")

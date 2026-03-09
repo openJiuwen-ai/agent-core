@@ -305,30 +305,11 @@ class AgentRail(ABC):
 
     priority: int = 50
 
-    def __init__(
-        self,
-        tools: Optional[List[Any]] = None,
-        skills: Optional[List[Any]] = None,
-    ):
-        """Initialize AgentRail.
+    def init(self, agent):
+        pass
 
-        Args:
-            tools: Tool cards to register on the agent
-            skills: Skill definitions (reserved, not yet
-                implemented)
-        """
-        self._tools = tools or []
-        self._skills = skills or []
-
-    @property
-    def tools(self) -> List[Any]:
-        """Tools carried by this rail."""
-        return self._tools
-
-    @property
-    def skills(self) -> List[Any]:
-        """Skills carried by this rail (reserved)."""
-        return self._skills
+    def uninit(self, agent):
+        pass
 
     # -- 8 hook methods (override to activate) --
 

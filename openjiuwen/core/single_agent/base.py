@@ -165,6 +165,7 @@ class BaseAgent(ABC):
         Returns:
             self for chaining
         """
+        rail.init(self)
         await self._agent_callback_manager.register_rail(rail, self)
         return self
 
@@ -178,6 +179,7 @@ class BaseAgent(ABC):
             self for chaining
         """
         await self._agent_callback_manager.unregister_rail(rail, self)
+        rail.uninit(self)
         return self
 
     async def _execute_callbacks(
