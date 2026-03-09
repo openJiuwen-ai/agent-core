@@ -31,6 +31,7 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
 )
 from openjiuwen.deepagents import create_deep_agent
+from openjiuwen.deepagents.tools import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
 
 API_BASE = os.getenv("API_BASE", "")
 API_KEY = os.getenv("API_KEY", "")
@@ -101,14 +102,19 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             )
 
     def _get_fs_tool_cards(self):
-        tool_cards = Runner.resource_mgr.get_sys_op_tool_cards(
-            sys_operation_id=self._sys_operation_id,
-            operation_name="fs",
-            tool_name=["write_file", "list_files", "read_file"],
-        )
-        if tool_cards is None:
-            self.fail("Failed to load fs tool cards from resource manager.")
-        return tool_cards
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+
+        read_tool = ReadFileTool(sys_oper)
+        write_tool = WriteFileTool(sys_oper)
+        edit_tool = EditFileTool(sys_oper)
+        glob_tool = GlobTool(sys_oper)
+        list_dir_tool = ListDirTool(sys_oper)
+        grep_tool = GrepTool(sys_oper)
+
+        tools = [read_tool, write_tool, edit_tool, glob_tool, list_dir_tool, grep_tool]
+        Runner.resource_mgr.add_tool(tools)
+
+        return [tool.card for tool in tools]
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")

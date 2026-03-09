@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import locale
 import os
 import platform
 from typing import Optional, Dict, Any, AsyncIterator, Callable
@@ -104,7 +105,7 @@ class ShellOperation(BaseShellOperation):
                 stderr=asyncio.subprocess.PIPE
             )
 
-            encoding = (options or {}).get("encoding", "utf-8")
+            encoding = (options or {}).get("encoding", self._detect_shell_encoding())
             process_handler = OperationUtils.create_handler(process=proc, encoding=encoding, timeout=timeout)
             invoke_data = await process_handler.invoke()
             invoke_exception = getattr(invoke_data, "exception", None)
@@ -224,7 +225,7 @@ class ShellOperation(BaseShellOperation):
             )
 
             chunk_size = (options or {}).get("chunk_size", 1024)
-            encoding = (options or {}).get("encoding", "utf-8")
+            encoding = (options or {}).get("encoding", self._detect_shell_encoding())
             process_handler = OperationUtils.create_handler(process=process, chunk_size=chunk_size, encoding=encoding,
                                                             timeout=timeout)
 
@@ -305,7 +306,7 @@ class ShellOperation(BaseShellOperation):
 
     def _check_allowlist(self, command: str) -> bool:
         """Check if command is in allowlist."""
-        if not hasattr(self._run_config, 'shell_allowlist') or self._run_config.shell_allowlist is None:
+        if not hasattr(self._run_config, 'shell_allowlist') or not self._run_config.shell_allowlist:
             return True
 
         cmd_prefix = command.split()[0] if command.strip() else ""
@@ -336,3 +337,14 @@ class ShellOperation(BaseShellOperation):
         os_name = platform.system().lower()
         wrapper = self._BUFFERING_WRAPPERS.get(os_name)
         return wrapper(command) if wrapper else command
+
+    @staticmethod
+    def _detect_shell_encoding() -> str:
+        """Detect the shell output encoding for the current system.
+        """
+
+        try:
+            encoding = locale.getpreferredencoding(False)
+            return encoding if encoding else "utf-8"
+        except Exception:
+            return "utf-8"
