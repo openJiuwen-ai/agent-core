@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Tuple
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit
@@ -14,32 +15,25 @@ class WriteManager:
     def __init__(self, managers: dict[str, BaseMemoryManager], mem_store: UserMemStore):
         self.managers = managers
         self.mem_store = mem_store
-
+        
     async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
                            llm: Tuple[str, Model] | None, semantic_store) -> None:
         if not memories:
             memory_logger.debug("No memory units to add", event_type=LogEventType.MEMORY_STORE)
             return
 
-        for mem_type, units in memories.items():
-            if mem_type in self.managers:
-                try:
-                    await self.managers[mem_type].add_memories(
-                        user_id, scope_id, units, llm, semantic_store=semantic_store)
-                except Exception as e:
-                    memory_logger.error(
-                        "Failed to add mem",
-                        exception=str(e),
-                        memory_type=mem_type,
-                        event_type=LogEventType.MEMORY_STORE,
-                    )
-                    raise e
-            else:
-                memory_logger.warning(
-                    "Unsupported memory type",
-                    memory_type=mem_type,
+        for manager in set(self.managers.values()):
+            try:
+                await manager.add_memories(
+                    user_id, scope_id, memories, llm, semantic_store=semantic_store)
+            except Exception as e:
+                memory_logger.error(
+                    "Failed to add mem",
+                    exception=str(e),
+                    memory_type=manager.mem_type,
                     event_type=LogEventType.MEMORY_STORE,
                 )
+                raise e
 
 
     async def update_mem_by_id(self, user_id: str, scope_id: str, mem_id: str, memory: str, semantic_store):

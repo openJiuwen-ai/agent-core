@@ -2,15 +2,17 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from openjiuwen.core.memory.process.extract.common import ExtractMemoryParams
 from openjiuwen.core.memory.process.extract.long_term_memory_extractor import LongTermMemoryExtractor
-from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit, \
-    FragmentMemoryUnit, SummaryUnit
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, BaseMemoryUnit, \
+    VariableUnit, FragmentMemoryUnit, SummaryUnit
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
 from openjiuwen.core.memory.process.extract.memory_analyzer import MemoryAnalyzer, VariableResult
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 
 category_to_class = {
-    "user_profile": MemoryType.FRAGMENT_MEMORY
+    "user_profile": MemoryType.USER_PROFILE,
+    "semantic_memory": MemoryType.SEMANTIC_MEMORY,
+    "episodic_memory": MemoryType.EPISODIC_MEMORY,
 }
 
 
@@ -84,8 +86,13 @@ class Generator:
                 all_memory_results[summary_type] = []
             all_memory_results[summary_type].append(summary_unit)
 
-        if not memory_analyze_res.has_key_information or not config.enable_fragment_memory:
+        if not memory_analyze_res.has_key_information:
             return all_memory_results
+        fragment_enable = {
+            MemoryType.USER_PROFILE.value: config.enable_user_profile,
+            MemoryType.SEMANTIC_MEMORY.value: config.enable_semantic_memory,
+            MemoryType.EPISODIC_MEMORY.value: config.enable_episodic_memory,
+        }
 
         try:
             merged_units = await self._categories_to_memory_unit(
@@ -122,7 +129,7 @@ class Generator:
             return all_memory_results
         for unit in merged_units:
             mem_type = unit.mem_type.value
-            if mem_type not in all_memory_results:
+            if mem_type not in all_memory_results or not fragment_enable.get(mem_type, False):
                 all_memory_results[mem_type] = []
             all_memory_results[mem_type].append(unit)
         memory_logger.info(
@@ -187,13 +194,16 @@ class Generator:
             memory_dict: dict,
             timestamp: str
     ) -> list[FragmentMemoryUnit]:
-        """Generate user profile memory unit based on input"""
+        """Generate fragment memory unit based on input"""
         fragment_mem_units = []
         for fragment_type, fragment_memories in memory_dict.items():
+            mem_type = category_to_class.get(fragment_type, None)
+            if not mem_type:
+                continue
             for mem_content in fragment_memories:
                 mem_id = str(await self.data_id_generator.generate_next_id(user_id=user_id))
                 fragment_mem_units.append(FragmentMemoryUnit(
-                    fragment_type=fragment_type,
+                    mem_type=mem_type,
                     content=mem_content,
                     message_mem_id=message_mem_id,
                     timestamp=timestamp,

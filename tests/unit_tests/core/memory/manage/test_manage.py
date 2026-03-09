@@ -13,7 +13,8 @@ from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManage
 from openjiuwen.core.memory.manage.index.fragment_memory_manager import FragmentMemoryManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.index.write_manager import WriteManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import FragmentMemoryUnit, VariableUnit, MemoryType
+from openjiuwen.core.memory.manage.mem_model.memory_unit import FragmentMemoryUnit, \
+    VariableUnit, MemoryType
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
@@ -149,21 +150,21 @@ class TestManage:
             crypto_key=b""
         )
         variable_manager = VariableManager(mock_kv_store, b"")
-        managers = {MemoryType.FRAGMENT_MEMORY.value: user_profile_manager, MemoryType.VARIABLE.value: variable_manager}
+        managers = {MemoryType.USER_PROFILE.value: user_profile_manager, MemoryType.VARIABLE.value: variable_manager}
         write_manager = WriteManager(managers, mock_mem_store)
         test_all_data = [
-            {"mem_id": "1000", "fragment_type": "user_profile", "content": "用户非常喜欢川菜，尤其是水煮鱼和麻婆豆腐"},
-            {"mem_id": "1001", "fragment_type": "user_profile", "content": "用户的职业是软件工程师，居住在北京市"},
-            {"mem_id": "1002", "fragment_type": "user_profile", "content": "用户的副业是抖音直播"},
-            {"mem_id": "1003", "fragment_type": "user_profile", "content": "用户的银行账户余额为10000元"},
-            {"mem_id": "1004", "fragment_type": "user_profile", "content": "用户的朋友圈中有50个好友"},
-            {"mem_id": "1005", "fragment_type": "user_profile", "content": "用户的宠物是一只金毛犬"},
+            {"mem_id": "1000", "mem_type": MemoryType.USER_PROFILE, "content": "用户非常喜欢川菜，尤其是水煮鱼和麻婆豆腐"},
+            {"mem_id": "1001", "mem_type": MemoryType.USER_PROFILE, "content": "用户的职业是软件工程师，居住在北京市"},
+            {"mem_id": "1002", "mem_type": MemoryType.USER_PROFILE, "content": "用户的副业是抖音直播"},
+            {"mem_id": "1003", "mem_type": MemoryType.USER_PROFILE, "content": "用户的银行账户余额为10000元"},
+            {"mem_id": "1004", "mem_type": MemoryType.USER_PROFILE, "content": "用户的朋友圈中有50个好友"}, 
+            {"mem_id": "1005", "mem_type": MemoryType.USER_PROFILE, "content": "用户的宠物是一只金毛犬"},
         ]
         test_all_data1 = [
-            {"mem_id": "1010", "fragment_type": "user_profile", "content": "用户喜欢打篮球和阅读历史小说"},
-            {"mem_id": "1011", "fragment_type": "user_profile", "content": "用户的生日是1990年1月1日"},
-            {"mem_id": "1012", "fragment_type": "user_profile", "content": "用户的汽车型号是特斯拉Model 3"},
-            {"mem_id": "1013", "fragment_type": "user_profile", "content": "用户在Twitter上有200个关注者"},
+            {"mem_id": "1010", "mem_type": MemoryType.USER_PROFILE, "content": "用户喜欢打篮球和阅读历史小说"},
+            {"mem_id": "1011", "mem_type": MemoryType.USER_PROFILE, "content": "用户的生日是1990年1月1日"},
+            {"mem_id": "1012", "mem_type": MemoryType.USER_PROFILE, "content": "用户的汽车型号是特斯拉Model 3"},
+            {"mem_id": "1013", "mem_type": MemoryType.USER_PROFILE, "content": "用户在Twitter上有200个关注者"},
         ]
 
         for item in test_all_data:
@@ -171,7 +172,7 @@ class TestManage:
 
             await write_manager.add_memories("usrZH2025", "fitnesstrackerv3", {mem_unit.mem_type.value: [mem_unit]},
                                              None, mock_semantic_recall)
-            mem_unit = VariableUnit(variable_name=item['fragment_type'],
+            mem_unit = VariableUnit(variable_name=item['mem_type'],
                                     variable_mem=item['content'])
             await write_manager.add_memories("usrZH2025", "fitnesstrackerv3", {mem_unit.mem_type.value: [mem_unit]},
                                              None, mock_semantic_recall)
@@ -181,7 +182,7 @@ class TestManage:
 
             await write_manager.add_memories("usrZH2026", "fitnesstrackerv3", {mem_unit.mem_type.value: [mem_unit]},
                                              None, mock_semantic_recall)
-            mem_unit = VariableUnit(variable_name=item['fragment_type'],
+            mem_unit = VariableUnit(variable_name=item['mem_type'],
                                     variable_mem=item['content'])
             await write_manager.add_memories("usrZH2026", "fitnesstrackerv3", {mem_unit.mem_type.value: [mem_unit]},
                                              None, mock_semantic_recall)

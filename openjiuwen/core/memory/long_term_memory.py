@@ -15,7 +15,7 @@ from openjiuwen.core.memory.manage.index.fragment_memory_manager import Fragment
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.index.write_manager import WriteManager
 from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, MemoryType
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.search.search_manager import SearchManager, SearchParams
 from openjiuwen.core.foundation.store.base_db_store import BaseDbStore
@@ -40,7 +40,7 @@ from openjiuwen.core.memory.migration.run_migrations import run_kv_migrations, r
 class MemInfo(BaseModel):
     mem_id: str = Field(default="", description="memory id")
     content: str = Field(default="", description="memory content")
-    type: MemoryType = Field(default=MemoryType.FRAGMENT_MEMORY, description="memory type")
+    type: MemoryType = Field(default=MemoryType.USER_PROFILE, description="memory type")
 
 
 class MemResult(BaseModel):
@@ -76,12 +76,13 @@ class LongTermMemory(metaclass=Singleton):
         # managers
         self.scope_user_mapping_manager = None
         self.message_manager: MessageManager | None = None
-        self.user_profile_manager = None
+        self.fragment_memory_manager = None
         self.variable_manager = None
         self.write_manager = None
         self.summary_manager = None
         self.search_manager = None
         self.generator = None
+        self.fragment_type = None
         # llm
         self._base_llm: Tuple[str, Model] | None = None
         # embedding
@@ -179,7 +180,7 @@ class LongTermMemory(metaclass=Singleton):
                 data_id_generator,
                 config.crypto_key
             )
-        self.user_profile_manager = FragmentMemoryManager(
+        self.fragment_memory_manager = FragmentMemoryManager(
             user_mem_store=user_mem_store,
             data_id_generator=data_id_generator,
             crypto_key=config.crypto_key
@@ -193,10 +194,14 @@ class LongTermMemory(metaclass=Singleton):
             crypto_key=self._sys_mem_config.crypto_key
         )
         managers = {
-            MemoryType.FRAGMENT_MEMORY.value: self.user_profile_manager,
+            MemoryType.USER_PROFILE.value: self.fragment_memory_manager,
+            MemoryType.EPISODIC_MEMORY.value: self.fragment_memory_manager,
+            MemoryType.SEMANTIC_MEMORY.value: self.fragment_memory_manager,
             MemoryType.VARIABLE.value: self.variable_manager,
             MemoryType.SUMMARY.value: self.summary_manager
         }
+        self.fragment_type = [MemoryType.USER_PROFILE.value, MemoryType.EPISODIC_MEMORY.value,
+                              MemoryType.SEMANTIC_MEMORY.value]
         self.write_manager = WriteManager(managers, user_mem_store)
         self.search_manager = SearchManager(
             managers,
@@ -743,7 +748,6 @@ class LongTermMemory(metaclass=Singleton):
                 "Invalid scope_id format.",
                 event_type=LogEventType.MEMORY_RETRIEVE,
                 query=query,
-                memory_type=MemoryType.FRAGMENT_MEMORY.value,
                 user_id=user_id,
                 scope_id=scope_id
             )
@@ -760,16 +764,21 @@ class LongTermMemory(metaclass=Singleton):
             scope_id=scope_id,
             top_k=num,
             user_id=user_id,
-            threshold=threshold
+            threshold=threshold,
         )
         try:
-            search_data = await self.search_manager.search(params, semantic_store)
+            search_data = []
+            for mem_type in self.fragment_type:
+                params.search_type = mem_type
+                res = await self.search_manager.search(params, semantic_store)
+                search_data.extend(res)
+            search_data = sorted(search_data, key=lambda x: x.get("score", 0.0), reverse=True)[:num]
             mem_results: list[MemResult] = [
                 MemResult(
                     mem_info=MemInfo(
                         mem_id=item["id"],
                         content=item["mem"],
-                        type=item.get("mem_type", MemoryType.FRAGMENT_MEMORY)
+                        type=item.get("mem_type", None)
                     ),
                     score=item.get("score", 0.0)
                 )
@@ -784,7 +793,6 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id,
                 query=query,
-                memory_type=MemoryType.FRAGMENT_MEMORY.value
             )
             return []
         except ValueError as e:
@@ -794,7 +802,6 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id,
                 exception=str(e),
-                memory_type=MemoryType.FRAGMENT_MEMORY.value,
                 query=query
             )
             return []
@@ -805,7 +812,6 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id,
                 scope_id=scope_id,
                 exception=str(e),
-                memory_type=MemoryType.FRAGMENT_MEMORY.value,
                 query=query
             )
             return []
@@ -951,7 +957,7 @@ class LongTermMemory(metaclass=Singleton):
                 event_type=LogEventType.MEMORY_RETRIEVE,
                 user_id=user_id,
                 scope_id=scope_id,
-                memory_type=MemoryType.FRAGMENT_MEMORY.value
+                
             )
             return []
         if not self.search_manager:

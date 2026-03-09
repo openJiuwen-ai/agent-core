@@ -10,7 +10,7 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.memory.common.base import generate_idx_name, parse_memory_hit_infos
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.mem_model.data_id_manager import DataIdManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import FragmentMemoryUnit, MemoryType
+from openjiuwen.core.memory.manage.mem_model.memory_unit import BaseMemoryUnit, FragmentMemoryUnit, MemoryType
 from openjiuwen.core.memory.manage.mem_model.semantic_store import SemanticStore
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
 from openjiuwen.core.memory.manage.update.mem_update_checker import MemUpdateChecker, MemoryStatus
@@ -28,7 +28,7 @@ class RecallParams:
     scope_id: str
     semantic_store: SemanticStore
     top_k: int = 5
-    mem_type: str = MemoryType.FRAGMENT_MEMORY.value
+    mem_type: str = MemoryType.USER_PROFILE.value
 
 
 @dataclass
@@ -39,16 +39,19 @@ class AddVectorParams:
     memory_id: str
     mem: str
     semantic_store: SemanticStore
-    mem_type: str = MemoryType.FRAGMENT_MEMORY.value
+    mem_type: str = MemoryType.USER_PROFILE.value
 
 
 class FragmentMemoryStoreParams(BaseModel):
-    mem_type: str = Field(default=MemoryType.FRAGMENT_MEMORY.value)
+    mem_type: str = Field(default=MemoryType.USER_PROFILE.value)
     user_id: Optional[str] = None
     scope_id: Optional[str] = None
-    fragment_type: Optional[str] = None
     content: Optional[str] = None
     source_id: Optional[str] = None
+
+
+FRAGMENT_MEMORY_TYPE = [MemoryType.USER_PROFILE.value, MemoryType.SEMANTIC_MEMORY.value,
+                        MemoryType.EPISODIC_MEMORY.value]
 
 
 class FragmentMemoryManager(BaseMemoryManager):
@@ -62,6 +65,7 @@ class FragmentMemoryManager(BaseMemoryManager):
         self.mem_store = user_mem_store
         self.date_user_profile_id = data_id_generator
         self.crypto_key = crypto_key
+        self.mem_type = "fragment"
 
     @staticmethod
     def _process_conflict_info(conflict_info: list[dict], input_memory_ids_map: dict[int, str]) -> list[dict]:
@@ -85,18 +89,30 @@ class FragmentMemoryManager(BaseMemoryManager):
             })
         return process_conflict_info
 
-    async def add_memories(self, user_id: str, scope_id: str, memories: list[FragmentMemoryUnit],
+    async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
                       llm: Tuple[str, Model] | None = None, **kwargs):
         semantic_store = self._get_semantic_store("add", **kwargs)
         # Step 1: Prepare new memories dictionary for checker
         new_mem_content: dict[str, str] = {}
         new_mem_units: dict[str, FragmentMemoryUnit] = {}
-        for mem_unit in memories:
-            mem_content = mem_unit.content
-            mem_id = mem_unit.mem_id
-            if mem_content:
-                new_mem_content[mem_id] = mem_content
-                new_mem_units[mem_id] = mem_unit
+        for mem_type, memory in memories.items():
+            if mem_type not in FRAGMENT_MEMORY_TYPE:
+                continue
+            for mem_unit in memory:
+                if not isinstance(mem_unit, FragmentMemoryUnit):
+                    memory_logger.warning(
+                        "mem_unit is not a FragmentMemoryUnit",
+                        event_type=LogEventType.MEMORY_STORE,
+                        memory_type=mem_type,
+                        user_id=user_id,
+                        scope_id=scope_id
+                    )
+                    continue
+                mem_content = mem_unit.content
+                mem_id = mem_unit.mem_id
+                if mem_content:
+                    new_mem_content[mem_id] = mem_content
+                    new_mem_units[mem_id] = mem_unit
 
         # Step 2: Query existing memories for context using search
         old_memories: dict[str, str] = {}
@@ -123,8 +139,10 @@ class FragmentMemoryManager(BaseMemoryManager):
                         old_mem_ids.add(result_id)
 
         # If no existing memories found, and only has one new memory, skip check and write directly
-        if not old_memories and len(memories) == 1:
-            await self._add_memory_to_store(user_id, scope_id, memories[0], semantic_store)
+        if not old_memories and len(new_mem_units) == 1:
+            # Get the only memory unit from new_mem_units
+            mem_unit = next(iter(new_mem_units.values()))
+            await self._add_memory_to_store(user_id, scope_id, mem_unit, semantic_store)
             return
 
         # Step 3: Use MemChecker to analyze for redundancy/conflicts
@@ -161,8 +179,10 @@ class FragmentMemoryManager(BaseMemoryManager):
         time = datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S')
         encrypt_new_memory = BaseMemoryManager.encrypt_memory_if_needed(key=self.crypto_key, plaintext=new_memory)
         new_data = {'mem': encrypt_new_memory, 'time': time}
+        old_mem = await self.mem_store.get(mem_id=mem_id, user_id=user_id, scope_id=scope_id)
+        mem_type = old_mem.get("mem_type", None)
         await self.mem_store.update(mem_id=mem_id, user_id=user_id, scope_id=scope_id, data=new_data)
-        table_name = generate_idx_name(user_id, scope_id, MemoryType.FRAGMENT_MEMORY.value)
+        table_name = generate_idx_name(user_id, scope_id, mem_type)
         await semantic_store.delete_docs([mem_id], table_name)
         # semantic memory embedding must not encrypt
         await semantic_store.add_docs([(mem_id, new_memory)], table_name, scope_id=scope_id)
@@ -170,17 +190,26 @@ class FragmentMemoryManager(BaseMemoryManager):
 
     async def search(self, user_id: str, scope_id: str, query: str, top_k: int, **kwargs):
         semantic_store = self._get_semantic_store("search", **kwargs)
-        mem_type = kwargs.get("mem_type", MemoryType.FRAGMENT_MEMORY.value)
-        mem_ids, scores = await self._recall_by_vector(
-            RecallParams(
-                query=query,
-                user_id=user_id,
-                scope_id=scope_id,
-                semantic_store=semantic_store,
-                top_k=top_k,
-                mem_type=mem_type
+        mem_type = kwargs.get("mem_type", None)
+        if not mem_type:
+            mem_types = FRAGMENT_MEMORY_TYPE
+        else:
+            mem_types = [mem_type]
+        mem_ids, scores = [], {}
+        for mem_type in mem_types:
+            mem_ids_, scores_ = await self._recall_by_vector(
+                RecallParams(
+                    query=query,
+                    user_id=user_id,
+                    scope_id=scope_id,
+                    semantic_store=semantic_store,
+                    top_k=top_k,
+                    mem_type=mem_type
+                )
             )
-        )
+            mem_ids.extend(mem_ids_)
+            scores.update(scores_)
+            mem_ids_, scores_ = [], {}
         retrieve_res = await self.mem_store.batch_get(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
         if retrieve_res is None:
             return None
@@ -188,7 +217,7 @@ class FragmentMemoryManager(BaseMemoryManager):
             item["score"] = scores.get(item['id'], 0)
             item["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=item["mem"])
         retrieve_res.sort(key=lambda x: scores.get(x["id"], 0), reverse=True)
-        return retrieve_res
+        return retrieve_res[:top_k]
 
     async def get(self, user_id: str, scope_id: str, mem_id: str) -> dict[str, Any] | None:
         retrieve_res = await self.mem_store.get(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
@@ -209,25 +238,34 @@ class FragmentMemoryManager(BaseMemoryManager):
                 scope_id=scope_id
             )
             return False
-        mem_type = kwargs.get("mem_type", MemoryType.FRAGMENT_MEMORY.value)
+        mem_type = kwargs.get("mem_type", data.get("mem_type", None))
         await self.mem_store.delete(mem_id=mem_id, user_id=user_id, scope_id=scope_id)
-        await self._delete_vector_user_profile_memory(
-            memory_id=[mem_id],
-            user_id=user_id,
-            scope_id=scope_id,
-            mem_type=mem_type,
-            semantic_store=semantic_store
-        )
+        if not mem_type:
+            mem_types = FRAGMENT_MEMORY_TYPE
+        else:
+            mem_types = [mem_type]
+        for mem_type in mem_types:
+            await self._delete_vector_user_profile_memory(
+                memory_id=[mem_id],
+                user_id=user_id,
+                scope_id=scope_id,
+                mem_type=mem_type,
+                semantic_store=semantic_store
+            )
         return True
 
     async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
         semantic_store = self._get_semantic_store("delete", **kwargs)
-        data = await self.mem_store.get_all(
-            user_id=user_id,
-            scope_id=scope_id,
-            mem_type=MemoryType.FRAGMENT_MEMORY.value
-        )
-        if data is None:
+        datas = []
+        for mem_type in FRAGMENT_MEMORY_TYPE:
+            data = await self.mem_store.get_all(
+                user_id=user_id,
+                scope_id=scope_id,
+                mem_type=mem_type
+            )
+            if data:
+                datas.extend(data)
+        if not datas:
             memory_logger.error(
                 "Delete user_profile in store failed, the mem of user_id is not exist.",
                 memory_type="user_profile",
@@ -236,15 +274,33 @@ class FragmentMemoryManager(BaseMemoryManager):
                 scope_id=scope_id
             )
             return False
-        mem_ids = [item['id'] for item in data]
+        mem_ids = [item['id'] for item in datas]
         await self.mem_store.batch_delete(user_id=user_id, scope_id=scope_id, mem_ids=mem_ids)
-        await self._delete_vector_store_table(user_id=user_id, scope_id=scope_id,
-                                              mem_type=MemoryType.FRAGMENT_MEMORY.value, semantic_store=semantic_store)
+        for mem_type in FRAGMENT_MEMORY_TYPE:
+            await self._delete_vector_store_table(user_id=user_id, scope_id=scope_id,
+                                                  mem_type=mem_type, semantic_store=semantic_store)
         return True
 
-    async def list_fragment_memories(self, user_id: str, scope_id: str, profile_type: Optional[str] = None,
-                                mem_type=MemoryType.FRAGMENT_MEMORY) -> list[dict[str, Any]]:
-        datas = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id, mem_type=mem_type.value)
+    async def list_fragment_memories(self, user_id: str, scope_id: str,
+                                mem_type: Optional[MemoryType] = None) -> list[dict[str, Any]]:
+        if not mem_type:
+            mem_types = FRAGMENT_MEMORY_TYPE
+        else:
+            if mem_type.value not in FRAGMENT_MEMORY_TYPE:
+                memory_logger.error(
+                    f"{mem_type.value} is not a valid memory type",
+                    memory_type=mem_type,
+                    event_type=LogEventType.MEMORY_STORE,
+                    user_id=user_id,
+                    scope_id=scope_id
+                )
+                return []
+            mem_types = [mem_type.value]
+        datas = []
+        for mem_type in mem_types:
+            data = await self.mem_store.get_all(user_id=user_id, scope_id=scope_id, mem_type=mem_type)
+            if data:
+                datas.extend(data)
         if not datas:
             memory_logger.debug(
                 "End to get user profile, result is None.",
@@ -254,18 +310,11 @@ class FragmentMemoryManager(BaseMemoryManager):
                 scope_id=scope_id
             )
             return []
-        new_datas = []
-        if profile_type is not None:
-            for data in datas:
-                if data['profile_type'] == profile_type:
-                    new_datas.append(data)
-        else:
-            new_datas = datas
-        for data in new_datas:
+        for data in datas:
             data["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key,
                                                                      ciphertext=data["mem"])
-        new_datas.sort(key=lambda x: (x['mem'], x['timestamp']), reverse=True)
-        return new_datas
+        datas.sort(key=lambda x: (x['mem'], x['timestamp']), reverse=True)
+        return datas
 
     async def _add_memory_to_store(
         self,
@@ -292,12 +341,6 @@ class FragmentMemoryManager(BaseMemoryManager):
                 memory_type=memory.mem_type,
                 error_msg=f"user_profile_manager add operation must pass profile_mem",
             )
-        if not memory.fragment_type:
-            raise build_error(
-                StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
-                memory_type=memory.mem_type,
-                error_msg=f"user_profile_manager add operation must pass profile_type",
-            )
 
         memory_logger.debug(
             "Add memory",
@@ -309,7 +352,7 @@ class FragmentMemoryManager(BaseMemoryManager):
         user_profile_search_param = FragmentMemoryStoreParams(
             user_id=user_id,
             scope_id=scope_id,
-            fragment_type=memory.fragment_type,
+            mem_type=memory.mem_type.value,
             content=memory.content,
             source_id=memory.message_mem_id
         )
@@ -320,7 +363,8 @@ class FragmentMemoryManager(BaseMemoryManager):
                 scope_id=scope_id,
                 memory_id=mem_id,
                 mem=memory.content,
-                semantic_store=semantic_store
+                semantic_store=semantic_store,
+                mem_type=memory.mem_type.value
             )
         )
         if not vector_success:
@@ -355,7 +399,6 @@ class FragmentMemoryManager(BaseMemoryManager):
             'id': mem_id,
             'user_id': req.user_id or '',
             'scope_id': req.scope_id or '',
-            'profile_type': req.fragment_type,
             'mem': content,
             'source_id': req.source_id,
             'mem_type': req.mem_type,
@@ -386,7 +429,7 @@ class FragmentMemoryManager(BaseMemoryManager):
             scope_id: str,
             memory_id: List[str],
             semantic_store: SemanticStore,
-            mem_type: str = MemoryType.FRAGMENT_MEMORY.value
+            mem_type: str = None
     ):
         if semantic_store:
             table_name = generate_idx_name(user_id, scope_id, mem_type)
@@ -440,7 +483,7 @@ class FragmentMemoryManager(BaseMemoryManager):
             error_code = error_codes.get(operation_type, StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR)
             raise build_error(
                 error_code,
-                memory_type=MemoryType.FRAGMENT_MEMORY.value,
+                memory_type="fragment_memory",
                 error_msg="semantic_store is required",
             )
         return semantic_store

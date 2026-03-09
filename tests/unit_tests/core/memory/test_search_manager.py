@@ -102,7 +102,7 @@ class TestSearchManager:
             variable_name=valid_var_name,
             variable_mem=var_value
         )
-        await variable_manager.add_memories(user_id, scope_id, [variable_unit])
+        await variable_manager.add_memories(user_id, scope_id, {MemoryType.VARIABLE.value: [variable_unit]})
         
         # Test if get_user_variable returns correct value when var_name is valid string
         result = await search_manager.get_user_variable(user_id, scope_id, valid_var_name)
@@ -141,7 +141,7 @@ class TestSearchManager:
             variable_name=valid_var_name,
             variable_mem=var_value
         )
-        await variable_manager.add_memories(user_id, scope_id, [variable_unit])
+        await variable_manager.add_memories(user_id, scope_id, {MemoryType.VARIABLE.value: [variable_unit]})
         
         # Create LongTermMemory instance and manually set necessary properties
         from openjiuwen.core.memory.long_term_memory import LongTermMemory

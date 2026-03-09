@@ -18,7 +18,8 @@ class UserMemStore:
     KEY_PREFIX_STR: str = "UMD"
     LEGACY_PREFIXES: List[str] = []
     MEM_TYPE_FIELD_KEY: str = "mem_type"
-    TOPIC_FIELD_KEY: str = "profile_type"
+    FRAGMENT_MEMORY_TYPE = [MemoryType.USER_PROFILE.value, MemoryType.SEMANTIC_MEMORY.value,
+                        MemoryType.EPISODIC_MEMORY.value]
     SEPARATOR: str = "/"
 
     def __init__(self, kv_store_instance: BaseKVStore):
@@ -65,12 +66,9 @@ class UserMemStore:
             await self.kv_store.set(user_mem_ids_key, self.__write_id(user_mem_ids_value, mem_id))
 
             # user profile topic ids
-            if (data[UserMemStore.MEM_TYPE_FIELD_KEY] == MemoryType.FRAGMENT_MEMORY.value and
-                    UserMemStore.TOPIC_FIELD_KEY in data.keys() and
-                    data[UserMemStore.TOPIC_FIELD_KEY] is not None):
+            if (data[UserMemStore.MEM_TYPE_FIELD_KEY] in UserMemStore.FRAGMENT_MEMORY_TYPE):
                 user_mem_topic_key = self.__get_concatenation_key([user_id, scope_id,
                                                                    UserMemStore.USER_PROFILE_TOPIC_STR,
-                                                                   data[UserMemStore.TOPIC_FIELD_KEY],
                                                                    self.IDS_STR])
                 user_mem_topic_value = await self.kv_store.get(user_mem_topic_key) or ""
                 await self.kv_store.set(user_mem_topic_key, self.__write_id(user_mem_topic_value, mem_id))
@@ -203,12 +201,9 @@ class UserMemStore:
                 await self.__delete_mem_id(user_mem_ids_key, mem_id)
 
                 # Delete user profile topic ids
-                if (dict_value[UserMemStore.MEM_TYPE_FIELD_KEY] == MemoryType.FRAGMENT_MEMORY.value and
-                        UserMemStore.TOPIC_FIELD_KEY in dict_value and
-                        dict_value[UserMemStore.TOPIC_FIELD_KEY] is not None):
+                if (dict_value[UserMemStore.MEM_TYPE_FIELD_KEY] in UserMemStore.FRAGMENT_MEMORY_TYPE):
                     user_mem_topic_key = self.__get_concatenation_key([user_id, scope_id,
                                                                        UserMemStore.USER_PROFILE_TOPIC_STR,
-                                                                       dict_value[UserMemStore.TOPIC_FIELD_KEY],
                                                                        self.IDS_STR])
                     await self.__delete_mem_id(user_mem_topic_key, mem_id)
 

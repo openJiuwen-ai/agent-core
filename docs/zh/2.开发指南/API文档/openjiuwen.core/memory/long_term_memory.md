@@ -342,7 +342,9 @@ async def add_messages(
 * **agent_config**(AgentMemoryConfig)：Agent 记忆策略配置，包含：
   * `mem_variables: list[Param]`：需要提取的变量记忆配置（变量名、描述、类型等）；
   * `enable_long_term_mem: bool`：是否开启长期记忆生成（默认 `True`）。
-*   * `enable_fragment_memory: bool`：是否开启记忆片段生成（默认 `True`）。  
+*   * `enable_user_profile: bool`：是否开启用户画像生成和使用（默认 `True`）。
+*   * `enable_semantic_memory: bool`：是否开启语义记忆生成和使用（默认 `True`）。
+*   * `enable_episodic_memory: bool`：是否开启情景记忆生成和使用（默认 `True`）。  
 *   * `enable_summary_memory: bool`：是否开启用户摘要记忆生成（默认 `True`）。  
 * **user_id**(str, 可选)：用户标识符。默认值：`"__default__"`。
 * **scope_id**(str, 可选)：作用域标识符；格式无效时直接返回，不抛异常。默认值：`"__default__"`。
@@ -380,7 +382,9 @@ async def add_messages(
 >>>         ),
 >>>     ],
 >>>     enable_long_term_mem=True,
->>>     enable_fragment_memory=True,
+>>>     enable_user_profile=True,
+>>>     enable_semantic_memory=True,
+>>>     enable_episodic_memory=True,
 >>>     enable_summary_memory=True,
 >>> )
 >>> 

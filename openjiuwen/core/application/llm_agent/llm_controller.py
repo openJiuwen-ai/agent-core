@@ -76,7 +76,9 @@ class LLMController(BaseController):
         super().__init__(config, context_engine, session)
         self.config = config
         self._enable_long_term_mem = self.config.agent_memory_config.enable_long_term_mem
-        self._enable_fragment_memory = self.config.agent_memory_config.enable_fragment_memory
+        self._enable_fragment_memory = (self.config.agent_memory_config.enable_user_profile or
+                                        self.config.agent_memory_config.enable_semantic_memory or
+                                        self.config.agent_memory_config.enable_episodic_memory)
         self._enable_summary_memory = self.config.agent_memory_config.enable_summary_memory
         self._enable_mem_variables = len(self.config.agent_memory_config.mem_variables) > 0
         self._enable_memory = (self.config.memory_scope_id and

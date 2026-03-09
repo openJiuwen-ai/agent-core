@@ -42,5 +42,7 @@ class MemoryScopeConfig(BaseModel):
 class AgentMemoryConfig(BaseModel):
     mem_variables: list[Param] = Field(default_factory=list)  # memory variables config
     enable_long_term_mem: bool = Field(default=True)  # enable long term memory or not
-    enable_fragment_memory: bool = Field(default=True)  # enable fragment memory or not
+    enable_user_profile: bool = Field(default=True)  # enable user profile memory or not
+    enable_semantic_memory: bool = Field(default=True)  # enable semantic memory or not
+    enable_episodic_memory: bool = Field(default=True)  # enable episodic memory or not
     enable_summary_memory: bool = Field(default=True)  # enable summary memory or not

@@ -30,7 +30,9 @@ The core types of the memory engine are defined in the `openjiuwen.core.memory` 
   Describes which "variable memories", "long-term memories", "user profile memories", and "user summary memories" an agent wants to extract and manage:
   - `mem_variables: list[Param]`: Variable memory configuration list (each `Param` defines a variable name, description, type, whether it's required, etc.).
   - `enable_long_term_mem: bool`: Whether to enable long-term memory (default: `True`).
-  - `enable_fragment_memory: bool`: Whether to enable memory fragment generation (default: `True`).
+  - `enable_user_profile: bool`: Whether to enable user profile memory generation and use (default: `True`).
+  - `enable_semantic_memory: bool`: Whether to enable semantic memory generation and use (default: `True`).
+  - `enable_episodic_memory: bool`: Whether to enable episodic memory generation and use (default: `True`).
   - `enable_summary_memory: bool`: Whether to enable user summary memory (default: `True`).
 
 > These classes are defined in the source code at:  
@@ -191,7 +193,9 @@ agent_mem_cfg = AgentMemoryConfig(
         Param.string("Age", "User age", required=False),
     ],
     enable_long_term_mem=True,
-    enable_fragment_memory=True,
+    enable_user_profile=True,
+    enable_semantic_memory=True,
+    enable_episodic_memory=True,
     enable_summary_memory=True
 )
 ```

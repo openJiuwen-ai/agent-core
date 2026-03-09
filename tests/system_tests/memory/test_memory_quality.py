@@ -136,6 +136,15 @@ class TestMemoryQuality(unittest.IsolatedAsyncioTestCase):
         self.scope_id = "test_memory_scope"
         self.user_id = "test_user_id"
 
+        await self.engine.set_scope_config(
+            scope_id=self.scope_id,
+            memory_scope_config=MemoryScopeConfig(
+                model_cfg=default_model_cfg,
+                model_client_cfg=default_model_client_cfg,
+                embedding_cfg=embed_config,
+            )
+        )
+
         logger.info("LongTermMemory initialized successfully with Chroma + SQLite + InMemoryKVStore")
 
     async def asyncTearDown(self):

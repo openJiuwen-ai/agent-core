@@ -342,7 +342,9 @@ Add conversation messages to the memory engine and generate memories (user profi
 * **agent_config** (AgentMemoryConfig): Agent memory strategy configuration, containing:
   * `mem_variables: list[Param]`: Variable memory configurations to extract (variable name, description, type, etc.);
   * `enable_long_term_mem: bool`: Whether to enable long-term memory generation (default `True`).
-  * `enable_fragment_memory: bool`: Whether to enable memory fragment generation (default `True`).  
+  * `enable_user_profile: bool`: Whether to enable user profile generation and use (default `True`).
+  * `enable_semantic_memory: bool`: Whether to enable semantic memory generation and use (default `True`).
+  * `enable_episodic_memory: bool`: Whether to enable episodic memory generation and use (default `True`).
   * `enable_summary_memory: bool`: Whether to enable user summary memory generation (default `True`).
 * **user_id** (str, optional): User identifier. Default value: `"__default__"`.
 * **scope_id** (str, optional): Scope identifier; returns directly without exception if format is invalid. Default value: `"__default__"`.
@@ -380,7 +382,9 @@ Add conversation messages to the memory engine and generate memories (user profi
 >>>         ),
 >>>     ],
 >>>     enable_long_term_mem=True,
->>>     enable_fragment_memory=True,
+>>>     enable_user_profile=True,
+>>>     enable_semantic_memory=True,
+>>>     enable_episodic_memory=True,
 >>>     enable_summary_memory=True,
 >>> )
 >>> 

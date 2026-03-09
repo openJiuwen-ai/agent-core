@@ -165,7 +165,9 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
                 Param.string("职业", "用户职业", required=False),
             ],
             enable_long_term_mem=True,
-            enable_fragment_memory=True,
+            enable_user_profile=True,
+            enable_semantic_memory=True,
+            enable_episodic_memory=True,
             enable_summary_memory=True
         )
 

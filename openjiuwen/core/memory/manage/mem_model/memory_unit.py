@@ -7,7 +7,9 @@ from typing import Optional
 
 
 class MemoryType(Enum):
-    FRAGMENT_MEMORY = "fragment"
+    USER_PROFILE = "user_profile"
+    SEMANTIC_MEMORY = "semantic_memory"
+    EPISODIC_MEMORY = "episodic_memory"
     VARIABLE = "variable"
     SUMMARY = "summary"
     UNKNOWN = "unknown"
@@ -27,8 +29,6 @@ class BaseMemoryUnit:
 
 @dataclass
 class FragmentMemoryUnit(BaseMemoryUnit):
-    mem_type: MemoryType = field(default=MemoryType.FRAGMENT_MEMORY, init=False)
-    fragment_type: str
     content: str
     message_mem_id: Optional[str] = None  # Corresponding Message ID
     timestamp: str = ""

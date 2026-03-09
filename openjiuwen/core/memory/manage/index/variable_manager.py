@@ -4,8 +4,8 @@
 from typing import Any, List, Optional, Tuple
 
 from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import VariableUnit
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
@@ -23,40 +23,53 @@ class VariableManager(BaseMemoryManager):
                  crypto_key: bytes):
         self.kv_store = kv_store
         self.crypto_key = crypto_key
+        self.mem_type = MemoryType.VARIABLE.value
         kv_prefix_registry.register_current(self.USER_VAR_PREFIX)
         kv_prefix_registry.register_current(self.SESSION_VAR_PREFIX)
         for legacy_prefix in self.LEGACY_PREFIXES:
             kv_prefix_registry.register_legacy(legacy_prefix)
 
-    async def add_memories(self, user_id: str, scope_id: str, memories: List[VariableUnit],
+    async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
                            llm: Tuple[str, Model] | None = None, **kwargs):
         """add Variable memories in batch"""
-        for memory in memories:
-            if self.kv_store is None:
-                memory_logger.error(
-                    "kv_store cannot be None",
-                    event_type=LogEventType.MEMORY_STORE,
-                    memory_type="variable",
-                    user_id=user_id,
-                    scope_id=scope_id
+        for mem_type, memory in memories.items():
+            if mem_type != self.mem_type:
+                continue
+            for unit in memory:
+                if not isinstance(unit, VariableUnit):
+                    memory_logger.warning(
+                        "mem_unit is not a VariableUnit",
+                        event_type=LogEventType.MEMORY_STORE,
+                        memory_type=self.mem_type,
+                        user_id=user_id,
+                        scope_id=scope_id
+                    )
+                    continue
+                if self.kv_store is None:
+                    memory_logger.error(
+                        "kv_store cannot be None",
+                        event_type=LogEventType.MEMORY_STORE,
+                        memory_type=self.mem_type,
+                        user_id=user_id,
+                        scope_id=scope_id
+                    )
+                    return
+                key, value = self._make_variable_pairs(
+                    user_id,
+                    False,
+                    scope_id,
+                    unit.variable_name,
+                    None,
+                    unit.variable_mem,
+                    None
                 )
-                return
-            key, value = self._make_variable_pairs(
-                user_id,
-                False,
-                scope_id,
-                memory.variable_name,
-                None,
-                memory.variable_mem,
-                None
-            )
-            await self.kv_store.set(key, value)
+                await self.kv_store.set(key, value)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         memory_logger.warning(
             "Not implemented method update",
             event_type=LogEventType.MEMORY_STORE,
-            memory_type="variable",
+            memory_type=self.mem_type,
             memory_id=[mem_id],
             user_id=user_id,
             scope_id=scope_id
@@ -68,7 +81,7 @@ class VariableManager(BaseMemoryManager):
             memory_logger.error(
                 "KV_store cannot be None",
                 event_type=LogEventType.MEMORY_STORE,
-                memory_type="variable",
+                memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
@@ -85,7 +98,7 @@ class VariableManager(BaseMemoryManager):
             "Not implemented method delete",
             event_type=LogEventType.MEMORY_STORE,
             memory_id=[mem_id],
-            memory_type="variable",
+            memory_type=self.mem_type,
             user_id=user_id,
             scope_id=scope_id
         )
@@ -96,7 +109,7 @@ class VariableManager(BaseMemoryManager):
             memory_logger.error(
                 "kv_store cannot be None",
                 event_type=LogEventType.MEMORY_STORE,
-                memory_type="variable",
+                memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
@@ -111,7 +124,7 @@ class VariableManager(BaseMemoryManager):
             memory_logger.error(
                 "kv_store cannot be None",
                 event_type=LogEventType.MEMORY_STORE,
-                memory_type="variable",
+                memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
@@ -124,7 +137,7 @@ class VariableManager(BaseMemoryManager):
             "Not implemented method get",
             memory_id=[mem_id],
             event_type=LogEventType.MEMORY_STORE,
-            memory_type="variable",
+            memory_type=self.mem_type,
             user_id=user_id,
             scope_id=scope_id
         )
@@ -134,7 +147,7 @@ class VariableManager(BaseMemoryManager):
         memory_logger.warning(
             "Not implemented method search",
             event_type=LogEventType.MEMORY_STORE,
-            memory_type="variable",
+            memory_type=self.mem_type,
             query=query,
             user_id=user_id,
             scope_id=scope_id

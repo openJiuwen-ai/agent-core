@@ -25,7 +25,6 @@ class SearchParams(BaseModel):
 
 
 class SearchManager:
-    user_mem_manager_list = [MemoryType.FRAGMENT_MEMORY.value]
     all_mem_manager_list = [item.value for item in MemoryType]
 
     def __init__(self,
@@ -43,6 +42,7 @@ class SearchManager:
         top_k = params.top_k
         threshold = params.threshold
         search_type = params.search_type
+        kwargs['mem_type'] = search_type
         # search_type is illegal
         if search_type is not None and search_type not in self.all_mem_manager_list:
             raise build_error(
@@ -60,18 +60,18 @@ class SearchManager:
         result = []
         # search_type not specified, traverse available managers
         if search_type is None:
-            for mem_type, manager in self.managers.items():
-                if mem_type in self.user_mem_manager_list:
-                    res = await manager.search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
-                                               semantic_store=semantic_store, **kwargs)
-                    if res is not None:
-                        result.extend(res)
+            for manager in set(self.managers.values()):
+                res = await manager.search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
+                                            semantic_store=semantic_store, **kwargs)
+                if res is not None:
+                    result.extend(res)
         # call the manager corresponding to search_type
         else:
             res = await self.managers[search_type].search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
                                                           semantic_store=semantic_store, **kwargs)
             if res:
                 result = res
+        
         # sort and truncate multiple search_type results based on score
         if len(result) > top_k:
             result.sort(key=lambda item: item["score"], reverse=True)
@@ -92,23 +92,22 @@ class SearchManager:
             item["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=item["mem"])
         return list_res
 
-    async def list_user_profile(self, user_id: str, scope_id: str, profile_type: Optional[str] = None) -> list[dict]:
-        if MemoryType.FRAGMENT_MEMORY.value not in self.managers:
+    async def list_user_profile(self, user_id: str, scope_id: str) -> list[dict]:
+        if any(item not in self.managers for item in UserMemStore.FRAGMENT_MEMORY_TYPE):
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
-                memory_type=MemoryType.FRAGMENT_MEMORY.value,
-                error_msg=f"{MemoryType.FRAGMENT_MEMORY.value} memory manager not inited",
+                memory_type="fragment_memory",
+                error_msg=f"fragment memory manager not inited",
             )
-        if not isinstance(self.managers[MemoryType.FRAGMENT_MEMORY.value], FragmentMemoryManager):
+        if not isinstance(self.managers[MemoryType.USER_PROFILE.value], FragmentMemoryManager):
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
-                memory_type=MemoryType.FRAGMENT_MEMORY.value,
-                error_msg=f"{MemoryType.FRAGMENT_MEMORY.value} manager class is not UserProfileManager",
+                memory_type="fragment_memory",
+                error_msg=f"fragment memory manager class is not FragmentMemoryManager",
             )
-        return await self.managers[MemoryType.FRAGMENT_MEMORY.value].list_fragment_memories(
+        return await self.managers[MemoryType.USER_PROFILE.value].list_fragment_memories(
             user_id=user_id,
-            scope_id=scope_id,
-            profile_type=profile_type
+            scope_id=scope_id
         )
 
     async def list_user_summary(self, user_id: str, scope_id: str) -> list[dict]:
