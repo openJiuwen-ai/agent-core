@@ -129,9 +129,10 @@ class Generator:
             return all_memory_results
         for unit in merged_units:
             mem_type = unit.mem_type.value
-            if mem_type not in all_memory_results or not fragment_enable.get(mem_type, False):
+            if mem_type not in all_memory_results:
                 all_memory_results[mem_type] = []
-            all_memory_results[mem_type].append(unit)
+            if fragment_enable.get(mem_type, False):
+                all_memory_results[mem_type].append(unit)
         memory_logger.info(
             "Memory units generated successfully",
             event_type=LogEventType.MEMORY_PROCESS,
@@ -201,6 +202,12 @@ class Generator:
             if not mem_type:
                 continue
             for mem_content in fragment_memories:
+                if not isinstance(mem_content, str):
+                    content = mem_content.get("content")
+                    if content:
+                        mem_content = content
+                    else:
+                        mem_content = str(mem_content)
                 mem_id = str(await self.data_id_generator.generate_next_id(user_id=user_id))
                 fragment_mem_units.append(FragmentMemoryUnit(
                     mem_type=mem_type,
