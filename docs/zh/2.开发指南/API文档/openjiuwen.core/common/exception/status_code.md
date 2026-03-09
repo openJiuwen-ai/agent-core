@@ -244,6 +244,8 @@
 | MEMORY_STORE_INIT_FAILED | 158006 | 内存存储初始化失败。 | 检查存储配置和连接。 |
 | MEMORY_CONNECT_STORE_EXECUTION_ERROR | 158007 | 内存连接存储执行错误。 | 检查存储服务可用性。 |
 | MEMORY_STORE_VALIDATION_INVALID | 158008 | 内存存储验证无效。 | 检查存储配置参数。 |
+| MEMORY_REGISTER_OPERATION_VALIDATION_INVALID | 158009 | 内存迁移操作注册失败。             | 检查实体键和版本号配置。 |
+| MEMORY_MIGRATE_MEMORY_EXECUTION_ERROR | 158010 | 内存迁移执行错误。                 | 检查迁移配置和数据。 |
 | | **Foundation Tool相关错误 (160000 - 169999)** | | |
 | (预留) | | | |
 | | **Optimization Toolchain相关错误 (170000 - 179999)** | | |
