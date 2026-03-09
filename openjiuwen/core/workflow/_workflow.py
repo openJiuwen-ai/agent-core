@@ -32,7 +32,6 @@ from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.graph.graph import PregelGraph
 
 
-
 @dataclass
 class EdgeTopology:
     """Edge topology context for ability inference."""
@@ -51,99 +50,72 @@ class EdgeTopology:
         )
 
 
-
-@dataclass
-class ComponentExecutionParams:
-    """
-    Component execution parameters encapsulation
-    """
-    node_id: str  # Node ID
-    session: Session  # Session object
-    executor: ComponentExecutable  # Component executable object
-    inputs: Dict[str, Any]  # Input data
-    inputs_schema: Optional[Dict[str, Any]] = None  # Input schema
-    outputs_schema: Optional[Dict[str, Any]] = None  # Output schema
-    context: Optional[ModelContext] = None  # Context, optional parameter
-
-
-async def execute_single_component(params: ComponentExecutionParams) -> Optional[Dict[str, Any]]:
-    """
-    Execute a single component and return the execution result.
-
-    Args:
-        params: Component execution parameters
-
-    Returns:
-        Component execution result
-    """
-    # Extract parameters from params
-    node_id = params.node_id
-    session = params.session
-    executor = params.executor
-    inputs = params.inputs
-    inputs_schema = params.inputs_schema
-    outputs_schema = params.outputs_schema
-    context = params.context
-
+async def execute_single_component(
+        component_id: str,
+        session: Session,
+        executor: ComponentComposable,
+        inputs: dict,  # Input data
+        *,
+        inputs_schema: dict = None,  # Input schema
+        outputs_schema: dict = None,  # Output schema
+        context: ModelContext = None  # Context, optional parameter
+):
     # 1. Create WorkflowSession
     workflow_session = WorkflowSession(
-        workflow_id=node_id,
+        workflow_id=component_id,
         parent=None,
         session_id=session.get_session_id(),
         callback_manager=session.get_callback_manager()
     )
 
-    # 2. Create custom NodeSession
-    class CustomNodeSession(NodeSession):
-        def __init__(self, session: BaseSession, node_id: str, node_type: str = None, node_config=None):
-            super().__init__(session, node_id, node_type)
-            self._custom_node_config = node_config
+    # 2. Create NodeSession
+    node_session = NodeSession(workflow_session, component_id, type(executor).__name__)
 
-        def node_config(self):
-            if self._custom_node_config:
-                return self._custom_node_config
-            return super().node_config()
+    # 3. Create Vertex
+    vertex = Vertex(component_id, executor.to_executable())
 
-    # Create component configuration
+    # 4. Initialize Vertex
+    # When context is None, it can still be initialized normally
+    vertex.init(node_session, context=context)
+
+    # 5. Directly set _node_config attribute
+    # Create simple configuration objects
     class SimpleIOConfig:
         def __init__(self, inputs_schema, outputs_schema=None):
             self.inputs_schema = inputs_schema
-            self.outputs_schema = outputs_schema
+            self.outputs_schema = outputs_schema  # Add outputs_schema attribute
 
     class SimpleNodeConfig:
         def __init__(self, inputs_schema, outputs_schema=None):
             self.io_configs = SimpleIOConfig(inputs_schema, outputs_schema)
             self.abilities = [ComponentAbility.INVOKE]
 
-    # Create custom NodeSession instance
-    node_config = SimpleNodeConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema)
-    node_session = CustomNodeSession(workflow_session, node_id, type(executor).__name__, node_config=node_config)
+            # Set input schema and output schema
 
-    # 3. Create Vertex
-    vertex = Vertex(node_id, executor)
+    vertex._node_config = SimpleNodeConfig(
+        inputs_schema=inputs_schema,
+        outputs_schema=outputs_schema
+    )
 
-    # 4. Initialize Vertex
-    vertex.init(node_session, context=context)
-
-    # 5. Submit input data
+    # 6. Submit input data
     node_session.state().commit_user_inputs(inputs)
 
-    # 6. Create PregelConfig
+    # 7. Create PregelConfig
     config = PregelConfig(
         session_id=workflow_session.session_id(),
-        ns=node_id,  # Simulate workflow_id
+        ns=component_id,  # Simulate workflow_id
         recursion_limit=100  # Recursion limit
     )
 
-    # 7. Execute component
+    # 8. Execute component
     await vertex.call(config)
 
-    # 8. Commit all state updates
+    # 9. Commit all state updates
     node_session.state().commit()
 
-    # 9. Get execution result
-    result = node_session.state().get_outputs(node_id)
-    return result.get(node_id)
+    # 10. Get execution result
+    result = node_session.state().get_outputs(component_id)
+    return result.get(component_id)
 
 
 class ConnectionType(Enum):

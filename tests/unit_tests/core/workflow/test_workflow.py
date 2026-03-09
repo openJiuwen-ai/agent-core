@@ -13,7 +13,7 @@ from openjiuwen.core.workflow import ArrayCondition
 from openjiuwen.core.workflow import NumberCondition
 from openjiuwen.core.workflow import End
 from openjiuwen.core.workflow import WorkflowComponent
-from openjiuwen.core.workflow._workflow import execute_single_component, ComponentExecutionParams
+from openjiuwen.core.workflow._workflow import execute_single_component
 from openjiuwen.core.workflow.components.flow.loop.callback.intermediate_loop_var import IntermediateLoopVarCallback
 from openjiuwen.core.workflow.components.flow.loop.callback.output import OutputCallback
 from openjiuwen.core.workflow import LoopGroup, LoopComponent
@@ -1382,24 +1382,21 @@ async def test_single_component_execution():
     component = CustomComponent()
     session = create_workflow_session()
     # 3. create Vertex instance
-    node_id = "test_component"
+    component_id = "test_component"
     inputs = {"a": "测试输入", "b": "测试输入2"}
     inputs_schema = {"a": "${a}", "b": "${b}"}
     outputs_schema = {"result": "${result}"}
 
-    # prepare param
-    params = ComponentExecutionParams(
-        node_id=node_id,
+    # 4. call execute_single_component method
+    result = await execute_single_component(
+        component_id=component_id,
         session=session,
         executor=component,
         inputs=inputs,
         inputs_schema=inputs_schema,
         outputs_schema=outputs_schema
     )
-    # 4. call execute_single_component method
-    result = await execute_single_component(
-        params
-    )
+    # 5. check result
     assert result == {'result': 'result'}
 
 
