@@ -439,6 +439,11 @@ class QuestionerDirectReplyHandler:
                 self._update_questioner_states_question(output.question)
                 # Write assistant message (question) to context
                 await self._write_assistant_message_to_context(output.question, context)
+            else:
+                # Write assistant message with extracted params result to context
+                await self._write_assistant_message_to_context(
+                    json.dumps(output.key_fields, ensure_ascii=False), context
+                )
             self._state = self._state.handle_event(event)
         else:
             raise build_error(
@@ -469,6 +474,11 @@ class QuestionerDirectReplyHandler:
                 self._update_questioner_states_question(output.question)
                 # Write assistant message (question) to context
                 await self._write_assistant_message_to_context(output.question, context)
+            else:
+                # Write assistant message with extracted params result to context
+                await self._write_assistant_message_to_context(
+                    json.dumps(output.key_fields, ensure_ascii=False), context
+                )
             self._state = self._state.handle_event(event)
         else:
             raise build_error(
