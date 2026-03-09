@@ -263,15 +263,18 @@ class AbilityManager:
         for name, agent_card in self._agents.items():
             if names is None or name in names:
                 # Build parameters from input_params
-                params = {"type": "object", "properties": {}, "required": []}
-                if hasattr(agent_card, 'input_params'):
-                    for param in agent_card.input_params:
-                        params["properties"][param.name] = {
-                            "type": param.type,
-                            "description": param.description or ""
-                        }
-                        if getattr(param, 'required', False):
-                            params["required"].append(param.name)
+                # input_params can be: None, dict (JSON Schema), or Type[BaseModel]
+                if agent_card.input_params is None:
+                    params = {"type": "object", "properties": {}, "required": []}
+                elif isinstance(agent_card.input_params, dict):
+                    # Already a JSON Schema dict, use directly
+                    params = agent_card.input_params
+                elif isinstance(agent_card.input_params, type) and issubclass(agent_card.input_params, BaseModel):
+                    # BaseModel type, convert to JSON Schema
+                    params = agent_card.input_params.model_json_schema()
+                else:
+                    # Fallback to default JSON Schema for unknown types
+                    params = {"type": "object", "properties": {}, "required": []}
 
                 tool_info = ToolInfo(
                     name=agent_card.name,
