@@ -77,6 +77,7 @@ class LogEventType(Enum):
     STORE_LOAD = "store_load"  # Data store load collection
 
     # Memory related events
+    MEMORY_INIT = "memory_init"  # Memory initialization
     MEMORY_STORE = "memory_store"  # Memory stored
     MEMORY_RETRIEVE = "memory_retrieve"  # Memory retrieved
     MEMORY_DELETE = "memory_delete"  # Memory deleted
@@ -227,7 +228,7 @@ class BaseLogEvent:
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     event_type: LogEventType | str = LogEventType.SYSTEM_START
     log_level: LogLevel = LogLevel.INFO
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc).astimezone())
 
     # Module information
     module_type: ModuleType = ModuleType.SYSTEM
@@ -625,6 +626,7 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.TOOL_CALL_END: ToolEvent,
     LogEventType.TOOL_CALL_ERROR: ToolEvent,
     # Memory events
+    LogEventType.MEMORY_INIT: MemoryEvent,
     LogEventType.MEMORY_PROCESS: MemoryEvent,
     LogEventType.MEMORY_STORE: MemoryEvent,
     LogEventType.MEMORY_RETRIEVE: MemoryEvent,

@@ -1,8 +1,8 @@
 import asyncio
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Union, Callable
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.workflow import End
+from openjiuwen.core.workflow import BranchRouter, End
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
@@ -12,6 +12,7 @@ from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, WorkflowComponent
 from openjiuwen.core.workflow.components import Session
+from openjiuwen.core.workflow.components.condition.condition import Condition
 
 
 class MockNodeBase(WorkflowComponent):
@@ -415,6 +416,7 @@ class DualAbilityWithErrorComponent(ComponentComposable):
     A component with dual stream abilities (TRANSFORM + STREAM) that can be configured
     to raise exceptions in specific abilities for testing error handling.
     """
+
     def __init__(self, error_in_stream: bool = False, error_in_transform: bool = False):
         super().__init__()
         self._error_in_stream = error_in_stream
@@ -432,6 +434,7 @@ class DualAbilityWithErrorComponent(ComponentComposable):
 
 class DualAbilityWithErrorExecutor(ComponentExecutable):
     """Executor that can raise exceptions in specific abilities."""
+
     def __init__(self, error_in_stream: bool = False, error_in_transform: bool = False):
         super().__init__()
         self._error_in_stream = error_in_stream
@@ -463,3 +466,45 @@ class DualAbilityWithErrorExecutor(ComponentExecutable):
             else:
                 async for data in obj:
                     yield {data_source_key: data}
+
+
+class MockNodeWithAllAbility(WorkflowComponent):
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        return inputs
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        for key in inputs.keys():
+            for index in range(0, 5):
+                yield {key: index}
+
+    async def collect(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        results = []
+        for key, obj in inputs.items():
+            async for item in obj:
+                results.append({key: item})
+        return {"collect_result": results}
+
+    async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        for key, obj in inputs.items():
+            async for item in obj:
+                yield {key: item}
+
+
+class MockIntentNode(WorkflowComponent):
+    def __init__(self, classification_id):
+        self._classification_id = classification_id
+        self._router = BranchRouter()
+
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        self._router.set_session(session)
+        return dict(classification_id=self._classification_id)
+
+    def add_component(self, graph: Graph, node_id: str, wait_for_all: bool = False) -> None:
+        graph.add_node(node_id, self.to_executable(), wait_for_all=wait_for_all)
+        graph.add_conditional_edges(node_id, self._router)
+
+    def add_branch(self, condition: Union[str, Callable[[], bool], Condition], target: Union[str, list[str]],
+                   branch_id: str = None):
+        if isinstance(target, str):
+            target = [target]
+        self._router.add_branch(condition, target, branch_id=branch_id)

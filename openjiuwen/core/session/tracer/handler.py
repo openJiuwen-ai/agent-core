@@ -80,7 +80,8 @@ class TraceAgentHandler(TraceBaseHandler):
         return TracerHandlerName.TRACE_AGENT.value
 
     def _format_data(self, span: TraceAgentSpan) -> dict:
-        span.status = self._get_node_status(span)
+        if span.status != NodeStatus.INTERRUPTED.value:
+            span.status = self._get_node_status(span)
         return {"type": self.event_name(), "payload": span.model_dump(by_alias=True)}
 
     def _get_tracer_agent_span(self, invoke_id: str) -> TraceAgentSpan:
@@ -274,11 +275,11 @@ class TraceWorkflowHandler(TraceBaseHandler):
         return TracerHandlerName.TRACER_WORKFLOW.value
 
     def _format_data(self, span: TraceWorkflowSpan) -> dict:
-        span.status = self._get_node_status(span)
+        if span.status != NodeStatus.INTERRUPTED.value:
+            span.status = self._get_node_status(span)
         result = span.model_dump(exclude_none=True, by_alias=True, exclude={"child_invokes_id", "llm_invoke_data"})
         return {"type": self.event_name(),
                 "payload": result}
-
 
     def _get_tracer_workflow_span(self, invoke_id: str) -> TraceWorkflowSpan:
         span = self._span_manager.get_span(invoke_id)
@@ -335,7 +336,7 @@ class TraceWorkflowHandler(TraceBaseHandler):
             if isinstance(exception, BaseError):
                 span.error = {"error_code": exception.code, "message": exception.message}
             elif isinstance(exception, GraphInterrupt):
-                return
+                span.status = NodeStatus.INTERRUPTED.value
             else:
                 span.error = {"error_code": StatusCode.WORKFLOW_EXECUTION_ERROR.code,
                               "message": StatusCode.WORKFLOW_EXECUTION_ERROR.errmsg.format(reason=str(exception))}
@@ -384,3 +385,16 @@ class TraceWorkflowHandler(TraceBaseHandler):
         await self._send_data(span)
         if span.component_type == "End" and span.end_time:
             self._span_manager.update_span(span, {})
+
+    @trigger_event
+    async def on_interact(self, invoke_id: str, inputs: Any, component_metadata: dict, need_send: bool = False,
+                          **kwargs):
+        span = self._get_tracer_workflow_span(invoke_id)
+
+        update_data = {
+            "interactive_inputs": inputs,
+            **component_metadata
+        }
+        self._span_manager.update_span(span, update_data)
+        if need_send:
+            await self._send_data(span, exclude={"outputs", "stream_outputs"})

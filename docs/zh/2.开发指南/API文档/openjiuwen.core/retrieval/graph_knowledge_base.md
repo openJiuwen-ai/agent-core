@@ -6,7 +6,7 @@
 
 
 ```python
-GraphKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, chunk_retriever: Optional[Retriever] = None, triple_retriever: Optional[Retriever] = None, llm_client: Optional[Any] = None, llm_model_name: Optional[Any] = None, **kwargs: Any)
+GraphKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, chunk_retriever: Optional[Retriever] = None, triple_retriever: Optional[Retriever] = None, llm_client: Optional[BaseModelClient] = None, **kwargs: Any)
 ```
 
 初始化图知识库。
@@ -22,8 +22,7 @@ GraphKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorSto
 * **index_manager**(Indexer, 可选)：索引管理器实例。默认值：None。
 * **chunk_retriever**(Retriever, 可选)：文档块检索器实例。默认值：None。
 * **triple_retriever**(Retriever, 可选)：三元组检索器实例。默认值：None。
-* **llm_client**(Any, 可选)：LLM客户端实例（用于三元组提取和智能检索）。默认值：None。
-* **llm_model_name**(Any, 可选)：LLM模型名称。默认值：None。
+* **llm_client**(BaseModelClient, 可选)：LLM客户端实例（用于三元组提取和智能检索）。默认值：None。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
 
 ### async parse_files
@@ -85,12 +84,12 @@ Added 1 documents with graph index
 retrieve(query: str, config: Optional[RetrievalConfig] = None, **kwargs: Any) -> List[RetrievalResult]
 ```
 
-检索相关文档，支持图检索。如果config.use_graph或知识库配置的use_graph为True，将使用图检索器进行检索，支持图扩展和多跳检索。
+检索相关文档，支持图检索和智能检索。如果config.use_graph或知识库配置的use_graph为True，将使用图检索器进行检索，支持图扩展和多跳检索。如果config.agentic为True，`AgenticRetriever` 会包装底层检索器执行迭代查询重写和结果融合。
 
 **参数**：
 
 * **query**(str)：查询字符串。
-* **config**(RetrievalConfig, 可选)：检索配置，use_graph=True启用图检索，graph_expansion=True启用图扩展。默认值：None。
+* **config**(RetrievalConfig, 可选)：检索配置，use_graph=True启用图检索，graph_expansion=True启用图扩展，agentic=True启用智能检索。默认值：None。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
 
 **返回**：

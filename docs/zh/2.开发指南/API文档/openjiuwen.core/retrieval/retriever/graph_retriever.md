@@ -65,11 +65,11 @@ retrieve(query: str, top_k: int = 5, score_threshold: Optional[float] = None, mo
 >>> from openjiuwen.core.retrieval.retriever.graph_retriever import GraphRetriever
 >>> from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
 >>> from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
->>> from openjiuwen.core.retrieval.common.config import VectorStoreConfig, EmbeddingConfig
+>>> from openjiuwen.core.retrieval.common.config import VectorStoreConfig, EmbeddingConfig, StoreType
 >>> 
 >>> async def run():
 ...     # 创建向量存储
-...     vs_config = VectorStoreConfig(collection_name="test_collection")
+...     vs_config = VectorStoreConfig(store_provider=StoreType.Chroma, collection_name="test_collection")
 ...     vector_store = ChromaVectorStore(config=vs_config, chroma_path="./chroma_db")
 ...     # 创建嵌入模型
 ...     embed_config = EmbeddingConfig(model_name="text-embedding-ada-002", api_key="your_api_key", base_url="your_base_url")

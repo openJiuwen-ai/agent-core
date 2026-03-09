@@ -6,9 +6,22 @@ Configuration Classes
 All configuration classes are unified in this file.
 """
 
+__all__ = [
+    "EmbeddingConfig",
+    "KnowledgeBaseConfig",
+    "RetrievalConfig",
+    "IndexConfig",
+    "StoreType",
+    "VectorStoreConfig",
+    "RerankerConfig",
+]
+
+from enum import Enum
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 
 
 class KnowledgeBaseConfig(BaseModel):
@@ -41,20 +54,21 @@ class IndexConfig(BaseModel):
     index_type: Literal["hybrid", "bm25", "vector"] = Field(default="hybrid", description="Index type")
 
 
+class StoreType(str, Enum):
+    """VectorStoreProvider type"""
+
+    Milvus = "milvus"
+    Chroma = "chroma"
+    PGVector = "pgvector"
+
+
 class VectorStoreConfig(BaseModel):
     """Vector store configuration"""
 
+    store_provider: StoreType = Field(..., description="Vector store provider identification")
     database_name: str = Field(default="", pattern=r"^[A-Za-z0-9_]*$", description="Database name")
     collection_name: str = Field(..., description="Collection name")
     distance_metric: Literal["cosine", "euclidean", "dot"] = Field(default="cosine", description="Distance metric")
-
-
-class EmbeddingConfig(BaseModel):
-    """Embedding model configuration"""
-
-    model_name: str = Field(..., description="Model name")
-    base_url: str = Field(..., description="API Base URL")
-    api_key: Optional[str] = Field(None, description="API Key")
 
 
 class RerankerConfig(BaseModel):

@@ -330,46 +330,6 @@ class TestRestFulApi:
                 assert result["data"] == error_data
 
     @pytest.mark.asyncio
-    async def test_invoke_with_gzipped_response(self, restful_api):
-        """Test invoke method handling GZIP compressed response"""
-        # Create compressed data
-        original_data = {
-            "compressed": True,
-            "items": [{"id": i, "name": f"item{i}"} for i in range(5)]
-        }
-        json_bytes = json.dumps(original_data).encode('utf-8')
-        gzipped_bytes = gzip.compress(json_bytes)
-
-        # Create mocked response with GZIP header
-        mock_response = self._create_mock_response(
-            status=200,
-            content_type="application/json",
-            url="http://example.com/api/gzipped",
-            reason="OK",
-            content_bytes=gzipped_bytes
-        )
-        mock_response.headers = {
-            "Content-Type": "application/json",
-            "Content-Encoding": "gzip"
-        }
-
-        # Use helper method to create mocked session
-        with patch('aiohttp.ClientSession') as mock_session_class:
-            mock_session = self._create_mocked_session_context(mock_response)
-            mock_session_class.return_value = mock_session
-
-            # Use SSL mock context manager
-            with self._ssl_mock_context():
-                # Call invoke method
-                result = await restful_api.invoke({})
-
-                # Verify result
-                assert result["code"] == 200
-                assert result["message"] == "success"
-                assert result["data"] == original_data
-                assert result["headers"]["Content-Encoding"] == "gzip"
-
-    @pytest.mark.asyncio
     async def test_invoke_response_size_exceeded(self, restful_api):
         """Test invoke method handling response size limit exceeded"""
         # Create large response data

@@ -44,3 +44,10 @@ class StateCollection(State):
     @property
     def global_state(self):
         return self._global_state
+
+    def dump(self) -> dict:
+        return {
+            "global_state": self._global_state.get_state(),
+            "agent_state": self._agent_state.get_state(),
+            "trace_state": self._trace_state
+        }

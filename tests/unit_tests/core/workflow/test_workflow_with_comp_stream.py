@@ -22,7 +22,8 @@ from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import StreamMode, BaseStreamMode, OutputSchema
 from openjiuwen.core.workflow import Workflow, WorkflowOutput, WorkflowChunk
 from openjiuwen.core.workflow import ComponentAbility
-from tests.unit_tests.core.workflow.mock_nodes import ComputeComponent2, DualAbilityWithErrorComponent
+from tests.unit_tests.core.workflow.mock_nodes import (ComputeComponent2, DualAbilityWithErrorComponent,
+                                                       MockIntentNode, MockNodeWithAllAbility)
 
 pytestmark = pytest.mark.asyncio
 
@@ -912,3 +913,126 @@ async def test_auto_ability_with_condition_edge():
     assert result.result == {'output': {'result2': 1}}
     result = await flow.invoke(inputs={"user_input": {"x": 2}}, session=create_workflow_session())
     assert result.result == {'output': {'result': 3}}
+
+
+class MockLLMComponent(WorkflowComponent):
+    def __init__(self, output, stream_outputs):
+        self.output = output
+        self.stream_outputs = stream_outputs
+
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        for output in self.stream_outputs:
+            yield {"a": output}
+        await asyncio.sleep(2)
+
+
+async def test_stream_call_fast_than_call():
+    def create_workflow(conf):
+        wf = Workflow()
+        wf.set_start_comp("start", Start(), inputs_schema={"query": "${user.query}"})
+        wf.add_workflow_comp("llm", MockLLMComponent(output={},
+                                                     stream_outputs=['2019', '年', '，', 'Rivian', '在', '没有',
+                                                                     '一辆车',
+                                                                     '下线', '的', '情况', '下', '一年', '进行', '了',
+                                                                     '四轮', '融资']))
+        wf.set_end_comp("end", End(conf=conf), inputs_schema={"query": "${start.query}"},
+                        stream_inputs_schema={"a": "${llm.a}"}, response_mode="streaming")
+
+        wf.add_connection("start", "llm")
+        wf.add_stream_connection("llm", "end")
+        return wf
+
+    template_for_stream_data_source = {"response_template": "####这是 a={{a}}, #####"}
+    wf = create_workflow(template_for_stream_data_source)
+    chunks = []
+    expect_chunks = [OutputSchema(type='end node stream', index=0, payload={'response': '####这是 a='}),
+                     OutputSchema(type='end node stream', index=1, payload={'response': '2019'}),
+                     OutputSchema(type='end node stream', index=2, payload={'response': '年'}),
+                     OutputSchema(type='end node stream', index=3, payload={'response': '，'}),
+                     OutputSchema(type='end node stream', index=4, payload={'response': 'Rivian'}),
+                     OutputSchema(type='end node stream', index=5, payload={'response': '在'}),
+                     OutputSchema(type='end node stream', index=6, payload={'response': '没有'}),
+                     OutputSchema(type='end node stream', index=7, payload={'response': '一辆车'}),
+                     OutputSchema(type='end node stream', index=8, payload={'response': '下线'}),
+                     OutputSchema(type='end node stream', index=9, payload={'response': '的'}),
+                     OutputSchema(type='end node stream', index=10, payload={'response': '情况'}),
+                     OutputSchema(type='end node stream', index=11, payload={'response': '下'}),
+                     OutputSchema(type='end node stream', index=12, payload={'response': '一年'}),
+                     OutputSchema(type='end node stream', index=13, payload={'response': '进行'}),
+                     OutputSchema(type='end node stream', index=14, payload={'response': '了'}),
+                     OutputSchema(type='end node stream', index=15, payload={'response': '四轮'}),
+                     OutputSchema(type='end node stream', index=16, payload={'response': '融资'}),
+                     OutputSchema(type='end node stream', index=17, payload={'response': ', #####'})]
+    async for chunk in wf.stream(inputs={"user": {"query": "i am a girl"}}, session=create_workflow_session(),
+                                 stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert chunks == expect_chunks
+
+    template_for_batch_data_source = {"response_template": "####这是 a={{query}}, #####"}
+    wf2 = create_workflow(template_for_batch_data_source)
+    chunks = []
+    expect_chunks = [
+        OutputSchema(type='end node stream', index=0, payload={'response': '####这是 a='}),
+        OutputSchema(type='end node stream', index=1, payload={'response': 'i am a girl'}),
+        OutputSchema(type='end node stream', index=2, payload={'response': ', #####'})]
+    async for chunk in wf2.stream(inputs={"user": {"query": "i am a girl"}}, session=create_workflow_session(),
+                                  stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+
+    assert chunks == expect_chunks
+
+
+def create_workflow_with_intent_node(mode, classification_id):
+    flow = Workflow()
+    flow.set_start_comp("start", Start(), inputs_schema={"query": "${query}"})
+    intent_component = MockIntentNode(classification_id=classification_id)
+    intent_component.add_branch("${intent.classification_id} == 0", ["node1"])
+    intent_component.add_branch("${intent.classification_id} == 1", ["node2"])
+
+    flow.add_workflow_comp("intent", intent_component, inputs_schema={"query": "${start.query}"})
+
+    flow.add_workflow_comp("node1", MockNodeWithAllAbility(), inputs_schema={"data": "${intent}"})
+    flow.add_workflow_comp("node2", MockNodeWithAllAbility(), inputs_schema={"value": "${intent.classification_id}"},
+                           comp_ability=[ComponentAbility.STREAM])
+    flow.add_workflow_comp("node3", MockNodeWithAllAbility(), stream_inputs_schema={"data3": "${node2.value}"})
+
+    flow.set_end_comp("end", End({"response_template": "输出:{{end_input}} 输出2:{{end_input2}}"}),
+                      response_mode=None,
+                      inputs_schema={"end_input": "${node1}"},
+                      stream_inputs_schema={"end_input2": "${node3}"})
+
+    flow.add_connection("start", "intent")
+
+    if mode == "node1":
+        flow.add_connection("node1", "end")
+
+    elif mode == "node2":
+        flow.add_stream_connection("node2", "node3")
+        flow.add_stream_connection("node3", "end")
+
+    else:
+        flow.add_connection("node1", "end")
+        flow.add_stream_connection("node2", "node3")
+        flow.add_stream_connection("node3", "end")
+
+    return flow
+
+
+async def test_workflow_with_intent_node():
+    flow = create_workflow_with_intent_node("node1", classification_id=0)
+    workflow_output = await flow.invoke({"query": "旅游"}, session=create_workflow_session())
+    assert workflow_output.result == {'response': "输出:{'data': {'classification_id': 0}} 输出2:"}
+
+    flow = create_workflow_with_intent_node("node2", classification_id=1)
+    workflow_output = await flow.invoke({"query": "旅游2"}, session=create_workflow_session())
+    assert workflow_output.result == {
+        'response': "输出: 输出2:{'data3': 0}{'data3': 1}{'data3': 2}{'data3': 3}{'data3': 4}"}
+
+    flow = create_workflow_with_intent_node("all", classification_id=0)
+    workflow_output = await flow.invoke({"query": "旅游"}, session=create_workflow_session())
+    assert workflow_output.result is None
+
+    flow = create_workflow_with_intent_node("all", classification_id=1)
+    workflow_output = await flow.invoke({"query": "旅游2"}, session=create_workflow_session())
+    assert workflow_output.result is None

@@ -7,9 +7,9 @@ Supports vector search, sparse search (BM25), and hybrid search.
 """
 
 import asyncio
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
+from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker, WeightedRanker
 from pymilvus.client.types import LoadState
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -23,9 +23,13 @@ from openjiuwen.core.foundation.store.vector.utils import (
 )
 from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
+from openjiuwen.core.retrieval.common.result_ranking import register_result_ranker_cls
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
+
+# Register ranker support
+register_result_ranker_cls(name="milvus", weighted=WeightedRanker, rrf=RRFRanker)
 
 
 class MilvusVectorStore(VectorStore):
@@ -404,6 +408,16 @@ class MilvusVectorStore(VectorStore):
             logger.error(f"Failed to delete vectors: {e}")
             return False
 
+    def _normalize_milvus_hit(self, item: Any) -> Dict[str, Any]:
+        """Flatten hit to one dict (SDK may put output_fields under 'entity')."""
+        if not isinstance(item, dict):
+            item = dict(item) if hasattr(item, "keys") else {}
+        out = dict(item)
+        entity = out.pop("entity", None)
+        if isinstance(entity, dict):
+            out |= entity
+        return out
+
     def _milvus_result_to_search_results(
         self,
         results: List[dict],
@@ -411,7 +425,8 @@ class MilvusVectorStore(VectorStore):
     ) -> List[SearchResult]:
         """Convert Milvus search results to SearchResult list"""
         search_results = []
-        for item in results:
+        for raw_item in results:
+            item = self._normalize_milvus_hit(raw_item)
             # Extract fields
             result_id = str(item.get("id", item.get("pk", "")))
             text = item.get(self.text_field, "")
@@ -424,9 +439,9 @@ class MilvusVectorStore(VectorStore):
                 except Exception:
                     metadata = {}
 
-            # Ensure doc_id is returned in metadata dict
+            # Ensure doc_id is in metadata for retriever (pop from item then metadata to avoid duplication)
             if "doc_id" not in metadata:
-                metadata["doc_id"] = metadata.pop(self.doc_id_field, None)
+                metadata["doc_id"] = item.pop(self.doc_id_field, None) or metadata.pop(self.doc_id_field, None)
 
             # Include chunk_id for upper layer association
             if item.get("chunk_id") is not None:

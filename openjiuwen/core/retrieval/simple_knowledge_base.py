@@ -6,21 +6,24 @@ Simple Knowledge Base Implementation
 Provides complete knowledge base functionality including document parsing, chunking, index building, and retrieval.
 """
 
+import asyncio
 import uuid
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import BaseModelClient
 from openjiuwen.core.retrieval.common.config import IndexConfig, KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
+from openjiuwen.core.retrieval.common.retrieval_result import MultiKBRetrievalResult, RetrievalResult
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.indexing.processor.extractor.base import Extractor
 from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
+from openjiuwen.core.retrieval.retriever.agentic_retriever import AgenticRetriever
 from openjiuwen.core.retrieval.retriever.base import Retriever
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
@@ -38,7 +41,7 @@ class SimpleKnowledgeBase(KnowledgeBase):
         extractor: Optional[Extractor] = None,
         index_manager: Optional[Indexer] = None,
         retriever: Optional[Retriever] = None,
-        llm_client: Optional[Any] = None,
+        llm_client: Optional[BaseModelClient] = None,
         **kwargs,
     ):
         """
@@ -68,33 +71,6 @@ class SimpleKnowledgeBase(KnowledgeBase):
         )
         self.retriever = retriever
 
-    async def parse_files(
-        self,
-        file_paths: List[str],
-        **kwargs,
-    ) -> List[Document]:
-        """Parse files from file paths into a list of Document objects"""
-        if not self.parser:
-            raise build_error(StatusCode.RETRIEVAL_KB_PARSER_NOT_FOUND, error_msg="parser is required for parse_files")
-
-        all_documents = []
-        for file_path in file_paths:
-            try:
-                file_name = kwargs.get("file_name", file_path.split("/")[-1])
-                file_id = kwargs.get("file_id", str(uuid.uuid4()))
-
-                documents = await self.parser.parse(
-                    file_path,
-                    file_name=file_name,
-                    file_id=file_id,
-                )
-                all_documents.extend(documents)
-            except Exception as e:
-                logger.error(f"Failed to parse file {file_path}: {e}")
-                continue
-
-        return all_documents
-
     async def add_documents(
         self,
         documents: List[Document],
@@ -111,6 +87,10 @@ class SimpleKnowledgeBase(KnowledgeBase):
             )
         if self.strict_validation and self.vector_store:
             self.vector_store.check_vector_field()
+
+        for doc in documents:
+            if not (getattr(doc, "id_", None) or "").strip():
+                doc.id_ = str(uuid.uuid4())
 
         # Chunk documents
         chunks = self.chunker.chunk_documents(documents)
@@ -188,7 +168,17 @@ class SimpleKnowledgeBase(KnowledgeBase):
         elif self.config.index_type == "bm25":
             mode = "sparse"
 
-        results = await self.retriever.retrieve(
+        # Enable agentic retrieval based if needed based on retrieval config
+        if retrieval_config.agentic:
+            retriever = AgenticRetriever(
+                retriever=self.retriever,
+                llm_client=self.llm_client,
+                **kwargs,
+            )
+        else:
+            retriever = self.retriever
+
+        results = await retriever.retrieve(
             query=query,
             top_k=retrieval_config.top_k,
             score_threshold=retrieval_config.score_threshold,
@@ -310,8 +300,6 @@ async def retrieve_multi_kb(
             logger.warning("retrieve_multi_kb: kb_id=%s failed: %s", getattr(kb.config, "kb_id", None), e)
             return []
 
-    import asyncio
-
     all_results = await asyncio.gather(*[_retrieve_one(kb) for kb in kbs])
     merged: Dict[str, float] = {}
     for results in all_results:
@@ -331,7 +319,7 @@ async def retrieve_multi_kb_with_source(
     query: str,
     config: Optional[RetrievalConfig] = None,
     top_k: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+) -> List[MultiKBRetrievalResult]:
     """
     Perform retrieval on multiple knowledge bases, return results with source information.
     Result items: text/score/raw_score/raw_score_scaled/kb_ids
@@ -346,8 +334,6 @@ async def retrieve_multi_kb_with_source(
             logger.warning("retrieve_multi_kb_with_source: kb_id=%s failed: %s", getattr(kb.config, "kb_id", None), e)
             return []
 
-    import asyncio
-
     all_results = await asyncio.gather(*[_retrieve_one(kb) for kb in kbs])
     merged: Dict[str, Dict[str, Any]] = {}
     for kb, results in zip(kbs, all_results):
@@ -356,8 +342,8 @@ async def retrieve_multi_kb_with_source(
             text = r.text
             score = 0.0 if r.score is None else float(r.score)
             meta = r.metadata or {}
-            raw_score = meta.get("raw_score")
-            raw_score_scaled = meta.get("raw_score_scaled")
+            raw_score = meta.get("raw_score", score)
+            raw_score_scaled = meta.get("raw_score_scaled", score)
             if text not in merged:
                 merged[text] = {
                     "text": text,
@@ -365,6 +351,7 @@ async def retrieve_multi_kb_with_source(
                     "raw_score": raw_score,
                     "raw_score_scaled": raw_score_scaled,
                     "kb_ids": set(),
+                    "metadata": meta,
                 }
             merged[text]["score"] = max(merged[text]["score"], score)
             if raw_score is not None:
@@ -375,19 +362,18 @@ async def retrieve_multi_kb_with_source(
                 merged[text]["raw_score_scaled"] = max(prev, raw_score_scaled) if prev is not None else raw_score_scaled
             merged[text]["kb_ids"].add(kb_id)
 
-    ranked = sorted(
-        (
-            {
-                "text": v["text"],
-                "score": v["score"],
-                "raw_score": v.get("raw_score"),
-                "raw_score_scaled": v.get("raw_score_scaled"),
-                "kb_ids": sorted(list(v["kb_ids"])),
-            }
-            for v in merged.values()
-        ),
-        key=lambda x: x["score"],
-        reverse=True,
-    )
+    ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
     limit = top_k or (config.top_k if config else None) or 5
-    return ranked[:limit]
+    ranked = ranked[:limit]
+    results = [
+        MultiKBRetrievalResult(
+            text=v["text"],
+            score=v["score"],
+            raw_score=v.get("raw_score"),
+            raw_score_scaled=v.get("raw_score_scaled"),
+            kb_ids=sorted(list(v["kb_ids"])),
+            metadata=v["metadata"],
+        )
+        for v in ranked
+    ]
+    return results

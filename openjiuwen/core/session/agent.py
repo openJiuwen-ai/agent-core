@@ -60,6 +60,9 @@ class Session:
     def get_state(self, key: Union[str, list, dict] = None) -> Any:
         return self._inner.state().get_global(key)
 
+    def dump_state(self) -> dict:
+        return self._inner.state().dump()
+
     async def write_stream(self, data: Union[dict, OutputSchema]):
         await self._inner.stream_writer_manager().get_writer(BaseStreamMode.OUTPUT).write(data)
 

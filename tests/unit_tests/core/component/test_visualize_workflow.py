@@ -786,7 +786,7 @@ def test_visualize_simple_stream_workflow_animation():
     assert flow.draw("jiuwen workflow", enable_animation=True) == mermaid_script
 
 
-@patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
+@patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true", "SSRF_PROTECT_ENABLED": "false"})
 def test_visualize_simple_workflow_intent():
     # flow: start → intent → (分支路由)
     #                    ├─ llm → plugin → end (天气查询)

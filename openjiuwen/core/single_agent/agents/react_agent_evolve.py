@@ -5,17 +5,34 @@ import asyncio
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.operator import Operator, LLMCallOperator, ToolCallOperator
+from openjiuwen.core.operator import (
+    Operator,
+    LLMCallOperator,
+    ToolCallOperator,
+)
 from openjiuwen.core.context_engine import ContextEngine, ModelContext
-from openjiuwen.core.foundation.llm import AssistantMessage, Model, UserMessage, SystemMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    Model,
+    UserMessage,
+    SystemMessage,
+)
 from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackEvent,
+    AgentCallbackContext,
+    InvokeInputs,
+    ModelCallInputs,
+    rail,
+)
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
+from openjiuwen.core.single_agent.agents.react_agent import (
+    ReActAgentConfig,
+)
 
 
 class ReActAgentEvolve(BaseAgent):
@@ -62,7 +79,7 @@ class ReActAgentEvolve(BaseAgent):
         self._tool_op = ToolCallOperator(
             tool=None,
             tool_call_id="react_tool",
-            tool_executor=self.ability_manager.execute,
+            tool_executor=self.ability_manager._execute_single_tool_call,
             tool_registry=self.ability_manager,
         )
 
@@ -233,7 +250,102 @@ class ReActAgentEvolve(BaseAgent):
             self.ability_manager.remove(context_reloader.card.name)
         return context
 
-    async def invoke(self, inputs: Any, session: Optional[Session] = None) -> Dict[str, Any]:
+    async def _prepare_model_call(
+        self,
+        ctx: AgentCallbackContext,
+        user_input: str,
+        context: ModelContext,
+        tools: Optional[List],
+    ) -> AssistantMessage:
+        """Prepare ctx.inputs for model call, then delegate.
+
+        Args:
+            ctx: Shared AgentCallbackContext
+            user_input: User query string
+            context: Current ModelContext
+            tools: Tool definitions
+
+        Returns:
+            AssistantMessage from LLM
+        """
+        context_window = await context.get_context_window(
+            system_messages=[],
+            tools=tools if tools else None,
+        )
+        skill_messages = self._get_skill_messages()
+        history_messages = context_window.get_messages()
+        ctx.inputs = ModelCallInputs(
+            messages=[*skill_messages, *history_messages],
+            tools=context_window.get_tools(),
+        )
+        return await self._railed_model_call(
+            ctx, user_input, session=ctx.session,
+        )
+
+    @rail(
+        before=AgentCallbackEvent.BEFORE_MODEL_CALL,
+        after=AgentCallbackEvent.AFTER_MODEL_CALL,
+        on_exception=AgentCallbackEvent.ON_MODEL_EXCEPTION,
+    )
+    async def _railed_model_call(
+        self,
+        ctx: AgentCallbackContext,
+        user_input: str,
+        session: Optional[Session] = None,
+    ) -> AssistantMessage:
+        """Execute LLM call via Operator with @rail hooks.
+
+        Rail hooks may have modified ctx.inputs.messages
+        / ctx.inputs.tools before this body runs.
+        """
+        llm_op = self._get_llm_op()
+        ai_message = await llm_op.invoke(
+            inputs={
+                "query": user_input,
+                "messages": ctx.inputs.messages,
+            },
+            session=session,
+            tools=ctx.inputs.tools or None,
+        )
+        ctx.inputs.response = ai_message
+        return ai_message
+
+    async def _prepare_tool_call(
+        self,
+        ctx: AgentCallbackContext,
+        tool_calls: List,
+        context: ModelContext,
+    ) -> None:
+        """Execute tool calls and commit tool messages into context.
+
+        Args:
+            ctx: Shared AgentCallbackContext
+            tool_calls: Tool call objects from LLM response
+            context: ModelContext to commit tool messages
+        """
+        for tool_call in tool_calls:
+            logger.info(
+                f"Executing tool: {tool_call.name} "
+                f"with args: {tool_call.arguments}"
+            )
+
+        if not tool_calls:
+            return
+
+        results = await self.ability_manager.execute(
+            ctx=ctx,
+            tool_call=tool_calls,
+            session=ctx.session,
+        )
+
+        for _, tool_message in results:
+            await context.add_messages(tool_message)
+
+    async def invoke(
+        self,
+        inputs: Any,
+        session: Optional[Session] = None,
+    ) -> Dict[str, Any]:
         """Execute ReAct process
 
         Args:
@@ -246,121 +358,88 @@ class ReActAgentEvolve(BaseAgent):
             Dict with output and result_type
         """
         user_input = self._normalize_user_input(inputs)
-
-        # Hook: before invoke
-        await self._execute_callbacks(AgentCallbackEvent.BEFORE_INVOKE, inputs=inputs)
-
-        # Get or create model context
-        context = await self._init_context(session)
-        # Add user message to context
-        await context.add_messages(UserMessage(content=user_input))
-        # Get tool info from _ability_manager
-        tools = await self.ability_manager.list_tool_info()
-
-        result = None
-
-        # ReAct loop
-        for iteration in range(self._config.max_iterations):
-            logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
-
-            # Get context window (system_prompt injected by react_llm operator)
-            context_window = await context.get_context_window(system_messages=[], tools=tools if tools else None)
-
-            # Hook: before model call
-            await self._execute_callbacks(
-                AgentCallbackEvent.BEFORE_MODEL_CALL,
-                inputs=inputs,
-                iteration=iteration + 1,
-                messages=context_window.get_messages()
-            )
-
-            skill_messages = self._get_skill_messages()
-
-            # Call LLM via Operator (react_llm)
-            llm_op = self._get_llm_op()
-            history_messages = context_window.get_messages()
-            ai_message = await llm_op.invoke(
-                inputs={"query": user_input, "messages": [*skill_messages, *history_messages]},
-                session=session,
-                tools=context_window.get_tools() or None,
-            )
-
-            # Hook: after model call
-            await self._execute_callbacks(
-                AgentCallbackEvent.AFTER_MODEL_CALL,
-                inputs=inputs,
-                iteration=iteration + 1,
-                response=ai_message
-            )
-
-            # Add AI message to context
-            ai_msg_for_context = AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
-            await context.add_messages(ai_msg_for_context)
-
-            # Check for tool calls
-            if ai_message.tool_calls:
-                # Log tool calls
-                for tool_call in ai_message.tool_calls:
-                    logger.info(f"Executing tool: {tool_call.name} with args: {tool_call.arguments}")
-
-                    # Hook: before tool call
-                    await self._execute_callbacks(
-                        AgentCallbackEvent.BEFORE_TOOL_CALL,
-                        inputs=inputs,
-                        iteration=iteration + 1,
-                        tool_name=tool_call.name,
-                        tool_args=tool_call.arguments
-                    )
-
-                # Execute tools via Operator (react_tool)
-                tool_op = self._tool_op
-                if tool_op is None:
-                    raise RuntimeError("react_tool operator is not initialized")
-                results = await tool_op.invoke({"tool_calls": ai_message.tool_calls}, session=session)
-
-                # Process results and add tool messages to context
-                for idx, (tool_result, tool_msg) in enumerate(results):
-                    logger.info(f"Tool result: {tool_result}")
-                    await context.add_messages(tool_msg)
-
-                    # Hook: after tool call
-                    tool_call = ai_message.tool_calls[idx]
-                    await self._execute_callbacks(
-                        AgentCallbackEvent.AFTER_TOOL_CALL,
-                        inputs=inputs,
-                        iteration=iteration + 1,
-                        tool_name=tool_call.name,
-                        tool_args=tool_call.arguments,
-                        tool_result=tool_result
-                    )
-            else:
-                # No tool calls, return AI response
-                await self.context_engine.save_contexts(session)
-                result = {
-                    "output": ai_message.content,
-                    "result_type": "answer"
-                }
-                # Hook: after invoke
-                await self._execute_callbacks(
-                    AgentCallbackEvent.AFTER_INVOKE,
-                    inputs=inputs,
-                    result=result
-                )
-                return result
-
-        # Max iterations reached
-        await self.context_engine.save_contexts(session)
-        result = {
-            "output": "Max iterations reached without completion",
-            "result_type": "error"
-        }
-        # Hook: after invoke
-        await self._execute_callbacks(
-            AgentCallbackEvent.AFTER_INVOKE,
-            inputs=inputs,
-            result=result
+        conversation_id = (
+            inputs.get("conversation_id")
+            if isinstance(inputs, dict) else None
         )
-        return result
+
+        invoke_inputs = InvokeInputs(
+            query=user_input,
+            conversation_id=conversation_id,
+        )
+
+        ctx = AgentCallbackContext(
+            agent=self,
+            inputs=invoke_inputs,
+            config=self._config,
+            session=session,
+        )
+
+        async with ctx.lifecycle(
+            AgentCallbackEvent.BEFORE_INVOKE,
+            AgentCallbackEvent.AFTER_INVOKE,
+        ):
+            # Read query after before_invoke (rail may modify)
+            query = ctx.inputs.query
+
+            # Get or create model context
+            context = await self._init_context(session)
+            ctx.context = context
+
+            # Add user message to context
+            await context.add_messages(
+                UserMessage(content=query)
+            )
+
+            # Get tool info
+            tools = await self.ability_manager.list_tool_info()
+
+            # ReAct loop
+            for iteration in range(
+                self._config.max_iterations
+            ):
+                logger.info(
+                    f"ReAct iteration "
+                    f"{iteration + 1}/"
+                    f"{self._config.max_iterations}"
+                )
+
+                ai_message = await self._prepare_model_call(
+                    ctx, query, context, tools,
+                )
+
+                ai_msg_for_context = AssistantMessage(
+                    content=ai_message.content,
+                    tool_calls=ai_message.tool_calls,
+                )
+                await context.add_messages(ai_msg_for_context)
+
+                if ai_message.tool_calls:
+                    await self._prepare_tool_call(
+                        ctx, ai_message.tool_calls, context,
+                    )
+                else:
+                    await self.context_engine.save_contexts(
+                        session
+                    )
+                    result = {
+                        "output": ai_message.content,
+                        "result_type": "answer",
+                    }
+                    invoke_inputs.result = result
+                    return result
+
+            # Max iterations reached
+            await self.context_engine.save_contexts(session)
+            result = {
+                "output": (
+                    "Max iterations reached "
+                    "without completion"
+                ),
+                "result_type": "error",
+            }
+            invoke_inputs.result = result
+            return result
 
     async def stream(
         self,

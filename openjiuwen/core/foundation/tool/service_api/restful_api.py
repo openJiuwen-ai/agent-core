@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
+from copy import deepcopy
 from typing import AsyncIterator, ClassVar, Dict, Any, Literal, Set
 
 import aiohttp
@@ -66,8 +67,8 @@ class RestfulApi(Tool):
                                                 default_headers=card.headers)
 
     async def _async_request(self, map_results: dict, timeout: float, max_response_byte_size: int,
-                             raise_for_status: True):
-        request_arg = {}
+                             raise_for_status: True, request_args: dict = None):
+        request_arg = deepcopy(request_args) if request_args and isinstance(request_args, dict) else {}
         if self._method in ["GET"]:
             request_arg["params"] = map_results.get(APIParamLocation.BODY)
         else:
@@ -112,7 +113,8 @@ class RestfulApi(Tool):
             return await self._async_request(map_results,
                                              final_timeout,
                                              kwargs.get("max_response_byte_size", self._max_response_byte_size),
-                                             kwargs.get("raise_for_status", True))
+                                             kwargs.get("raise_for_status", True),
+                                             kwargs.get("request_args", {}))
         except (aiohttp.ConnectionTimeoutError, asyncio.TimeoutError) as e:
             raise build_error(StatusCode.TOOL_RESTFUL_API_EXECUTION_TIMEOUT, cause=e,
                               method="invoke", timeout=final_timeout, card=self.card)

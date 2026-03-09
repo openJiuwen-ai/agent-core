@@ -76,6 +76,10 @@ class LLMController(BaseController):
         super().__init__(config, context_engine, session)
         self.config = config
         self._enable_long_term_mem = self.config.agent_memory_config.enable_long_term_mem
+        self._enable_fragment_memory = (self.config.agent_memory_config.enable_user_profile or
+                                        self.config.agent_memory_config.enable_semantic_memory or
+                                        self.config.agent_memory_config.enable_episodic_memory)
+        self._enable_summary_memory = self.config.agent_memory_config.enable_summary_memory
         self._enable_mem_variables = len(self.config.agent_memory_config.mem_variables) > 0
         self._enable_memory = (self.config.memory_scope_id and
                                (self._enable_long_term_mem or self._enable_mem_variables))
@@ -1332,17 +1336,35 @@ class LLMController(BaseController):
                 if not self._enable_long_term_mem:
                     logger.info("[LongTermMemory] not enable long_term_memory")
                     return result
-                long_term_memory = await self._long_term_memory_instance.search_user_mem(
-                    user_id=user_id,
-                    scope_id=scope_id,
-                    query=query,
-                    num=10
-                )
-                if long_term_memory:
-                    memory_contents = [mem.mem_info.content for mem in long_term_memory]
+                memory_contents = []
+                if self._enable_fragment_memory:
+                    long_term_memory = await self._long_term_memory_instance.search_user_mem(
+                        user_id=user_id,
+                        scope_id=scope_id,
+                        query=query,
+                        num=10
+                    )
+                    if long_term_memory:
+                        memory_contents.append("用户画像记忆：")
+                        memory_contents += [mem.mem_info.content for mem in long_term_memory]
+                    logger.info(f"long_term_memory: {long_term_memory}")
+
+                if self._enable_summary_memory:
+                    user_summary_memory = await self._long_term_memory_instance.search_user_history_summary(
+                        user_id=user_id,
+                        scope_id=scope_id,
+                        query=query,
+                        num=5
+                    )
+                    if user_summary_memory:
+                        memory_contents.append("摘要记忆：")
+                        memory_contents += [mem.mem_info.content for mem in user_summary_memory]
+                    logger.info(f"user_summary_memory: {user_summary_memory}")
+                if memory_contents:
                     result.update(
                         {"sys_long_term_memory": JsonUtils.safe_json_dumps(memory_contents, ensure_ascii=False)})
-                logger.info(f"long_term_memory: {long_term_memory}")
+                else:
+                    result.update({"sys_long_term_memory": "[]"})
             except Exception as e:
                 logger.error(f"[LongTermMemory] failed to search mem: {e}")
                 result.update({"sys_long_term_memory": "[]"})

@@ -728,6 +728,52 @@ get_sys_operation(self,
 >>> operations = Runner.resource_mgr.get_sys_operation(tag=["scheduled"])
 ```
 
+### get_sys_op_tool_cards
+
+```python
+get_sys_op_tool_cards(self,
+                      sys_operation_id: str,
+                      *,
+                      operation_name: str | List[str] = None,
+                      tool_name: str | List[str] = None
+                      ) -> ToolCard | List[ToolCard] | None
+```
+
+从系统操作中获取工具卡片。
+
+**参数：**
+
+* **sys_operation_id**(str)：系统操作的ID。
+* **operation_name**(str | List[str]，可选)：单个操作名称或操作名称列表，例如：`"fs"`, `["fs", "shell"]`。如果为`None`，则返回所有操作的所有工具卡片。
+* **tool_name**(str | List[str]，可选)：单个工具名称或工具名称列表，例如：`"read_file"`, `["read_file", "write_file"]`。仅在`operation_name`为单个字符串时有效。当`operation_name`为列表时不能使用。如果为`None`，则返回指定操作的所有工具卡片。
+
+**返回：**
+
+**[ToolCard](../foundation/tool/tool.md) | List[[ToolCard](../foundation/tool/tool.md)] | None**，符合条件的工具卡片。
+
+**异常：**
+
+* **ValidationError**：当`operation_name`为列表且同时提供了`tool_name`时抛出。
+
+**样例：**
+
+```python
+>>> # 场景1：获取单个工具卡片
+>>> tool_card = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op", operation_name="fs", tool_name="read_file")
+>>>
+>>> # 场景2：从同一操作获取多个工具卡片
+>>> tool_cards = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op", operation_name="fs", tool_name=["read_file", "write_file"])
+>>>
+>>> # 场景3：从单个操作获取所有工具卡片
+>>> tool_cards = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op", operation_name="fs")
+>>>
+>>> # 场景4：从多个操作获取所有工具卡片
+>>> tool_cards = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op", operation_name=["fs", "shell"])
+>>>
+>>> # 场景5：从所有操作获取所有工具卡片
+>>> tool_cards = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op")
+```
+
 ### get_tool_infos
 
 ```python

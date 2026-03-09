@@ -132,7 +132,7 @@ async def test_runner_callback_framework_decorators():
     async def before_handler(*args, **kwargs):
         event_log.append("before")
 
-    @framework.trigger_on_call("before_event", pass_args=False)
+    @framework.emit_before("before_event", pass_args=False)
     async def process_data(data: str):
         event_log.append(f"process: {data}")
         return {"result": data}
@@ -476,7 +476,7 @@ async def test_runner_callback_framework_emits():
     async def on_ready(result):
         received_results.append(result)
 
-    @framework.emits("data_ready")
+    @framework.emit_after("data_ready")
     async def process():
         return {"status": "done"}
 

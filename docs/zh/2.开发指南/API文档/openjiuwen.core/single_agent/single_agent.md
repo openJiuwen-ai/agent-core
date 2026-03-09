@@ -442,6 +442,18 @@ get_state(self, key: Union[str, list, dict] = None) -> Any
 - 当`key`为`str`类型，返回为该路径下的状态信息，若不存在，则返回`None`。
 - 当`key`为`dict`\ `list`类型，该接口会将输入的`dict`\ `list`中所有`${}`内的变量替换成相应路径的变量的值，若对应变量路径不存在，则替换为`None`，最终返回为替换完的结果。
 
+### dump_state
+
+```python
+dump_state(self) -> dict
+```
+
+导出本Agent的状态信息。
+
+**返回**：
+
+**dict**：包含当前Agent的所有状态的字典。
+
 ### async write_stream(data: Union[dict, OutputSchema])
 
 写入流式输出数据。

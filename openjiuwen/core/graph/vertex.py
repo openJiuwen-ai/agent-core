@@ -48,7 +48,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         self._is_first_init = True
 
     def init(self, session: BaseSession, **kwargs) -> bool:
-        self._session = NodeSession(session, self._node_id, type(self._executable).__name__)
+        self._session = NodeSession(session, self._node_id, type(self._executable).__name__,
+                                    self._executable.skip_trace())
         self._context = kwargs.get("context")
         self._stream_called_timeout = session.config().get_env(COMP_STREAM_CALL_TIMEOUT_KEY)
         self._node_config = self._session.node_config()
@@ -65,6 +66,12 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 event_type=LogEventType.GRAPH_VERTEX_INIT,
                 **self._log_message)
             self._is_first_init = False
+        has_stream_inputs = self._has_stream_call and (
+                self._node_config and self._node_config.stream_io_configs and
+                self._node_config.stream_io_configs.inputs_schema is not None)
+        if has_stream_inputs and hasattr(self._executable, "set_mix"):
+            self._executable.set_mix()
+        self._is_started.clear()
         return True
 
     async def _run_executable(self, ability: ComponentAbility, is_subgraph: bool = False, config: Any = None,
@@ -360,6 +367,9 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             for ability in call_ability:
                 current_ability = ability
                 await self._run_executable(ability, is_subgraph, config)
+            if len(call_ability) == 0:
+                await self.__trace_component_begin__()
+
         except ExecutionError as e:
             logger.error(
                 "Node ability call failed",

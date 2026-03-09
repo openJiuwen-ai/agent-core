@@ -29,12 +29,17 @@ EMBED_API_KEY=
 # Resource directory for Chroma persistence and SQLite database
 MEMORY_RESOURCE_DIR=./resource_dir
 
-# Maximum input message length for memory processing
-MEMORY_INPUT_MSG_MAX_LEN=8192
-
-# Maximum tokens for single-turn history summary
-MEMORY_SUMMARY_MAX_TOKEN=128
-
 # Optional: AES encryption key (32 bytes, base64 encoded)
 # Generate with: python -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
 MEMORY_CRYPTO_KEY=
+
+# ========== Vector DB Configuration ==========
+# Vector DB type: chroma, milvus
+VECTOR_DB_TYPE=chroma
+
+# Milvus server URI (e.g., "http://localhost:19530" for local Milvus)
+MILVUS_URI=http://120.46.187.244:1030
+
+# Milvus authentication token (optional, required if Milvus has authentication enabled)
+# Format: "username:password" or API token
+# MILVUS_TOKEN=

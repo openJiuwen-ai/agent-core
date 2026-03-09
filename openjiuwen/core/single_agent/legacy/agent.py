@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     pass
 
 
-
 class WorkflowFactory:
     """Workflow factory class that creates a new workflow instance on each call (concurrency-safe).
 
@@ -293,8 +292,10 @@ class BaseAgent(ABC):
 
         def make_workflow_provider(workflow):
             """Create a provider function that returns the workflow instance."""
+
             def provider():
                 return workflow
+
             return provider
 
         for item in workflows:
@@ -484,6 +485,8 @@ class BaseAgent(ABC):
 
     async def clear_session(self, session_id: str = "default_session"):
         logger.debug("session is managed by agent, cleared through session's release method")
+        from openjiuwen.core.runner import Runner
+        await Runner.release(session_id=session_id)
 
 
 class ControllerAgent(BaseAgent):
@@ -671,5 +674,6 @@ class ControllerAgent(BaseAgent):
                 yield res
 
     async def clear_session(self, session_id: str = "default_session"):
+        await super().clear_session(session_id=session_id)
         self.context_engine.clear_context(session_id=session_id)
         await self.controller.cleanup_conversation(session_id)

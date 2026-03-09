@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from abc import abstractmethod
+from abc import ABCMeta, abstractmethod
 from typing import Any, AsyncIterator, Dict, Type
 from typing import TypeVar
 from pydantic import BaseModel, Field
@@ -23,7 +23,33 @@ class ToolCard(BaseCard):
         return ToolInfo(name=self.name, description=self.description, parameters=self.input_params)
 
 
-class Tool:
+class _ToolMeta(ABCMeta):
+    def __call__(cls, *args, **kwargs):
+        instance = super().__call__(*args, **kwargs)
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.callback.events import ToolCallEvents
+        _fw = Runner.callback_framework
+        fn = instance.invoke
+        fn = _fw.emit_before(ToolCallEvents.TOOL_INVOKE_INPUT)(fn)
+        fn = _fw.transform_io(
+            input_event=ToolCallEvents.TOOL_INVOKE_INPUT,
+            output_event=ToolCallEvents.TOOL_INVOKE_OUTPUT,
+        )(fn)
+        fn = _fw.emit_after(ToolCallEvents.TOOL_INVOKE_OUTPUT)(fn)
+        instance.invoke = fn
+
+        fn = instance.stream
+        fn = _fw.emit_before(ToolCallEvents.TOOL_STREAM_INPUT)(fn)
+        fn = _fw.transform_io(
+            input_event=ToolCallEvents.TOOL_STREAM_INPUT,
+            output_event=ToolCallEvents.TOOL_STREAM_OUTPUT,
+        )(fn)
+        fn = _fw.emit_after(ToolCallEvents.TOOL_STREAM_OUTPUT, item_key="result")(fn)
+        instance.stream = fn
+        return instance
+
+
+class Tool(metaclass=_ToolMeta):
     """tool class that defined the data types and content for LLM modules"""
 
     def __init__(self, card: ToolCard):

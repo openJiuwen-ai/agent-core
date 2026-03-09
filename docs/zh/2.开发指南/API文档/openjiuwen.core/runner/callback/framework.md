@@ -65,7 +65,8 @@ def on(
     error_handler: Optional[Callable] = None,
     max_retries: int = 0,
     retry_delay: float = 0.0,
-    timeout: Optional[float] = None
+    timeout: Optional[float] = None,
+    callback_type: str = ""
 )
 ```
 
@@ -84,6 +85,26 @@ def on(
 * **max_retries**(int, 可选)：最大重试次数。默认值：0。
 * **retry_delay**(float, 可选)：重试间隔（秒）。默认值：0.0。
 * **timeout**(Optional[float], 可选)：单次执行超时（秒）。默认值：None。
+* **callback_type**(str, 可选)：语义类型标记，如 "transform"。默认值：""。
+
+**返回**：
+
+* 装饰器函数。
+
+---
+
+### on_transform
+
+```python
+def on_transform(self, event: str, *, priority: int = 0)
+```
+
+装饰器：注册 transform 类型回调的便捷方式，等价于 `on(event, callback_type="transform", priority=priority)`。仅被 `trigger_transform` 和 `transform_io` 的事件模式触发；普通 `trigger` 不会调用此类回调。
+
+**参数**：
+
+* **event**(str)：事件名。
+* **priority**(int, 可选)：优先级。默认值：0。
 
 **返回**：
 
@@ -200,10 +221,16 @@ def transform_io(
     result_key: str = "result",
     input_transform: Optional[InputTransform] = None,
     output_transform: Optional[OutputTransform] = None,
+    output_mode: Literal["frame", "generator"] = "frame",
 )
 ```
 
-装饰器：在调用被装饰函数前后对入参和返回值做变换。支持两种方式：**事件模式**（设置 `input_event`/`output_event`，由框架触发事件并用最后一个回调返回值作为变换后的入参或结果）；**直接回调模式**（设置 `input_transform`/`output_transform`，`input_transform(*args, **kwargs)` 返回 `(new_args, new_kwargs)`，`output_transform(value)` 返回新值）。支持普通异步函数与异步生成器（对生成器逐项做 output 变换）。
+装饰器：在调用被装饰函数前后对入参和返回值做变换。支持两种方式：**事件模式**（设置 `input_event`/`output_event`，由框架触发事件并用最后一个回调返回值作为变换后的入参或结果）；**直接回调模式**（设置 `input_transform`/`output_transform`，`input_transform(*args, **kwargs)` 返回 `(new_args, new_kwargs)`，`output_transform(value)` 返回新值）。支持普通异步函数与异步生成器。
+
+`output_mode` 控制对生成器函数的输出变换方式：
+
+* **`'frame'`**（默认）：逐帧模式，对每个 yield 项单独调用 output 变换；事件模式下 output_event 对每项触发一次。
+* **`'generator'`**：生成器模式，将整个 source 异步迭代器一次性传给 output 变换；直接回调模式下 `output_transform` 须为异步生成器函数 `(source: AsyncIterator) -> AsyncIterator`，可对每项 yield 0/1/多次，支持过滤、展开、有状态变换；事件模式下 output_event 触发一次并以 source 为参数，回调应返回可迭代对象；同步生成器自动提升为异步。对非生成器函数使用时抛出 `ValueError`。
 
 **参数**：
 
@@ -212,6 +239,7 @@ def transform_io(
 * **result_key**(str, 可选)：输出事件触发时传参的键名。默认值："result"。
 * **input_transform**(InputTransform, 可选)：直接输入变换回调。默认值：None。
 * **output_transform**(OutputTransform, 可选)：直接输出变换回调。默认值：None。
+* **output_mode**(Literal["frame", "generator"], 可选)：生成器函数的输出变换模式。默认值："frame"。
 
 **返回**：
 
@@ -317,6 +345,25 @@ async def trigger(self, event: str, *args, **kwargs) -> List[Any]
 **返回**：
 
 * **List[Any]**，所有被执行回调的返回值列表。
+
+---
+
+### trigger_transform
+
+```python
+async def trigger_transform(self, event: str, *args, **kwargs) -> Any
+```
+
+仅触发 `callback_type="transform"` 的回调，返回最后一个回调的结果。无 transform 回调时返回内部哨兵值，调用方应据此透传原始值。通常不需要直接调用此方法；`transform_io` 事件模式在内部使用它。
+
+**参数**：
+
+* **event**(str)：事件名。
+* **\*args**、**\*\*kwargs**：传给回调的参数。
+
+**返回**：
+
+* **Any**，最后一个 transform 回调的返回值；若无 transform 回调则返回内部哨兵值。
 
 ---
 

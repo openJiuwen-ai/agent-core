@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import re
 from dataclasses import dataclass
 from typing import List, Optional, Union, Tuple, Dict, Any
 from pydantic import BaseModel, Field
@@ -29,23 +28,20 @@ _COMPRESS_LEVEL = "compress_level"
 
 DEFAULT_ROUND_COMPRESSION_PROMPT: str = """
 You are a Context Conversation Round Compression Assistant.
-Your task: compress and summarize the following consecutive conversation rounds into **a single message**:
-- If the role is "user", summarize all the user's intentions, questions, and instructions.
-- If the role is "assistant", summarize the AI's responses, decisions, action results, and tool call information.
+Your task: compress and summarize the following consecutive conversation rounds into **one complete round** (user + assistant):
 
 📌 Strict Requirements:
-1. Retain all specific information related to tasks, decisions, constraints, numerical values, and tool calls.
-2. Do not create any new information; all content must be traceable to the original messages.
-3. If the role is "user", **only include summaries of the user's inputs or intentions**.
-4. If the role is "assistant", **only include summaries of the AI's processing results or responses, including tool calls**.
-5. Compress and summarize into **a single message**.
-6. The total token count of the compressed summary should be 30% of the original.
-7. The output must be valid JSON in the following format:
-```json
+1. For each user message: summarize the user's intentions, questions, and instructions.
+2. For each assistant message: summarize the AI's responses, decisions, action results, and tool calls.
+3. Preserve all specific information related to tasks, decisions, constraints, numerical values, and tool calls.
+4. Do not create any new information; all content must be traceable to the original messages.
+5. Compress and summarize into **one user message and one assistant message**.
+6. The total token count should be 30% of the original.
+7. Output must be valid JSON:
 {
-    "summary": "<refined content>"
+    "user_summary": "<refined user content>",
+    "assistant_summary": "<refined assistant content>"
 }
-```
 """
 
 
@@ -189,8 +185,8 @@ class RoundLevelCompressor(ContextProcessor):
     @staticmethod
     def _is_valid_dialogue_round(u: BaseMessage, a: BaseMessage) -> bool:
         return (
-            isinstance(u, UserMessage)
-            and isinstance(a, AssistantMessage)
+            u.role == "user"
+            and a.role == "assistant"
             and not a.tool_calls
         )
 
@@ -222,13 +218,54 @@ class RoundLevelCompressor(ContextProcessor):
 
         return all_qualified_windows
 
+    async def _compress_round_pairs(
+            self,
+            rounds: List[DialogueRound],
+            context: ModelContext
+    ) -> Tuple[Optional[BaseMessage], Optional[BaseMessage]]:
+        conversation_pairs = []
+        for r in rounds:
+            conversation_pairs.append({
+                "user": r.user.content,
+                "assistant": r.ai.content
+            })
+
+        messages = [
+            SystemMessage(content=self._prompt),
+            UserMessage(content=f"conversation_rounds:{conversation_pairs}")
+        ]
+
+        response = await self._model.invoke(messages, output_parser=JsonOutputParser())
+
+        summary = response.parser_content
+        if summary and isinstance(summary, dict):
+            user_summary = summary.get("user_summary", "")
+            assistant_summary = summary.get("assistant_summary", "")
+
+            if user_summary and assistant_summary:
+                new_user = await self.offload_messages(
+                    role="user",
+                    content=user_summary,
+                    messages=[r.user for r in rounds],
+                    context=context
+                )
+                new_ai = await self.offload_messages(
+                    role="assistant",
+                    content=assistant_summary,
+                    messages=[r.ai for r in rounds],
+                    context=context
+                )
+                return new_user, new_ai
+
+        logger.warning("[RoundLevelCompressor] Round pair compression failed")
+        return None, None
+
     async def _compress_rounds(
             self,
             messages: List[BaseMessage],
             rounds: Union[List[DialogueRound], List[List[DialogueRound]]],
             context: ModelContext
-    ) -> Tuple[
-        List[BaseMessage], List[int], List[int]]:
+    ) -> Tuple[List[BaseMessage], List[int], List[int]]:
 
         if isinstance(rounds[0], DialogueRound):
             target_windows = [rounds]
@@ -240,14 +277,10 @@ class RoundLevelCompressor(ContextProcessor):
         all_ends = []
 
         for window in target_windows[::-1]:
-            users = [r.user for r in window]
-            ais = [r.ai for r in window]
-
             base_level = window[0].level or 0
             new_level = base_level + 1
 
-            new_user = await self._compress_messages(users, "user", context)
-            new_ai = await self._compress_messages(ais, "assistant", context)
+            new_user, new_ai = await self._compress_round_pairs(window, context)
 
             if new_user is None or new_ai is None:
                 logger.warning("[RoundLevelCompressor] Compression failed, return original messages")
@@ -318,4 +351,3 @@ class RoundLevelCompressor(ContextProcessor):
 
     def save_state(self) -> Dict[str, Any]:
         pass
-

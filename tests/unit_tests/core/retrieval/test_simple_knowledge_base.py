@@ -3,15 +3,22 @@
 Simple knowledge base implementation test cases
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval import SimpleKnowledgeBase, retrieve_multi_kb, retrieve_multi_kb_with_source
-from openjiuwen.core.retrieval import KnowledgeBaseConfig
-from openjiuwen.core.retrieval import Document, TextChunk
-from openjiuwen.core.retrieval import RetrievalResult
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.retrieval import (
+    Document,
+    KnowledgeBaseConfig,
+    RetrievalConfig,
+    RetrievalResult,
+    SimpleKnowledgeBase,
+    TextChunk,
+    retrieve_multi_kb,
+    retrieve_multi_kb_with_source,
+)
+from openjiuwen.core.retrieval.common.retrieval_result import MultiKBRetrievalResult, RetrievalResult
 
 
 @pytest.fixture
@@ -185,6 +192,44 @@ class TestSimpleKnowledgeBase:
         mock_retriever.retrieve.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_retrieve_with_agentic(self, mock_config, mock_retriever):
+        """Test using Agentic retrieval via SimpleKnowledgeBase"""
+        with patch("openjiuwen.core.retrieval.simple_knowledge_base.AgenticRetriever") as mock_agentic_class:
+            mock_agentic_retriever = AsyncMock()
+            mock_agentic_retriever.retrieve = AsyncMock(
+                return_value=[
+                    RetrievalResult(text="Agentic result", score=0.98),
+                ]
+            )
+            mock_agentic_class.return_value = mock_agentic_retriever
+
+            mock_llm_client = AsyncMock()
+            kb = SimpleKnowledgeBase(
+                config=mock_config,
+                retriever=mock_retriever,
+                llm_client=mock_llm_client,
+            )
+            config = RetrievalConfig(agentic=True, top_k=5)
+            results = await kb.retrieve("test query", config=config)
+            assert len(results) == 1
+            mock_agentic_class.assert_called_once()
+            # Verify AgenticRetriever is constructed with retriever= and llm_client=
+            call_kwargs = mock_agentic_class.call_args[1]
+            assert "retriever" in call_kwargs
+            assert "llm_client" in call_kwargs
+            assert call_kwargs["retriever"] == mock_retriever
+            assert call_kwargs["llm_client"] == mock_llm_client
+
+    @pytest.mark.asyncio
+    async def test_retrieve_without_agentic(self, mock_config, mock_retriever):
+        """Test retrieval without agentic flag uses the base retriever directly"""
+        kb = SimpleKnowledgeBase(config=mock_config, retriever=mock_retriever)
+        config = RetrievalConfig(agentic=False, top_k=5)
+        results = await kb.retrieve("test query", config=config)
+        assert len(results) == 1
+        mock_retriever.retrieve.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_retrieve_without_retriever_or_vector_store(self, mock_config):
         """Test retrieval without retriever or vector store"""
         kb = SimpleKnowledgeBase(config=mock_config)
@@ -319,9 +364,10 @@ class TestRetrieveMultiKb:
             ]
         )
 
-        results = await retrieve_multi_kb_with_source([mock_kb1, mock_kb2], "test query", top_k=5)
+        results = await retrieve_multi_kb_with_source(kbs=[mock_kb1, mock_kb2], query="test query", top_k=5)
         assert len(results) <= 5
         if results:
-            assert "text" in results[0]
-            assert "score" in results[0]
-            assert "kb_ids" in results[0]
+            assert isinstance(results[0], MultiKBRetrievalResult)
+            assert results[0].text == "Result 1"
+            assert results[0].score == 0.95
+            assert results[0].kb_ids == ["kb1", "kb2"]

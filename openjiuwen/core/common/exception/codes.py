@@ -140,6 +140,16 @@ class StatusCode(Enum):
     COMPONENT_QUESTIONER_EXECUTION_PROCESS_ERROR = (101076,
                                                     "component questioner_execution process error, reason: {error_msg}")
 
+    ## KnowledgeRetrievalComponent 101100 - 101149
+    COMPONENT_KNOWLEDGE_RETRIEVAL_INVOKE_CALL_FAILED = (
+        101100, "component knowledge_retrieval invoke call failed, reason: {error_msg}")
+    COMPONENT_KNOWLEDGE_RETRIEVAL_EMBED_MODEL_INIT_ERROR = (
+        101101, "component knowledge_retrieval embed_model initialization error, reason: {error_msg}")
+    COMPONENT_KNOWLEDGE_RETRIEVAL_INPUT_PARAM_ERROR = (
+        101102, "component knowledge_retrieval input parameter error, reason: {error_msg}")
+    COMPONENT_KNOWLEDGE_RETRIEVAL_LLM_MODEL_INIT_ERROR = (
+        101103, "component knowledge_retrieval llm_model initialization failed, reason: {error_msg}")
+    
     ## ToolComponent  102000 - 102019
     COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
@@ -177,6 +187,13 @@ class StatusCode(Enum):
     AGENT_CONTROLLER_TASK_EXECUTION_ERROR = (123008, "controller task execution error, reason: {error_msg}")
     AGENT_CONTROLLER_EVENT_HANDLER_ERROR = (123009, "controller event handler error, reason: {error_msg}")
     AGENT_CONTROLLER_EVENT_QUEUE_ERROR = (123010, "agent controller event queue execution error, reason: {error_msg}")
+
+    # DeepAgent 123020 - 123039
+    DEEPAGENT_CONFIG_PARAM_ERROR = (123020, "deepagent config parameter error, reason: {error_msg}")
+    DEEPAGENT_INPUT_PARAM_ERROR = (123021, "deepagent input parameter error, reason: {error_msg}")
+    DEEPAGENT_CONTEXT_PARAM_ERROR = (123022, "deepagent callback context parameter error, reason: {error_msg}")
+    DEEPAGENT_RUNTIME_ERROR = (123023, "deepagent runtime error, reason: {error_msg}")
+    DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED = (123024, "deepagent task loop not implemented, reason: {error_msg}")
 
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999
@@ -406,6 +423,10 @@ class StatusCode(Enum):
         155109,
         "retrieval indexing_vector_field is invalid, reason: {error_msg}",
     )
+    RETRIEVAL_INDEXING_FETCH_ERROR = (
+        155110,
+        "retrieval indexing fetch or parse error, reason: {error_msg}",
+    )
 
     # KnowledgeBase Retrieval - Retriever 155200 - 155299
     RETRIEVAL_RETRIEVER_MODE_NOT_SUPPORT = (155200, "retrieval retriever_mode is not supported, reason: {error_msg}")
@@ -430,13 +451,18 @@ class StatusCode(Enum):
         155206,
         "retrieval retriever_vector_store not found, reason: {error_msg}",
     )
-    RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND = (155207, "retrieval retriever_collection not found, reason: {error_msg}")
-    RETRIEVAL_RETRIEVER_GRAPH_RETRIEVER_NOT_FOUND = (
+    RETRIEVAL_RETRIEVER_COLLECTION_NOT_FOUND = (
+        155207, "retrieval retriever_collection not found, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_NOT_FOUND = (
         155208,
-        "retrieval retriever_graph_retriever not found, reason: {error_msg}",
+        "retrieval retriever not found, reason: {error_msg}",
     )
-    RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND = (155209, "retrieval retriever_llm_client not found, reason: {error_msg}")
-    RETRIEVAL_RETRIEVER_TOP_K_NOT_FOUND = (155210, "retrieval retriever_top_k not found, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_LLM_CLIENT_NOT_FOUND = (
+        155209, "retrieval retriever_llm_client not found, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_TOP_K_INVALID = (
+        155210, "retrieval retriever_top_k is invalid, reason: {error_msg}")
+    RETRIEVAL_RETRIEVER_INVALID = (
+        155211, "retrieval retriever is invalid, reason: {error_msg}")
 
     # KnowledgeBase Retrieval - Utils 155300 - 155399
     RETRIEVAL_UTILS_CONFIG_FILE_NOT_FOUND = (155300, "retrieval utils_config_file not found, reason: {error_msg}")
@@ -450,7 +476,9 @@ class StatusCode(Enum):
 
     # KnowledgeBase Retrieval - Vector Store 155400 - 155499
     RETRIEVAL_VECTOR_STORE_PATH_NOT_FOUND = (155400, "retrieval vector_store_path not found, reason: {error_msg}")
-    RETRIEVAL_VECTOR_STORE_QUERY_INVALID = (155400, "retrieval vector_store_query not valid, reason: {error_msg}")
+    RETRIEVAL_VECTOR_STORE_QUERY_INVALID = (155401, "retrieval vector_store_query not valid, reason: {error_msg}")
+    RETRIEVAL_VECTOR_STORE_PROVIDER_INVALID = (
+        155402, "retrieval vector_store_provider is not supported, reason: {error_msg}")
 
     # KnowledgeBase Retrieval - Knowledge Base 155500 - 155599
     RETRIEVAL_KB_PARSER_NOT_FOUND = (155500, "retrieval kb_parser not found, reason: {error_msg}")
@@ -480,6 +508,24 @@ class StatusCode(Enum):
     RETRIEVAL_RERANKER_UNREACHABLE_CALL_FAILED = (155601, "retrieval reranker call failed, reason: {error_msg}")
     RETRIEVAL_RERANKER_INPUT_INVALID = (155602, "retrieval reranker_input is invalid, reason: {error_msg}")
 
+    # KnowledgeBase Retrieval - Query Rewriter 155603 - 155609
+    RETRIEVAL_QUERY_REWRITER_PROMPT_NOT_FOUND = (
+        155603,
+        "retrieval query_rewriter prompt file not found, reason: {error_msg}",
+    )
+    RETRIEVAL_QUERY_REWRITER_OUTPUT_INVALID = (
+        155604,
+        "retrieval query_rewriter llm output is not valid JSON, reason: {error_msg}",
+    )
+    RETRIEVAL_QUERY_REWRITER_LLM_INVOKE_FAILED = (
+        155605,
+        "retrieval query_rewriter llm invoke failed, reason: {error_msg}",
+    )
+    RETRIEVAL_QUERY_REWRITER_INPUT_INVALID = (
+        155606,
+        "retrieval query_rewriter input is invalid, reason: {error_msg}",
+    )
+
     # =========================
     # Memory Engine 158000 – 159999
     # =========================
@@ -493,6 +539,11 @@ class StatusCode(Enum):
     MEMORY_STORE_INIT_FAILED = (158006, "failed to init {store_type}, reason: {error_msg}")
     MEMORY_CONNECT_STORE_EXECUTION_ERROR = (158007, "failed to connect {store_type}, reason: {error_msg}")
     MEMORY_STORE_VALIDATION_INVALID = (158008, "{store_type} validation failed, reason: {error_msg}")
+    MEMORY_REGISTER_OPERATION_VALIDATION_INVALID = (
+        158009,
+        "failed to register operation for {entity_key}:{schema_version}, reason: {error_msg}"
+    )
+    MEMORY_MIGRATE_MEMORY_EXECUTION_ERROR = (158010, "failed to migrate memory, reason: {error_msg}")
 
     # =========================
     # Foundation Tool 160000–169999
@@ -517,6 +568,7 @@ class StatusCode(Enum):
     TOOLCHAIN_TRAINER_EXECUTION_ERROR = (170005, "toolchain trainer execution error, reason: {error_msg}")
 
     # Optimization Toolchain - End-to-end Performance Optimization 171000 - 171999
+
     # Optimization Toolchain - AgentRL 172000 - 172999
 
     # Optimization Toolchain - Prompt Builder 173000 - 173999
@@ -528,6 +580,93 @@ class StatusCode(Enum):
     )
     TOOLCHAIN_BAD_CASE_TEMPLATE_EXECUTION_ERROR = (
         173002, "toolchain bad_case_template execution error, reason: {error_msg}"
+    )
+
+    # Optimization Toolchain - Task Memory (Middleware/Service) 174000 - 174025
+    TOOLCHAIN_EVOLVING_MEMORY_RETRIEVE_EXECUTION_ERROR = (
+        174000, "toolchain evolving memory retrieve execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_SUMMARIZE_EXECUTION_ERROR = (
+        174001, "toolchain evolving memory summarize execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_ADD_EXECUTION_ERROR = (
+        174002, "toolchain evolving memory add memory execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_FETCH_EXECUTION_ERROR = (
+        174003, "toolchain evolving memory get playbook execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_CLEAR_EXECUTION_ERROR = (
+        174004, "toolchain evolving memory clear playbook execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_CONFIG_INVALID = (
+        174005, "toolchain evolving memory config is invalid, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_SERVICE_INIT_FAILED = (
+        174006, "toolchain evolving memory service initialization failed, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_EMBEDDING_EXECUTION_ERROR = (
+        174007, "toolchain evolving memory embedding execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_LLM_GENERATION_EXECUTION_ERROR = (
+        174008, "toolchain evolving memory llm generation execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_DB_CONNECTOR_EXECUTION_ERROR = (
+        174009, "toolchain evolving memory db connector execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_FILE_IO_EXECUTION_ERROR = (
+        174010, "toolchain evolving memory file I/O execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_VECTOR_STORE_EXECUTION_ERROR = (
+        174011, "toolchain evolving memory vector store execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_INJECTION_EXECUTION_ERROR = (
+        174012, "toolchain evolving memory prompt injection execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_STATE_RESTORE_EXECUTION_ERROR = (
+        174013, "toolchain evolving memory prompt state restore execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_MEMORY_INPUT_INVALID = (
+        174014, "toolchain evolving memory input is invalid, reason: {error_msg}"
+    )
+
+    # Optimization Toolchain - Tool Self-optimization 174025 - 174049
+    TOOLCHAIN_EVOLVING_TOOL_CALL_CONFIG_ERROR = (
+        174025, "toolchain optimizer tool_call config error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_PARAM_ERROR = (
+        174026, "toolchain optimizer tool_call parameter error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_RUNTIME_ERROR = (
+        174027, "toolchain optimizer tool_call runtime error, reason: {error_msg}"
+    )
+
+    TOOLCHAIN_EVOLVING_TOOL_CALL_EXAMPLE_STAGE_EXECUTION_ERROR = (
+        174028, "toolchain optimizer tool_call example_stage execution error, reason: {error_msg}"
+    )
+
+    TOOLCHAIN_EVOLVING_TOOL_CALL_BEAM_SEARCH_EXECUTION_ERROR = (
+        174029, "toolchain optimizer tool_call beam_search execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_EVALUATOR_EXECUTION_ERROR = (
+        174030, "toolchain optimizer tool_call evaluator execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR = (
+        174031, "toolchain optimizer tool_call llm_call execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_REVIEWER_EXECUTION_ERROR = (
+        174032, "toolchain optimizer tool_call reviewer execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_SCHEMA_EXTRACT_EXECUTION_ERROR = (
+        174033, "toolchain optimizer tool_call schema_extract execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_OUTPUT_PARSE_ERROR = (
+        174034, "toolchain optimizer tool_call output parse error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_LOGGING_EXECUTION_ERROR = (
+        174035, "toolchain optimizer tool_call logging execution error, reason: {error_msg}"
+    )
+    TOOLCHAIN_EVOLVING_TOOL_CALL_RESULT_PERSIST_EXECUTION_ERROR = (
+        174036, "toolchain optimizer tool_call result persist execution error, reason: {error_msg}"
     )
 
     # =========================
@@ -584,6 +723,13 @@ class StatusCode(Enum):
 
     # 4. openapi tool 182400 - 182499
     TOOL_OPENAPI_CLIENT_EXECUTION_ERROR = (182400, "openapi client execute error, error='{reason}'")
+
+    # 5. deepagents tool 182500 - 182699
+    TOOL_TODOS_LOAD_FAILED = (182500, "todo tool loads failed, error='{reason}'")
+    TOOL_TODOS_SAVE_FAILED = (182501, "todo tool saves failed, error='{reason}'")
+    TOOL_TODOS_CLEAR_FAILED = (182502, "todo tool clears failed, error='{reason}'")
+    TOOL_TODOS_VALIDATION_INVALID = (182503, "todo tool validation invalid, error='{reason}'")
+    TOOL_TODOS_INVOKE_FAILED = (182504, "todo tool invoke failed, error='{reason}'")
 
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")

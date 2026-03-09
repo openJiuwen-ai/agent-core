@@ -22,7 +22,7 @@ from openjiuwen.core.retrieval.common.config import (
     VectorStoreConfig,
 )
 from openjiuwen.core.retrieval.common.document import Document, MultimodalDocument, TextChunk
-from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult, SearchResult
+from openjiuwen.core.retrieval.common.retrieval_result import MultiKBRetrievalResult, RetrievalResult, SearchResult
 from openjiuwen.core.retrieval.common.triple import Triple
 from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
 from openjiuwen.core.retrieval.common.triple_memory import TripleMemory
@@ -36,6 +36,11 @@ from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
 
 # Processor & Chunker classes
 from openjiuwen.core.retrieval.indexing.processor.base import Processor
+from openjiuwen.core.retrieval.indexing.processor.chunker import (
+    HybridChunker,
+    get_chunker,
+    register_chunker,
+)
 from openjiuwen.core.retrieval.indexing.processor.chunker.base import Chunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.char_chunker import CharChunker
 from openjiuwen.core.retrieval.indexing.processor.chunker.chunking import TextChunker
@@ -79,6 +84,7 @@ from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 
 # Vector store related
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
+from openjiuwen.core.retrieval.vector_store.store import create_vector_store
 
 from .lazy_load import _LAZY_ATTRIBUTES, _LAZY_IMPORT_CACHE, lazy_load
 
@@ -100,6 +106,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.retrieval.indexing.indexer.milvus_indexer import MilvusIndexer
     from openjiuwen.core.retrieval.indexing.processor import parser
     from openjiuwen.core.retrieval.knowledge_base import KnowledgeBase
+    from openjiuwen.core.retrieval.query_rewriter.query_rewriter import QueryRewriter
     from openjiuwen.core.retrieval.reranker.chat_reranker import ChatReranker
     from openjiuwen.core.retrieval.reranker.standard_reranker import StandardReranker
     from openjiuwen.core.retrieval.simple_knowledge_base import (
@@ -121,6 +128,7 @@ _NON_LAZY_ATTRIBUTES = [
     "Document",
     "MultimodalDocument",
     "TextChunk",
+    "MultiKBRetrievalResult",
     "RetrievalResult",
     "SearchResult",
     "Triple",
@@ -133,6 +141,7 @@ _NON_LAZY_ATTRIBUTES = [
     "APIEmbedding",
     "Reranker",
     "VectorStore",
+    "create_vector_store",
     "Indexer",
     # Processor classes
     "Processor",
@@ -150,6 +159,9 @@ _NON_LAZY_ATTRIBUTES = [
     "PreprocessingPipeline",
     "TextChunker",
     "CharChunker",
+    "HybridChunker",
+    "get_chunker",
+    "register_chunker",
     "TokenizerChunker",
     "TripleExtractor",
     # Retriever classes

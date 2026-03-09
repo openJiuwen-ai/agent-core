@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """
-Load configuration for embedding & reranker
+Load configuration for embedding, reranker, and query rewriter (LLM).
 """
 
 import os
@@ -12,6 +12,7 @@ import dotenv
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.config import EmbeddingConfig, RerankerConfig
+from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo, ModelConfig
 
 env_file = Path(__file__).parent / ".env"
 if not env_file.exists():
@@ -64,4 +65,33 @@ except Exception as e:
     logger.error("Multimodal embedding not configured: %r", e)
     MULTIMODAL_EMBEDDING_CONFIG = EMBEDDING_CONFIG
 
-__all__ = ["EMBEDDING_CONFIG", "MULTIMODAL_EMBEDDING_CONFIG", "RERANKER_CONFIG"]
+# Query Rewriter (LLM): used by showcase_query_rewriter.py; fallback to API_BASE/API_KEY/MODEL_NAME/MODEL_PROVIDER
+try:
+    _qr_api_base = os.environ.get("QR_LLM_API_BASE") or os.environ.get("API_BASE", "")
+    _qr_api_key = os.environ.get("QR_LLM_API_KEY") or os.environ.get("API_KEY", "")
+    _qr_model = os.environ.get("QR_LLM_MODEL") or os.environ.get("MODEL_NAME", "")
+    _qr_provider = os.environ.get("QR_LLM_PROVIDER") or os.environ.get("MODEL_PROVIDER", "OpenAI")
+    if _qr_api_base and _qr_model:
+        QR_LLM_MODEL_CONFIG = ModelConfig(
+            model_provider=_qr_provider,
+            model_info=BaseModelInfo(
+                api_key=_qr_api_key,
+                api_base=_qr_api_base,
+                model=_qr_model,
+                temperature=0.0,
+                top_p=0.1,
+                timeout=60,
+            ),
+        )
+    else:
+        QR_LLM_MODEL_CONFIG = None
+except Exception as e:
+    logger.error("QR LLM config not configured: %r", e)
+    QR_LLM_MODEL_CONFIG = None
+
+__all__ = [
+    "EMBEDDING_CONFIG",
+    "MULTIMODAL_EMBEDDING_CONFIG",
+    "RERANKER_CONFIG",
+    "QR_LLM_MODEL_CONFIG",
+]

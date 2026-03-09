@@ -18,9 +18,8 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
+from openjiuwen.core.foundation.store.base_embedding import Embedding, EmbeddingConfig
 from openjiuwen.core.retrieval.common.callbacks import BaseCallback
-from openjiuwen.core.retrieval.common.config import EmbeddingConfig
-from openjiuwen.core.retrieval.embedding.base import Embedding
 
 
 class APIEmbedding(Embedding):
@@ -231,6 +230,7 @@ class APIEmbedding(Embedding):
 
     async def _get_embeddings(self, text: str | List[str], **kwargs) -> List[List[float]]:
         """Get embedding vectors"""
+        kwargs.pop("callback_cls", None)
 
         payload = {"model": self.model_name, "input": text, **kwargs}
 
@@ -295,6 +295,7 @@ class APIEmbedding(Embedding):
 
     def _get_embeddings_sync(self, text: str | List[str], **kwargs) -> List[List[float]]:
         """Get embedding vectors (sync version)."""
+        kwargs.pop("callback_cls", None)
 
         payload = {"model": self.model_name, "input": text, **kwargs}
 

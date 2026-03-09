@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
 from openjiuwen.core.memory.manage.index.summary_manager import SummaryManager
-from openjiuwen.core.memory.manage.index.user_profile_manager import UserProfileManager
+from openjiuwen.core.memory.manage.index.fragment_memory_manager import FragmentMemoryManager
 from openjiuwen.core.memory.manage.index.variable_manager import VariableManager
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 from openjiuwen.core.memory.manage.mem_model.user_mem_store import UserMemStore
@@ -25,7 +25,6 @@ class SearchParams(BaseModel):
 
 
 class SearchManager:
-    user_mem_manager_list = [MemoryType.USER_PROFILE.value]
     all_mem_manager_list = [item.value for item in MemoryType]
 
     def __init__(self,
@@ -36,13 +35,14 @@ class SearchManager:
         self.mem_store = user_mem_store
         self.crypto_key = crypto_key
 
-    async def search(self, params: SearchParams, **kwargs) -> list[dict[str, Any]] | None:
+    async def search(self, params: SearchParams, semantic_store, **kwargs) -> list[dict[str, Any]] | None:
         user_id = params.user_id
         scope_id = params.scope_id
         query = params.query
         top_k = params.top_k
         threshold = params.threshold
         search_type = params.search_type
+        kwargs['mem_type'] = search_type
         # search_type is illegal
         if search_type is not None and search_type not in self.all_mem_manager_list:
             raise build_error(
@@ -60,17 +60,18 @@ class SearchManager:
         result = []
         # search_type not specified, traverse available managers
         if search_type is None:
-            for mem_type, manager in self.managers.items():
-                if mem_type in self.user_mem_manager_list:
-                    res = await manager.search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k, **kwargs)
-                    if res is not None:
-                        result.extend(res)
+            for manager in set(self.managers.values()):
+                res = await manager.search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
+                                            semantic_store=semantic_store, **kwargs)
+                if res is not None:
+                    result.extend(res)
         # call the manager corresponding to search_type
         else:
             res = await self.managers[search_type].search(user_id=user_id, scope_id=scope_id, query=query, top_k=top_k,
-                                                          **kwargs)
+                                                          semantic_store=semantic_store, **kwargs)
             if res:
                 result = res
+        
         # sort and truncate multiple search_type results based on score
         if len(result) > top_k:
             result.sort(key=lambda item: item["score"], reverse=True)
@@ -89,26 +90,25 @@ class SearchManager:
             return list_res
         for item in list_res:
             item["mem"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=item["mem"])
-            item["context_summary"] = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key,
-                                                                                 ciphertext=item["context_summary"])
         return list_res
 
-    async def list_user_profile(self, user_id: str, scope_id: str, profile_type: Optional[str] = None) -> list[dict]:
-        if MemoryType.USER_PROFILE.value not in self.managers:
+    async def list_user_profile(self, user_id: str, scope_id: str) -> list[dict]:
+        if any(item not in self.managers for item in UserMemStore.FRAGMENT_MEMORY_TYPE):
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
-                memory_type=MemoryType.USER_PROFILE.value,
-                error_msg=f"{MemoryType.USER_PROFILE.value} memory manager not inited",
+                memory_type="fragment_memory",
+                error_msg=f"fragment memory manager not inited",
             )
-        if not isinstance(self.managers[MemoryType.USER_PROFILE.value], UserProfileManager):
+        if not isinstance(self.managers[MemoryType.USER_PROFILE.value], FragmentMemoryManager):
             raise build_error(
                 StatusCode.MEMORY_GET_MEMORY_EXECUTION_ERROR,
-                memory_type=MemoryType.USER_PROFILE.value,
-                error_msg=f"{MemoryType.USER_PROFILE.value} manager class is not UserProfileManager",
+                memory_type="fragment_memory",
+                error_msg=f"fragment memory manager class is not FragmentMemoryManager",
             )
-        return await self.managers[MemoryType.USER_PROFILE.value].list_user_profile(user_id=user_id,
-                                                                                    scope_id=scope_id,
-                                                                                    profile_type=profile_type)
+        return await self.managers[MemoryType.USER_PROFILE.value].list_fragment_memories(
+            user_id=user_id,
+            scope_id=scope_id
+        )
 
     async def list_user_summary(self, user_id: str, scope_id: str) -> list[dict]:
         if MemoryType.SUMMARY.value not in self.managers:
@@ -143,7 +143,7 @@ class SearchManager:
                                                                             scope_id=scope_id, name=var_name)
         if res is None:
             return None
-        return res[var_name]
+        return res[var_name] if var_name in res else None
 
     async def get_all_user_variable(self, user_id: str, scope_id: str) -> dict[str, Any]:
         if MemoryType.VARIABLE.value not in self.managers:

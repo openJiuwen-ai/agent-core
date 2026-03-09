@@ -501,7 +501,11 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
                 Param.string(name="name", description="用户的姓名", required=False),
                 Param.string(name="career", description="用户的职业", required=False),
             ],
-            enable_long_term_mem=True
+            enable_long_term_mem=True,
+            enable_user_profile=True,
+            enable_semantic_memory=True,
+            enable_episodic_memory=True,
+            enable_summary_memory=True
         )
         await memory_engine.set_scope_config(scope_id, self._create_memory_scope_config())
 
@@ -584,7 +588,11 @@ class LLMAgentTest(unittest.IsolatedAsyncioTestCase):
         await memory_engine.set_scope_config(scope_id, self._create_memory_scope_config())
         llm_agent_config.agent_memory_config = AgentMemoryConfig(
             mem_variables=[],
-            enable_long_term_mem=True
+            enable_long_term_mem=True,
+            enable_user_profile=True,
+            enable_semantic_memory=True,
+            enable_episodic_memory=True,
+            enable_summary_memory=True
         )
         llm_agent: LLMAgent = create_llm_agent(
             agent_config=llm_agent_config,

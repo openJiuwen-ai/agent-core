@@ -4,7 +4,7 @@
 import ast
 import re
 from dataclasses import dataclass, field
-from typing import Optional, Union, Callable, List
+from typing import Optional, Union, Callable, List, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -21,11 +21,10 @@ from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Output, Input
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.foundation.llm import (
-    BaseMessage, UserMessage, SystemMessage, ModelRequestConfig, ModelClientConfig, Model
+    BaseMessage, UserMessage, SystemMessage, AssistantMessage, ModelRequestConfig, ModelClientConfig, Model
 )
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.common.security.user_config import UserConfig
-
 
 LUI = "llm"
 NAME = "name"
@@ -51,10 +50,17 @@ CHAT_HISTORY_MAX_TURN = "chat_history_max_turn"
 INTENT_DETECTION_TEMPLATE = "intent_detection_template"
 ROLE = "role"
 CONTENT = "content"
-ROLE_MAP = {"user": '用户', 'assistant': '助手', 'system': '系统', 'tool': '工具'}
-JSON_PARSE_FAIL_REASON = "当前意图识别的输出:'{result}'格式不符合有效的JSON规范，导致解析失败，因此返回默认分类。"
-CLASS_KEY_MISSING_REASON = "当前意图识别的输出 '{result}' 缺少必要的输出'class'分类信息，因此返回默认分类。"
-VALIDATION_FAIL_REASON = "当前意图识别的输出类别 '{intent_class}' 不在预定义的分类列表: '{category_list}'中，因此系统返回默认分类。"
+ROLE_MAP_ZH = {"user": '用户', 'assistant': '助手', 'system': '系统', 'tool': '工具'}
+ROLE_MAP_EN = {"user": 'User', 'assistant': 'Assistant', 'system': 'System', 'tool': 'Tool'}
+JSON_PARSE_FAIL_REASON_ZH = "当前意图识别的输出:'{result}'格式不符合有效的JSON规范，导致解析失败，因此返回默认分类。"
+JSON_PARSE_FAIL_REASON_EN = ("The intent detection output '{result}' does not conform to valid JSON format, "
+                             "parsing failed, therefore default category is returned.")
+CLASS_KEY_MISSING_REASON_ZH = "当前意图识别的输出 '{result}' 缺少必要的输出'class'分类信息，因此返回默认分类。"
+CLASS_KEY_MISSING_REASON_EN = ("The intent detection output '{result}' is missing "
+                               "the required 'class' classification field, therefore default category is returned.")
+VALIDATION_FAIL_REASON_ZH = "当前意图识别的输出类别 '{intent_class}' 不在预定义的分类列表: '{category_list}'中，因此系统返回默认分类。"
+VALIDATION_FAIL_REASON_EN = ("The intent detection output class '{intent_class}' is not in the "
+                             "predefined category list: '{category_list}', therefore default category is returned.")
 WORKFLOW_CHAT_HISTORY = "workflow_chat_history"
 
 RESULT = "result"
@@ -69,7 +75,8 @@ SEARCH_NUM = 5
 CLASSIFICATION_ID = "classificationId"
 CLASSIFICATION_DEFAULT_ID = 0
 CLASSIFICATION_NAME = "name"
-CLASSIFICATION_DEFAULT_NAME = "默认意图"
+CLASSIFICATION_DEFAULT_NAME_ZH = "默认意图"
+CLASSIFICATION_DEFAULT_NAME_EN = "Default intent"
 KG_FILTER_KEY = "filter_string"
 KG_FILTER_PREFIX = "category:"
 KG_SCOPE = "scope"
@@ -79,9 +86,10 @@ _PROVIDER_NAME_MAP = {
     "siliconflow": "SiliconFlow",
 }
 
-DEFAULT_SYSTEM_PROMPT = "你是一个识别用户输入意图的AI助手。"
+DEFAULT_SYSTEM_PROMPT_ZH = "你是一个识别用户输入意图的AI助手。"
+DEFAULT_SYSTEM_PROMPT_EN = "You are an AI assistant that identifies user input intent."
 
-DEFAULT_USER_PROMPT = """
+DEFAULT_USER_PROMPT_ZH = """
 {{user_prompt}}
 
 当前可供选择的功能分类如下：
@@ -102,14 +110,43 @@ reason: 说明为何选择该分类
 如果没有合适的分类，请输出 {{default_class}}。
 """
 
+DEFAULT_USER_PROMPT_EN = """
+{{user_prompt}}
 
-def get_default_template():
+Available function categories:
+{{category_info}}
+
+Conversation history between user and assistant:
+{{chat_history}}
+
+Current input:
+{{input}}
+
+Please analyze the current input and conversation history, and output the most suitable function category. Output format is JSON with the following two fields:
+class: represents the classification result
+reason: explains why this classification was chosen
+Example: {"class": "Category1", "reason": "Current input xxx"}
+Please refer to the following examples:
+{{example_content}}
+If no suitable category exists, output {{default_class}}.
+"""
+
+
+def get_default_template(accept_language: Literal['zh', 'en'] = 'zh'):
+    """Return prompt template based on accept_language."""
+    if accept_language == 'en':
+        return PromptTemplate(
+            content=[
+                SystemMessage(content=DEFAULT_SYSTEM_PROMPT_EN),
+                UserMessage(content=DEFAULT_USER_PROMPT_EN),
+            ]
+        )
     return PromptTemplate(
-                content=[
-                    SystemMessage(content=DEFAULT_SYSTEM_PROMPT),
-                    UserMessage(content=DEFAULT_USER_PROMPT),
-                ]
-            )
+        content=[
+            SystemMessage(content=DEFAULT_SYSTEM_PROMPT_ZH),
+            UserMessage(content=DEFAULT_USER_PROMPT_ZH),
+        ]
+    )
 
 
 @dataclass
@@ -122,19 +159,20 @@ class IntentDetectionCompConfig(ComponentConfig):
     example_content: list[str] = field(default_factory=list)
     enable_history: bool = False
     chat_history_max_turn: int = 3
+    accept_language: Literal['zh', 'en'] = field(default='zh')
 
 
 @dataclass
 class IntentDetectionDefaultConfig:
     category_list: list[str] = field(default_factory=list)
-    intent_detection_template: PromptTemplate = field(default_factory=get_default_template)
+    intent_detection_template: PromptTemplate = field(default_factory=lambda: get_default_template('zh'))
     default_class: str = '分类0'
     enable_input: bool = True
 
 
 class IntentDetectionInput(BaseModel):
     query: str
-    model_config = ConfigDict(extra='allow')   # Allow any extra fields
+    model_config = ConfigDict(extra='allow')  # Allow any extra fields
 
 
 class IntentDetectionOutput(BaseModel):
@@ -156,13 +194,6 @@ class IntentDetectionExecutable(ComponentExecutable):
         self._router: Union[BranchRouter, None] = None
 
     @staticmethod
-    def _get_chat_history_from_context(context) -> List[BaseMessage]:
-        chat_history = []
-        if context is not None:
-            chat_history = context.get_messages()
-        return chat_history
-
-    @staticmethod
     def _refix_llm_output(input_str):
         json_path = r'\{.*\}'
         match = re.search(json_path, input_str, re.DOTALL)
@@ -175,11 +206,11 @@ class IntentDetectionExecutable(ComponentExecutable):
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         """Invoke IntentDetection node"""
-        # Extract context data
         self._set_session(session)
         self._router.set_session(session)
         await self._initialize_if_needed()
-        chat_history = self._get_chat_history_from_context(context)
+        await self._write_user_message_to_context(inputs, context)
+        chat_history = await self._get_chat_history_from_context(context)
         current_inputs = self._prepare_detection_inputs(inputs, chat_history)
         llm_output = await self._invoke_llm_and_get_result(current_inputs)
         workflow_logger.info(
@@ -194,6 +225,7 @@ class IntentDetectionExecutable(ComponentExecutable):
                 "sensitive_mode": UserConfig.is_sensitive()
             }
         )
+        await self._write_assistant_message_to_context(llm_output, context)
         intent_res = self._parse_detection_result(llm_output)
         return intent_res
 
@@ -203,6 +235,14 @@ class IntentDetectionExecutable(ComponentExecutable):
 
     def post_commit(self) -> bool:
         return True
+
+    async def _get_chat_history_from_context(self, context) -> List[BaseMessage]:
+        chat_history = []
+        if self._config.enable_history and context is not None:
+            context_window = await context.get_context_window(dialogue_round=self._config.chat_history_max_turn)
+            if context_window is not None:
+                chat_history = context_window.get_messages()
+        return chat_history
 
     def _get_category_info(self):
         return "\n".join(f"{cid}: {cname}" for cid, cname in
@@ -272,11 +312,12 @@ class IntentDetectionExecutable(ComponentExecutable):
         return current_inputs
 
     def _format_chat_history(self, chat_history):
+        role_map = ROLE_MAP_EN if self._config.accept_language == 'en' else ROLE_MAP_ZH
         chat_history_str = ""
         for history in chat_history[-self._config.chat_history_max_turn:]:
-            if history.role in ROLE_MAP:
+            if history.role in role_map:
                 chat_history_str += "{}: {}\n".format(
-                    ROLE_MAP.get(history.role), history.content
+                    role_map.get(history.role), history.content
                 )
         return chat_history_str
 
@@ -331,31 +372,40 @@ class IntentDetectionExecutable(ComponentExecutable):
             }
         )
 
-
         return llm_output_content
 
     def _post_process_intent_detection(self, result):
         """Post-process the result"""
+        lang = self._config.accept_language
+        json_fail_reason = JSON_PARSE_FAIL_REASON_EN if lang == 'en' else JSON_PARSE_FAIL_REASON_ZH
+        class_missing_reason = CLASS_KEY_MISSING_REASON_EN if lang == 'en' else CLASS_KEY_MISSING_REASON_ZH
+        validation_fail_reason = VALIDATION_FAIL_REASON_EN if lang == 'en' else VALIDATION_FAIL_REASON_ZH
+        category_pattern = r"Category\d+" if lang == 'en' else r"分类\d+"
+
         try:
             result = self._refix_llm_output(result)
             parsed_dict = ast.literal_eval(result)
         except Exception:
-            return self._default_config.default_class, JSON_PARSE_FAIL_REASON.format(result=result)
+            return self._default_config.default_class, json_fail_reason.format(result=result)
 
         if not isinstance(parsed_dict, dict):
-            return self._default_config.default_class, JSON_PARSE_FAIL_REASON.format(result=result)
+            return self._default_config.default_class, json_fail_reason.format(result=result)
 
         # post_process class information
         if not parsed_dict.get(CLASS):
-            return self._default_config.default_class, CLASS_KEY_MISSING_REASON.format(result=parsed_dict)
+            return self._default_config.default_class, class_missing_reason.format(result=parsed_dict)
 
         intent_class = parsed_dict.get(CLASS).replace('\n', '').replace(' ', '').replace('"', '').replace("'", '')
-        match = re.search(r"分类\d+", intent_class)
+        match = re.search(category_pattern, intent_class, re.IGNORECASE)
         if match:
-            parsed_dict.update({CLASS: match.group(0)})
+            matched = match.group(0)
+            if lang == 'en':
+                digit_part = re.search(r'\d+', matched)
+                matched = f"Category{digit_part.group(0)}" if digit_part else matched
+            parsed_dict.update({CLASS: matched})
 
-        if not parsed_dict.get(CLASS) in self._default_config.category_list:
-            reason = VALIDATION_FAIL_REASON.format(
+        if parsed_dict.get(CLASS) not in self._default_config.category_list:
+            reason = validation_fail_reason.format(
                 intent_class=parsed_dict.get(CLASS),
                 category_list=self._default_config.category_list
             )
@@ -368,20 +418,46 @@ class IntentDetectionExecutable(ComponentExecutable):
         return result in self._default_config.category_list
 
     def _append_default_category(self):
+        default_name = (CLASSIFICATION_DEFAULT_NAME_EN if self._config.accept_language == 'en'
+                        else CLASSIFICATION_DEFAULT_NAME_ZH)
         self._default_config.category_list = [self._default_config.default_class] + self._default_config.category_list
-        self._config.category_name_list = [CLASSIFICATION_DEFAULT_NAME] + self._config.category_name_list
+        self._config.category_name_list = [default_name] + self._config.category_name_list
 
     def _get_intent_id_and_name(self, intent_class):
-        intent_res = {CLASSIFICATION_ID: CLASSIFICATION_DEFAULT_ID, CLASSIFICATION_NAME: CLASSIFICATION_DEFAULT_NAME}
+        default_name = (CLASSIFICATION_DEFAULT_NAME_EN if self._config.accept_language == 'en'
+                        else CLASSIFICATION_DEFAULT_NAME_ZH)
+        intent_res = {CLASSIFICATION_ID: CLASSIFICATION_DEFAULT_ID, CLASSIFICATION_NAME: default_name}
         idx = next((i for i, category in enumerate(self._default_config.category_list) if category == intent_class), -1)
         if idx > -1:
             intent_res = {CLASSIFICATION_ID: idx, CLASSIFICATION_NAME: self._config.category_name_list[idx]}
         return intent_res
 
     def _init_default_config_category_list(self, component_config: IntentDetectionCompConfig):
-        self._default_config = IntentDetectionDefaultConfig()
+        lang = getattr(component_config, 'accept_language', 'zh') or 'zh'
+        category_prefix = "Category" if lang == 'en' else "分类"
+        default_class = f"{category_prefix}0"
+        self._default_config = IntentDetectionDefaultConfig(
+            intent_detection_template=get_default_template(lang),
+            default_class=default_class
+        )
         for index, _ in enumerate(component_config.category_name_list, start=1):
-            self._default_config.category_list.append(f"分类{index}")
+            self._default_config.category_list.append(f"{category_prefix}{index}")
+
+    async def _write_user_message_to_context(self, inputs, context):
+        if context is None or not self._config.enable_history:
+            return
+        try:
+            query = IntentDetectionInput.model_validate(inputs).query or ""
+        except ValidationError:
+            return
+        if query:
+            await context.add_messages([UserMessage(content=query)])
+
+    async def _write_assistant_message_to_context(self, content: str, context):
+        if context is None or not self._config.enable_history:
+            return
+        if content:
+            await context.add_messages([AssistantMessage(content=content)])
 
 
 class IntentDetectionComponent(ComponentComposable):

@@ -114,6 +114,8 @@ class LoopGroup(BaseWorkflow, Executable):
         self.auto_complete_abilities()
         actor_manager = ActorManager(self._workflow_spec, self._stream_actor, sub_graph=True, session=session)
         loop_session = SubWorkflowSession(session.parent(), self._workflow_config.card.id, actor_manager)
+        loop_session.config().add_workflow_config(workflow_id=self._workflow_config.card.id,
+                                                  workflow_config=self._workflow_config)
         self.compiled_graph = self.compile(loop_session, context=kwargs.get("context"))
         await self.compiled_graph.invoke(inputs, loop_session)
         return None
@@ -418,10 +420,10 @@ class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, Ato
                 callback(OUT_LOOP, session)
 
         if not continue_loop:
-            session.state().update({INDEX: 0, BROKEN: False})
+            session.state().update({INDEX: None, BROKEN: False})
             self._post_body.set_finish_index(-1)
             session.parent().state().update({POST_BODY_NODE_ID: None})
-            session.state().set_outputs({INDEX: 0})
+            session.state().set_outputs({INDEX: None})
 
         return self._in_loop if continue_loop else self._out_loop
 
@@ -441,7 +443,8 @@ class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, Ato
 
         loop_session.state().set_outputs({LOOP_ID: self._node_id})
         state = loop_session.state()._io_state.get_state()
-        if self._node_id in state:
+        state = state.get(session.parent_id()) if session.parent_id() else state
+        if state and self._node_id in state:
             del state[self._node_id]
         loop_session.state().set_outputs(state)
         loop_session.state().commit()

@@ -24,11 +24,26 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Optional,
     Set,
 )
 
 from openjiuwen.core.runner.callback.chain import CallbackChain
+from openjiuwen.core.runner.callback.decorator import (
+    _TRANSFORM_NOOP,
+    create_emit_after_decorator,
+    create_emit_around_decorator,
+    create_emit_before_decorator,
+    create_on_decorator,
+    create_on_wrap_decorator,
+    create_transform_io_by_events_decorator,
+    create_transform_io_decorator,
+    create_wrap_by_event_decorator,
+    InputTransform,
+    OutputTransform,
+    WrapHandler,
+)
 from openjiuwen.core.runner.callback.enums import (
     ChainAction,
     FilterAction,
@@ -37,17 +52,6 @@ from openjiuwen.core.runner.callback.enums import (
 from openjiuwen.core.runner.callback.filters import (
     CircuitBreakerFilter,
     EventFilter,
-)
-from openjiuwen.core.runner.callback.decorator import (
-    create_emit_around_decorator,
-    create_emits_decorator,
-    create_emits_stream_decorator,
-    create_on_decorator,
-    create_transform_io_by_events_decorator,
-    create_transform_io_decorator,
-    create_trigger_on_call_decorator,
-    InputTransform,
-    OutputTransform,
 )
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
@@ -157,7 +161,8 @@ class AsyncCallbackFramework:
             error_handler: Optional[Callable] = None,
             max_retries: int = 0,
             retry_delay: float = 0.0,
-            timeout: Optional[float] = None
+            timeout: Optional[float] = None,
+            callback_type: str = "",
     ):
         """Decorator to register an async callback.
 
@@ -179,6 +184,7 @@ class AsyncCallbackFramework:
             max_retries: Maximum retry attempts
             retry_delay: Delay between retries in seconds
             timeout: Execution timeout in seconds
+            callback_type: Semantic type marker, e.g. "transform"
 
         Returns:
             Decorator function
@@ -196,6 +202,7 @@ class AsyncCallbackFramework:
             max_retries=max_retries,
             retry_delay=retry_delay,
             timeout=timeout,
+            callback_type=callback_type,
         )
 
     def register_sync(
@@ -212,7 +219,8 @@ class AsyncCallbackFramework:
             error_handler: Optional[Callable] = None,
             max_retries: int = 0,
             retry_delay: float = 0.0,
-            timeout: Optional[float] = None
+            timeout: Optional[float] = None,
+            callback_type: str = "",
     ) -> 'CallbackInfo':
         """Synchronous registration method for decorator use.
 
@@ -230,7 +238,8 @@ class AsyncCallbackFramework:
             tags=tags or set(),
             max_retries=max_retries,
             retry_delay=retry_delay,
-            timeout=timeout
+            timeout=timeout,
+            callback_type=callback_type,
         )
 
         self._callbacks[event].append(callback_info)
@@ -254,79 +263,67 @@ class AsyncCallbackFramework:
 
         return callback_info
 
-    def trigger_on_call(
+    def emit_before(
             self,
             event: str,
-            pass_result: bool = False,
+            *,
             pass_args: bool = True
     ):
-        """Decorator to automatically trigger event when function is called.
+        """Decorator to trigger event BEFORE the decorated function is called.
 
-        Triggers the event before executing the decorated function.
+        Supports async functions, async generators, sync functions (promoted
+        to async), and sync generators (promoted to async generators).
 
-        Example:
-            >>> @framework.trigger_on_call("processing_started")
+        Example (async):
+            >>> @framework.emit_before("processing_started")
             >>> async def process_data(data):
             >>>     return {"processed": data}
 
+        Example (sync — promoted to async):
+            >>> @framework.emit_before("processing_started")
+            >>> def process_data(data):
+            >>>     return {"processed": data}
+            >>> # Must be awaited: result = await process_data(data)
+
         Args:
             event: Event name to trigger
-            pass_result: Whether to pass function result to callbacks
             pass_args: Whether to pass function arguments to callbacks
 
         Returns:
             Decorator function
         """
-        return create_trigger_on_call_decorator(
-            self, event, pass_result=pass_result, pass_args=pass_args
-        )
+        return create_emit_before_decorator(self, event, pass_args=pass_args)
 
-    def emits(
+    def emit_after(
             self,
             event: str,
+            *,
             result_key: str = "result",
-            include_args: bool = False
+            item_key: str = "item",
+            pass_args: bool = False,
+            stream_mode: Literal["per_item", "once"] = "per_item",
     ):
-        """Decorator to trigger event with function result after execution.
+        """Decorator to trigger event AFTER the decorated function completes.
 
-        Triggers the event after the function completes, passing the result.
+        For regular functions: triggers event with the result.
+        For generators: triggers event for each yielded item (per_item mode)
+        or once with all collected items (once mode).
 
-        Example:
-            >>> @framework.emits("data_processed")
+        Supports async functions, async generators, sync functions (promoted
+        to async), and sync generators (promoted to async generators).
+
+        Example (regular function):
+            >>> @framework.emit_after("data_processed")
             >>> async def process_data(data):
             >>>     return {"processed": data}
-            >>>
             >>> # Callbacks receive: result={"processed": data}
 
-        Args:
-            event: Event name to trigger
-            result_key: Keyword argument name for the result
-            include_args: Whether to include original args in event
-
-        Returns:
-            Decorator function
-        """
-        return create_emits_decorator(
-            self, event, result_key=result_key, include_args=include_args
-        )
-
-    def emits_stream(
-            self,
-            event: str,
-            item_key: str = "item"
-    ) -> Callable:
-        """Decorator to emit events for each item yielded by async generator.
-
-        When decorating an async generator function, this will automatically
-        trigger an event for each item that is yielded. The original items
-        are still yielded to the caller.
-
-        Example:
+        Example (stream per_item):
             >>> @framework.on("chunk_ready")
             >>> async def save_chunk(item: dict):
             >>>     print(f"Saving: {item}")
             >>>
-            >>> @framework.emits_stream("chunk_ready")
+            >>> @framework.emit_after("chunk_ready")
             >>> async def process_file(filepath: str):
             >>>     with open(filepath, 'r') as f:
             >>>         for line in f:
@@ -336,14 +333,31 @@ class AsyncCallbackFramework:
             >>> async for chunk in process_file("data.txt"):
             >>>     pass  # chunk_ready event triggered for each chunk
 
+        Example (stream once):
+            >>> @framework.emit_after("all_chunks_done", stream_mode="once")
+            >>> async def process_file(filepath: str):
+            >>>     for line in open(filepath):
+            >>>         yield {"line": line.strip()}
+            >>> # Callbacks receive: result=[{"line": ...}, {"line": ...}, ...]
+
         Args:
-            event: Event name to trigger for each yielded item
-            item_key: Keyword argument name for the yielded item (default: "item")
+            event: Event name to trigger
+            result_key: Keyword argument name for the result (regular functions)
+            item_key: Keyword argument name for each yielded item (generators)
+            pass_args: Whether to include original args in event
+            stream_mode: For generators - "per_item" triggers per item, "once"
+                triggers after all items are yielded with collected results
 
         Returns:
-            Decorated async generator function
+            Decorator function
         """
-        return create_emits_stream_decorator(self, event, item_key=item_key)
+        return create_emit_after_decorator(
+            self, event,
+            result_key=result_key,
+            item_key=item_key,
+            pass_args=pass_args,
+            stream_mode=stream_mode,
+        )
 
     def emit_around(
             self,
@@ -358,11 +372,20 @@ class AsyncCallbackFramework:
         Triggers before_event before execution and after_event after completion.
         Optionally triggers on_error_event if an exception occurs.
 
-        Example:
+        Supports async functions, async generators, sync functions (promoted
+        to async), and sync generators (promoted to async generators).
+
+        Example (async):
             >>> @framework.emit_around("process_start", "process_end",
             >>>                        on_error_event="process_error")
             >>> async def process_data(data):
             >>>     return {"processed": data}
+
+        Example (sync — promoted to async):
+            >>> @framework.emit_around("start", "end")
+            >>> def compute(x):
+            >>>     return x * 2
+            >>> # Must be awaited: result = await compute(5)
 
         Args:
             before_event: Event to trigger before execution
@@ -391,6 +414,7 @@ class AsyncCallbackFramework:
             result_key: str = "result",
             input_transform: Optional[InputTransform] = None,
             output_transform: Optional[OutputTransform] = None,
+            output_mode: Literal["frame", "generator"] = "frame",
     ):
         """Decorator to transform function inputs and outputs via callbacks.
 
@@ -399,6 +423,17 @@ class AsyncCallbackFramework:
         events and uses the last callback return value as the transformed
         input or output. Otherwise uses input_transform/output_transform
         callables directly.
+
+        ``output_mode`` controls how the output transform is applied to
+        generator functions:
+
+        * ``'frame'`` (default): output transform is applied once per yielded
+          item. For event mode, output_event fires per item.
+        * ``'generator'``: output transform receives the entire source async
+          iterator. For direct callable mode, output_transform must be an
+          async generator function. For event mode, output_event fires once
+          with the source; the callback should return an async iterable.
+          Sync generator functions are automatically promoted to async.
 
         Event-based example:
             >>> @framework.on("transform_input")
@@ -434,6 +469,9 @@ class AsyncCallbackFramework:
                 (new_args, new_kwargs). Used when input_event is not set.
             output_transform: Optional direct callback value -> new_value.
                 Used when output_event is not set.
+            output_mode: ``'frame'`` (default) or ``'generator'``. Controls
+                how output transform is applied to generator functions.
+                Raises ``ValueError`` if used with non-generator functions.
 
         Returns:
             Decorator that applies input/output transformation via
@@ -445,11 +483,153 @@ class AsyncCallbackFramework:
                 input_event=input_event,
                 output_event=output_event,
                 result_key=result_key,
+                output_mode=output_mode,
             )
         return create_transform_io_decorator(
             input_transform=input_transform,
             output_transform=output_transform,
+            output_mode=output_mode,
         )
+
+    def on_wrap(
+        self,
+        event: str,
+        *,
+        priority: int = 0,
+    ) -> Callable[[WrapHandler], WrapHandler]:
+        """Decorator that registers a WrapHandler for *event*.
+
+        WrapHandlers form an explicit call chain around the function decorated
+        with :meth:`wrap`.  Each handler receives ``call_next`` as its first
+        argument and decides when (and whether) to invoke the rest of the chain.
+
+        Handlers are stored in the framework's standard ``_callbacks`` registry
+        under ``"__wrap__:{event}"``, so they participate in the same priority
+        sorting and can be removed via :meth:`unregister` /
+        :meth:`unregister_event`.
+
+        For regular (non-generator) functions::
+
+            @framework.on_wrap("fetch")
+            async def auth_handler(call_next, *args, **kwargs):
+                if not kwargs.get("token"):
+                    raise PermissionError("missing token")
+                return await call_next(*args, **kwargs)
+
+        For async/sync generator functions the handler must itself be an
+        async generator that iterates ``call_next``::
+
+            @framework.on_wrap("stream_data")
+            async def log_handler(call_next, *args, **kwargs):
+                async for item in call_next(*args, **kwargs):
+                    print("item:", item)
+                    yield item
+
+        Args:
+            event: Logical event name shared with the matching :meth:`wrap`
+                decorator.
+            priority: Higher-priority handlers are outermost (called first)
+                in the chain.
+
+        Returns:
+            Decorator that registers the function and returns it unchanged.
+        """
+        return create_on_wrap_decorator(self, event, priority=priority)
+
+    def wrap(
+        self,
+        event: str,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Decorator that wraps a function with event-registered WrapHandlers.
+
+        At each call, the framework retrieves all enabled WrapHandlers
+        registered for *event* via :meth:`on_wrap` and executes them as a
+        chain around the decorated function.  Because the handler list is
+        resolved at call time, handlers registered after decoration are
+        automatically included.
+
+        Supports async functions, sync functions (promoted to async), async
+        generators, and sync generators (promoted to async generators).
+
+        Example::
+
+            @framework.on_wrap("fetch", priority=10)
+            async def log_handler(call_next, *args, **kwargs):
+                print("before fetch")
+                result = await call_next(*args, **kwargs)
+                print("after fetch")
+                return result
+
+            @framework.wrap("fetch")
+            async def fetch_data(url: str) -> dict:
+                ...
+
+        For a static chain (handlers fixed at decoration time, no framework
+        involvement) use :func:`create_wrap_decorator` directly.
+
+        Args:
+            event: Logical event name shared with the matching :meth:`on_wrap`
+                decorators.
+
+        Returns:
+            Decorator that wraps the function with the dynamic handler chain.
+        """
+        return create_wrap_by_event_decorator(self, event)
+
+    def on_transform(
+        self,
+        event: str,
+        *,
+        priority: int = 0,
+    ):
+        """Convenience decorator that registers a transform-type callback.
+
+        Equivalent to ``on(event, callback_type="transform", priority=priority)``.
+        Transform callbacks are exclusively invoked by :meth:`trigger_transform`
+        and are used by :meth:`transform_io` to modify inputs and outputs.
+
+        Example::
+
+            @framework.on_transform(ToolCallEvents.TOOL_INVOKE_INPUT)
+            async def preprocess(inputs, **kwargs):
+                return ((modified_inputs,), kwargs)
+
+        Args:
+            event: Event name to listen for.
+            priority: Execution priority (higher first).
+
+        Returns:
+            Decorator function.
+        """
+        return self.on(event, callback_type="transform", priority=priority)
+
+    async def trigger_transform(self, event: str, *args, **kwargs) -> Any:
+        """Trigger only transform-type callbacks and return the last result.
+
+        Unlike :meth:`trigger`, this method runs only callbacks registered with
+        ``callback_type="transform"``.  When no such callbacks exist, returns the
+        sentinel :data:`_TRANSFORM_NOOP` so callers can detect a no-op and pass
+        through the original value unchanged.
+
+        Args:
+            event: Event name to trigger.
+            *args: Positional arguments forwarded to callbacks.
+            **kwargs: Keyword arguments forwarded to callbacks.
+
+        Returns:
+            The return value of the last transform callback, or
+            ``_TRANSFORM_NOOP`` when no transform callbacks are registered.
+        """
+        callbacks = [
+            info for info in self._callbacks.get(event, [])
+            if info.enabled and info.callback_type == "transform"
+        ]
+        if not callbacks:
+            return _TRANSFORM_NOOP
+        result: Any = _TRANSFORM_NOOP
+        for info in callbacks:
+            result = await info.callback(*args, **kwargs)
+        return result
 
     async def register(
             self,
@@ -661,6 +841,9 @@ class AsyncCallbackFramework:
 
         for callback_info in callbacks:
             if not callback_info.enabled:
+                continue
+
+            if callback_info.callback_type == "transform":
                 continue
 
             callback = callback_info.callback

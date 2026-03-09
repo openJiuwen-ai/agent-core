@@ -1,21 +1,51 @@
-from typing import List, Union, Optional, Dict, Any
+from typing import (
+    Any,
+    AsyncIterator,
+    Dict,
+    List,
+    Optional,
+    Union,
+)
 from unittest.mock import MagicMock
 
 import pytest
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
-    AudioGenerationResponse
-from openjiuwen.core.workflow import LLMCompConfig, WorkflowCard
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.session import BaseSession
-from openjiuwen.core.session.stream import StreamMode, BaseStreamMode
-from openjiuwen.core.session.tracer import decorate_tool_with_trace, decorate_workflow_with_trace, \
-    decorate_model_with_trace
 from openjiuwen.core.foundation.llm import (
-    BaseModelClient, BaseOutputParser, ModelClientConfig, ModelRequestConfig, BaseMessage, UserMessage
+    BaseMessage,
+    BaseModelClient,
+    BaseOutputParser,
+    ModelClientConfig,
+    ModelRequestConfig,
+    UserMessage,
 )
-from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard, Input, Output
+from openjiuwen.core.foundation.llm.schema import (
+    AudioGenerationResponse,
+    ImageGenerationResponse,
+    VideoGenerationResponse,
+)
+from openjiuwen.core.foundation.tool import (
+    Input,
+    Output,
+    Tool,
+    ToolCard,
+    ToolInfo,
+)
+from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session.stream import (
+    BaseStreamMode,
+    StreamMode,
+)
+from openjiuwen.core.session.tracer import (
+    decorate_model_with_trace,
+    decorate_tool_with_trace,
+    decorate_workflow_with_trace,
+)
+from openjiuwen.core.workflow import (
+    LLMCompConfig,
+    WorkflowCard,
+)
 from openjiuwen.core.workflow.components.llm.llm_comp import LLMExecutable
 
 pytestmark = pytest.mark.asyncio
@@ -60,6 +90,9 @@ class MockTool(Tool):
         logger.info(inputs)
         logger.info(f"begin to invoke , inputs={inputs}")
         return {}
+
+    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
+        pass
 
     def get_tool_info(self) -> ToolInfo:
         pass
@@ -275,7 +308,7 @@ class TestDecator:
         for item in results:
             print(item)
         assert len(results) == 2
-        assert results[0][2].get("instance_info", {}).get("class_name", "") == "mock tool"
+        assert results[0][2].get("instance_info", {}).get("class_name", "") == "test_tool"
 
     async def test_decorate_workflow(self):
         workflow = MockWorkflow()

@@ -140,13 +140,13 @@ async def test_transform_io_decorator_no_transform():
 @pytest.mark.asyncio
 async def test_transform_io_by_events_input_output(framework):
     """Event-based input and output transform."""
-    @framework.on("input_transform")
+    @framework.on("input_transform", callback_type="transform")
     async def normalize_input(*args, **kwargs):
         args_list, kw = list(args), dict(kwargs)
         kw.setdefault("limit", 10)
         return (tuple(args_list), kw)
 
-    @framework.on("output_transform")
+    @framework.on("output_transform", callback_type="transform")
     async def serialize_output(result):
         return f"result:{result}"
 
@@ -167,7 +167,7 @@ async def test_transform_io_by_events_input_output(framework):
 @pytest.mark.asyncio
 async def test_transform_io_by_events_input_only(framework):
     """Event-based input transform only."""
-    @framework.on("input_event")
+    @framework.on("input_event", callback_type="transform")
     async def add_one(*args, **kwargs):
         a, k = list(args), dict(kwargs)
         k["n"] = k.get("n", 0) + 1
@@ -189,7 +189,7 @@ async def test_transform_io_by_events_input_only(framework):
 @pytest.mark.asyncio
 async def test_transform_io_by_events_output_only(framework):
     """Event-based output transform only."""
-    @framework.on("output_event")
+    @framework.on("output_event", callback_type="transform")
     async def double(result):
         return result * 2
 
@@ -225,12 +225,12 @@ async def test_transform_io_by_events_no_callbacks_passthrough(framework):
 
 @pytest.mark.asyncio
 async def test_transform_io_by_events_last_callback_wins(framework):
-    """Last registered callback return value is used."""
-    @framework.on("out", priority=0)
+    """Last executed callback return value is used (lowest priority runs last)."""
+    @framework.on("out", priority=0, callback_type="transform")
     async def first(result):
         return result + 1
 
-    @framework.on("out", priority=10)
+    @framework.on("out", priority=10, callback_type="transform")
     async def second(result):
         return result * 2
 
@@ -243,16 +243,16 @@ async def test_transform_io_by_events_last_callback_wins(framework):
     async def get():
         return 5
 
-    # trigger() runs by priority (high first), results list order is
-    # [second_result, first_result], so results[-1] is first_result.
+    # trigger_transform() runs in priority order (high first): second(5*2=10),
+    # then first(5+1=6). Last executed = first → result = 6.
     result = await get()
-    assert result == 6  # 5+1 from first (last in list)
+    assert result == 6  # 5+1 from first (last executed, lowest priority)
 
 
 @pytest.mark.asyncio
 async def test_transform_io_by_events_async_generator(framework):
     """Event-based output transform on async generator items."""
-    @framework.on("item")
+    @framework.on("item", callback_type="transform")
     async def double(result):
         return result * 2
 
@@ -275,7 +275,7 @@ async def test_transform_io_by_events_async_generator(framework):
 @pytest.mark.asyncio
 async def test_transform_io_by_events_custom_result_key(framework):
     """Custom result_key for output event payload."""
-    @framework.on("custom_out")
+    @framework.on("custom_out", callback_type="transform")
     async def transform(**kwargs):
         value = kwargs.get("value")
         return value * 3
@@ -322,12 +322,12 @@ async def test_framework_transform_io_callable(framework):
 async def test_framework_transform_io_events(framework):
     """Framework.transform_io with input_event/output_event."""
 
-    @framework.on("in_ev")
+    @framework.on("in_ev", callback_type="transform")
     async def in_cb(*args, **kwargs):
         base = (args[0] if args else kwargs.get("x", 0))
         return args, {**kwargs, "x": base + 1}
 
-    @framework.on("out_ev")
+    @framework.on("out_ev", callback_type="transform")
     async def out_cb(result):
         return result + 100
 
@@ -345,7 +345,7 @@ async def test_framework_transform_io_events(framework):
 @pytest.mark.asyncio
 async def test_framework_transform_io_events_prefer_over_callable(framework):
     """When both event and callable given, event is used."""
-    @framework.on("ev")
+    @framework.on("ev", callback_type="transform")
     async def event_cb(result):
         return "from_event"
 
@@ -366,7 +366,7 @@ async def test_framework_transform_io_events_prefer_over_callable(framework):
 @pytest.mark.asyncio
 async def test_framework_transform_io_sync_generator_with_events(framework):
     """Event-based transform on sync generator (wrapper becomes async)."""
-    @framework.on("item")
+    @framework.on("item", callback_type="transform")
     async def double(result):
         return result * 2
 
@@ -422,7 +422,7 @@ async def test_transform_io_decorator_async_input_transform():
 @pytest.mark.asyncio
 async def test_transform_io_by_events_input_tuple_return(framework):
     """Input event callback returns (args, kwargs) tuple."""
-    @framework.on("in")
+    @framework.on("in", callback_type="transform")
     async def return_tuple(*args, **kwargs):
         return ((1, 2), {"a_key": 3})
 
@@ -437,3 +437,194 @@ async def test_transform_io_by_events_input_tuple_return(framework):
 
     result = await consume(0, 0)
     assert result == 6  # a=1, b=2, a_key=3
+
+
+# === Generator output mode ===
+
+
+@pytest.mark.asyncio
+async def test_transform_io_generator_mode_expand():
+    """Direct callable: async gen + output_mode='generator' expands each item to two."""
+
+    async def expand(source):
+        async for item in source:
+            yield item
+            yield item * 10
+
+    @create_transform_io_decorator(output_transform=expand, output_mode="generator")
+    async def gen():
+        for i in range(1, 4):
+            yield i
+
+    items = [item async for item in gen()]
+    assert items == [1, 10, 2, 20, 3, 30]
+
+
+@pytest.mark.asyncio
+async def test_transform_io_generator_mode_filter():
+    """Direct callable: async gen + output_mode='generator' filters out even items."""
+
+    async def keep_odd(source):
+        async for item in source:
+            if item % 2 != 0:
+                yield item
+
+    @create_transform_io_decorator(output_transform=keep_odd, output_mode="generator")
+    async def gen():
+        for i in range(1, 6):
+            yield i
+
+    items = [item async for item in gen()]
+    assert items == [1, 3, 5]
+
+
+@pytest.mark.asyncio
+async def test_transform_io_generator_mode_stateful():
+    """Direct callable: async gen + output_mode='generator' accumulates running total."""
+
+    async def running_total(source):
+        total = 0
+        async for item in source:
+            total += item
+            yield total
+
+    @create_transform_io_decorator(
+        output_transform=running_total, output_mode="generator"
+    )
+    async def gen():
+        for i in [1, 2, 3, 4]:
+            yield i
+
+    items = [item async for item in gen()]
+    assert items == [1, 3, 6, 10]
+
+
+@pytest.mark.asyncio
+async def test_transform_io_generator_mode_no_output_transform():
+    """Direct callable: output_mode='generator', output_transform=None passes source through."""
+
+    @create_transform_io_decorator(output_transform=None, output_mode="generator")
+    async def gen():
+        for i in range(3):
+            yield i
+
+    items = [item async for item in gen()]
+    assert items == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_transform_io_generator_mode_sync_gen():
+    """Direct callable: sync gen + output_mode='generator' is promoted to async gen."""
+
+    async def double(source):
+        async for item in source:
+            yield item * 2
+
+    @create_transform_io_decorator(output_transform=double, output_mode="generator")
+    def sync_gen():
+        yield from range(3)
+
+    items = [item async for item in sync_gen()]
+    assert items == [0, 2, 4]
+
+
+def test_transform_io_generator_mode_invalid_for_non_gen():
+    """Direct callable: output_mode='generator' on a non-generator raises ValueError."""
+
+    with pytest.raises(ValueError, match="output_mode='generator'"):
+
+        @create_transform_io_decorator(output_mode="generator")
+        async def not_a_gen():
+            return 42
+
+
+@pytest.mark.asyncio
+async def test_transform_io_frame_mode_unchanged():
+    """Direct callable: output_mode='frame' (default) keeps existing frame-by-frame behavior."""
+
+    @create_transform_io_decorator(
+        output_transform=lambda x: x * 2, output_mode="frame"
+    )
+    async def gen():
+        for i in range(1, 4):
+            yield i
+
+    items = [item async for item in gen()]
+    assert items == [2, 4, 6]
+
+
+@pytest.mark.asyncio
+async def test_transform_io_events_generator_mode_expand(framework):
+    """Events path: async gen + output_mode='generator' expands each item to two."""
+
+    @framework.on_transform("out_ev")
+    async def expand(result):
+        async def _gen(src):
+            async for item in src:
+                yield item
+                yield item * 10
+
+        return _gen(result)
+
+    @framework.transform_io(output_event="out_ev", output_mode="generator")
+    async def gen():
+        for i in range(1, 3):
+            yield i
+
+    items = [item async for item in gen()]
+    assert items == [1, 10, 2, 20]
+
+
+@pytest.mark.asyncio
+async def test_transform_io_events_generator_mode_filter(framework):
+    """Events path: async gen + output_mode='generator' filters items."""
+
+    @framework.on_transform("out_ev")
+    async def keep_odd(result):
+        async def _gen(src):
+            async for item in src:
+                if item % 2 != 0:
+                    yield item
+
+        return _gen(result)
+
+    @framework.transform_io(output_event="out_ev", output_mode="generator")
+    async def gen():
+        for i in range(1, 6):
+            yield i
+
+    items = [item async for item in gen()]
+    assert items == [1, 3, 5]
+
+
+@pytest.mark.asyncio
+async def test_transform_io_events_generator_mode_no_callbacks(framework):
+    """Events path: no callbacks registered → source passes through unchanged."""
+
+    @framework.transform_io(output_event="out_ev", output_mode="generator")
+    async def gen():
+        for i in range(3):
+            yield i
+
+    items = [item async for item in gen()]
+    assert items == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_transform_io_events_generator_mode_sync_gen(framework):
+    """Events path: sync gen + output_mode='generator' is promoted to async gen."""
+
+    @framework.on_transform("out_ev")
+    async def double(result):
+        async def _gen(src):
+            async for item in src:
+                yield item * 2
+
+        return _gen(result)
+
+    @framework.transform_io(output_event="out_ev", output_mode="generator")
+    def sync_gen():
+        yield from range(3)
+
+    items = [item async for item in sync_gen()]
+    assert items == [0, 2, 4]

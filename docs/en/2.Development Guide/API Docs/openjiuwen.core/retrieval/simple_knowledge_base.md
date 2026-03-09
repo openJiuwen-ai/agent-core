@@ -8,7 +8,7 @@ Knowledge base implementation based on vector retrieval, providing complete know
 
 
 ```python
-SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, retriever: Optional[Retriever] = None, llm_client: Optional[Any] = None, **kwargs: Any)
+SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, retriever: Optional[Retriever] = None, llm_client: Optional[BaseModelClient] = None, **kwargs: Any)
 ```
 
 Initialize simple knowledge base.
@@ -23,7 +23,7 @@ Initialize simple knowledge base.
 * **extractor**(Extractor, optional): Extractor instance. Default: None.
 * **index_manager**(Indexer, optional): Index manager instance. Default: None.
 * **retriever**(Retriever, optional): Retriever instance (optional, will be automatically created based on index_type if not provided). Default: None.
-* **llm_client**(Any, optional): LLM client instance. Default: None.
+* **llm_client**(BaseModelClient, optional): LLM client instance (required for agentic retrieval). Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 ### async parse_files
@@ -32,11 +32,11 @@ Initialize simple knowledge base.
 parse_files(file_paths: List[str], **kwargs: Any) -> List[Document]
 ```
 
-Parse files from file paths and return a list of Document objects.
+Parse file paths or URLs into a list of Document objects. When `parser` is `AutoParser`, `file_paths` may contain both local paths and URLs.
 
 **Parameters**:
 
-* **file_paths**(List[str]): List of file paths.
+* **file_paths**(List[str]): List of file paths or URLs.
 * **kwargs**(Any): Variable arguments that may include file_name and file_id parameters.
 
 **Returns**:
@@ -105,7 +105,7 @@ Added 1 documents
 retrieve(query: str, config: Optional[RetrievalConfig] = None, **kwargs: Any) -> List[RetrievalResult]
 ```
 
-Retrieve relevant documents. If retriever is not provided, the corresponding retriever will be automatically created based on index_type.
+Retrieve relevant documents. If retriever is not provided, the corresponding retriever will be automatically created based on index_type. When `config.agentic` is True, an `AgenticRetriever` wraps the underlying retriever to perform iterative query rewriting and result fusion (requires `llm_client` to be configured).
 
 **Parameters**:
 
@@ -202,10 +202,10 @@ Perform retrieval on multiple knowledge bases, deduplicate by text and merge res
 ## func async retrieve_multi_kb_with_source
 
 ```python
-retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[Dict[str, Any]]
+retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[MultiKBRetrievalResult]
 ```
 
-Perform retrieval on multiple knowledge bases, returning results with source information. Result items include: text/score/raw_score/raw_score_scaled/kb_ids.
+Perform retrieval on multiple knowledge bases, returning results with source information. Each result item is a `MultiKBRetrievalResult` containing: text, score, raw_score, raw_score_scaled, kb_ids, and metadata.
 
 **Parameters**:
 
@@ -216,5 +216,5 @@ Perform retrieval on multiple knowledge bases, returning results with source inf
 
 **Returns**:
 
-**List[Dict[str, Any]]**, returns a list of results containing text, score, source knowledge base IDs, and other information.
+**List[MultiKBRetrievalResult]**, returns a list of `MultiKBRetrievalResult` objects containing text, score, raw scores, source knowledge base IDs, and metadata.
 

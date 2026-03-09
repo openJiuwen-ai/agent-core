@@ -7,6 +7,7 @@ from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
 from openjiuwen.core.foundation.tool.schema import McpToolInfo
 
@@ -21,7 +22,6 @@ class McpServerConfig(BaseModel):
     params: Dict[str, Any] = Field(default_factory=dict)
     auth_headers: dict = Field(default_factory=dict)
     auth_query_params: Dict[str, str] = Field(default_factory=dict)
-
 
 
 class McpToolCard(ToolCard):
@@ -57,6 +57,10 @@ class MCPTool(Tool):
         try:
             # Prepare arguments for MCP tool call
             arguments = inputs if isinstance(inputs, dict) else {}
+            if self._card.input_params is not None:
+                arguments = SchemaUtils.format_with_schema(inputs, self._card.input_params,
+                                                           skip_none_value=kwargs.get("skip_none_value", False),
+                                                           skip_validate=kwargs.get("skip_inputs_validate", False))
 
             result = await self._mcp_client.call_tool(tool_name=self._card.name, arguments=arguments)
             return {"result": result}

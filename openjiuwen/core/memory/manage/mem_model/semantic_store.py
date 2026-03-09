@@ -13,6 +13,8 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
+from openjiuwen.core.memory.migration.migration_plan import vector_registry
+from openjiuwen.core.memory.common.base import parse_memtype_from_idx_name
 
 
 class SemanticStore:
@@ -87,6 +89,14 @@ class SemanticStore:
         )
 
         await self.vector_store.create_collection(collection_name, schema)
+
+        mem_type = parse_memtype_from_idx_name(collection_name)
+        latest_schema_version = vector_registry.get_current_version(f"vector_{mem_type}")
+        await self.vector_store.update_collection_metadata(
+            collection_name,
+            {"schema_version": latest_schema_version}
+        )
+
         self._created_collections.add(collection_name)
         memory_logger.debug(
             f"Created collection '{collection_name}' with embedding dimension {embedding_dim}",

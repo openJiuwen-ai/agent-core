@@ -224,3 +224,4 @@ Metadata and configuration for a registered callback.
 * **timeout** (Optional[float], optional): Execution timeout in seconds. Default: None.
 * **created_at** (float, optional): Registration timestamp. Default: time.time().
 * **wrapper** (Optional[Callable], optional): Wrapper returned by decorator (for unregistering). Default: None.
+* **callback_type** (str, optional): Semantic type marker, e.g. "transform". Default: "".

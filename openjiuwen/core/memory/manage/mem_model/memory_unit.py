@@ -6,55 +6,45 @@ from enum import Enum
 from typing import Optional
 
 
-class ConflictType(Enum):
-    ADD = "ADD"
-    DELETE = "DELETE"
-    UPDATE = "UPDATE"
-    NONE = "NONE"
-
-
 class MemoryType(Enum):
     USER_PROFILE = "user_profile"
+    SEMANTIC_MEMORY = "semantic_memory"
+    EPISODIC_MEMORY = "episodic_memory"
     VARIABLE = "variable"
-    IMPLICIT_USER_PROFILE = "implicit_user_profile"
     SUMMARY = "summary"
     UNKNOWN = "unknown"
+
+
+class SupportMemoryType(Enum):
+    USER_PROFILE = "user_profile"
+    SUMMARY = "summary"
 
 
 @dataclass
 class BaseMemoryUnit:
     """a single memory data item"""
     mem_type: MemoryType
-    user_id: str
-    scope_id: str
+    mem_id: str
 
 
 @dataclass
-class UserProfileUnit(BaseMemoryUnit):
-    mem_type: MemoryType = field(default=MemoryType.USER_PROFILE, init=False)
-    profile_type: str
-    profile_mem: str
-    score: Optional[float] = None  # Relevance Scoring
+class FragmentMemoryUnit(BaseMemoryUnit):
+    content: str
     message_mem_id: Optional[str] = None  # Corresponding Message ID
-    mem_id: str = ""
-    is_implicit: bool = False
-    reasoning: str = ""
-    context_summary: str = ""
     timestamp: str = ""
 
 
 @dataclass
 class VariableUnit(BaseMemoryUnit):
     mem_type: MemoryType = field(default=MemoryType.VARIABLE, init=False)
+    mem_id: str = field(default="", init=False)
     variable_name: str
     variable_mem: str
-    mem_id: str = ""
 
 
 @dataclass
 class SummaryUnit(BaseMemoryUnit):
     mem_type: MemoryType = field(default=MemoryType.SUMMARY, init=False)
     summary: str
-    mem_id: str = ""
     message_mem_id: Optional[str] = None  # Corresponding Message ID
     timestamp: str = ""

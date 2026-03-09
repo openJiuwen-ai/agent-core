@@ -1,13 +1,14 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
-from typing import Any
+from typing import Any, List
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
+from openjiuwen.core.memory.common.kv_prefix_registry import kv_prefix_registry
 
 
 class UserMemStore:
@@ -15,8 +16,10 @@ class UserMemStore:
     IDS_STR: str = "ids"
     USER_PROFILE_TOPIC_STR: str = "UPT"
     KEY_PREFIX_STR: str = "UMD"
+    LEGACY_PREFIXES: List[str] = []
     MEM_TYPE_FIELD_KEY: str = "mem_type"
-    TOPIC_FIELD_KEY: str = "profile_type"
+    FRAGMENT_MEMORY_TYPE = [MemoryType.USER_PROFILE.value, MemoryType.SEMANTIC_MEMORY.value,
+                        MemoryType.EPISODIC_MEMORY.value]
     SEPARATOR: str = "/"
 
     def __init__(self, kv_store_instance: BaseKVStore):
@@ -27,6 +30,9 @@ class UserMemStore:
                 error_msg=f"kv store instance is None in UserMemStore"
             )
         self.kv_store = kv_store_instance
+        kv_prefix_registry.register_current(self.KEY_PREFIX_STR)
+        for legacy_prefix in self.LEGACY_PREFIXES:
+            kv_prefix_registry.register_legacy(legacy_prefix)
 
     async def write(self, user_id: str, scope_id: str, mem_id: str, data: dict[str, Any]) -> bool:
         """write data to store"""
@@ -60,12 +66,9 @@ class UserMemStore:
             await self.kv_store.set(user_mem_ids_key, self.__write_id(user_mem_ids_value, mem_id))
 
             # user profile topic ids
-            if (data[UserMemStore.MEM_TYPE_FIELD_KEY] == MemoryType.USER_PROFILE.value and
-                    UserMemStore.TOPIC_FIELD_KEY in data.keys() and
-                    data[UserMemStore.TOPIC_FIELD_KEY] is not None):
+            if (data[UserMemStore.MEM_TYPE_FIELD_KEY] in UserMemStore.FRAGMENT_MEMORY_TYPE):
                 user_mem_topic_key = self.__get_concatenation_key([user_id, scope_id,
                                                                    UserMemStore.USER_PROFILE_TOPIC_STR,
-                                                                   data[UserMemStore.TOPIC_FIELD_KEY],
                                                                    self.IDS_STR])
                 user_mem_topic_value = await self.kv_store.get(user_mem_topic_key) or ""
                 await self.kv_store.set(user_mem_topic_key, self.__write_id(user_mem_topic_value, mem_id))
@@ -198,12 +201,9 @@ class UserMemStore:
                 await self.__delete_mem_id(user_mem_ids_key, mem_id)
 
                 # Delete user profile topic ids
-                if (dict_value[UserMemStore.MEM_TYPE_FIELD_KEY] == MemoryType.USER_PROFILE.value and
-                        UserMemStore.TOPIC_FIELD_KEY in dict_value and
-                        dict_value[UserMemStore.TOPIC_FIELD_KEY] is not None):
+                if (dict_value[UserMemStore.MEM_TYPE_FIELD_KEY] in UserMemStore.FRAGMENT_MEMORY_TYPE):
                     user_mem_topic_key = self.__get_concatenation_key([user_id, scope_id,
                                                                        UserMemStore.USER_PROFILE_TOPIC_STR,
-                                                                       dict_value[UserMemStore.TOPIC_FIELD_KEY],
                                                                        self.IDS_STR])
                     await self.__delete_mem_id(user_mem_topic_key, mem_id)
 

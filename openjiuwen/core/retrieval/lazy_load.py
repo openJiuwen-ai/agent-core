@@ -23,7 +23,20 @@ _LAZY_MILVUS = [
 _LAZY_CHROMA = ["ChromaIndexer", "ChromaVectorStore", "ChromaVectorField"]
 _LAZY_OPENAI = ["OpenAIEmbedding", "VLLMEmbedding", "parse_base64_embedding"]
 _LAZY_HTTPX = ["StandardReranker", "ChatReranker"]
-_LAZY_PARSER = ["AutoFileParser", "Parser", "JSONParser", "PDFParser", "TxtMdParser", "WordParser"]
+_LAZY_PARSER = [
+    "AutoFileParser",
+    "AutoLinkParser",
+    "AutoParser",
+    "ExcelParser",
+    "Parser",
+    "JSONParser",
+    "PDFParser",
+    "ImageParser",
+    "TxtMdParser",
+    "WebPageParser",
+    "WeChatArticleParser",
+    "WordParser",
+]
 _LAZY_KNOWLEDGE_BASE = [
     # Knowledge base classes
     "KnowledgeBase",
@@ -33,7 +46,16 @@ _LAZY_KNOWLEDGE_BASE = [
     "retrieve_multi_kb",
     "retrieve_multi_kb_with_source",
 ]
-_LAZY_ATTRIBUTES = _LAZY_MILVUS + _LAZY_CHROMA + _LAZY_OPENAI + _LAZY_HTTPX + _LAZY_PARSER + _LAZY_KNOWLEDGE_BASE
+_LAZY_QUERY_REWRITER = ["QueryRewriter"]
+_LAZY_ATTRIBUTES = (
+    _LAZY_MILVUS
+    + _LAZY_CHROMA
+    + _LAZY_OPENAI
+    + _LAZY_HTTPX
+    + _LAZY_PARSER
+    + _LAZY_KNOWLEDGE_BASE
+    + _LAZY_QUERY_REWRITER
+)
 _LAZY_IMPORT_CACHE = dict.fromkeys(_LAZY_ATTRIBUTES, None)
 
 
@@ -108,6 +130,12 @@ def _load_knowledge_base():
     _LAZY_IMPORT_CACHE["retrieve_multi_kb_with_source"] = retrieve_multi_kb_with_source
 
 
+def _load_query_rewriter():
+    from openjiuwen.core.retrieval.query_rewriter.query_rewriter import QueryRewriter
+
+    _LAZY_IMPORT_CACHE["QueryRewriter"] = QueryRewriter
+
+
 def lazy_load(name: str) -> Optional[object]:
     """
     Lazy loading for heavy modules in retrieval
@@ -124,4 +152,6 @@ def lazy_load(name: str) -> Optional[object]:
         _load_parser()
     elif name in _LAZY_KNOWLEDGE_BASE:
         _load_knowledge_base()
+    elif name in _LAZY_QUERY_REWRITER:
+        _load_query_rewriter()
     return _LAZY_IMPORT_CACHE.get(name)

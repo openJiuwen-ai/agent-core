@@ -1,52 +1,75 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.memory.manage.mem_model.memory_unit import MemoryType, BaseMemoryUnit, VariableUnit
 from openjiuwen.core.memory.manage.index.base_memory_manager import BaseMemoryManager
-from openjiuwen.core.memory.manage.mem_model.memory_unit import VariableUnit
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
+from openjiuwen.core.memory.common.kv_prefix_registry import kv_prefix_registry
 
 
 class VariableManager(BaseMemoryManager):
     SEPARATOR = "/"
+    USER_VAR_PREFIX = "user_var"
+    SESSION_VAR_PREFIX = "session_var"
+    LEGACY_PREFIXES: List[str] = []
 
     def __init__(self,
                  kv_store: BaseKVStore,
                  crypto_key: bytes):
         self.kv_store = kv_store
         self.crypto_key = crypto_key
+        self.mem_type = MemoryType.VARIABLE.value
+        kv_prefix_registry.register_current(self.USER_VAR_PREFIX)
+        kv_prefix_registry.register_current(self.SESSION_VAR_PREFIX)
+        for legacy_prefix in self.LEGACY_PREFIXES:
+            kv_prefix_registry.register_legacy(legacy_prefix)
 
-    async def add(self, memory: VariableUnit, llm: Tuple[str, Model] | None = None):
-        """add Variable memory"""
-        if self.kv_store is None:
-            memory_logger.error(
-                "kv_store cannot be None",
-                event_type=LogEventType.MEMORY_STORE,
-                memory_type="variable",
-                user_id=memory.user_id,
-                scope_id=memory.scope_id
-            )
-            return
-        key, value = self._make_variable_pairs(
-            memory.user_id,
-            False,
-            memory.scope_id,
-            memory.variable_name,
-            None,
-            memory.variable_mem,
-            None
-        )
-        await self.kv_store.set(key, value)
+    async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
+                           llm: Tuple[str, Model] | None = None, **kwargs):
+        """add Variable memories in batch"""
+        for mem_type, memory in memories.items():
+            if mem_type != self.mem_type:
+                continue
+            for unit in memory:
+                if not isinstance(unit, VariableUnit):
+                    memory_logger.warning(
+                        "mem_unit is not a VariableUnit",
+                        event_type=LogEventType.MEMORY_STORE,
+                        memory_type=self.mem_type,
+                        user_id=user_id,
+                        scope_id=scope_id
+                    )
+                    continue
+                if self.kv_store is None:
+                    memory_logger.error(
+                        "kv_store cannot be None",
+                        event_type=LogEventType.MEMORY_STORE,
+                        memory_type=self.mem_type,
+                        user_id=user_id,
+                        scope_id=scope_id
+                    )
+                    return
+                key, value = self._make_variable_pairs(
+                    user_id,
+                    False,
+                    scope_id,
+                    unit.variable_name,
+                    None,
+                    unit.variable_mem,
+                    None
+                )
+                await self.kv_store.set(key, value)
 
     async def update(self, user_id: str, scope_id: str, mem_id: str, new_memory: str, **kwargs):
         memory_logger.warning(
             "Not implemented method update",
             event_type=LogEventType.MEMORY_STORE,
-            memory_type="variable",
+            memory_type=self.mem_type,
             memory_id=[mem_id],
             user_id=user_id,
             scope_id=scope_id
@@ -58,7 +81,7 @@ class VariableManager(BaseMemoryManager):
             memory_logger.error(
                 "KV_store cannot be None",
                 event_type=LogEventType.MEMORY_STORE,
-                memory_type="variable",
+                memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
@@ -75,24 +98,24 @@ class VariableManager(BaseMemoryManager):
             "Not implemented method delete",
             event_type=LogEventType.MEMORY_STORE,
             memory_id=[mem_id],
-            memory_type="variable",
+            memory_type=self.mem_type,
             user_id=user_id,
             scope_id=scope_id
         )
         pass
 
-    async def delete_by_user_id(self, user_id: str, scope_id: str):
+    async def delete_by_user_id(self, user_id: str, scope_id: str, **kwargs):
         if self.kv_store is None:
             memory_logger.error(
                 "kv_store cannot be None",
                 event_type=LogEventType.MEMORY_STORE,
-                memory_type="variable",
+                memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
             return
-        user_prefix = f"user_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}"
-        session_prefix = f"session_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}"
+        user_prefix = f"{self.USER_VAR_PREFIX}{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}"
+        session_prefix = f"{self.SESSION_VAR_PREFIX}{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}"
         await self.kv_store.delete_by_prefix(user_prefix)
         await self.kv_store.delete_by_prefix(session_prefix)
 
@@ -101,7 +124,7 @@ class VariableManager(BaseMemoryManager):
             memory_logger.error(
                 "kv_store cannot be None",
                 event_type=LogEventType.MEMORY_STORE,
-                memory_type="variable",
+                memory_type=self.mem_type,
                 user_id=user_id,
                 scope_id=scope_id
             )
@@ -114,7 +137,7 @@ class VariableManager(BaseMemoryManager):
             "Not implemented method get",
             memory_id=[mem_id],
             event_type=LogEventType.MEMORY_STORE,
-            memory_type="variable",
+            memory_type=self.mem_type,
             user_id=user_id,
             scope_id=scope_id
         )
@@ -124,7 +147,7 @@ class VariableManager(BaseMemoryManager):
         memory_logger.warning(
             "Not implemented method search",
             event_type=LogEventType.MEMORY_STORE,
-            memory_type="variable",
+            memory_type=self.mem_type,
             query=query,
             user_id=user_id,
             scope_id=scope_id
@@ -136,7 +159,7 @@ class VariableManager(BaseMemoryManager):
         """query variable by user_id, scope_id, variable_name return variable mem."""
         self._check_user_and_scope_id(user_id, scope_id, "Search")
         if not name or not name.strip():
-            prefix_str = f"user_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}"
+            prefix_str = f"{self.USER_VAR_PREFIX}{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}"
             kv_ret = await self.kv_store.get_by_prefix(prefix_str)
             result = {}
             for k, v in kv_ret.items():
@@ -144,10 +167,10 @@ class VariableManager(BaseMemoryManager):
                 result[k.split(f"{self.SEPARATOR}")[-1]] = v
             return result
         if session_id:
-            key = (f"session_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}"
+            key = (f"{self.SESSION_VAR_PREFIX}{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}"
                    f"{self.SEPARATOR}{session_id}{self.SEPARATOR}{name}")
         else:
-            key = f"user_var{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}{name}"
+            key = f"{self.USER_VAR_PREFIX}{self.SEPARATOR}{user_id}{self.SEPARATOR}{scope_id}{self.SEPARATOR}{name}"
         kv_ret = await self.kv_store.get(key)
         kv_ret = BaseMemoryManager.decrypt_memory_if_needed(key=self.crypto_key, ciphertext=kv_ret)
         return {name: kv_ret}
@@ -171,7 +194,7 @@ class VariableManager(BaseMemoryManager):
             # 1) user_var
             if session_id is None:
                 key = (
-                    f"user_var{VariableManager.SEPARATOR}{usr_id}"
+                    f"{self.USER_VAR_PREFIX}{VariableManager.SEPARATOR}{usr_id}"
                     f"{VariableManager.SEPARATOR}{scope_id}"
                     f"{VariableManager.SEPARATOR}{var_name}"
                 )
@@ -179,7 +202,7 @@ class VariableManager(BaseMemoryManager):
             # 2) session_var
             else:
                 key = (
-                    f"session_var{VariableManager.SEPARATOR}{usr_id}"
+                    f"{self.SESSION_VAR_PREFIX}{VariableManager.SEPARATOR}{usr_id}"
                     f"{VariableManager.SEPARATOR}{scope_id}"
                     f"{VariableManager.SEPARATOR}{session_id}"
                     f"{VariableManager.SEPARATOR}{var_name}"

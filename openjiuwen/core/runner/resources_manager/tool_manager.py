@@ -15,7 +15,8 @@ from openjiuwen.core.foundation.tool import (
     McpClient,
     SseClient,
     StdioClient,
-    PlaywrightClient
+    PlaywrightClient,
+    StreamableHttpClient,
 )
 
 
@@ -112,6 +113,9 @@ class ToolMgr:
             return StdioClient(config.server_path, config.server_name, config.params)
         elif config.client_type == "playwright":
             return PlaywrightClient(config.server_path, config.server_name)
+        elif config.client_type == "streamable-http":
+            return StreamableHttpClient(config.server_path, config.server_name,
+                                        config.auth_headers, config.auth_query_params)
         elif config.client_type == "openapi":
             from openjiuwen.core.foundation.tool.mcp.client import OpenApiClient
             return OpenApiClient(config.server_path, config.server_name)
@@ -155,6 +159,11 @@ class ToolMgr:
     def remove_sys_operation_tools(self, sys_op_id: str) -> list[str]:
         """Unregister and return tool IDs associated with a SysOperation."""
         resource = self._sys_op_resources.pop(sys_op_id, None)
+        return resource.tool_ids if resource else []
+
+    def get_sys_operation_tool_ids(self, sys_op_id: str) -> list[str]:
+        """Get tool IDs associated with a SysOperation."""
+        resource = self._sys_op_resources.get(sys_op_id)
         return resource.tool_ids if resource else []
 
     async def refresh_tool_server(self, server_id: str, skip_not_exist: bool = False, force: bool = False) -> list[

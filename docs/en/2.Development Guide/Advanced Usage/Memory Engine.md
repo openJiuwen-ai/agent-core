@@ -27,9 +27,13 @@ The core types of the memory engine are defined in the `openjiuwen.core.memory` 
   - `embedding_cfg: EmbeddingConfig`: Embedding model configuration used in this scope (`model_name/base_url/api_key`).
 
 - **`AgentMemoryConfig`** (Agent-level Memory Strategy Configuration)
-  Describes which "variable memories" and "long-term memories" an agent wants to extract and manage:
+  Describes which "variable memories", "long-term memories", "user profile memories", and "user summary memories" an agent wants to extract and manage:
   - `mem_variables: list[Param]`: Variable memory configuration list (each `Param` defines a variable name, description, type, whether it's required, etc.).
   - `enable_long_term_mem: bool`: Whether to enable long-term memory (default: `True`).
+  - `enable_user_profile: bool`: Whether to enable user profile memory generation and use (default: `True`).
+  - `enable_semantic_memory: bool`: Whether to enable semantic memory generation and use (default: `True`).
+  - `enable_episodic_memory: bool`: Whether to enable episodic memory generation and use (default: `True`).
+  - `enable_summary_memory: bool`: Whether to enable user summary memory (default: `True`).
 
 > These classes are defined in the source code at:  
 > `openjiuwen.core.memory.config.config` and `openjiuwen.core.memory.__init__`, and can be directly imported via `from openjiuwen.core.memory import MemoryEngineConfig, MemoryScopeConfig, AgentMemoryConfig, LongTermMemory`.
@@ -189,6 +193,10 @@ agent_mem_cfg = AgentMemoryConfig(
         Param.string("Age", "User age", required=False),
     ],
     enable_long_term_mem=True,
+    enable_user_profile=True,
+    enable_semantic_memory=True,
+    enable_episodic_memory=True,
+    enable_summary_memory=True
 )
 ```
 
@@ -280,6 +288,29 @@ for mem in mem_list:
 
 ```python
 search_results = await engine.search_user_mem(
+    query="What is the user's occupation?",
+    num=5,
+    user_id="user1",
+    scope_id="app_demo_scope",
+    threshold=0.3,  # Filter results below the threshold
+)
+
+for item in search_results:
+    mem = item.mem_info
+    print(f"mem_id={mem.mem_id}, type={mem.type}, score={item.score:.4f}, content={mem.content}")
+```
+
+The return value is a list of `MemResult`, each containing:
+
+- `mem_info: MemInfo`: Includes `mem_id/content/type`;
+- `score: float`: Similarity score.
+
+## Semantic Retrieval of User History Summary Memory (search_user_history_summary)
+
+`search_user_history_summary` provides vector similarity-based history summary memory retrieval:
+
+```python
+search_results = await engine.search_user_history_summary(
     query="What is the user's occupation?",
     num=5,
     user_id="user1",

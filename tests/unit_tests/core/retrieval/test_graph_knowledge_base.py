@@ -7,11 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.retrieval import GraphKnowledgeBase
-from openjiuwen.core.retrieval import KnowledgeBaseConfig, RetrievalConfig
-from openjiuwen.core.retrieval import Document, TextChunk
-from openjiuwen.core.retrieval import Triple
-from openjiuwen.core.retrieval import RetrievalResult
+from openjiuwen.core.retrieval import (
+    Document,
+    GraphKnowledgeBase,
+    KnowledgeBaseConfig,
+    RetrievalConfig,
+    RetrievalResult,
+    TextChunk,
+    Triple,
+)
 
 
 @pytest.fixture
@@ -201,15 +205,54 @@ class TestGraphKnowledgeBase:
             )
             mock_agentic_retriever_class.return_value = mock_agentic_retriever
 
+            mock_llm_client = AsyncMock()
             kb = GraphKnowledgeBase(
                 config=mock_config,
                 vector_store=mock_vector_store,
                 embed_model=mock_embed_model,
+                llm_client=mock_llm_client,
             )
             config = RetrievalConfig(use_graph=True, agentic=True, top_k=5)
             results = await kb.retrieve("test query", config=config)
             assert len(results) == 1
             mock_agentic_retriever_class.assert_called_once()
+            call_kwargs = mock_agentic_retriever_class.call_args[1]
+            assert "retriever" in call_kwargs
+            assert "llm_client" in call_kwargs
+            assert "graph_retriever" not in call_kwargs
+            assert "llm_model_name" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_retrieve_without_graph_falls_back_to_simple(
+        self,
+        mock_config,
+        mock_vector_store,
+        mock_embed_model,
+    ):
+        """Test that when use_graph is False in both config and retrieval config, it falls back to SimpleKnowledgeBase"""
+        mock_config.use_graph = False
+
+        kb = GraphKnowledgeBase(
+            config=mock_config,
+            vector_store=mock_vector_store,
+            embed_model=mock_embed_model,
+        )
+        config = RetrievalConfig(use_graph=False, top_k=5)
+
+        with patch("openjiuwen.core.retrieval.simple_knowledge_base.SimpleKnowledgeBase") as mock_simple_kb_class:
+            mock_simple_kb = AsyncMock()
+            mock_simple_kb.retrieve = AsyncMock(
+                return_value=[
+                    RetrievalResult(text="Simple result", score=0.9),
+                ]
+            )
+            mock_simple_kb_class.return_value = mock_simple_kb
+
+            results = await kb.retrieve("test query", config=config)
+            assert len(results) == 1
+            # SimpleKnowledgeBase should receive llm_client
+            call_kwargs = mock_simple_kb_class.call_args[1]
+            assert "llm_client" in call_kwargs
 
     @pytest.mark.asyncio
     async def test_delete_documents_with_graph(self, mock_config, mock_index_manager):

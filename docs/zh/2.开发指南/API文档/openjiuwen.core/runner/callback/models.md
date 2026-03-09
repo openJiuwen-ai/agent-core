@@ -226,3 +226,4 @@ class CallbackInfo(
 * **timeout**(Optional[float], 可选)：单次执行超时（秒）。默认值：None。
 * **created_at**(float, 可选)：注册时间戳。默认值：time.time()。
 * **wrapper**(Optional[Callable], 可选)：装饰器返回的包装函数（用于注销）。默认值：None。
+* **callback_type**(str, 可选)：语义类型标记，如 "transform"。默认值：""。

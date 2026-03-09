@@ -13,7 +13,6 @@ from unittest.mock import (
     MagicMock,
     patch,
 )
-import pytest
 from sqlalchemy import (
     MetaData,
     Table,
@@ -135,7 +134,7 @@ async def test_workflow_agent_kb_flow(mock_sessionmaker, mock_create_engine, moc
 
     # 1. Initialize Components
     kb_config = KnowledgeBaseConfig(kb_id="workflow_kb", index_type="vector")
-    vs_config = VectorStoreConfig(collection_name="pg_collection", distance_metric="cosine")
+    vs_config = VectorStoreConfig(store_provider="pgvector", collection_name="pg_collection", distance_metric="cosine")
 
     # PG Store
 
@@ -237,7 +236,8 @@ async def test_llm_agent_retrieval(mock_sessionmaker, mock_create_engine, mock_p
     mock_create_engine.return_value = AsyncMock()
 
     # 1. Setup Backend (PG Store + KB)
-    vs_config = VectorStoreConfig(collection_name="agent_collection", distance_metric="euclidean")
+    vs_config = VectorStoreConfig(
+        store_provider="pgvector", collection_name="agent_collection", distance_metric="euclidean")
     pg_store = PGVectorStore(
         config=vs_config,
         pg_uri="postgresql+asyncpg://mock:mock@localhost/db"

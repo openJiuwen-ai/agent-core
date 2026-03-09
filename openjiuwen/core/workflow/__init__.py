@@ -46,6 +46,10 @@ from openjiuwen.core.workflow.components.llm.intent_detection_comp import (
     IntentDetectionComponent,
     IntentDetectionCompConfig
 )
+from openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp import (
+    KnowledgeRetrievalComponent,
+    KnowledgeRetrievalCompConfig,
+)
 from openjiuwen.core.workflow.components.tool.tool_comp import ToolComponent, ToolComponentConfig
 from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter, Branch
 from openjiuwen.core.workflow.components.condition.condition import Condition, FuncCondition, AlwaysTrue
@@ -54,6 +58,7 @@ from openjiuwen.core.workflow.components.condition.array import ArrayCondition
 from openjiuwen.core.workflow.components.condition.number import NumberCondition
 
 from openjiuwen.core.session.workflow import Session, create_workflow_session
+from openjiuwen.core.workflow._workflow import execute_single_component
 
 
 _WORKFLOW_CLASSES = [
@@ -62,6 +67,7 @@ _WORKFLOW_CLASSES = [
     "WorkflowOutput",
     "WorkflowChunk",
     "WorkflowExecutionState",
+    "execute_single_component"
 ]
 
 _WORKFLOW_METHODS = [
@@ -107,7 +113,10 @@ _TOOL_RELATED_COMPONENTS = [
     "ToolComponentConfig",
 ]
 
-_RESOURCE_RELATED_COMPONENTS = []
+_RESOURCE_RELATED_COMPONENTS = [
+    "KnowledgeRetrievalComponent",
+    "KnowledgeRetrievalCompConfig",
+]
 
 _CONDITION_CLASSES = [
     "Condition",

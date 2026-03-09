@@ -45,3 +45,4 @@ class BranchComponent(WorkflowComponent):
 
     def skip_trace(self) -> bool:
         return True
+

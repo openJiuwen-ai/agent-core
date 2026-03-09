@@ -228,15 +228,15 @@ def test_on_decorator_preserves_function(framework):
 
 
 @pytest.mark.asyncio
-async def test_trigger_on_call_basic(framework):
-    """Test @trigger_on_call triggers event before function."""
+async def test_emit_before_basic(framework):
+    """Test @emit_before triggers event before function."""
     call_log = []
 
     @framework.on("processing")
     async def on_processing(data):
         call_log.append(f"event: {data}")
 
-    @framework.trigger_on_call("processing")
+    @framework.emit_before("processing")
     async def process(data):
         call_log.append(f"process: {data}")
         return {"processed": data}
@@ -247,53 +247,32 @@ async def test_trigger_on_call_basic(framework):
 
 
 @pytest.mark.asyncio
-async def test_trigger_on_call_pass_args_false(framework):
-    """Test @trigger_on_call with pass_args=False."""
+async def test_emit_before_pass_args_false(framework):
+    """Test @emit_before with pass_args=False."""
     received_args = []
 
     @framework.on("event")
     async def handler(*args, **kwargs):
         received_args.append((args, kwargs))
 
-    @framework.trigger_on_call("event", pass_args=False)
+    @framework.emit_before("event", pass_args=False)
     async def my_func(data):
         return data
 
     await my_func("secret_data")
-    # Event should be triggered with no arguments
     assert received_args[0] == ((), {})
 
 
 @pytest.mark.asyncio
-async def test_trigger_on_call_pass_result(framework):
-    """Test @trigger_on_call with pass_result=True."""
-    received = []
-
-    @framework.on("event")
-    async def handler(**kwargs):
-        received.append(kwargs)
-
-    @framework.trigger_on_call("event", pass_result=True)
-    async def my_func():
-        return {"status": "done"}
-
-    result = await my_func()
-    assert result == {"status": "done"}
-    # Should have been called twice - once before, once after with result
-    assert len(received) == 2
-    assert received[1].get("result") == {"status": "done"}
-
-
-@pytest.mark.asyncio
-async def test_emits_basic(framework):
-    """Test @emits triggers event with result."""
+async def test_emit_after_basic(framework):
+    """Test @emit_after triggers event with result."""
     received_results = []
 
     @framework.on("data_ready")
     async def on_ready(result):
         received_results.append(result)
 
-    @framework.emits("data_ready")
+    @framework.emit_after("data_ready")
     async def process():
         return {"status": "done"}
 
@@ -303,15 +282,15 @@ async def test_emits_basic(framework):
 
 
 @pytest.mark.asyncio
-async def test_emits_custom_result_key(framework):
-    """Test @emits with custom result_key."""
+async def test_emit_after_custom_result_key(framework):
+    """Test @emit_after with custom result_key."""
     received = []
 
     @framework.on("event")
     async def handler(**kwargs):
         received.append(kwargs)
 
-    @framework.emits("event", result_key="data")
+    @framework.emit_after("event", result_key="data")
     async def process():
         return {"value": 42}
 
@@ -320,15 +299,15 @@ async def test_emits_custom_result_key(framework):
 
 
 @pytest.mark.asyncio
-async def test_emits_include_args(framework):
-    """Test @emits with include_args=True."""
+async def test_emit_after_pass_args(framework):
+    """Test @emit_after with pass_args=True."""
     received = []
 
     @framework.on("event")
     async def handler(*args, **kwargs):
         received.append({"args": args, "kwargs": kwargs})
 
-    @framework.emits("event", include_args=True)
+    @framework.emit_after("event", pass_args=True)
     async def process(input_data, extra="default"):
         return "result"
 

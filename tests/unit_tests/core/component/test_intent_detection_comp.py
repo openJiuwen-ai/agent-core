@@ -104,6 +104,52 @@ class TestIntentDetectionExecutableInvoke:
             assert output["category_name"] == "name2"
             llm_mock.invoke.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_invoke_success_accept_language_en(self, fake_ctx):
+        """accept_language='en' 时，LLM 返回 Category2 应正确解析"""
+        config = IntentDetectionCompConfig(
+            user_prompt="Determine user intent",
+            category_name_list=["weather", "travel", "other"],
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            accept_language="en",
+        )
+        llm_mock = AsyncMock()
+        llm_mock.invoke.return_value = Mock(
+            content='{"class": "Category2", "reason": "User asks about travel"}'
+        )
+
+        with patch.object(IntentDetectionExecutable, "_create_llm_instance", return_value=llm_mock):
+            exe = IntentDetectionExecutable(config)
+            exe.set_router(BranchRouter())
+            output = await exe.invoke({"query": "I want to travel"}, fake_ctx, context=Mock())
+
+        assert output["category_name"] == "travel"
+        assert output["classification_id"] == 2
+
+    @pytest.mark.asyncio
+    async def test_invoke_success_accept_language_en_case_insensitive(self, fake_ctx):
+        """accept_language='en' 时，category1 应能匹配 Category1"""
+        config = IntentDetectionCompConfig(
+            user_prompt="Determine user intent",
+            category_name_list=["weather"],
+            model_config=_create_model_request_config(),
+            model_client_config=_create_model_client_config(),
+            accept_language="en",
+        )
+        llm_mock = AsyncMock()
+        llm_mock.invoke.return_value = Mock(
+            content='{"class": "category1", "reason": "weather query"}'
+        )
+
+        with patch.object(IntentDetectionExecutable, "_create_llm_instance", return_value=llm_mock):
+            exe = IntentDetectionExecutable(config)
+            exe.set_router(BranchRouter())
+            output = await exe.invoke({"query": "What is the weather"}, fake_ctx, context=Mock())
+
+        assert output["category_name"] == "weather"
+        assert output["classification_id"] == 1
+
 
 class TestIntentDetectionComponent:
     @unittest.skip("skip system test")

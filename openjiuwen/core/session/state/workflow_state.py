@@ -61,6 +61,19 @@ class StateCollection(State):
         result = self._comp_state.get_by_prefix(key, self._node_id)
         return result
 
+    def dump(self) -> dict:
+        return {
+            "io_state": self._io_state.get_state(),
+            "io_state_updates": self._io_state.get_updates(),
+            "global_state": self._global_state.get_state(),
+            "global_state_updates": self._global_state.get_updates(),
+            "comp_state": self._comp_state.get_state(),
+            "comp_state_updates": self._comp_state.get_updates(),
+            "workflow_state": self._workflow_state.get_state(),
+            "workflow_state_updates": self._workflow_state.get_updates(),
+            "trace_state": self._trace_state
+        }
+
     def commit_cmp(self):
         self._comp_state.commit(self._node_id)
         self._io_state.commit(self._node_id)

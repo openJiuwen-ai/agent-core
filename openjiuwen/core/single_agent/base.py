@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from abc import abstractmethod, ABC
 from typing import (
+    Dict,
     List,
     Any,
     AsyncIterator,
@@ -26,16 +27,17 @@ from typing import (
 )
 from pydantic import BaseModel
 
-from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.context_engine import ContextEngine, ModelContext
 from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
-from openjiuwen.core.single_agent.middleware.base import AgentCallbackEvent, AgentCallbackContext, AgentMiddleware, \
-    AnyAgentCallback
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackEvent, AgentCallbackContext, AgentRail, AnyAgentCallback,
+)
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
 from openjiuwen.core.controller.config import ControllerConfig
@@ -74,7 +76,7 @@ class BaseAgent(ABC):
         """
         self.card = card
         self._ability_manager = AbilityManager()
-        self._agent_callback_manager = AgentCallbackManager()
+        self._agent_callback_manager = AgentCallbackManager(card.id)
         self._skill_util = None
         self.lazy_init_skill()
 
@@ -114,6 +116,12 @@ class BaseAgent(ABC):
     def ability_manager(self) -> AbilityManager:
         return self._ability_manager
 
+    @ability_manager.setter
+    def ability_manager(
+        self, value: AbilityManager
+    ) -> None:
+        self._ability_manager = value
+
     @property
     def agent_callback_manager(self) -> AgentCallbackManager:
         """Access the hook registry for advanced registration."""
@@ -129,11 +137,11 @@ class BaseAgent(ABC):
         self.lazy_init_skill()
         await self._skill_util.register_remote_skills(skills_dir, github_tree, token=token)
 
-    def register_callback(
-        self,
-        event: AgentCallbackEvent,
-        callback: AnyAgentCallback,
-        priority: int = 100
+    async def register_callback(
+            self,
+            event: AgentCallbackEvent,
+            callback: AnyAgentCallback,
+            priority: int = 100
     ) -> 'BaseAgent':
         """Register an agent callback.
 
@@ -145,50 +153,68 @@ class BaseAgent(ABC):
         Returns:
             self for chaining
         """
-        self._agent_callback_manager.register_callback(event, callback, priority)
+        await self._agent_callback_manager.register_callback(event, callback, priority)
         return self
 
-    def register_middleware(self, middleware: AgentMiddleware) -> 'BaseAgent':
-        """Register a middleware instance.
+    async def register_rail(self, rail: AgentRail) -> 'BaseAgent':
+        """Register a rail instance.
 
         Args:
-            middleware: MiddleWare to register
+            rail: AgentRail to register
 
         Returns:
             self for chaining
         """
-        self._agent_callback_manager.register_middleware(middleware)
+        rail.init(self)
+        await self._agent_callback_manager.register_rail(rail, self)
+        return self
+
+    async def unregister_rail(self, rail: AgentRail) -> 'BaseAgent':
+        """Unregister a rail instance.
+
+        Args:
+            rail: AgentRail to unregister
+
+        Returns:
+            self for chaining
+        """
+        await self._agent_callback_manager.unregister_rail(rail, self)
+        rail.uninit(self)
         return self
 
     async def _execute_callbacks(
-        self,
-        event: AgentCallbackEvent,
-        inputs: Any = None,
-        iteration: int = 0,
-        **extra
-    ) -> AgentCallbackContext:
+            self,
+            event: AgentCallbackEvent,
+            inputs: Dict[str, Any],
+            session: Optional[Any] = None,
+            context: Optional[ModelContext] = None,
+            **kwargs,
+    ) -> None:
         """Execute callbacks for a given event.
 
-        This method should be called by subclasses at appropriate points
-        in their execution flow.
+        ``inputs`` is passed to the callback context.  For typed
+        event inputs, use the dataclasses defined in rail.base:
+            BEFORE_INVOKE      InvokeInputs(query, conversation_id?)
+            AFTER_INVOKE       InvokeInputs(query, conversation_id?, result)
+            BEFORE_MODEL_CALL  ModelCallInputs(messages, tools?)
+            AFTER_MODEL_CALL   ModelCallInputs(messages, tools?, response)
+            BEFORE_TOOL_CALL   ToolCallInputs(tool_call, tool_name?, tool_args?)
+            AFTER_TOOL_CALL    ToolCallInputs(tool_call, tool_name?, tool_args?, tool_result, tool_msg)
 
         Args:
-            event: The agent callback event
-            inputs: Original inputs
-            iteration: Current iteration number
-            **extra: Additional context data
-
-        Returns:
-            AgentCallbackContext with potential modifications
+            event:   The agent callback event
+            inputs:  Event parameters (typed dataclass or dict)
+            session: Current Session object (None for before_invoke)
+            context: Current ModelContext (None for before_invoke)
         """
         ctx = AgentCallbackContext(
             agent=self,
             event=event,
             inputs=inputs,
-            iteration=iteration,
-            extra=extra
+            session=session,
+            context=context,
         )
-        return await self._agent_callback_manager.execute(event, ctx)
+        await self._agent_callback_manager.execute(event, ctx)
 
     @abstractmethod
     async def invoke(
@@ -308,13 +334,13 @@ class ControllerAgent(BaseAgent):
                 session_id=session_id
             )
         from openjiuwen.core.runner import Runner
-        await Runner.release(session_id=session_id)
+        await Runner().release(session_id=session_id)
 
     async def invoke(
-        self,
-        inputs: Union[str, dict, 'InputEvent'],
-        session: Optional[Session] = None,
-        **kwargs
+            self,
+            inputs: Union[str, dict, 'InputEvent'],
+            session: Optional[Session] = None,
+            **kwargs
     ) -> ControllerOutput:
         """Batch execution using controller
 
@@ -406,16 +432,15 @@ class ControllerAgent(BaseAgent):
                     StatusCode.AGENT_CONTROLLER_RUNTIME_ERROR,
                     error_msg="session is required",
                 )
-
             # Convert inputs to InputEvent
             input_event = InputEvent.from_user_input(user_input=inputs)
 
             # Forward directly to Controller.stream()
             async for chunk in self.controller.stream(
-                inputs=input_event,
-                session=session,
-                stream_modes=stream_modes,
-                **kwargs
+                    inputs=input_event,
+                    session=session,
+                    stream_modes=stream_modes,
+                    **kwargs
             ):
                 yield chunk
 

@@ -18,4 +18,5 @@
 | [questioner_comp](./components/llm/questioner_comp.md) | QuestionerComponent、QuestionerConfig、FieldInfo |
 | [start_comp](./components/flow/start_comp.md) | Start |
 | [tool_comp](./components/tool/tool_comp.md) | ToolComponent、ToolComponentConfig |
+| [knowledge_retrieval_comp](./components/resource/knowledge_retrieval_comp.md) | KnowledgeRetrievalComponent、KnowledgeRetrievalCompConfig |
 | [workflow_comp](./components/flow/workflow_comp.md) | SubWorkflowComponent |

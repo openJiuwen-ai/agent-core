@@ -1,10 +1,8 @@
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session.internal.agent import AgentSession
 from openjiuwen.core.session.internal.workflow import WorkflowSession, NodeSession
 from openjiuwen.core.session.state.base import ReadableStateLike
 from openjiuwen.core.session import get_by_schema
 from openjiuwen.core.session.utils import update_dict, root_to_index
-from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -259,6 +257,7 @@ class TestSession:
 
     @staticmethod
     def test_agent_session():
+        from openjiuwen.core.session.agent import Session
         agent_session = Session(session_id="abc", card=AgentCard())
         data = {"data": {"a": 1}}
         agent_session.update_state({"result": data})
@@ -275,3 +274,66 @@ class TestSession:
 
         agent_session.update_state({"result": data2})
         assert agent_session.get_state("result") == {"data": {"b": 1}}
+
+        dump_state = agent_session.dump_state()
+        assert dump_state == {"agent_state": {},
+                              "global_state": {"result": {"data": {"b": 1}}},
+                              "trace_state": {}}
+
+    @staticmethod
+    def test_node_session():
+        from openjiuwen.core.session.node import Session
+        session = Session(session=NodeSession(session=WorkflowSession(), node_id="node1"))
+        # 测试更新组件状态
+        session.update_state({"key1": "value1"})
+
+        session.update_state({"key2": {"nested_key": "nested_value"}})
+
+        # 测试更新全局状态
+        session.update_global_state({"global_key1": "global_value1"})
+
+        session.update_global_state({"global_key2": {"nested_global_key": "nested_global_value"}})
+
+        # 更新的状态会放在updates里，调用commit后才会真正更新到state里
+        assert session.get_state("key1") is None
+        assert session.get_state("key2") is None
+        assert session.get_global_state("global_key1") is None
+        assert session.get_global_state("global_key2") is None
+
+        dump_state = session.dump_state()
+
+        assert dump_state == {
+                                "io_state": {},
+                                "io_state_updates": {},
+                                "global_state": {},
+                                "global_state_updates": {"node1": [{"global_key1": "global_value1"},
+                                                                   {"global_key2":
+                                                                        {"nested_global_key": "nested_global_value"}}]},
+                                "comp_state": {},
+                                "comp_state_updates": {"node1": [{"node1": {"key1": "value1"}},
+                                                                 {"node1": {"key2": {"nested_key": "nested_value"}}}]},
+                                "workflow_state": {},
+                                "workflow_state_updates": {},
+                                "trace_state": {}}
+
+        # 组件执行完成会自动提交状态，这里手动提交测试commit逻辑
+        getattr(session, "_inner").state().commit()
+        assert session.get_state("key1") == "value1"
+        assert session.get_state("key2") == {"nested_key": "nested_value"}
+        assert session.get_global_state("global_key1") == "global_value1"
+        assert session.get_global_state("global_key2") == {"nested_global_key": "nested_global_value"}
+
+        dump_state = session.dump_state()
+        assert dump_state == {
+            "io_state": {},
+            "io_state_updates": {},
+            "global_state": {"global_key1": "global_value1",
+                             "global_key2": {"nested_global_key": "nested_global_value"}},
+            "global_state_updates": {},
+            "comp_state": {"node1": {"key1": "value1", "key2": {"nested_key": "nested_value"}}},
+            "comp_state_updates": {},
+            "workflow_state": {},
+            "workflow_state_updates": {},
+            "trace_state": {}}
+
+

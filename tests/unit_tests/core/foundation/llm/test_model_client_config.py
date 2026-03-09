@@ -27,6 +27,22 @@ def test_model_client_config_accepts_supported_providers():
     )
     assert cfg2.client_provider == ProviderType.SiliconFlow
 
+    cfg3 = ModelClientConfig(
+        client_provider=ProviderType.OpenRouter,
+        api_key="sk-test",
+        api_base="http://localhost",
+    )
+    assert cfg3.client_provider == ProviderType.OpenRouter
+
+
+def test_model_client_config_normalizes_openrouter_provider_case():
+    cfg = ModelClientConfig(
+        client_provider="OPENROUTER",
+        api_key="sk-test",
+        api_base="http://localhost",
+    )
+    assert cfg.client_provider == ProviderType.OpenRouter
+
 
 def test_model_client_config_model_validate_invalid_provider_raises_base_error():
     with pytest.raises(BaseError) as error:

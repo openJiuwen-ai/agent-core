@@ -728,6 +728,52 @@ Get a system operation instance by ID/tag.
 >>> operations = Runner.resource_mgr.get_sys_operation(tag=["scheduled"])
 ```
 
+### get_sys_op_tool_cards
+
+```python
+get_sys_op_tool_cards(self,
+                      sys_operation_id: str,
+                      *,
+                      operation_name: str | List[str] = None,
+                      tool_name: str | List[str] = None
+                      ) -> ToolCard | List[ToolCard] | None
+```
+
+Get tool cards from a system operation.
+
+**Parameters:**
+
+* **sys_operation_id**(str): The ID of the system operation.
+* **operation_name**(str | List[str], optional): Single operation name or list of operation names, e.g., `"fs"`, `["fs", "shell"]`. If `None`, returns all tool cards from all operations.
+* **tool_name**(str | List[str], optional): Single tool name or list of tool names, e.g., `"read_file"`, `["read_file", "write_file"]`. Only valid when `operation_name` is a single string. Cannot be used when `operation_name` is a list. If `None`, returns all tool cards from the specified operation(s).
+
+**Returns:**
+
+**[ToolCard](../foundation/tool/tool.md) | List[[ToolCard](../foundation/tool/tool.md)] | None**, Tool card(s) matching the criteria.
+
+**Raises:**
+
+* **ValidationError**: If `operation_name` is a list and `tool_name` is also provided.
+
+**Example:**
+
+```python
+>>> # Scenario 1: Get a single tool card
+>>> tool_card = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op", operation_name="fs", tool_name="read_file")
+>>>
+>>> # Scenario 2: Get multiple tool cards from the same operation
+>>> tool_cards = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op", operation_name="fs", tool_name=["read_file", "write_file"])
+>>>
+>>> # Scenario 3: Get all tool cards from a single operation
+>>> tool_cards = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op", operation_name="fs")
+>>>
+>>> # Scenario 4: Get all tool cards from multiple operations
+>>> tool_cards = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op", operation_name=["fs", "shell"])
+>>>
+>>> # Scenario 5: Get all tool cards from all operations
+>>> tool_cards = Runner.resource_mgr.get_sys_op_tool_cards("my_sys_op")
+```
+
 ### get_tool_infos
 
 ```python

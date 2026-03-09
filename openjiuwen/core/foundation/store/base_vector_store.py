@@ -3,12 +3,14 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+if TYPE_CHECKING:
+    from openjiuwen.core.memory.migration.operation.base_operation import BaseOperation
 
 
 class VectorDataType(str, Enum):
@@ -43,6 +45,7 @@ class FieldSchema(BaseModel):
     element_type: Optional[VectorDataType] = Field(default=None, description="Element type for ARRAY fields")
     max_capacity: Optional[int] = Field(default=None, description="Max capacity for ARRAY fields")
     description: Optional[str] = Field(default=None, description="Field description")
+    default_value: Optional[Any] = Field(default=None, description="Default value for the field")
 
     @field_validator("dim")
     @classmethod
@@ -78,6 +81,8 @@ class FieldSchema(BaseModel):
             result["element_type"] = self.element_type.value
         if self.max_capacity is not None:
             result["max_capacity"] = self.max_capacity
+        if self.default_value is not None:
+            result["default_value"] = self.default_value
         return result
 
     @classmethod
@@ -96,6 +101,7 @@ class FieldSchema(BaseModel):
             element_type=VectorDataType(data["element_type"]) if data.get("element_type") else None,
             max_capacity=data.get("max_capacity"),
             description=data.get("description"),
+            default_value=data.get("default_value"),
         )
 
 
@@ -542,5 +548,37 @@ class BaseVectorStore(ABC):
                 collection_name="my_collection",
                 filters={"category": "tech", "status": "inactive"},
             )
+        """
+        pass
+
+    @abstractmethod
+    async def list_collection_names(self) -> List[str]:
+        """
+        List all collection names in the vector store.
+
+        Returns:
+            List[str]: A list of collection names.
+        """
+        pass
+
+    @abstractmethod
+    async def update_schema(self, collection_name: str, operations: List["BaseOperation"]) -> None:
+        """
+        Upgrade the schema field for vector data migration.
+
+        """
+        pass
+
+    @abstractmethod
+    async def update_collection_metadata(self, collection_name: str, metadata: Dict[str, Any]) -> None:
+        """
+        Update the schema version of a collection.
+        """
+        pass
+
+    @abstractmethod
+    async def get_collection_metadata(self, collection_name: str) -> Dict[str, Any]:
+        """
+        Get the schema version of a collection.
         """
         pass

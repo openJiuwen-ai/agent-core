@@ -349,36 +349,44 @@ Use `kwargs["_chain_context"]` to get **ChainContext** and pass data between ste
 
 ### Registration and auto-trigger
 
-- **@framework.on(event, priority=0, once=False, namespace="default", tags=None, filters=None, rollback_handler=None, error_handler=None, max_retries=0, retry_delay=0.0, timeout=None)**  
-  Register a function as a callback for the event. Higher priority runs first; `once=True` disables after one run; `error_handler` is called when the callback raises.
+- **@framework.on(event, priority=0, once=False, namespace="default", tags=None, filters=None, rollback_handler=None, error_handler=None, max_retries=0, retry_delay=0.0, timeout=None, callback_type="")**
+  Register a function as a callback for the event. Higher priority runs first; `once=True` disables after one run; `error_handler` is called when the callback raises; `callback_type` is a semantic marker — `"transform"` marks the callback as transform-only.
 
-- **@framework.trigger_on_call(event, pass_result=False, pass_args=True)**  
+- **@framework.trigger_on_call(event, pass_result=False, pass_args=True)**
   Trigger the event when the decorated function is **called** (optionally pass args or trigger again with result after return).
 
-- **@framework.emits(event, result_key="result", include_args=False)**  
+- **@framework.emits(event, result_key="result", include_args=False)**
   Trigger the event **after** the function returns, passing the return value under `result_key`; optionally include original args.
 
-- **@framework.emit_around(before_event, after_event, pass_args=True, pass_result=True, on_error_event=None)**  
+- **@framework.emit_around(before_event, after_event, pass_args=True, pass_result=True, on_error_event=None)**
   Trigger before_event before execution and after_event after success; if the function raises and on_error_event is set, trigger that event.
 
-- **@framework.emits_stream(event, item_key="item")**  
+- **@framework.emits_stream(event, item_key="item")**
   Decorate an **async generator**; trigger the event on each yield and pass the item under `item_key`.
+
+- **@framework.on_transform(event, *, priority=0)**
+  Convenience decorator for registering transform-type callbacks. Equivalent to `@framework.on(event, callback_type="transform")`. Only triggered by `trigger_transform` and the event mode of `transform_io`; a regular `trigger` call will not invoke these callbacks.
 
 ### transform_io: input/output transformation
 
 Transform a function’s **arguments** and **return value** in two ways:
 
-1. **Event mode**: Set `input_event` / `output_event`. Before calling the function, trigger input_event; callbacks receive `(*args, **kwargs)` and return `(new_args, new_kwargs)`; the framework uses the last callback result as the new arguments. After return (or per generator item), trigger output_event; callbacks receive `result_key=value` and return the new value; the framework uses the last result as the final result.
-2. **Direct callback mode**: Set `input_transform` / `output_transform`. `input_transform(*args, **kwargs)` returns `(new_args, new_kwargs)`; `output_transform(value)` returns the new value. Sync/async supported; for generators, output transform is applied per item.
+1. **Event mode**: Set `input_event` / `output_event`. Before calling the function, trigger input_event; callbacks receive `(*args, **kwargs)` and return `(new_args, new_kwargs)`; the framework uses the last callback result as the new arguments. After return (or per generator item), trigger output_event; callbacks receive `result_key=value` and return the new value; the framework uses the last result as the final result. **Important**: event mode only triggers callbacks with `callback_type="transform"`, so you must register them with `@framework.on_transform(event)` or `@framework.on(event, callback_type="transform")`; callbacks registered with plain `@framework.on` are not invoked by `transform_io`.
+2. **Direct callback mode**: Set `input_transform` / `output_transform`. `input_transform(*args, **kwargs)` returns `(new_args, new_kwargs)`; `output_transform(value)` returns the new value. Sync/async supported.
+
+`output_mode` controls how the output transform is applied to generator functions:
+
+* **`’frame’`** (default): `output_transform(item)` is called once per yielded item (or output_event fires once per item in event mode).
+* **`’generator’`**: The entire source async iterator is handed to `output_transform` once. In direct callback mode, `output_transform` must be an async generator function that iterates the source and yields new items — enabling filtering, 1-to-N expansion, and stateful transforms. In event mode, the output callback receives the source and returns an async iterable. Sync generator functions are automatically promoted to async. Raises `ValueError` for non-generator functions.
 
 Use for normalizing arguments, serializing results, or shared encrypt/decrypt. Example (event mode):
 
 ```python
-@framework.on("transform_input")
+@framework.on_transform("transform_input")
 async def normalize_input(*args, **kwargs):
     return (args, {**kwargs, "limit": kwargs.get("limit", 10)})
 
-@framework.on("transform_output")
+@framework.on_transform("transform_output")
 async def serialize_output(result):
     return json.dumps(result) if isinstance(result, dict) else result
 
@@ -388,6 +396,23 @@ async def serialize_output(result):
 )
 async def fetch_data(limit: int):
     return {"count": limit}
+```
+
+Example (generator mode — direct callback):
+
+```python
+async def expand_chunks(source):
+    """Split each chunk into individual tokens."""
+    async for chunk in source:
+        for token in chunk.split():
+            yield token
+
+@framework.transform_io(output_transform=expand_chunks, output_mode="generator")
+async def stream_response():
+    yield "hello world"
+    yield "foo bar baz"
+
+# yields: "hello", "world", "foo", "bar", "baz"
 ```
 
 ---
@@ -410,6 +435,47 @@ Register with **add_hook(event, hook_type, hook)**; hook can be sync or async.
 - **get_slow_callbacks(threshold=1.0)**: Returns callbacks whose average time exceeds the threshold for performance tuning.
 
 Keep `enable_metrics=True` (default) for important events and review slow callbacks periodically.
+
+---
+
+## Tool / LLM / Workflow invoke/stream interception
+
+`Tool`, `BaseModelClient`, and `Workflow` automatically wrap their `invoke` and `stream` methods into corresponding `transform_io` pipelines at instantiation. Registering transform callbacks for the relevant events intercepts all instances globally.
+
+### Available events
+
+| Class | Input event | Output event |
+|-------|-------------|--------------|
+| `Tool.invoke` | `ToolCallEvents.TOOL_INVOKE_INPUT` | `ToolCallEvents.TOOL_INVOKE_OUTPUT` |
+| `Tool.stream` | `ToolCallEvents.TOOL_STREAM_INPUT` | `ToolCallEvents.TOOL_STREAM_OUTPUT` |
+| `BaseModelClient.invoke` | `LLMCallEvents.LLM_INVOKE_INPUT` | `LLMCallEvents.LLM_INVOKE_OUTPUT` |
+| `BaseModelClient.stream` | `LLMCallEvents.LLM_STREAM_INPUT` | `LLMCallEvents.LLM_STREAM_OUTPUT` |
+| `Workflow.invoke` | `WorkflowEvents.WORKFLOW_INVOKE_INPUT` | `WorkflowEvents.WORKFLOW_INVOKE_OUTPUT` |
+| `Workflow.stream` | `WorkflowEvents.WORKFLOW_STREAM_INPUT` | `WorkflowEvents.WORKFLOW_STREAM_OUTPUT` |
+
+Input callbacks receive `(*args, **kwargs)` and return `(new_args, new_kwargs)`; output callbacks receive `result=<value>` and return the new value; for stream methods, the output event fires once per yielded item.
+
+### Example
+
+```python
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner.callback.events import ToolCallEvents
+
+fw = Runner.callback_framework
+
+# Intercept inputs for all Tool.invoke calls
+@fw.on_transform(ToolCallEvents.TOOL_INVOKE_INPUT)
+async def preprocess(inputs, **kwargs):
+    # inputs is the first positional argument of Tool.invoke
+    return ((inputs,), kwargs)
+
+# Intercept the return value for all Tool.invoke calls
+@fw.on_transform(ToolCallEvents.TOOL_INVOKE_OUTPUT)
+async def postprocess(result):
+    return result  # pass through, or return a modified value
+```
+
+Callbacks apply to **all** Tool/LLM/Workflow instances without modifying any instance code.
 
 ---
 

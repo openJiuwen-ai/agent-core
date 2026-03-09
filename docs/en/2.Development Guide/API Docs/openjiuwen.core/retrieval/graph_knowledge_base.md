@@ -6,7 +6,7 @@ Graph-enhanced knowledge base implementation that supports graph indexing and re
 
 
 ```python
-GraphKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, chunk_retriever: Optional[Retriever] = None, triple_retriever: Optional[Retriever] = None, llm_client: Optional[Any] = None, llm_model_name: Optional[Any] = None, **kwargs: Any)
+GraphKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, chunk_retriever: Optional[Retriever] = None, triple_retriever: Optional[Retriever] = None, llm_client: Optional[BaseModelClient] = None, **kwargs: Any)
 ```
 
 Initialize graph knowledge base.
@@ -22,8 +22,7 @@ Initialize graph knowledge base.
 * **index_manager**(Indexer, optional): Index manager instance. Default: None.
 * **chunk_retriever**(Retriever, optional): Document chunk retriever instance. Default: None.
 * **triple_retriever**(Retriever, optional): Triple retriever instance. Default: None.
-* **llm_client**(Any, optional): LLM client instance (for triple extraction and agentic retrieval). Default: None.
-* **llm_model_name**(Any, optional): LLM model name. Default: None.
+* **llm_client**(BaseModelClient, optional): LLM client instance (for triple extraction and agentic retrieval). Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 ### async parse_files
@@ -85,12 +84,12 @@ Added 1 documents with graph index
 retrieve(query: str, config: Optional[RetrievalConfig] = None, **kwargs: Any) -> List[RetrievalResult]
 ```
 
-Retrieve relevant documents, supporting graph retrieval. If config.use_graph is True, graph retriever will be used for retrieval, supporting graph expansion and multi-hop retrieval.
+Retrieve relevant documents, supporting graph retrieval and agentic retrieval. If config.use_graph is True, graph retriever will be used for retrieval, supporting graph expansion and multi-hop retrieval. If config.agentic is True, an `AgenticRetriever` wraps the underlying retriever to perform iterative query rewriting and result fusion.
 
 **Parameters**:
 
 * **query**(str): Query string.
-* **config**(RetrievalConfig, optional): Retrieval configuration, use_graph=True enables graph retrieval, graph_expansion=True enables graph expansion. Default: None.
+* **config**(RetrievalConfig, optional): Retrieval configuration, use_graph=True enables graph retrieval, graph_expansion=True enables graph expansion, agentic=True enables agentic retrieval. Default: None.
 * **kwargs**(Any): Variable arguments for passing additional configuration parameters.
 
 **Returns**:

@@ -123,9 +123,10 @@ class AgentStorage(BaseRedisStorage):
             blob_key = build_key_with_namespace(
                 session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
             )
-            await pipeline.set(dump_type_key, dump_type, self._ttl_seconds)
-            await pipeline.set(blob_key, blob, self._ttl_seconds)
-            await pipeline.execute()
+            await (pipeline
+                   .set(dump_type_key, dump_type, self._ttl_seconds)
+                   .set(blob_key, blob, self._ttl_seconds)
+                   .execute())
             logger.debug(f"Saved state for agent {agent_id}, session {session_id}")
         except Exception as e:
             logger.error(f"Failed to save state for agent {agent_id}, session {session_id}: {e}")
@@ -142,9 +143,10 @@ class AgentStorage(BaseRedisStorage):
         blob_key = build_key_with_namespace(
             session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
         )
-        await pipeline.get(dump_type_key)
-        await pipeline.get(blob_key)
-        results = await pipeline.execute()
+        results = await (pipeline
+                         .get(dump_type_key)
+                         .get(blob_key)
+                         .execute())
 
         if len(results) != self._KEY_NUMS:
             logger.debug(
@@ -190,9 +192,10 @@ class AgentStorage(BaseRedisStorage):
         blob_key = build_key_with_namespace(
             session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
         )
-        await pipeline.exists(dump_type_key)
-        await pipeline.exists(blob_key)
-        results = await pipeline.execute()
+        results = await (pipeline
+                         .exists(dump_type_key)
+                         .exists(blob_key)
+                         .execute())
 
         if len(results) != self._KEY_NUMS:
             return False
@@ -246,8 +249,9 @@ class WorkflowStorage(BaseRedisStorage):
             blob_key = build_key_with_namespace(
                 session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._STATE_BLOBS
             )
-            await pipeline.set(dump_type_key, dump_type, self._ttl_seconds)
-            await pipeline.set(blob_key, blob, self._ttl_seconds)
+            (pipeline
+             .set(dump_type_key, dump_type, self._ttl_seconds)
+             .set(blob_key, blob, self._ttl_seconds))
             has_operations = True
         else:
             logger.warning(f"Failed to serialize state for workflow {workflow_id}, session {session_id}")
@@ -262,8 +266,9 @@ class WorkflowStorage(BaseRedisStorage):
             blob_key = build_key_with_namespace(
                 session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._UPDATE_BLOBS
             )
-            await pipeline.set(dump_type_key, dump_type, self._ttl_seconds)
-            await pipeline.set(blob_key, blob, self._ttl_seconds)
+            (pipeline
+             .set(dump_type_key, dump_type, self._ttl_seconds)
+             .set(blob_key, blob, self._ttl_seconds))
             has_operations = True
 
         if has_operations:
@@ -285,17 +290,18 @@ class WorkflowStorage(BaseRedisStorage):
         state_blob_key = build_key_with_namespace(
             session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._STATE_BLOBS
         )
-        await pipeline.get(state_dump_type_key)
-        await pipeline.get(state_blob_key)
         updates_dump_type_key = build_key_with_namespace(
             session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._UPDATE_BLOBS_DUMP_TYPE
         )
         updates_blob_key = build_key_with_namespace(
             session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._UPDATE_BLOBS
         )
-        await pipeline.get(updates_dump_type_key)
-        await pipeline.get(updates_blob_key)
-        results = await pipeline.execute()
+        results = await (pipeline
+                         .get(state_dump_type_key)
+                         .get(state_blob_key)
+                         .get(updates_dump_type_key)
+                         .get(updates_blob_key)
+                         .execute())
 
         if len(results) != self._KEY_NUMS:
             logger.warning(
@@ -371,8 +377,6 @@ class WorkflowStorage(BaseRedisStorage):
         state_blob_key = build_key_with_namespace(
             session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._STATE_BLOBS
         )
-        await pipeline.exists(state_dump_type_key)
-        await pipeline.exists(state_blob_key)
         # Check updates keys (optional)
         state_updates_dump_type_key = build_key_with_namespace(
             session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._UPDATE_BLOBS_DUMP_TYPE
@@ -380,9 +384,12 @@ class WorkflowStorage(BaseRedisStorage):
         state_updates_blob_key = build_key_with_namespace(
             session_id, SESSION_NAMESPACE_WORKFLOW, workflow_id, self._UPDATE_BLOBS
         )
-        await pipeline.exists(state_updates_dump_type_key)
-        await pipeline.exists(state_updates_blob_key)
-        results = await pipeline.execute()
+        results = await (pipeline
+                         .exists(state_dump_type_key)
+                         .exists(state_blob_key)
+                         .exists(state_updates_dump_type_key)
+                         .exists(state_updates_blob_key)
+                         .execute())
 
         if len(results) != self._KEY_NUMS:
             return False
@@ -429,10 +436,11 @@ class GraphStore(Store):
     async def get(self, session_id: str, ns: str) -> Optional[GraphState]:
         pipeline = self._redis_store.pipeline()
         key_type = build_key_with_namespace(session_id, WORKFLOW_NAMESPACE_GRAPH, ns, self._DATA_TYPE)
-        await pipeline.get(key_type)
         key_value = build_key_with_namespace(session_id, WORKFLOW_NAMESPACE_GRAPH, ns, self._DATA_VALUE)
-        await pipeline.get(key_value)
-        results = await pipeline.execute()
+        results = await (pipeline
+                         .get(key_type)
+                         .get(key_value)
+                         .execute())
         if len(results) != self._KEY_NUMS:
             logger.error(f"Redis expected {self._KEY_NUMS} keys but got {len(results)} results")
             return None
@@ -472,10 +480,11 @@ class GraphStore(Store):
             dump_type, blob = serialized
             key_type = build_key_with_namespace(session_id, WORKFLOW_NAMESPACE_GRAPH, ns, self._DATA_TYPE)
             pipeline = self._redis_store.pipeline()
-            await pipeline.set(key_type, dump_type, self._ttl_seconds)
             key_value = build_key_with_namespace(session_id, WORKFLOW_NAMESPACE_GRAPH, ns, self._DATA_VALUE)
-            await pipeline.set(key_value, blob, self._ttl_seconds)
-            await pipeline.execute()
+            await (pipeline
+                   .set(key_type, dump_type, self._ttl_seconds)
+                   .set(key_value, blob, self._ttl_seconds)
+                   .execute())
             logger.debug(f"Saved graph state for session {session_id}, ns {ns}")
         except Exception as e:
             logger.error(f"Failed to save graph state for session {session_id}, ns {ns}: {e}")

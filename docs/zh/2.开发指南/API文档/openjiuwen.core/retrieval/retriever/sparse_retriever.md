@@ -42,11 +42,11 @@ retrieve(query: str, top_k: int = 5, score_threshold: Optional[float] = None, mo
 >>> import asyncio
 >>> from openjiuwen.core.retrieval.retriever.sparse_retriever import SparseRetriever
 >>> from openjiuwen.core.retrieval.vector_store.chroma_store import ChromaVectorStore
->>> from openjiuwen.core.retrieval.common.config import VectorStoreConfig
+>>> from openjiuwen.core.retrieval.common.config import VectorStoreConfig, StoreType
 >>> 
 >>> async def run():
 ...     # 创建向量存储
-...     vs_config = VectorStoreConfig(collection_name="test_collection")
+...     vs_config = VectorStoreConfig(store_provider=StoreType.Chroma, collection_name="test_collection")
 ...     vector_store = ChromaVectorStore(config=vs_config, chroma_path="./chroma_db")
 ...     # 创建稀疏检索器
 ...     retriever = SparseRetriever(vector_store=vector_store)

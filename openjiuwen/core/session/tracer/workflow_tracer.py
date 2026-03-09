@@ -177,3 +177,17 @@ class TracerWorkflowUtils:
                                        invoke_id=invoke_id,
                                        parent_node_id=parent_id,
                                        exception=error)
+
+    @staticmethod
+    async def trace_component_interactive_inputs(session, inputs: Optional[dict], send: bool = True):
+        tracer = session.tracer()
+        if tracer is None:
+            return
+        executable_id = session.executable_id()
+        parent_id = session.parent_id()
+        await tracer.trigger(TracerHandlerName.TRACER_WORKFLOW.value, "on_interact",
+                             invoke_id=executable_id,
+                             parent_node_id=parent_id,
+                             inputs=inputs,
+                             need_send=send,
+                             component_metadata=TracerWorkflowUtils._get_component_metadata(session))

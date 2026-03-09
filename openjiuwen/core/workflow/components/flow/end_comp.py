@@ -50,6 +50,9 @@ class End(WorkflowComponent):
 
     def set_mix(self):
         self._mix = True
+        if self._template:
+            self._template.set_data_source_count(2)
+            self._template.reset()
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         workflow_logger.debug(
@@ -184,7 +187,7 @@ class End(WorkflowComponent):
         )
         result = None
         if self._template is not None:
-            result = await self._render(inputs, session.get_env(END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY))
+            result = await self._render(inputs, session.get_env(END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY), session)
         else:
             chunks = []
             for (path, value) in extract_leaf_nodes(inputs):
@@ -223,6 +226,10 @@ class End(WorkflowComponent):
                             component_type_str="End",
                             metadata={"error": str(e)}
                         )
+                        if not self._batch_template.is_rendered():
+                            answer = await self._batch_template.render(inputs, session)
+                            self._batch_template = None
+                            return {"response": answer}
                         return None
                 self._batch_template = None
                 return None
@@ -249,8 +256,14 @@ class TemplateProcessor:
 
         self._lock = asyncio.Lock()
         self._condition = asyncio.Condition()
-        self._count = 0
         self._chunk_index = 0
+
+        self._data_source_count = 1
+        self._count = 0
+
+    def set_data_source_count(self, data_source_count: int):
+        self._data_source_count = data_source_count
+        self._count = 0
 
     def current_position(self) -> int:
         return self._current_position
@@ -287,15 +300,15 @@ class TemplateProcessor:
         if self._current_position != 0:
             self._current_position = 0
         self._chunk_index = 0
+        self._count = 0
 
     async def render_stream(self, inputs: dict, session: Session, timeout: float = 0.2) -> AsyncGenerator:
-        self._count += 1
         try:
             async for frame in self._render_stream(inputs, timeout, session):
                 yield frame
         finally:
-            self._count -= 1
-            if self._count == 0:
+            self._count += 1
+            if self._count == self._data_source_count:
                 self.reset()
 
     async def _render_stream(self, inputs: dict, timeout: float, session: Session) -> AsyncGenerator:
@@ -344,7 +357,7 @@ class TemplateProcessor:
                 value = get_value_by_nested_path(segment, inputs)
                 if value is None:
                     # In mixed mode (concurrent render_stream calls), should wait instead of skipping
-                    if self._count > 1:
+                    if self._count < self._data_source_count:
                         should_wait = True
                         continue
                     # If only one call and no other values exist, skip None values
@@ -381,8 +394,13 @@ class TemplateBatchProcessor:
         self._template = template
         self._inputs = inputs if inputs is not None else {}
         self.condition = asyncio.Condition()
+        self._is_rendered = False
+
+    def is_rendered(self) -> bool:
+        return self._is_rendered
 
     async def render(self, inputs: dict, session: Session) -> str:
+        self._is_rendered = True
         if inputs is None:
             inputs = self._inputs
         else:

@@ -980,6 +980,90 @@ get call times: 3, num: 30, num_list: {'current_call_time': None, 'num': 30}
 ->[end] get num = 40
 ```
 
+### dump_state
+
+```python
+dump_state(self) -> dict
+```
+
+导出当前工作流的完整状态信息，返回一个包含所有状态的字典。
+
+**返回**：
+
+**dict**：包含当前所有状态的字典。
+
+**样例**：
+
+```python
+>>> import asyncio
+>>> 
+>>> from openjiuwen.core.workflow import WorkflowComponent
+>>> from openjiuwen.core.workflow import BranchComponent
+>>> from openjiuwen.core.workflow import Start
+>>> from openjiuwen.core.context_engine import ModelContext
+>>> from openjiuwen.core.workflow import Output, Input
+>>> from openjiuwen.core.workflow.components import Session
+>>> from openjiuwen.core.workflow import create_workflow_session
+>>> from openjiuwen.core.workflow import Workflow
+>>> 
+>>> # 1. 实现自定义组件, 用于全局状态每次进行+10的操作
+>>> class AddTenComponent(WorkflowComponent):
+...     def __init__(self, node_id):
+...         super().__init__()
+...         self._node_id = node_id
+... 
+...     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+...         call_times = session.get_state("call_times")
+... 
+...         # 获取当前全局状态num
+...         num = session.get_global_state("num")
+... 
+...         if not num:
+...             num = 0
+...         if not call_times:
+...             call_times = 0
+...         call_times += 1
+...         num += 10
+...         session.update_global_state({"num": num, "current_call_times": call_times})
+...         # 更新当前全局状态
+...         session.update_state({"call_times": call_times})
+... 
+...         # 打印当前状态
+...         print(f'dump state in {self._node_id}: {session.dump_state()}')
+...         return inputs
+... 
+>>> # 2. 自定义组件，用于工作流结束时读取全局状态num
+>>> class CustomEnd(WorkflowComponent):
+...     def __init__(self, node_id):
+...         super().__init__()
+...         self._node_id = node_id
+... 
+...     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+...         # 打印当前状态
+...         print(f'dump state in {self._node_id}: {session.dump_state()}')
+...         return inputs
+...  
+>>> # 3. 创建工作流，并且执行工作流
+>>> flow = Workflow()
+>>> flow.set_start_comp("start", Start())
+>>> flow.set_end_comp("end", CustomEnd("end"))
+>>> flow.add_workflow_comp("a", AddTenComponent("a"))
+>>> 
+>>> sw = BranchComponent()
+>>> sw.add_branch("${num} <= 30", ["a"], "1")
+>>> sw.add_branch("${num} > 30", ["end"], "2")
+>>> flow.add_workflow_comp("sw", sw)
+>>> 
+>>> flow.add_connection("start", "a")
+>>> flow.add_connection("a", "sw")
+>>> asyncio.run(flow.invoke({"a": 2}, create_workflow_session()))
+dump state in a: {'io_state': {'a': 2}, 'io_state_updates': {}, 'global_state': {'a': 2, 'start': {'output': 'llm'}}, 'global_state_updates': {'a': [{'num': 10, 'current_call_times': 1}]}, 'comp_state': {}, 'comp_state_updates': {'a': [{'a': {'call_times': 1}}]}, 'workflow_state': {}, 'workflow_state_updates': {}, 'trace_state': {}}
+dump state in a: {'io_state': {'a': 2, 'sw': {}}, 'io_state_updates': {}, 'global_state': {'a': 2, 'start': {'output': 'llm'}, 'num': 10, 'current_call_times': 1}, 'global_state_updates': {'a': [{'num': 20, 'current_call_times': 2}]}, 'comp_state': {'a': {'call_times': 1}}, 'comp_state_updates': {'a': [{'a': {'call_times': 2}}]}, 'workflow_state': {}, 'workflow_state_updates': {}, 'trace_state': {}}
+dump state in a: {'io_state': {'a': 2, 'sw': {}}, 'io_state_updates': {}, 'global_state': {'a': 2, 'start': {'output': 'llm'}, 'num': 20, 'current_call_times': 2}, 'global_state_updates': {'a': [{'num': 30, 'current_call_times': 3}]}, 'comp_state': {'a': {'call_times': 2}}, 'comp_state_updates': {'a': [{'a': {'call_times': 3}}]}, 'workflow_state': {}, 'workflow_state_updates': {}, 'trace_state': {}}
+dump state in a: {'io_state': {'a': 2, 'sw': {}}, 'io_state_updates': {}, 'global_state': {'a': 2, 'start': {'output': 'llm'}, 'num': 30, 'current_call_times': 3}, 'global_state_updates': {'a': [{'num': 40, 'current_call_times': 4}]}, 'comp_state': {'a': {'call_times': 3}}, 'comp_state_updates': {'a': [{'a': {'call_times': 4}}]}, 'workflow_state': {}, 'workflow_state_updates': {}, 'trace_state': {}}
+dump state in end: {'io_state': {'a': 2, 'sw': {}}, 'io_state_updates': {}, 'global_state': {'a': 2, 'start': {'output': 'llm'}, 'num': 40, 'current_call_times': 4}, 'global_state_updates': {}, 'comp_state': {'a': {'call_times': 4}}, 'comp_state_updates': {}, 'workflow_state': {}, 'workflow_state_updates': {}, 'trace_state': {}}
+```
+
 ### write_stream
 
 ```python

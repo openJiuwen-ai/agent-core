@@ -7,7 +7,7 @@
 > **参考实现**：基于 `SimpleKnowledgeBase` 的示例项目。该项目实现了一个持续更新的 PEP（Python Enhancement Proposals）知识库，用于为代码的审视与修复提供风格与规范层面的专业建议。详见 [TomatoReviewer](https://gitcode.com/SushiNinja/TomatoReviewer)。
 
 ```python
-SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, retriever: Optional[Retriever] = None, llm_client: Optional[Any] = None, **kwargs: Any)
+SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorStore] = None, embed_model: Optional[Embedding] = None, parser: Optional[Parser] = None, chunker: Optional[Chunker] = None, extractor: Optional[Extractor] = None, index_manager: Optional[Indexer] = None, retriever: Optional[Retriever] = None, llm_client: Optional[BaseModelClient] = None, **kwargs: Any)
 ```
 
 初始化简单知识库。
@@ -22,7 +22,7 @@ SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorSt
 * **extractor**(Extractor, 可选)：提取器实例。默认值：None。
 * **index_manager**(Indexer, 可选)：索引管理器实例。默认值：None。
 * **retriever**(Retriever, 可选)：检索器实例（可选，如果未提供将根据index_type自动创建）。默认值：None。
-* **llm_client**(Any, 可选)：LLM客户端实例。默认值：None。
+* **llm_client**(BaseModelClient, 可选)：LLM客户端实例（智能检索时必需）。默认值：None。
 * **kwargs**(Any)：可变参数，用于传递其他额外的配置参数。
 
 ### async parse_files
@@ -31,11 +31,11 @@ SimpleKnowledgeBase(config: KnowledgeBaseConfig, vector_store: Optional[VectorSt
 parse_files(file_paths: List[str], **kwargs: Any) -> List[Document]
 ```
 
-从文件路径解析文件，返回Document对象列表。
+从文件路径或 URL 解析为 Document 列表。当 `parser` 为 `AutoParser` 时，`file_paths` 可同时包含本地文件路径与 URL。
 
 **参数**：
 
-* **file_paths**(List[str])：文件路径列表。
+* **file_paths**(List[str])：文件路径或 URL 列表。
 * **kwargs**(Any)：可变参数，可包含file_name和file_id参数。
 
 **返回**：
@@ -104,7 +104,7 @@ Added 1 documents
 retrieve(query: str, config: Optional[RetrievalConfig] = None, **kwargs: Any) -> List[RetrievalResult]
 ```
 
-检索相关文档。如果未提供retriever，将根据index_type自动创建相应的检索器。
+检索相关文档。如果未提供retriever，将根据index_type自动创建相应的检索器。当 `config.agentic` 为 True 时，`AgenticRetriever` 会包装底层检索器执行迭代查询重写和结果融合（需要配置 `llm_client`）。
 
 **参数**：
 
@@ -201,10 +201,10 @@ retrieve_multi_kb(kbs: List[KnowledgeBase], query: str, config: Optional[Retriev
 ## func async retrieve_multi_kb_with_source
 
 ```python
-retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[Dict[str, Any]]
+retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Optional[RetrievalConfig] = None, top_k: Optional[int] = None) -> List[MultiKBRetrievalResult]
 ```
 
-在多个知识库上执行检索，返回包含来源信息的结果。结果项包含：text/score/raw_score/raw_score_scaled/kb_ids。
+在多个知识库上执行检索，返回包含来源信息的结果。每个结果项为 `MultiKBRetrievalResult` 对象，包含：text、score、raw_score、raw_score_scaled、kb_ids 和 metadata。
 
 **参数**：
 
@@ -215,5 +215,5 @@ retrieve_multi_kb_with_source(kbs: List[KnowledgeBase], query: str, config: Opti
 
 **返回**：
 
-**List[Dict[str, Any]]**，返回包含文本、得分、来源知识库ID等信息的结果列表。
+**List[MultiKBRetrievalResult]**，返回 `MultiKBRetrievalResult` 对象列表，包含文本、得分、原始得分、来源知识库ID和元数据等信息。
 

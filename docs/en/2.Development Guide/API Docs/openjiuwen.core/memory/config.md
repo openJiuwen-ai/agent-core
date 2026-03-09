@@ -101,7 +101,7 @@ Scope-level memory configuration, used to define independent model and vector pa
 ## class openjiuwen.core.memory.config.config.AgentMemoryConfig
 
 ```
-class openjiuwen.core.memory.config.config.AgentMemoryConfig(mem_variables: list[Param] = [], enable_long_term_mem: bool = True)
+class openjiuwen.core.memory.config.config.AgentMemoryConfig(mem_variables: list[Param] = [], enable_long_term_mem: bool = True, enable_user_profile: bool = True, enable_semantic_memory: bool = True, enable_episodic_memory: bool = True, enable_summary_memory: bool = True)
 ```
 
 Agent-level memory strategy configuration, describing what types of memories an agent wants to extract and manage.
@@ -110,6 +110,10 @@ Agent-level memory strategy configuration, describing what types of memories an 
 
 * **mem_variables** (list[Param], optional): Variable memory configuration list; each `Param` defines a variable name, description, type, whether it's required, etc.; when `LongTermMemory.add_messages` is called, variable values will be extracted from conversations based on these configurations and saved. Default: `[]`.
 * **enable_long_term_mem** (bool, optional): Whether to enable long-term memory generation; when `True`, user profiles (long-term memory) will be extracted from conversations and saved to semantic storage; when `False`, only messages and variable memories are saved, and user profiles are not generated. Default: `True`.
+* **enable_user_profile** (bool, optional): Whether to enable user profile generation and use; when `True`, user personal information (such as name, phone number, etc.) will be extracted from the conversation and saved to the semantic storage, and user profile will be used in semantic retrieval; when `False`, user profile is not generated and used. Default: `True`.
+* **enable_semantic_memory** (bool, optional): Whether to enable semantic memory generation and use; when `True`, semantic memory will be extracted from the conversation and saved to the semantic storage, and semantic memory will be used in semantic retrieval; when `False`, semantic memory is not generated and used. Default: `True`.
+* **enable_episodic_memory** (bool, optional): Whether to enable episodic memory generation and use; when `True`, episodic memory will be extracted from the conversation and saved to the semantic storage, and episodic memory will be used in semantic retrieval; when `False`, episodic memory is not generated and used. Default: `True`.
+* **enable_summary_memory** (bool, optional): Whether to enable user summary memory generation; when `True`, user summaries (such as recent conversation content) will be extracted from conversations and saved to semantic storage; when `False`, user summary memory is not generated. Default: `True`.
 
 > **Note**: The `Param` type is defined in `openjiuwen.core.common.schema.param`, typically containing parameters such as `name / description / type / required`.
 
@@ -136,6 +140,10 @@ Agent-level memory strategy configuration, describing what types of memories an 
 >>>         ),
 >>>     ],
 >>>     enable_long_term_mem=True,
+>>>     enable_user_profile=True,
+>>>     enable_semantic_memory=True,
+>>>     enable_episodic_memory=True,
+>>>     enable_summary_memory=True,
 >>> )
 ```
 
@@ -207,6 +215,10 @@ Agent-level memory strategy configuration, describing what types of memories an 
 >>>         ),
 >>>     ],
 >>>     enable_long_term_mem=True,
+>>>     enable_user_profile=True,
+>>>     enable_semantic_memory=True,
+>>>     enable_episodic_memory=True,
+>>>     enable_summary_memory=True,
 >>> )
 >>>
 ```

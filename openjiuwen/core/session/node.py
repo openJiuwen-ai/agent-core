@@ -30,9 +30,13 @@ class Session:
         return self._description
 
     async def trace(self, data: dict):
+        if self._inner.skip_trace():
+            return
         await TracerWorkflowUtils.trace(self._inner, data)
 
     async def trace_error(self, error: Exception):
+        if self._inner.skip_trace():
+            return
         await TracerWorkflowUtils.trace_error(self._inner, error)
 
     async def interact(self, value):
@@ -42,7 +46,10 @@ class Session:
                               reason="interact when streaming process(transform or collect) is not supported")
         if self._interaction is None:
             self._interaction = WorkflowInteraction(self._inner)
-        return await self._interaction.wait_user_inputs(value)
+        user_inputs = await self._interaction.wait_user_inputs(value)
+        if not self._inner.skip_trace():
+            await TracerWorkflowUtils.trace_component_interactive_inputs(self._inner, user_inputs)
+        return user_inputs
 
     def get_executable_id(self) -> str:
         return self._inner.executable_id()
@@ -61,6 +68,9 @@ class Session:
 
     def get_global_state(self, key: Union[str, list, dict] = None) -> Any:
         return self._inner.state().get_global(key)
+
+    def dump_state(self) -> dict:
+        return self._inner.state().dump()
 
     async def write_stream(self, data: Union[dict, OutputSchema]):
         writer = self._stream_writer()

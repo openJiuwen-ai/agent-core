@@ -244,11 +244,7 @@ class ParserRegistry(metaclass=Singleton):
         content_type = lower_headers.get('content-type', 'text/plain')
         content_encoding = lower_headers.get('content-encoding', '')
 
-        # 1. First apply decompression if needed
-        if content_encoding and response_data:
-            response_data = self._apply_decompression(response_data, content_encoding)
-
-        # 2. Find appropriate parser
+        # Find appropriate parser
         result = None
         parsed = False
         for parser in self._parsers:

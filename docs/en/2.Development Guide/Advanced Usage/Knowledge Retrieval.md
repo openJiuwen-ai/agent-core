@@ -24,6 +24,7 @@ from openjiuwen.core.retrieval.common.config import (
     EmbeddingConfig,
     KnowledgeBaseConfig,
     RetrievalConfig,
+    StoreType,
     VectorStoreConfig,
 )
 from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
@@ -48,6 +49,7 @@ async def create_kb() -> None:
     # Create vector store
     # milvus_uri represents the host address of the Milvus service (default is http://localhost:19530), milvus_token is the key for authentication (default is empty)
     vector_store_config = VectorStoreConfig(
+        store_provider=StoreType.Milvus,
         collection_name=f"kb_{kb_config.kb_id}_chunks",
         distance_metric="cosine",
     )
@@ -98,6 +100,28 @@ async def create_kb() -> None:
     )
 
     return knowledge_base
+```
+
+## Document Parsers (Parser)
+
+The knowledge base supports different parsers for different document sources:
+
+| Parser | Description | Use case |
+|--------|-------------|----------|
+| **AutoFileParser** | Selects a parser by file extension; supports multiple local file formats | Use when processing local files only |
+| **AutoLinkParser** | Selects a parser by URL; supports WeChat articles (mp.weixin.qq.com) and web pages (http(s)) | Use when processing URLs only |
+| **AutoParser** | Single entry: routes URLs to link parsing and local paths to file parsing; supports both files and links | Use when you need both local files and web/WeChat links |
+
+**Formats supported by AutoFileParser**: PDF (.pdf), text/Markdown (.txt / .md / .markdown), Word (.docx), Excel/CSV/TSV (.xlsx / .csv / .tsv), JSON (.json), images (.png / .jpg / .jpeg / .webp / .gif / .jfif). New formats can be registered via the `@register_parser` decorator.
+
+To support both local files and web links, set `parser` to `AutoParser()` and import from `openjiuwen.core.retrieval`. With `AutoParser`, you can pass a single mixed list of local paths and URLs to `parse_files`:
+
+```python
+from openjiuwen.core.retrieval import AutoParser
+
+parser = AutoParser()
+# You can then pass a mixed list to parse_files, e.g.:
+# documents = await knowledge_base.parse_files(["./doc1.pdf", "https://mp.weixin.qq.com/...", "./doc2.txt"])
 ```
 
 # Use Knowledge Base Instance
@@ -155,6 +179,13 @@ async def retrieval(knowledge_base: SimpleKnowledgeBase) -> None:
         print(f"  Chunk ID: {result.chunk_id}")
 ```
 
+## Query Rewriter for multi-turn retrieval
+
+When you are not using agentic retrieval, you can still improve retrieval in multi-turn dialogue by using the standalone **QueryRewriter**. It resolves pronouns, formalizes colloquial expressions, and disambiguates the user query using the conversation context (via the context engine). For each turn, call `await rewriter.rewrite(user_message)` first to get a `standalone_query`, then pass that to `knowledge_base.retrieve(standalone_query, ...)`. The rewriter does not update the context itself; the caller should append user and assistant messages to the context after each turn.
+
+- API: [QueryRewriter](../API%20Docs/openjiuwen.core/retrieval/query_rewriter/query_rewriter.md)
+- Example: For more usage examples, please refer to the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under `examples/retrieval/`, including: `showcase_query_rewriter.py` (Query Rewriter usage in multi-turn retrieval).
+
 ## Delete Documents
 
 Documents in the knowledge base can be deleted through the ```delete_documents``` method.
@@ -171,7 +202,7 @@ async def delete_document_id(knowledge_base: SimpleKnowledgeBase) -> None:
 `openjiuwen.core.retrieval.simple_knowledge_base` also provides helper functions for multi-knowledge base retrieval, suitable for querying multiple `KnowledgeBase` instances in a single request:
 
 - `retrieve_multi_kb(kbs: list[KnowledgeBase], query: str, config: RetrievalConfig | None = None, top_k: int | None = None) -> list[str]`
-- `retrieve_multi_kb_with_source(kbs: list[KnowledgeBase], query: str, config: RetrievalConfig | None = None, top_k: int | None = None) -> list[dict]`
+- `retrieve_multi_kb_with_source(kbs: list[KnowledgeBase], query: str, config: RetrievalConfig | None = None, top_k: int | None = None) -> list[MultiKBRetrievalResult]`
 
 Example:
 
@@ -190,10 +221,10 @@ async def search_across_kbs(kbs: list[SimpleKnowledgeBase]) -> None:
     for i, t in enumerate(texts, 1):
         print(f"{i}. {t}")
 
-    # Return results with source information
+    # Return results with source information (each item is a MultiKBRetrievalResult)
     results = await retrieve_multi_kb_with_source(kbs, query, config=RetrievalConfig(top_k=5))
     for item in results:
-        print(f"text={item['text']}, score={item['score']}, kb_ids={list(item['kb_ids'])}")
+        print(f"text={item.text}, score={item.score}, kb_ids={list(item.kb_ids)}")
 ```
 
 ## Get Statistics
@@ -209,6 +240,74 @@ print(f"Index Info: {stats['index_info']}")
 print(f"Component Status: {stats}")
 ```
 
+## Agentic Retrieval
+
+Both `SimpleKnowledgeBase` and `GraphKnowledgeBase` support **agentic retrieval** — an LLM-powered iterative retrieval strategy that automatically rewrites queries and fuses results across multiple rounds for higher recall and precision.
+
+To enable agentic retrieval, set `agentic=True` in `RetrievalConfig` and provide an `llm_client` when creating the knowledge base:
+
+### Agentic retrieval with SimpleKnowledgeBase
+```python
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+
+# Create an LLM client for agentic retrieval
+llm_client = OpenAIModelClient(
+    api_key="sk-xxxxx",
+    base_url="http://xxxxx",
+    model="<model_name>",
+)
+
+# Pass llm_client when creating the knowledge base
+knowledge_base = SimpleKnowledgeBase(
+    config=kb_config,
+    vector_store=vector_store,
+    embed_model=embed_model,
+    llm_client=llm_client,  # Required for agentic retrieval
+)
+
+# Enable agentic retrieval via RetrievalConfig
+retrieval_config = RetrievalConfig(
+    top_k=5,
+    agentic=True,  # Enable agentic retrieval
+)
+
+results = await knowledge_base.retrieve("complex multi-hop question", config=retrieval_config)
+```
+
+### Agentic retrieval with GraphKnowledgeBase
+
+```python
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+
+# Create an LLM client for agentic retrieval
+llm_client = OpenAIModelClient(
+    api_key="sk-xxxxx",
+    base_url="http://xxxxx",
+    model="<model_name>",
+)
+
+graph_kb = GraphKnowledgeBase(
+    config=kb_config,
+    vector_store=vector_store,
+    embed_model=embed_model,
+    llm_client=llm_client,
+)
+
+# Enable agentic retrieval via RetrievalConfig
+retrieval_config = RetrievalConfig(
+    top_k=5,
+    agentic=True,
+    use_graph=True,
+    graph_expansion=True,
+)
+
+results = await graph_kb.retrieve("complex multi-hop question", config=retrieval_config)
+```
+
+Under the hood, the knowledge base wraps its internal retriever with an `AgenticRetriever`, which performs iterative query rewriting and RRF fusion. When used with `GraphKnowledgeBase`, graph-specific features such as graph expansion and triple linking are automatically enabled unless disabled through RetrievalConfig.
+
+> **Note**: Agentic retrieval requires an `llm_client` to be configured on the knowledge base. The `AgenticRetriever` itself accepts any `Retriever` subclass, so it works with vector, sparse, hybrid, and graph retrievers alike. To create kb_config, vector_store and embed_model, refer the complete knowledge base example below.
+
 # Complete Knowledge Base Usage Code Example
 
 ```python
@@ -218,6 +317,7 @@ from openjiuwen.core.retrieval.common.config import (
     EmbeddingConfig,
     KnowledgeBaseConfig,
     RetrievalConfig,
+    StoreType,
     VectorStoreConfig,
 )
 from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
@@ -242,6 +342,7 @@ async def create_kb() -> None:
     # Create vector store
     # milvus_uri represents the host address of the Milvus service (default is http://localhost:19530), milvus_token is the key for authentication (default is empty)
     vector_store_config = VectorStoreConfig(
+        store_provider=StoreType.Milvus,
         collection_name=f"kb_{kb_config.kb_id}_chunks",
         distance_metric="cosine",
     )

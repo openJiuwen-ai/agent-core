@@ -398,10 +398,10 @@ The `End` component is the built-in end component of the openJiuwen workflow, de
 
 The Large Model (LLM) Component generates output content by invoking large language models based on input prompts. It supports filling user-defined input variables into predefined prompt templates, optionally enabling conversation history, and supports various output formats such as JSON, Markdown, and Text.
 
-Create the configuration information object `LLMCompConfig` for the LLM component, specifying the specific configuration information of the large model invoked by the component (`model`), the prompt template information (`template_content`), the output format information (`response_format`), and the output parameter information (`output_config`). The LLM component also supports whether to enable conversation history (`enable_history`).
+Create the configuration information object `LLMCompConfig` for the LLM component, specifying the client configuration of the large model (`model_client_config`), the model request configuration (`model_config`), the prompt template information (`template_content`), the output format information (`response_format`), and the output parameter information (`output_config`). The LLM component also supports whether to enable conversation history (`enable_history`).
 
 ```python
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.workflow import LLMCompConfig
 
 # 定义模型配置变量（实际使用时需要替换为真实值）
@@ -410,20 +410,23 @@ MODEL_NAME = "gpt-3.5-turbo"  # 示例值
 API_BASE = "https://xxx"  # 示例值
 API_KEY = "your-api-key"  # 示例值
 
-model_config = ModelConfig(
-    model_provider=MODEL_PROVIDER,
-    model_info=BaseModelInfo(
-        model=MODEL_NAME,
-        api_base=API_BASE,
-        api_key=API_KEY,
-        temperature=0.7,
-        top_p=0.9,
-        timeout=30,
-    )
+model_client_config = ModelClientConfig(
+    client_provider=MODEL_PROVIDER,
+    api_key=API_KEY,
+    api_base=API_BASE,
+    timeout=30,
+    verify_ssl=False,
+)
+
+model_config = ModelRequestConfig(
+    model=MODEL_NAME,
+    temperature=0.7,
+    top_p=0.9,
 )
 
 config = LLMCompConfig(
-    model=model_config,
+    model_client_config=model_client_config,
+    model_config=model_config,
     template_content=[
         {"role": "system", "content": "你是一个AI助手。"},
         {"role": "user", "content": "{{query}}"}
@@ -602,10 +605,10 @@ In addition, the framework supports creating tool objects based on local functio
 
 The Intent Detection Component uses Large Language Model (LLM) services to accurately identify and classify the intent of user inputs. Based on the downstream branch routing rules set by the user, it automatically routes tasks to the corresponding workflow components for processing.
 
-Create the configuration object `IntentDetectionCompConfig` for the intent component, specifying the detailed configuration information of the large model invoked by the component (`model`), the prompt information for determining user intent (`user_prompt`), the list of intent category names (`category_name_list`), and whether to rely on conversation history (`enable_history`), etc.
+Create the configuration object `IntentDetectionCompConfig` for the intent component, specifying the client configuration of the large model (`model_client_config`), the model request configuration (`model_config`), the prompt information for determining user intent (`user_prompt`), the list of intent category names (`category_name_list`), and whether to rely on conversation history (`enable_history`), etc.
 
 ```python
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.workflow import IntentDetectionCompConfig, IntentDetectionComponent
 
 # 定义模型配置变量（实际使用时需要替换为真实值）
@@ -614,22 +617,25 @@ MODEL_NAME = "gpt-3.5-turbo"  # 示例值
 API_BASE = "https://xxx"  # 示例值
 API_KEY = "your-api-key"  # 示例值
 
-model_config = ModelConfig(
-    model_provider=MODEL_PROVIDER,
-    model_info=BaseModelInfo(
-        model=MODEL_NAME,
-        api_base=API_BASE,
-        api_key=API_KEY,
-        temperature=0.7,
-        top_p=0.9,
-        timeout=30,
-    )
+model_client_config = ModelClientConfig(
+    client_provider=MODEL_PROVIDER,
+    api_key=API_KEY,
+    api_base=API_BASE,
+    timeout=30,
+    verify_ssl=False,
+)
+
+model_config = ModelRequestConfig(
+    model=MODEL_NAME,
+    temperature=0.7,
+    top_p=0.9,
 )
 
 config = IntentDetectionCompConfig(
     user_prompt="请判断用户意图",
     category_name_list=["查询某地天气"],
-    model=model_config,
+    model_client_config=model_client_config,
+    model_config=model_config,
     example_content=["示例1：今天下雨吗？这是查询天气的意图"],
     enable_history=False
 )
@@ -698,10 +704,10 @@ When a user invokes the workflow, the following results will be output depending
 
 The Questioner Component supports configuring preset questions and actively asking users questions based on these presets to collect feedback. At the same time, it supports configuring a parameter extraction switch. Once enabled, the system will extract specified parameters by combining user feedback and optional conversation history. Provided that the maximum number of follow-up questions is not exceeded, it can continue to ask follow-up questions to guide the user in completing the information. In addition, the component supports flexible integration with custom third-party LLMs and flexible configuration of prompt templates for parameter extraction.
 
-Create the configuration object `QuestionerConfig` for the Questioner Component, specifying the detailed configuration information of the large model invoked by the component (`model`), custom preset questions (`question_content`), whether to extract parameters (`extract_fields_from_response`), parameter information to be extracted (`field_names`), and whether to extract parameters based on external conversation history (`with_chat_history`). Other configuration information will be filled into the prompt template built into the Questioner.
+Create the configuration object `QuestionerConfig` for the Questioner Component, specifying the client configuration of the large model (`model_client_config`), the model request configuration (`model_config`), custom preset questions (`question_content`), whether to extract parameters (`extract_fields_from_response`), parameter information to be extracted (`field_names`), and whether to extract parameters based on external conversation history (`with_chat_history`). Other configuration information will be filled into the prompt template built into the Questioner.
 
 ```python
-from openjiuwen.core.foundation.llm import ModelConfig, BaseModelInfo
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.workflow import FieldInfo, QuestionerConfig, QuestionerComponent
 
 # 定义模型配置变量（实际使用时需要替换为真实值）
@@ -710,16 +716,18 @@ MODEL_NAME = "gpt-3.5-turbo"  # 示例值
 API_BASE = "https://xxx"  # 示例值
 API_KEY = "your-api-key"  # 示例值
 
-model_config = ModelConfig(
-    model_provider=MODEL_PROVIDER,
-    model_info=BaseModelInfo(
-        model=MODEL_NAME,
-        api_base=API_BASE,
-        api_key=API_KEY,
-        temperature=0.7,
-        top_p=0.9,
-        timeout=30,
-    )
+model_client_config = ModelClientConfig(
+    client_provider=MODEL_PROVIDER,
+    api_key=API_KEY,
+    api_base=API_BASE,
+    timeout=30,
+    verify_ssl=False,
+)
+
+model_config = ModelRequestConfig(
+    model=MODEL_NAME,
+    temperature=0.7,
+    top_p=0.9,
 )
 # FieldInfo描述了需要提取的参数信息，包含参数名field_name、参数描述信息description、是否必须提取required以及参数默认值default_value。如果是必选参数且没有默认值，就必须提取该待提取参数的值。
 key_fields = [
@@ -736,7 +744,8 @@ key_fields = [
     ),
 ]
 config = QuestionerConfig(
-    model=model_config,
+    model_client_config=model_client_config,
+    model_config=model_config,
     question_content="",
     extract_fields_from_response=True,
     field_names=key_fields,
@@ -856,6 +865,7 @@ When a user invokes the workflow, the following results will be output depending
   ```
 
 - When the user input is irrelevant information (e.g., `"Help me book a flight"`), and the parameter extraction is incomplete, if the maximum number of follow-up rounds has been reached, an exception is thrown.
+- The current agent does not support this type of exception scenario when invoking workflows that include question components. Please take note during invocation.
   
   ```text
   错误码为101074
@@ -1572,4 +1582,117 @@ The result obtained after execution:
 
 ```
 main workflow with sub workflow run result: result={'output': {'result': 'hello'}} state=<WorkflowExecutionState.COMPLETED: 'COMPLETED'>
+```
+
+# KnowledgeRetrieval Component
+
+The `KnowledgeRetrievalComponent` is a preset component that integrates knowledge retrieval into openJiuwen workflows. It wraps `KnowledgeBase` and supports multiple vector store backends (Milvus, ChromaDB, PGVector) via the `store_provider` field in `VectorStoreConfig`.
+
+## Configuration
+
+Create a `KnowledgeRetrievalCompConfig` to configure the component. The key fields are:
+
+- `kb_configs`: List of `KnowledgeBaseConfig` defining which knowledge bases to retrieve from.
+- `retrieval_config`: `RetrievalConfig` controlling top_k, score_threshold, etc.
+- `vector_store_config`: `VectorStoreConfig` with `store_provider` set to `StoreType.Milvus`, `StoreType.Chroma`, or `StoreType.PGVector`.
+- `vector_store_additional_config`: Additional keyword arguments for the vector store constructor.
+- `embed_config`: `EmbeddingConfig` for embedding model (required for vector/hybrid index types).
+- `result_separator`: Separator when joining retrieved texts into `context`. Default: `"\n\n"`.
+- `include_metadata`: Set to `True` to include `results_with_metadata` in the output.
+
+## Example: RAG Workflow (Start → KnowledgeRetrieval → LLM → End)
+
+The following example builds a simple Retrieval-Augmented Generation pipeline using the `KnowledgeRetrievalComponent`:
+
+```python
+from openjiuwen.core.retrieval.common.config import (
+    EmbeddingConfig,
+    KnowledgeBaseConfig,
+    RetrievalConfig,
+    StoreType,
+    VectorStoreConfig,
+)
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.workflow import (
+    End,
+    KnowledgeRetrievalCompConfig,
+    KnowledgeRetrievalComponent,
+    LLMCompConfig,
+    LLMComponent,
+    Start,
+    Workflow,
+    WorkflowCard,
+    create_workflow_session,
+)
+
+# 1. Build workflow
+flow = Workflow(card=WorkflowCard(name="RAG Workflow", id="rag_wf", version="1.0"))
+
+start = Start()
+
+# 2. Configure KnowledgeRetrieval component
+kr_config = KnowledgeRetrievalCompConfig(
+    kb_configs=[
+        KnowledgeBaseConfig(kb_id="demo_kb", index_type="vector"),
+    ],
+    retrieval_config=RetrievalConfig(top_k=3, score_threshold=0.0),
+    vector_store_config=VectorStoreConfig(
+        store_provider=StoreType.Chroma,
+        collection_name="demo_collection",
+        distance_metric="cosine",
+    ),
+    vector_store_additional_config={"chroma_path": "/tmp/demo_chroma"},
+    embed_config=EmbeddingConfig(
+        model_name="text-embedding-v3",
+        base_url="https://api.example.com/embeddings",
+        api_key="your-api-key",
+    ),
+    result_separator="\n\n",
+    include_metadata=False,
+)
+kr_component = KnowledgeRetrievalComponent(component_config=kr_config)
+
+# 3. Configure LLM component
+llm_config = LLMCompConfig(
+    model_client_config=ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="your-api-key",
+        api_base="https://api.example.com/v1",
+        timeout=120,
+        verify_ssl=False,
+    ),
+    model_config=ModelRequestConfig(model="gpt-4", temperature=0.7),
+    template_content=[
+        {"role": "system", "content": "Answer based on the provided context."},
+        {"role": "user", "content": "Context:\n{{context}}\n\nQuestion: {{query}}\n\nAnswer:"},
+    ],
+    response_format={"type": "text"},
+    output_config={"answer": {"type": "string", "required": True}},
+)
+llm_component = LLMComponent(component_config=llm_config)
+
+end = End({"responseTemplate": "{{answer}}"})
+
+# 4. Assemble workflow graph: Start → KnowledgeRetrieval → LLM → End
+flow.set_start_comp("start", start, inputs_schema={"query": "${query}"})
+flow.add_workflow_comp("kr", kr_component, inputs_schema={"query": "${start.query}"})
+flow.add_workflow_comp("llm", llm_component, inputs_schema={
+    "context": "${kr.context}",
+    "query": "${start.query}",
+})
+flow.set_end_comp("end", end, inputs_schema={"answer": "${llm.answer}"})
+
+flow.add_connection("start", "kr")
+flow.add_connection("kr", "llm")
+flow.add_connection("llm", "end")
+
+# 5. Execute
+import asyncio
+
+async def main():
+    session = create_workflow_session(session_id="rag_session")
+    result = await flow.invoke({"query": "What is OpenJiuwen?"}, session)
+    print(result.result)
+
+asyncio.run(main())
 ```

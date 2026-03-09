@@ -3,7 +3,7 @@
 
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, List, Callable, Union
+from typing import Optional, Dict, List, Callable, Union, Any
 from pydantic import ConfigDict, Field, BaseModel
 
 
@@ -62,6 +62,8 @@ class TraceWorkflowSpan(Span):
     stream_inputs: Optional[list] = Field(default=None, alias="streamInputs")
     # for component stream output
     stream_outputs: Optional[list] = Field(default=None, alias="streamOutputs")
+    # for interactive inputs
+    interactive_inputs: Optional[Any] = Field(default=None, alias="interactiveInputs")
 
 
     def append_stream_output(self, chunk):

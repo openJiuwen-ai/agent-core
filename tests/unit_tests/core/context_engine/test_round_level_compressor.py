@@ -38,10 +38,11 @@ class TestRoundLevelCompressor:
     @pytest.mark.asyncio
     async def test_tokens_threshold_triggers_round_compression(self):
         """When token count exceeds threshold and enough rounds exist, rounds are compressed."""
-        mock_user = MagicMock()
-        mock_user.parser_content = {"summary": "User intents: ask A, ask B, ask C."}
-        mock_ai = MagicMock()
-        mock_ai.parser_content = {"summary": "AI responses: answer A, answer B, answer C."}
+        mock = MagicMock()
+        mock.parser_content = {
+            "user_summary": "User intents: ask A, ask B, ask C.",
+            "assistant_summary": "AI responses: answer A, answer B, answer C."
+        }
 
         mock_counter = MagicMock()
         mock_counter.count_messages = MagicMock(return_value=15000)
@@ -50,7 +51,7 @@ class TestRoundLevelCompressor:
             "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock_user, mock_ai])
+            mock_model.invoke = AsyncMock(side_effect=[mock])
             mock_model_cls.return_value = mock_model
 
             config = RoundLevelCompressorConfig(
@@ -84,10 +85,11 @@ class TestRoundLevelCompressor:
     @pytest.mark.asyncio
     async def test_multi_round_add_triggers_compression(self):
         """Multiple add_messages calls: compression triggered when threshold reached."""
-        mock_user = MagicMock()
-        mock_user.parser_content = {"summary": "Compressed user intents."}
-        mock_ai = MagicMock()
-        mock_ai.parser_content = {"summary": "Compressed assistant responses."}
+        mock = MagicMock()
+        mock.parser_content = {
+            "user_summary": "Compressed user intents.",
+            "assistant_summary": "Compressed assistant responses."
+        }
 
         mock_counter = MagicMock()
         mock_counter.count_messages = MagicMock(return_value=12000)
@@ -96,7 +98,7 @@ class TestRoundLevelCompressor:
             "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock_user, mock_ai])
+            mock_model.invoke = AsyncMock(side_effect=[mock])
             mock_model_cls.return_value = mock_model
 
             config = RoundLevelCompressorConfig(
@@ -136,10 +138,11 @@ class TestRoundLevelCompressor:
     @pytest.mark.asyncio
     async def test_keep_last_round_preserves_final_round(self):
         """With keep_last_round=True, the last round is not compressed."""
-        mock_user = MagicMock()
-        mock_user.parser_content = {"summary": "Earlier user intents."}
-        mock_ai = MagicMock()
-        mock_ai.parser_content = {"summary": "Earlier AI responses."}
+        mock = MagicMock()
+        mock.parser_content = {
+            "user_summary": "Earlier user intents.",
+            "assistant_summary": "Earlier AI responses."
+        }
 
         mock_counter = MagicMock()
         mock_counter.count_messages = MagicMock(return_value=15000)
@@ -148,7 +151,7 @@ class TestRoundLevelCompressor:
             "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock_user, mock_ai])
+            mock_model.invoke = AsyncMock(side_effect=[mock])
             mock_model_cls.return_value = mock_model
 
             config = RoundLevelCompressorConfig(
@@ -174,10 +177,11 @@ class TestRoundLevelCompressor:
     @pytest.mark.asyncio
     async def test_reloader_tool_restores_original_messages(self):
         """Reloader tool returns original messages for offloaded content."""
-        mock_user = MagicMock()
-        mock_user.parser_content = {"summary": "Summarized users."}
-        mock_ai = MagicMock()
-        mock_ai.parser_content = {"summary": "Summarized assistants."}
+        mock = MagicMock()
+        mock.parser_content = {
+            "user_summary": "Summarized users.",
+            "assistant_summary": "Summarized assistants."
+        }
 
         mock_counter = MagicMock()
         mock_counter.count_messages = MagicMock(return_value=20000)
@@ -186,7 +190,7 @@ class TestRoundLevelCompressor:
             "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock_user, mock_ai])
+            mock_model.invoke = AsyncMock(side_effect=[mock])
             mock_model_cls.return_value = mock_model
 
             config = RoundLevelCompressorConfig(
@@ -254,10 +258,11 @@ class TestRoundLevelCompressor:
     @pytest.mark.asyncio
     async def test_customized_compression_prompt_used(self):
         """Customized compression prompt is passed to Model.invoke."""
-        mock_user = MagicMock()
-        mock_user.parser_content = {"summary": "Custom user summary."}
-        mock_ai = MagicMock()
-        mock_ai.parser_content = {"summary": "Custom ai summary."}
+        mock = MagicMock()
+        mock.parser_content = {
+            "user_summary": "Custom user summary.",
+            "assistant_summary": "Custom ai summary."
+        }
 
         mock_counter = MagicMock()
         mock_counter.count_messages = MagicMock(return_value=12000)
@@ -268,7 +273,7 @@ class TestRoundLevelCompressor:
             "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock_user, mock_ai])
+            mock_model.invoke = AsyncMock(side_effect=[mock])
             mock_model_cls.return_value = mock_model
 
             config = RoundLevelCompressorConfig(
@@ -286,7 +291,7 @@ class TestRoundLevelCompressor:
             await ctx.add_messages(rounds)
 
             call_args_list = mock_model.invoke.call_args_list
-            assert len(call_args_list) >= 2
-            for call_args in call_args_list[:2]:
+            assert len(call_args_list) >= 1
+            for call_args in call_args_list[:1]:
                 messages_passed = call_args[0][0]
-                assert messages_passed[0].content == custom_prompt
+                assert any(m.content == custom_prompt for m in messages_passed)

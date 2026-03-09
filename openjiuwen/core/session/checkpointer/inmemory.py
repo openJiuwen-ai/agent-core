@@ -15,7 +15,6 @@ from openjiuwen.core.session.checkpointer import Checkpointer
 from openjiuwen.core.session.checkpointer.base import Storage
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.internal.workflow import NodeSession
 from openjiuwen.core.session.session import BaseSession
 
 
@@ -382,6 +381,8 @@ class WorkflowStorage(Storage):
         if inputs.raw_inputs is not None:
             session.state().update_and_commit_workflow_state({INTERACTIVE_INPUT: inputs.raw_inputs})
         else:
+            from openjiuwen.core.session.internal.workflow import NodeSession
+
             for node_id, value in inputs.user_inputs.items():
                 node_session = NodeSession(session, node_id)
                 interactive_input = node_session.state().get(INTERACTIVE_INPUT)

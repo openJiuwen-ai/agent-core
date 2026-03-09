@@ -6,7 +6,7 @@
 import asyncio
 import unittest
 from typing import Dict, Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.controller.legacy.controller import BaseController
@@ -157,6 +157,128 @@ class TestBaseControllerConversationIsolation(unittest.IsolatedAsyncioTestCase):
         self.assertIn("conv_001", controller._subscriptions)
 
         await controller.stop()
+
+
+class TestBaseAgentClearSession(unittest.IsolatedAsyncioTestCase):
+    """Test BaseAgent.clear_session() releases session from Runner"""
+
+    async def asyncSetUp(self):
+        """Setup test fixtures"""
+        self.config = AgentConfig()
+
+    async def test_clear_session_calls_runner_release(self):
+        """Test BaseAgent.clear_session() calls Runner.release with correct session_id"""
+        from openjiuwen.core.single_agent.legacy.agent import BaseAgent
+
+        class ConcreteAgent(BaseAgent):
+            """Concrete implementation for testing"""
+
+            async def invoke(self, inputs: Dict, session=None):
+                return {}
+
+            async def stream(self, inputs: Dict, session=None):
+                async for item in []:
+                    yield item
+
+        agent = ConcreteAgent(agent_config=self.config)
+
+        with patch('openjiuwen.core.runner.Runner') as mock_runner:
+            mock_runner.release = AsyncMock()
+
+            session_id = "test_session_123"
+            await agent.clear_session(session_id=session_id)
+
+            # Verify Runner.release was called with correct session_id
+            mock_runner.release.assert_called_once_with(session_id=session_id)
+
+    async def test_clear_session_default_session_id(self):
+        """Test BaseAgent.clear_session() uses default_session when session_id not provided"""
+        from openjiuwen.core.single_agent.legacy.agent import BaseAgent
+
+        class ConcreteAgent(BaseAgent):
+            """Concrete implementation for testing"""
+
+            async def invoke(self, inputs: Dict, session=None):
+                return {}
+
+            async def stream(self, inputs: Dict, session=None):
+                async for item in []:
+                    yield item
+
+        agent = ConcreteAgent(agent_config=self.config)
+
+        with patch('openjiuwen.core.runner.Runner') as mock_runner:
+            mock_runner.release = AsyncMock()
+
+            # Call without session_id argument
+            await agent.clear_session()
+
+            # Verify Runner.release was called with default session_id
+            mock_runner.release.assert_called_once_with(
+                session_id="default_session"
+            )
+
+
+class TestControllerAgentClearSession(unittest.IsolatedAsyncioTestCase):
+    """Test ControllerAgent.clear_session() calls parent clear_session()"""
+
+    async def asyncSetUp(self):
+        """Setup test fixtures"""
+        self.config = AgentConfig()
+        self.context_engine = MagicMock()
+        self.controller = MagicMock(spec=BaseController)
+        self.controller.controller_type = "test"
+        self.controller.event_source = MagicMock()
+
+    async def test_clear_session_calls_parent_clear_session(self):
+        """Test ControllerAgent.clear_session() calls parent's clear_session()"""
+        from openjiuwen.core.single_agent.legacy.agent import ControllerAgent, BaseAgent
+
+        self.controller.cleanup_conversation = AsyncMock()
+
+        agent = ControllerAgent(agent_config=self.config)
+        agent.controller = self.controller
+
+        mock_parent_clear = AsyncMock()
+
+        with patch.object(BaseAgent, 'clear_session', mock_parent_clear):
+            with patch.object(type(agent), 'context_engine', self.context_engine):
+                session_id = "test_session_123"
+                await agent.clear_session(session_id=session_id)
+
+                # Verify controller's cleanup methods were called
+                self.context_engine.clear_context.assert_called_once_with(
+                    session_id=session_id
+                )
+                self.controller.cleanup_conversation.assert_called_once_with(session_id)
+
+                # Verify parent's clear_session was called
+                mock_parent_clear.assert_called_once_with(session_id=session_id)
+
+    async def test_clear_session_default_session_id(self):
+        """Test clear_session uses default_session when session_id not provided"""
+        from openjiuwen.core.single_agent.legacy.agent import ControllerAgent, BaseAgent
+
+        self.controller.cleanup_conversation = AsyncMock()
+
+        agent = ControllerAgent(agent_config=self.config)
+        agent.controller = self.controller
+
+        mock_parent_clear = AsyncMock()
+
+        with patch.object(BaseAgent, 'clear_session', mock_parent_clear):
+            with patch.object(type(agent), 'context_engine', self.context_engine):
+                # Call without session_id argument
+                await agent.clear_session()
+
+                # Verify controller's cleanup methods were called with default session_id
+                self.context_engine.clear_context.assert_called_once_with(
+                    session_id="default_session"
+                )
+                self.controller.cleanup_conversation.assert_called_once_with("default_session")
+
+                # Verify parent's clear_session was called with default session_id
+                mock_parent_clear.assert_called_once_with(session_id="default_session")
 
 
 if __name__ == "__main__":

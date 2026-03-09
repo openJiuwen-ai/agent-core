@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.common.config import KnowledgeBaseConfig, RetrievalConfig
+from openjiuwen.core.foundation.llm import BaseModelClient
+from openjiuwen.core.retrieval.common.config import IndexConfig, KnowledgeBaseConfig, RetrievalConfig
 from openjiuwen.core.retrieval.common.document import Document, TextChunk
 from openjiuwen.core.retrieval.common.retrieval_result import RetrievalResult
 from openjiuwen.core.retrieval.embedding.base import Embedding
@@ -43,8 +44,7 @@ class GraphKnowledgeBase(KnowledgeBase):
         index_manager: Optional[Indexer] = None,
         chunk_retriever: Optional[Retriever] = None,
         triple_retriever: Optional[Retriever] = None,
-        llm_client: Optional[Any] = None,
-        llm_model_name: Optional[Any] = None,
+        llm_client: Optional[BaseModelClient] = None,
         **kwargs,
     ):
         """
@@ -75,35 +75,7 @@ class GraphKnowledgeBase(KnowledgeBase):
         )
         self.chunk_retriever = chunk_retriever
         self.triple_retriever = triple_retriever
-        self.llm_model_name = llm_model_name
         self.graph_retriever: Optional[GraphRetriever] = None
-
-    async def parse_files(
-        self,
-        file_paths: List[str],
-        **kwargs,
-    ) -> List[Document]:
-        """Parse files from file paths into a list of Document objects"""
-        if not self.parser:
-            raise build_error(StatusCode.RETRIEVAL_KB_PARSER_NOT_FOUND, error_msg="parser is required for parse_files")
-
-        all_documents = []
-        for file_path in file_paths:
-            try:
-                file_name = kwargs.get("file_name", file_path.split("/")[-1])
-                file_id = kwargs.get("file_id", str(uuid.uuid4()))
-
-                documents = await self.parser.parse(
-                    file_path,
-                    file_name=file_name,
-                    file_id=file_id,
-                )
-                all_documents.extend(documents)
-            except Exception as e:
-                logger.error(f"Failed to parse file {file_path}: {e}")
-                continue
-
-        return all_documents
 
     async def add_documents(
         self,
@@ -122,13 +94,15 @@ class GraphKnowledgeBase(KnowledgeBase):
         if self.strict_validation and self.vector_store:
             self.vector_store.check_vector_field()
 
+        for doc in documents:
+            if not (getattr(doc, "id_", None) or "").strip():
+                doc.id_ = str(uuid.uuid4())
+
         # Chunk documents
         chunks = self.chunker.chunk_documents(documents)
         logger.info(f"Chunked {len(documents)} documents into {len(chunks)} chunks")
 
         # Build chunk index
-        from openjiuwen.core.retrieval.common.config import IndexConfig
-
         chunk_index_config = IndexConfig(
             index_name=f"kb_{self.config.kb_id}_chunks",
             index_type=self.config.index_type,
@@ -175,7 +149,7 @@ class GraphKnowledgeBase(KnowledgeBase):
                         metadata={
                             **triple.metadata,
                             "triple": json.dumps([triple.subject, triple.predicate, triple.object]),
-                            "confidence": triple.confidence if triple.confidence else 0,
+                            "confidence": triple.confidence or 0,
                             "chunk_index": i,
                             "chunk_id": triple.metadata.get("chunk_id", ""),
                         },
@@ -211,7 +185,7 @@ class GraphKnowledgeBase(KnowledgeBase):
         retrieval_config = config or RetrievalConfig()
 
         # If using graph retrieval, create or use graph retriever
-        if retrieval_config.use_graph or self.config.use_graph:
+        if retrieval_config.use_graph or (retrieval_config.use_graph is None and self.config.use_graph):
             if not self.graph_retriever:
                 if not self.vector_store:
                     raise build_error(
@@ -232,22 +206,24 @@ class GraphKnowledgeBase(KnowledgeBase):
                 )
                 # Inject index_type from upper layer for GraphRetriever mode validation
                 self.graph_retriever.index_type = self.config.index_type
-                if retrieval_config.agentic:
-                    self.graph_retriever = AgenticRetriever(
-                        graph_retriever=self.graph_retriever,
-                        llm_client=self.llm_client,
-                        llm_model_name=self.llm_model_name,
-                        agent_topk=retrieval_config.top_k,
-                    )
 
-            # Use graph retriever
             mode = "hybrid"
             if self.config.index_type == "vector":
                 mode = "vector"
             elif self.config.index_type == "bm25":
                 mode = "sparse"
 
-            results = await self.graph_retriever.retrieve(
+            # Enable agentic retrieval based if needed based on retrieval config
+            if retrieval_config.agentic:
+                retriever = AgenticRetriever(
+                    retriever=self.graph_retriever,
+                    llm_client=self.llm_client,
+                    **kwargs,
+                )
+            else:
+                retriever = self.graph_retriever
+
+            results = await retriever.retrieve(
                 query=query,
                 top_k=retrieval_config.top_k,
                 score_threshold=retrieval_config.score_threshold,
@@ -268,6 +244,7 @@ class GraphKnowledgeBase(KnowledgeBase):
             parser=self.parser,
             chunker=self.chunker,
             index_manager=self.index_manager,
+            llm_client=self.llm_client,
         )
 
         return await base_kb.retrieve(query, config, **kwargs)

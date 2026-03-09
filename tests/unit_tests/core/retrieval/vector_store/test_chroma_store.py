@@ -23,6 +23,7 @@ from openjiuwen.core.retrieval import (
 def vector_store_config():
     """Create vector store configuration"""
     return VectorStoreConfig(
+        store_provider="chroma",
         collection_name="test_collection",
         distance_metric="cosine",
     )
@@ -112,6 +113,7 @@ class TestChromaVectorStore:
 
         # Store configured with cosine
         vector_store_config = VectorStoreConfig(
+            store_provider="chroma",
             collection_name="test_collection",
             distance_metric="cosine",
         )

@@ -345,6 +345,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
     def _create_mock_session(self):
         """创建 mock session"""
         mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
         return mock_session
 
 
@@ -421,6 +423,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock session
         mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
         mock_tool = MagicMock()
         mock_tool.invoke = AsyncMock(return_value=3)
 
@@ -471,6 +475,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock session
         mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
 
         def get_tool_side_effect(name):
             mock_tool = MagicMock()
@@ -531,6 +537,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         # 创建 mock session
         mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
         mock_tool = MagicMock()
         mock_tool.invoke = AsyncMock(return_value=3)
         mock_get_tool.return_value = MagicMock(return_value=mock_tool)
@@ -654,7 +662,10 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
     def _create_mock_session(self):
         """创建 mock session，模拟真实 Session 的 write_stream/stream_iterator 行为"""
         import asyncio
-        mock_session = AsyncMock()
+        mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.update_state.return_value = None
+        mock_session.pre_run = AsyncMock()
         data_queue = asyncio.Queue()
 
         async def mock_write_stream(data):
@@ -905,6 +916,283 @@ class TestNewReActAgentToolTagIsolation(unittest.IsolatedAsyncioTestCase):
         names_b = [info.name for info in infos_b if info]
         assert "tool_b" in names_b
         assert "tool_a" not in names_b
+
+
+class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
+    """测试 AbilityManager 的 bug 修复和逻辑优化"""
+
+    def setUp(self):
+        """设置测试环境"""
+        from openjiuwen.core.single_agent import AbilityManager
+        self.ability_manager = AbilityManager()
+
+    def test_remove_batch_returns_complete_list(self):
+        """测试批量删除时返回完整列表（修复循环内 return 的 bug）"""
+        # 添加多个工具
+        tool1 = ToolCard(name="tool1", description="工具1")
+        tool2 = ToolCard(name="tool2", description="工具2")
+        tool3 = ToolCard(name="tool3", description="工具3")
+
+        self.ability_manager.add([tool1, tool2, tool3])
+
+        # 批量删除多个工具
+        result = self.ability_manager.remove(["tool1", "tool2"])
+
+        # 验证返回的是完整列表（不是第一次循环就返回）
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].name, "tool1")
+        self.assertEqual(result[1].name, "tool2")
+
+        # 验证剩余工具
+        remaining = self.ability_manager.list()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0].name, "tool3")
+
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_mcp_tool_infos')
+    async def test_list_tool_info_adds_mcp_tools_to_tools_dict(self, mock_get_mcp_tool_infos):
+        """测试 MCP 工具被添加到 _tools（用于映射 tool_name 到完整 ID）"""
+        # pylint: disable=protected-access
+        from openjiuwen.core.foundation.tool import McpServerConfig
+        from openjiuwen.core.foundation.tool.schema import ToolInfo
+
+        # Mock MCP 工具返回
+        mock_mcp_tool = ToolInfo(
+            name="mcp_tool",
+            description="MCP 工具",
+            parameters={}
+        )
+        mock_get_mcp_tool_infos.return_value = [mock_mcp_tool]
+
+        # 添加 MCP 服务器配置
+        mcp_config = McpServerConfig(
+            server_name="test_mcp",
+            server_id="mcp_001",
+            server_path="/test/path"
+        )
+        self.ability_manager.add(mcp_config)
+
+        # 获取 tool_infos
+        tool_infos = await self.ability_manager.list_tool_info()
+
+        # 验证 MCP 工具在返回列表中
+        self.assertEqual(len(tool_infos), 1)
+        self.assertEqual(tool_infos[0].name, "mcp_tool")
+
+        # 验证 MCP 工具被添加到 _tools 字典（用于映射）
+        self.assertEqual(len(self.ability_manager._tools), 1)
+        self.assertIn("mcp_tool", self.ability_manager._tools)
+        # 验证 ID 格式为 {server_id}.{server_name}.{tool_name}
+        self.assertEqual(self.ability_manager._tools["mcp_tool"].id, "mcp_001.test_mcp.mcp_tool")
+
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_mcp_tool_infos')
+    async def test_remove_mcp_server_also_removes_mcp_tools(self, mock_get_mcp_tool_infos):
+        """测试删除 MCP 服务器时同时删除对应的 MCP 工具"""
+        # pylint: disable=protected-access
+        from openjiuwen.core.foundation.tool import McpServerConfig
+        from openjiuwen.core.foundation.tool.schema import ToolInfo
+
+        # Mock MCP 工具返回
+        mock_mcp_tool1 = ToolInfo(name="tool1", description="工具1", parameters={})
+        mock_mcp_tool2 = ToolInfo(name="tool2", description="工具2", parameters={})
+        mock_get_mcp_tool_infos.return_value = [mock_mcp_tool1, mock_mcp_tool2]
+
+        # 添加 MCP 服务器配置
+        mcp_config = McpServerConfig(
+            server_name="test_mcp",
+            server_id="mcp_001",
+            server_path="/test/path"
+        )
+        self.ability_manager.add(mcp_config)
+
+        # 获取 tool_infos（触发 MCP 工具添加到 _tools）
+        await self.ability_manager.list_tool_info()
+
+        # 验证 MCP 工具被添加到 _tools
+        self.assertEqual(len(self.ability_manager._tools), 2)
+        self.assertIn("tool1", self.ability_manager._tools)
+        self.assertIn("tool2", self.ability_manager._tools)
+
+        # 删除 MCP 服务器
+        result = self.ability_manager.remove("test_mcp")
+
+        # 验证 MCP 服务器被删除
+        self.assertIsNotNone(result)
+        self.assertEqual(result.server_name, "test_mcp")
+
+        # 验证对应的 MCP 工具也被删除
+        self.assertEqual(len(self.ability_manager._tools), 0)
+        self.assertNotIn("tool1", self.ability_manager._tools)
+        self.assertNotIn("tool2", self.ability_manager._tools)
+
+
+class TestAbilityManagerAgentCardInputParams(unittest.IsolatedAsyncioTestCase):
+    """测试 AbilityManager 处理 AgentCard input_params 的 bug 修复 (Issue #518)"""
+
+    def setUp(self):
+        """设置测试环境"""
+        from openjiuwen.core.single_agent import AbilityManager
+        self.ability_manager = AbilityManager()
+
+    async def test_agent_card_with_json_schema_dict(self):
+        """测试 AgentCard 的 input_params 为 JSON Schema dict 时能正确转换"""
+        from pydantic import BaseModel
+
+        # 创建一个带有 JSON Schema dict 的 AgentCard
+        agent_card = AgentCard(
+            name="sub_agent",
+            description="子 Agent",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "用户输入信息"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "上下文信息"
+                    }
+                },
+                "required": ["query"]
+            }
+        )
+
+        self.ability_manager.add(agent_card)
+
+        # 获取 tool_infos，应该不会抛出 AttributeError
+        tool_infos = await self.ability_manager.list_tool_info()
+
+        # 验证结果
+        self.assertEqual(len(tool_infos), 1)
+        self.assertEqual(tool_infos[0].name, "sub_agent")
+        self.assertEqual(tool_infos[0].description, "子 Agent")
+
+        # 验证 parameters 正确
+        params = tool_infos[0].parameters
+        self.assertIn("type", params)
+        self.assertEqual(params["type"], "object")
+        self.assertIn("properties", params)
+        self.assertIn("query", params["properties"])
+        self.assertIn("context", params["properties"])
+        self.assertIn("required", params)
+        self.assertIn("query", params["required"])
+
+    async def test_agent_card_with_basemodel_type(self):
+        """测试 AgentCard 的 input_params 为 BaseModel 类型时能正确转换"""
+        from pydantic import BaseModel, Field
+
+        # 定义一个 Pydantic BaseModel
+        class AgentInputParams(BaseModel):
+            query: str = Field(description="用户输入信息")
+            context: str = Field(default="", description="上下文信息")
+
+        # 创建一个带有 BaseModel 类型的 AgentCard
+        agent_card = AgentCard(
+            name="sub_agent",
+            description="子 Agent",
+            input_params=AgentInputParams
+        )
+
+        self.ability_manager.add(agent_card)
+
+        # 获取 tool_infos，应该不会抛出异常
+        tool_infos = await self.ability_manager.list_tool_info()
+
+        # 验证结果
+        self.assertEqual(len(tool_infos), 1)
+        self.assertEqual(tool_infos[0].name, "sub_agent")
+        self.assertEqual(tool_infos[0].description, "子 Agent")
+
+        # 验证 parameters 正确（应该是 model_json_schema() 的结果）
+        params = tool_infos[0].parameters
+        self.assertIn("type", params)
+        self.assertEqual(params["type"], "object")
+        self.assertIn("properties", params)
+        self.assertIn("query", params["properties"])
+        self.assertIn("context", params["properties"])
+
+    async def test_agent_card_with_none_input_params(self):
+        """测试 AgentCard 的 input_params 为 None 时能正确处理"""
+        # 创建一个 input_params 为 None 的 AgentCard
+        agent_card = AgentCard(
+            name="sub_agent",
+            description="子 Agent",
+            input_params=None
+        )
+
+        self.ability_manager.add(agent_card)
+
+        # 获取 tool_infos，应该不会抛出异常
+        tool_infos = await self.ability_manager.list_tool_info()
+
+        # 验证结果
+        self.assertEqual(len(tool_infos), 1)
+        self.assertEqual(tool_infos[0].name, "sub_agent")
+        self.assertEqual(tool_infos[0].description, "子 Agent")
+
+        # 验证 parameters 为默认 JSON Schema
+        params = tool_infos[0].parameters
+        expected_params = {"type": "object", "properties": {}, "required": []}
+        self.assertEqual(params, expected_params)
+
+    async def test_multiple_agent_cards_with_different_input_params(self):
+        """测试多个 AgentCard 混合不同类型的 input_params"""
+        from pydantic import BaseModel, Field
+
+        # 定义一个 Pydantic BaseModel
+        class AgentInputParams(BaseModel):
+            query: str = Field(description="查询内容")
+
+        # 创建三个不同类型的 AgentCard
+        agent_card1 = AgentCard(
+            name="agent1",
+            description="Agent with JSON Schema",
+            input_params={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "查询"}
+                },
+                "required": ["query"]
+            }
+        )
+
+        agent_card2 = AgentCard(
+            name="agent2",
+            description="Agent with BaseModel",
+            input_params=AgentInputParams
+        )
+
+        agent_card3 = AgentCard(
+            name="agent3",
+            description="Agent with None",
+            input_params=None
+        )
+
+        self.ability_manager.add([agent_card1, agent_card2, agent_card3])
+
+        # 获取 tool_infos，应该不会抛出异常
+        tool_infos = await self.ability_manager.list_tool_info()
+
+        # 验证结果
+        self.assertEqual(len(tool_infos), 3)
+
+        # 验证每个 Agent 都被正确转换
+        names = [t.name for t in tool_infos]
+        self.assertIn("agent1", names)
+        self.assertIn("agent2", names)
+        self.assertIn("agent3", names)
+
+        # 验证各自的 parameters
+        for tool_info in tool_infos:
+            if tool_info.name == "agent1":
+                self.assertIn("properties", tool_info.parameters)
+                self.assertIn("query", tool_info.parameters["properties"])
+            elif tool_info.name == "agent2":
+                self.assertIn("properties", tool_info.parameters)
+                self.assertIn("query", tool_info.parameters["properties"])
+            elif tool_info.name == "agent3":
+                expected_params = {"type": "object", "properties": {}, "required": []}
+                self.assertEqual(tool_info.parameters, expected_params)
 
 
 if __name__ == "__main__":
