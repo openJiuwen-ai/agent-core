@@ -6,89 +6,81 @@ import pytest
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
-
-@pytest.mark.asyncio
-async def test_lazy_init_skill_create_on_configure():
-    with patch.object(ReActAgent, "_init_memory_scope", return_value=None):
-        agent = ReActAgent(card=AgentCard(name="t", description="d"))
-
-    cfg = ReActAgentConfig()
-    cfg.prompt_template = [{"role": "system", "content": "hi"}]
-    cfg.sys_operation_id = "sys_1"
-
-    mock_skill_util = MagicMock()
-    mock_skill_util.has_skill.return_value = False
-
-    with patch("openjiuwen.core.single_agent.skills.SkillUtil", return_value=mock_skill_util) as mock_ctor:
-        agent.configure(cfg)
-        mock_ctor.assert_called_once_with("sys_1")
-        agent.lazy_init_skill()
-        mock_ctor.assert_called_once_with("sys_1")
+SKILL_UTIL_PATH = "openjiuwen.core.single_agent.skills.SkillUtil"
 
 
-@pytest.mark.asyncio
-async def test_lazy_skill_init_update_when_exists_and_sysop_changed():
-    with patch.object(ReActAgent, "_init_memory_scope", return_value=None):
-        agent = ReActAgent(card=AgentCard(name="t", description="d"))
+class TestSkillLazyInit:
+    """Tests for BaseAgent.lazy_init_skill / register_skill lifecycle."""
 
-    existing_skill_util = MagicMock()
-    existing_skill_util.set_sys_operation_id = MagicMock()
-    existing_skill_util.has_skill.return_value = False
+    @staticmethod
+    def _make_agent() -> ReActAgent:
+        return ReActAgent(card=AgentCard(name="t", description="d"))
 
-    with patch("openjiuwen.core.single_agent.skills.SkillUtil", return_value=existing_skill_util) as mock_ctor:
-        old_cfg = ReActAgentConfig()
-        old_cfg.prompt_template = [{"role": "system", "content": "hi"}]
-        old_cfg.sys_operation_id = "sys_old"
-        agent.configure(old_cfg)
+    @staticmethod
+    def _make_config(sys_operation_id: str = None) -> ReActAgentConfig:
+        cfg = ReActAgentConfig()
+        cfg.prompt_template = [{"role": "system", "content": "hi"}]
+        cfg.sys_operation_id = sys_operation_id
+        return cfg
 
-        mock_ctor.assert_called_once_with("sys_old")
+    @pytest.mark.asyncio
+    async def test_configure_creates_skill_util_and_lazy_init_is_idempotent(self):
+        """configure() creates SkillUtil; a second lazy_init_skill() does not recreate it."""
+        agent = self._make_agent()
+        mock_skill_util = MagicMock()
+        mock_skill_util.has_skill.return_value = False
 
-        existing_skill_util.set_sys_operation_id.reset_mock()
+        with patch(SKILL_UTIL_PATH, return_value=mock_skill_util) as mock_ctor:
+            agent.configure(self._make_config("sys_1"))
+            mock_ctor.assert_called_once_with("sys_1")
 
-        new_cfg = ReActAgentConfig()
-        new_cfg.prompt_template = [{"role": "system", "content": "hi"}]
-        new_cfg.sys_operation_id = "sys_new"
-        agent.configure(new_cfg)
+            agent.lazy_init_skill()
+            mock_ctor.assert_called_once_with("sys_1")
 
-        existing_skill_util.set_sys_operation_id.assert_called_once_with("sys_new")
-        mock_ctor.assert_called_once_with("sys_old")
+    @pytest.mark.asyncio
+    async def test_reconfigure_updates_sys_operation_id_without_recreating(self):
+        """Re-configuring with a new sys_operation_id updates the existing SkillUtil."""
+        agent = self._make_agent()
+        mock_skill_util = MagicMock()
+        mock_skill_util.has_skill.return_value = False
 
+        with patch(SKILL_UTIL_PATH, return_value=mock_skill_util) as mock_ctor:
+            agent.configure(self._make_config("sys_old"))
+            mock_ctor.assert_called_once_with("sys_old")
 
-@pytest.mark.asyncio
-async def test_register_skill_fails_when_sys_operation_id_missing():
-    with patch.object(ReActAgent, "_init_memory_scope", return_value=None):
-        agent = ReActAgent(card=AgentCard(name="t", description="d"))
+            mock_skill_util.set_sys_operation_id.reset_mock()
 
-    cfg = ReActAgentConfig()
-    cfg.prompt_template = [{"role": "system", "content": "hi"}]
-    cfg.sys_operation_id = None
-    agent.configure(cfg)
+            agent.configure(self._make_config("sys_new"))
+            mock_skill_util.set_sys_operation_id.assert_called_once_with("sys_new")
+            # SkillUtil constructor was NOT called again
+            mock_ctor.assert_called_once_with("sys_old")
 
-    agent.lazy_init_skill = MagicMock(wraps=agent.lazy_init_skill)
+    @pytest.mark.asyncio
+    async def test_register_skill_raises_when_sys_operation_id_missing(self):
+        """register_skill() raises AttributeError when sys_operation_id is None."""
+        agent = self._make_agent()
+        agent.configure(self._make_config(sys_operation_id=None))
 
-    with pytest.raises(AttributeError):
-        await agent.register_skill("/tmp/skills")
+        agent.lazy_init_skill = MagicMock(wraps=agent.lazy_init_skill)
 
-    agent.lazy_init_skill.assert_called_once()
+        with pytest.raises(AttributeError):
+            await agent.register_skill("/tmp/skills")
 
+        agent.lazy_init_skill.assert_called_once()
 
-@pytest.mark.asyncio
-async def test_register_skill_triggers_lazy_init_and_calls_register_skills():
-    with patch.object(ReActAgent, "_init_memory_scope", return_value=None):
-        agent = ReActAgent(card=AgentCard(name="t", description="d"))
+    @pytest.mark.asyncio
+    async def test_register_skill_triggers_lazy_init_and_delegates(self):
+        """register_skill() lazy-inits SkillUtil then delegates to register_skills()."""
+        agent = self._make_agent()
 
-    cfg = ReActAgentConfig()
-    cfg.prompt_template = [{"role": "system", "content": "hi"}]
-    cfg.sys_operation_id = "sys_2"
+        with patch.object(agent, "lazy_init_skill", return_value=None):
+            agent.configure(self._make_config("sys_2"))
 
-    with patch.object(agent, "lazy_init_skill", return_value=None):
-        agent.configure(cfg)
+        mock_skill_util = MagicMock()
+        mock_skill_util.register_skills = AsyncMock()
 
-    mock_skill_util = MagicMock()
-    mock_skill_util.register_skills = AsyncMock()
+        with patch(SKILL_UTIL_PATH, return_value=mock_skill_util) as mock_ctor:
+            await agent.register_skill("/tmp/skills")
 
-    with patch("openjiuwen.core.single_agent.skills.SkillUtil", return_value=mock_skill_util) as mock_ctor:
-        await agent.register_skill("/tmp/skills")
-
-        mock_ctor.assert_called_once_with("sys_2")
-        mock_skill_util.register_skills.assert_awaited_once_with("/tmp/skills", agent)
+            mock_ctor.assert_called_once_with("sys_2")
+            mock_skill_util.register_skills.assert_awaited_once_with("/tmp/skills", agent)

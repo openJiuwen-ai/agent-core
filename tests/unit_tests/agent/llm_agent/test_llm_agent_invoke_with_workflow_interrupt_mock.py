@@ -321,9 +321,7 @@ class TestReActAgentWithWorkflowInterruptMock(unittest.IsolatedAsyncioTestCase):
                     react_agent, 
                     {"conversation_id": "12345", "query": interactive_input}
                 )
-                
-                print(f"LLMAgent di er ci shu chu jie guo: {result}")
-                
+
                 # 验证第二次调用返回最终答案
                 self.assertIsInstance(result, dict, "第二次调用应该返回字典")
                 self.assertEqual(result['result_type'], 'answer', "应该返回 answer 类型")

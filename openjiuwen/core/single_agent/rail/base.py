@@ -30,6 +30,7 @@ from typing import (
 )
 
 from openjiuwen.core.context_engine import ModelContext
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.agent import Session
 
 if TYPE_CHECKING:
@@ -51,7 +52,7 @@ class InvokeInputs:
         conversation_id: Optional conversation/session ID
         result: Agent invoke result (filled after invoke)
     """
-    query: str
+    query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
 

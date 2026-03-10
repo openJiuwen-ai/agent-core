@@ -14,6 +14,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from pydantic import Field, BaseModel
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
@@ -32,7 +33,6 @@ from openjiuwen.core.foundation.llm import (
     SystemMessage
 )
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
@@ -282,12 +282,14 @@ class InterruptionState:
     interrupted_workflows: per-workflow entries keyed by workflow_id
     pending_workflow_id: workflow_id currently waiting for user feedback
     pending_component_id: component_id currently waiting for user feedback
+    original_query: the original user query from the first invoke (before any resume)
     """
     ai_message: AssistantMessage
     iteration: int
     interrupted_workflows: Dict[str, WorkflowInterruptEntry]
     pending_workflow_id: str
     pending_component_id: str
+    original_query: str = ""
 
 
 class ReActAgent(BaseAgent):
@@ -320,19 +322,8 @@ class ReActAgent(BaseAgent):
             self._config.context_engine_config
         )
         self._llm = None
-        self._init_memory_scope()
         super().__init__(card)
         self._ability_manager.set_context_engine(self.context_engine)
-
-    def _init_memory_scope(self) -> None:
-        """Initialize memory scope (subclass can override configuration)"""
-        if self._config.mem_scope_id:
-            asyncio.run(
-                LongTermMemory().set_scope_config(
-                    self._config.mem_scope_id,
-                    MemoryScopeConfig()
-                )
-            )
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -366,10 +357,6 @@ class ReActAgent(BaseAgent):
                 config.context_engine_config
             )
             self._ability_manager.set_context_engine(self.context_engine)
-        # Update memory_scope if memory scope ID changed
-        if old_config.mem_scope_id != config.mem_scope_id:
-            self._init_memory_scope()
-
         # Reset sys operation id if changed
         if old_config.sys_operation_id != config.sys_operation_id:
             self.lazy_init_skill()
@@ -567,6 +554,7 @@ class ReActAgent(BaseAgent):
             tool_calls: list,
             ai_message: AssistantMessage,
             iteration: int,
+            original_query: str = "",
     ) -> Optional[InterruptionState]:
         """Check tool results for interruption and build InterruptionState if found.
 
@@ -602,6 +590,7 @@ class ReActAgent(BaseAgent):
             interrupted_workflows=interrupted,
             pending_workflow_id=first_workflow_id,
             pending_component_id=first_component_id,
+            original_query=original_query,
         )
 
     def _save_interruption_state(self, state: InterruptionState, session) -> None:
@@ -704,7 +693,10 @@ class ReActAgent(BaseAgent):
             all_tool_calls.append(tc_copy)
 
         results = await self._execute_tool_call(ctx, all_tool_calls, session, context)
-        interrupt = self._after_execute_tool_call(results, all_tool_calls, resume_ai_message, resume_iteration)
+        interrupt = self._after_execute_tool_call(
+            results, all_tool_calls, resume_ai_message, resume_iteration,
+            original_query=interruption_state.original_query,
+        )
         if interrupt:
             return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
 
@@ -739,6 +731,31 @@ class ReActAgent(BaseAgent):
                 interactive_input.update(comp_id, str(user_query))
             return interactive_input
         return InteractiveInput(raw_inputs=str(user_query))
+
+    @staticmethod
+    def _render_system_messages(system_messages: List, inputs: Any) -> None:
+        """Render inputs fields into system message placeholders in-place.
+
+        Aligns with MessageHandlerUtils.format_llm_inputs: InteractiveInput skips rendering.
+        Only str-valued fields from inputs dict are used as render variables.
+        """
+        from openjiuwen.core.session import InteractiveInput
+        from openjiuwen.core.foundation.prompt import PromptTemplate
+        if isinstance(inputs, InteractiveInput):
+            return
+        if isinstance(inputs, dict):
+            render_fields = {k: v for k, v in inputs.items() if isinstance(v, str)}
+        else:
+            render_fields = {"query": str(inputs)}
+        if not render_fields:
+            return
+        for msg in system_messages:
+            if not isinstance(msg.content, str):
+                continue
+            try:
+                msg.content = PromptTemplate(content=msg.content).format(render_fields).content
+            except BaseError as e:
+                logger.warning("Failed to render system message placeholder: %s", e)
 
     async def _warn_missing_skill_read_file_tool(self) -> None:
         """
@@ -825,6 +842,8 @@ class ReActAgent(BaseAgent):
 
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+        if isinstance(inputs, dict):
+            ctx.extra["user_id"] = inputs.get("user_id", "")
 
         async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
             user_input = ctx.inputs.query
@@ -834,6 +853,8 @@ class ReActAgent(BaseAgent):
             interruption_state = self._load_interruption_state(session)
             if interruption_state is not None:
                 self._clear_interruption_state(session)
+                # Restore original query so MemoryRail.after_invoke writes the right UserMessage
+                ctx.extra["_original_query"] = interruption_state.original_query
 
             context = await self._init_context(session)
             ctx.context = context
@@ -843,6 +864,8 @@ class ReActAgent(BaseAgent):
                 for msg in self._config.prompt_template
                 if msg.get("role") == "system"
             ]
+            self._render_system_messages(system_messages, inputs)
+
             if system_messages and self._skill_util is not None and self._skill_util.has_skill():
                 await self._warn_missing_skill_read_file_tool()
                 skill_prompt = self._skill_util.get_skill_prompt()
@@ -857,32 +880,40 @@ class ReActAgent(BaseAgent):
                     interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                 )
                 if resume_result is not None:
-                    return resume_result
-                start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
+                    pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
+                else:
+                    start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
 
-            for iteration in range(start_iteration, self._config.max_iterations):
-                logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+            if invoke_inputs.result is None:
+                for iteration in range(start_iteration, self._config.max_iterations):
+                    logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
-                ai_message = await self._call_model(ctx, context, system_messages, tools)
-                await context.add_messages(
-                    AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
-                )
+                    ai_message = await self._call_model(ctx, context, system_messages, tools)
+                    await context.add_messages(
+                        AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
+                    )
 
-                if not ai_message.tool_calls:
+                    if not ai_message.tool_calls:
+                        await self.context_engine.save_contexts(session)
+                        result = {"output": ai_message.content, "result_type": "answer"}
+                        invoke_inputs.result = result
+                        break
+
+                    results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+                    interrupt = self._after_execute_tool_call(
+                        results, ai_message.tool_calls, ai_message, iteration,
+                        original_query=ctx.extra.get("_original_query", ""),
+                    )
+                    if interrupt:
+                        await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+                        break
+                else:
                     await self.context_engine.save_contexts(session)
-                    result = {"output": ai_message.content, "result_type": "answer"}
+                    result = {"output": "Max iterations reached without completion", "result_type": "error"}
                     invoke_inputs.result = result
-                    return result
 
-                results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
-                interrupt = self._after_execute_tool_call(results, ai_message.tool_calls, ai_message, iteration)
-                if interrupt:
-                    return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
-
-            await self.context_engine.save_contexts(session)
-            result = {"output": "Max iterations reached without completion", "result_type": "error"}
-            invoke_inputs.result = result
-            return result
+        # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
+        return ctx.extra.get("invoke_result", invoke_inputs.result)
 
     async def _write_invoke_result_to_stream(
             self,
@@ -934,7 +965,6 @@ class ReActAgent(BaseAgent):
         Yields:
             OutputSchema objects from stream_iterator
         """
-        final_result_holder = {"result": None}
 
         if session is not None:
             await session.pre_run()
@@ -942,12 +972,15 @@ class ReActAgent(BaseAgent):
         async def stream_process():
             try:
                 final_result = await self.invoke(inputs, session)
-                final_result_holder["result"] = final_result
                 if session is not None:
-                    await self._write_invoke_result_to_stream(final_result, session)
+                    if isinstance(final_result, list):
+                        # Already adapted (e.g. by InvokeResultAdapterRail) — write each schema directly
+                        for schema in final_result:
+                            await session.write_stream(schema)
+                    else:
+                        await self._write_invoke_result_to_stream(final_result, session)
             except Exception as e:
                 logger.error(f"ReActAgent stream error: {e}")
-                final_result_holder["result"] = {"output": str(e), "result_type": "error"}
             finally:
                 if session is not None:
                     await self.context_engine.save_contexts(session)
