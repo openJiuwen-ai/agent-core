@@ -81,20 +81,20 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
         fake_mcp_client.streamable_http = fake_streamable_http
 
         with patch.dict(
-            sys.modules,
-            {
-                "mcp": fake_mcp,
-                "mcp.client": fake_mcp_client,
-                "mcp.client.streamable_http": fake_streamable_http,
-            },
-            clear=False,
+                sys.modules,
+                {
+                    "mcp": fake_mcp,
+                    "mcp.client": fake_mcp_client,
+                    "mcp.client.streamable_http": fake_streamable_http,
+                },
+                clear=False,
         ):
-            client = StreamableHttpClient(
-                "http://127.0.0.1:8930/mcp",
-                "test-server",
+            client = StreamableHttpClient(config=McpServerConfig(
+                server_path="http://127.0.0.1:8930/mcp",
+                server_name="test-server",
                 auth_headers={"Authorization": "Bearer token"},
                 auth_query_params={"ak": "demo-ak"},
-            )
+            ))
             connected = await client.connect()
             self.assertTrue(connected)
             self.assertEqual(call_args["server_path"], "http://127.0.0.1:8930/mcp")
@@ -131,15 +131,16 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
         fake_mcp_client.streamable_http = fake_streamable_http
 
         with patch.dict(
-            sys.modules,
-            {
-                "mcp": fake_mcp,
-                "mcp.client": fake_mcp_client,
-                "mcp.client.streamable_http": fake_streamable_http,
-            },
-            clear=False,
+                sys.modules,
+                {
+                    "mcp": fake_mcp,
+                    "mcp.client": fake_mcp_client,
+                    "mcp.client.streamable_http": fake_streamable_http,
+                },
+                clear=False,
         ):
-            client = StreamableHttpClient("http://127.0.0.1:8930/mcp", "test-server")
+            client = StreamableHttpClient(
+                config=McpServerConfig(server_path="http://127.0.0.1:8930/mcp", server_name="test-server"))
             connected = await client.connect(timeout=10.0)
             self.assertFalse(connected)
 

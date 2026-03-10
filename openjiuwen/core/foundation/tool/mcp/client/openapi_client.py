@@ -13,7 +13,7 @@ from jsonschema_path import SchemaPath
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
-from openjiuwen.core.foundation.tool import McpClient
+from openjiuwen.core.foundation.tool import McpClient, McpServerConfig
 from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.common.exception.codes import StatusCode
 
@@ -71,17 +71,18 @@ class OpenApiClient(McpClient):
 
     asyncio.run(main())
     """
+    __client_name__ = "openapi"
 
-    def __init__(self, server_path: str, name: str):
-        super().__init__(str(server_path))
+    def __init__(self, server_config: McpServerConfig):
+        super().__init__(server_config)
         self._director = None
         self._spec = None
         self.openapi_spec = None
-        self._name = name
+        self._name = server_config.server_name
         self._client = httpx.AsyncClient()
         self._tool_manager = ToolManager()
         self._used_names: defaultdict[str, int] = defaultdict(int)
-        self._server_path = server_path
+        self._server_path = server_config.server_path
 
     def _generate_tool_name(self, route: "HTTPRoute") -> str:
         if route.operation_id:

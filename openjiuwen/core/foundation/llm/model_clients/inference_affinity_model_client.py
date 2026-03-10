@@ -28,6 +28,8 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, Mode
 
 class InferenceAffinityModelClient(BaseModelClient):
     """Inference Affinity (vLLM) API client with cache release support"""
+    __client_name__ = "inference_affinity"
+
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)

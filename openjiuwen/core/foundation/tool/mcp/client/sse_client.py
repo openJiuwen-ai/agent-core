@@ -7,28 +7,27 @@ import httpx
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
 
 class SseClient(McpClient):
     """SSE (Server-Sent Events) transport based MCP client"""
+    __client_name__ = "sse"
 
-    def __init__(self, server_path: str, name: str,
-                 auth_headers: Optional[Dict[str, str]] = None,
-                 auth_query_params: Optional[Dict[str, str]] = None):
-        super().__init__(server_path)
-        self._name = name
+    def __init__(self, config: McpServerConfig):
+        super().__init__(config)
+        self._name = config.server_name
         self._client = None
         self._session = None
         self._read = None
         self._write = None
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
-        if auth_headers is not None or auth_query_params is not None:
+        if config.auth_headers is not None or config.auth_query_params is not None:
             self._auth_provider = AuthHeaderAndQueryProvider(
-                auth_headers=auth_headers or {},
-                auth_query_params=auth_query_params or {},
+                auth_headers=config.auth_headers or {},
+                auth_query_params=config.auth_query_params or {},
             )
             logger.info("Using custom header and query authorization for SSE client")
         else:
@@ -37,7 +36,7 @@ class SseClient(McpClient):
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         from mcp import ClientSession
         from mcp.client.sse import sse_client
-        
+
         try:
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
             self._client = sse_client(self._server_path, timeout=actual_timeout, auth=self._auth_provider)

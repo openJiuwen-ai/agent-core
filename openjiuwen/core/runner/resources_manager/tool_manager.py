@@ -8,15 +8,12 @@ from typing import Any, List, Optional
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import runner_logger as logger
+from openjiuwen.core.common.clients.client_registry import client_registry
 from openjiuwen.core.session.tracer import decorate_tool_with_trace
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import McpToolCard, MCPTool, McpServerConfig
 from openjiuwen.core.foundation.tool import (
     McpClient,
-    SseClient,
-    StdioClient,
-    PlaywrightClient,
-    StreamableHttpClient,
 )
 
 
@@ -106,21 +103,13 @@ class ToolMgr:
 
     @staticmethod
     def _create_client(config: McpServerConfig) -> McpClient:
-        if config.client_type == "sse":
-            return SseClient(config.server_path, config.server_name,
-                             config.auth_headers, config.auth_query_params)
-        elif config.client_type == "stdio":
-            return StdioClient(config.server_path, config.server_name, config.params)
-        elif config.client_type == "playwright":
-            return PlaywrightClient(config.server_path, config.server_name)
-        elif config.client_type == "streamable-http":
-            return StreamableHttpClient(config.server_path, config.server_name,
-                                        config.auth_headers, config.auth_query_params)
-        elif config.client_type == "openapi":
-            from openjiuwen.core.foundation.tool.mcp.client import OpenApiClient
-            return OpenApiClient(config.server_path, config.server_name)
-        else:
-            raise ValueError(f"Unsupported MCP client type: {config.client_type}")
+        try:
+            client = client_registry.get_client(name=config.client_type, client_type="mcp", config=config)
+            if client is None or not isinstance(client, McpClient):
+                raise ValueError(f"Unsupported MCP client type: {config.client_type}")
+            return client
+        except Exception as e:
+            raise ValueError(f"Unsupported MCP client type: {config.client_type}") from e
 
     def get_mcp_server_ids(self, server_name: str):
         return self._mcp_server_name_to_ids.get(server_name, [])

@@ -10,6 +10,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
+from openjiuwen.core.foundation.llm.schema.config import ProviderType
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
     AudioGenerationResponse
 from openjiuwen.core.foundation.llm.schema.message import (
@@ -28,6 +29,7 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, Mode
 
 class SiliconFlowModelClient(BaseModelClient):
     """SiliconFlow API client supporting GPT models and OpenAI-compatible services."""
+    __client_name__ = ProviderType.SiliconFlow.name
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)

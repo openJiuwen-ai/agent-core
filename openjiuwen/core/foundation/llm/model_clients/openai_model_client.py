@@ -23,7 +23,7 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
 
 if TYPE_CHECKING:
     import openai
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
+    __client_name__ = ProviderType.OpenAI.name
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
@@ -94,7 +95,7 @@ class OpenAIModelClient(BaseModelClient):
             timeout: Optional timeout override for this specific request
         """
         from openai import AsyncOpenAI
-        
+
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 

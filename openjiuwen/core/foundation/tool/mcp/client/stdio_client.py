@@ -5,22 +5,23 @@ from contextlib import AsyncExitStack
 from typing import Any, List, Optional, Dict
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import McpToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
 
 class StdioClient(McpClient):
     """Stdio transport based MCP client"""
+    __client_name__ = "stdio"
 
-    def __init__(self, server_path: str, name: str, params: Dict = None):
-        super().__init__(server_path)
-        self._name = name
+    def __init__(self, config: McpServerConfig):
+        super().__init__(config)
+        self._name = config.server_name
         self._client = None
         self._session = None
         self._read = None
         self._write = None
-        self._params = params if params else {}
+        self._params = config.params if config.params else {}
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
 

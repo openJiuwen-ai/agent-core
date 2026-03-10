@@ -60,6 +60,7 @@ class MockLLMModel(BaseModelClient):
         responses: List of predefined AIMessage responses.
         call_history: List of messages received in each call.
     """
+    __client_name__ = "mock"
 
     def __init__(self, **kwargs):
         """Initialize MockLLMModel.
