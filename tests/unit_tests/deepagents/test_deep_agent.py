@@ -14,6 +14,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentRail,
 )
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.deep_agent import DeepAgent
@@ -26,6 +27,7 @@ class DummyModel:
     def __init__(self) -> None:
         self.model_client_config = None
         self.model_config = None
+
 
 
 class FakeInnerCallbackManager:
@@ -124,7 +126,7 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert set_result is agent
     assert agent.is_initialized is True
 
-    assert agent.drain_pending_external_events() == []
+    assert agent.loop_coordinator is None
 
 
 @pytest.mark.asyncio
@@ -206,7 +208,7 @@ async def test_invoke_invalid_input_type_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_task_loop_not_implemented() -> None:
+async def test_invoke_task_loop_requires_session() -> None:
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     ).configure(
@@ -214,8 +216,28 @@ async def test_invoke_task_loop_not_implemented() -> None:
     )
     agent.set_react_agent(FakeReactAgent(), initialized=True)
 
-    with pytest.raises(Exception, match="Task-loop invoke path is reserved"):
-        await agent.invoke("loop_input")
+    with pytest.raises(
+        Exception, match="session is required"
+    ):
+        await agent.invoke("no_session")
+
+
+@pytest.mark.asyncio
+async def test_invoke_task_loop_delegates_to_event_queue() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=True)
+    )
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=True)
+
+    session = Session(session_id="s1")
+    result = await agent.invoke("loop_input", session=session)
+
+    assert result["output"] == "echo:loop_input"
+    assert agent.loop_coordinator is not None
+    assert agent.loop_coordinator.current_iteration == 1
 
 
 @pytest.mark.asyncio
@@ -235,32 +257,56 @@ async def test_stream_single_round_branch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_task_loop_not_implemented() -> None:
+async def test_stream_task_loop_yields_result() -> None:
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     ).configure(
         DeepAgentConfig(enable_task_loop=True)
     )
-    agent.set_react_agent(FakeReactAgent(), initialized=True)
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=True)
 
-    with pytest.raises(Exception, match="Task-loop stream path is reserved"):
-        _ = [chunk async for chunk in agent.stream("loop_input")]
+    session = Session(session_id="s1")
+    chunks = [
+        chunk async for chunk
+        in agent.stream("loop_input", session=session)
+    ]
+
+    assert len(chunks) >= 1
+    assert chunks[0]["output"] == "echo:loop_input"
 
 
 @pytest.mark.asyncio
-async def test_follow_up_steer_abort_and_drain_are_noop() -> None:
+async def test_follow_up_steer_noop_without_queue() -> None:
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     ).configure(
         DeepAgentConfig(enable_task_loop=False)
     )
 
+    # No event_queue → these are safe no-ops
     await agent.follow_up("continue", task_id="task_1")
     await agent.steer("change strategy")
-    await agent.abort()
+    assert agent.loop_coordinator is None
 
-    assert agent.drain_pending_external_events() == []
-    assert agent.drain_pending_external_events() == []
+
+@pytest.mark.asyncio
+async def test_abort_sets_coordinator_flag() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=True)
+    )
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=True)
+
+    # Run one loop iteration to create coordinator
+    session = Session(session_id="s1")
+    await agent.invoke("setup", session=session)
+    assert agent.loop_coordinator is not None
+
+    await agent.abort()
+    assert agent.loop_coordinator.is_aborted is True
 
 
 @pytest.mark.asyncio

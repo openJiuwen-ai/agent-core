@@ -20,8 +20,30 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
-from openjiuwen.deepagents.schema.loop_event import (
-    DeepLoopEvent,
+from openjiuwen.core.controller.config import ControllerConfig
+from openjiuwen.core.controller.modules.event_queue import (
+    EventQueue,
+)
+from openjiuwen.core.controller.modules.task_manager import (
+    TaskManager,
+)
+from openjiuwen.core.controller.modules.task_scheduler import (
+    TaskScheduler,
+)
+from openjiuwen.core.context_engine import ContextEngine
+from openjiuwen.core.controller.schema.event import (
+    InputEvent,
+    TaskInteractionEvent,
+)
+from openjiuwen.deepagents.deep_agent_event_handler import (
+    DeepAgentEventHandler,
+)
+from openjiuwen.deepagents.deep_agent_event_executor import (
+    DEEP_TASK_TYPE,
+    build_deep_executor,
+)
+from openjiuwen.deepagents.loop_coordinator import (
+    LoopCoordinator,
 )
 from openjiuwen.deepagents.schema.state import (
     clear_state,
@@ -69,7 +91,9 @@ class DeepAgent(BaseAgent):
         self._deep_config: Optional[DeepAgentConfig] = None
         self._react_agent: Optional[ReActAgent] = None
         self._pending_rails: List[AgentRail] = []
-        self._pending_external_events: List[DeepLoopEvent] = []
+        self._loop_coordinator: Optional[LoopCoordinator] = None
+        self._event_queue: Optional[EventQueue] = None
+        self._event_handler: Optional[DeepAgentEventHandler] = None
         self._initialized = False
         super().__init__(card)
 
@@ -100,11 +124,10 @@ class DeepAgent(BaseAgent):
         """deep_config carried by this agent."""
         return self._deep_config
 
-    def drain_pending_external_events(self) -> List[DeepLoopEvent]:
-        """Return and clear external loop events queued via follow_up/steer/abort."""
-        queued = list(self._pending_external_events)
-        self._pending_external_events.clear()
-        return queued
+    @property
+    def loop_coordinator(self) -> Optional[LoopCoordinator]:
+        """LoopCoordinator for the outer task loop."""
+        return self._loop_coordinator
 
     def _create_react_agent(self) -> ReActAgent:
         """Build the internal ReActAgent from current DeepAgentConfig."""
@@ -251,18 +274,150 @@ class DeepAgent(BaseAgent):
         )
 
     async def _run_task_loop_invoke(
-        self, ctx: AgentCallbackContext, session: Optional[Session]
+        self,
+        ctx: AgentCallbackContext,
+        session: Optional[Session],
     ) -> Dict[str, Any]:
-        """Invoke inner ReActAgent in outer loop skeleton."""
-        _ = ctx
-        _ = session
-        raise build_error(
-            StatusCode.DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED,
-            error_msg=(
-                "Task-loop invoke path is reserved for upcoming "
-                "EventHandler/TaskExecutor-based integration."
+        """Run the outer task loop via TaskScheduler.
+
+        Creates the full Controller infrastructure
+        (TaskManager, TaskScheduler, ContextEngine),
+        registers the DeepAgentEventExecutor, and
+        publishes the initial user query as an
+        InputEvent. The handler waits for the
+        TaskScheduler to complete the task.
+
+        Args:
+            ctx: Callback context with InvokeInputs.
+            session: Current session.
+
+        Returns:
+            Result dict from the last iteration.
+        """
+        modified = ctx.inputs
+        if not isinstance(modified, InvokeInputs):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg=(
+                    "ctx.inputs must be InvokeInputs "
+                    "for task-loop invoke."
+                ),
+            )
+
+        if session is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg=(
+                    "session is required for "
+                    "task-loop mode."
+                ),
+            )
+
+        # Initialize coordinator
+        coordinator = LoopCoordinator(
+            stop_condition=(
+                self._deep_config.stop_condition
+                if self._deep_config
+                else None
             ),
         )
+        self._loop_coordinator = coordinator
+        coordinator.reset()
+
+        # Create full Controller infrastructure
+        config = ControllerConfig()
+        task_manager = TaskManager(config=config)
+        event_queue = EventQueue(config)
+        context_engine = ContextEngine()
+
+        task_scheduler = TaskScheduler(
+            config=config,
+            task_manager=task_manager,
+            context_engine=context_engine,
+            ability_manager=self.ability_manager,
+            event_queue=event_queue,
+            card=self.card,
+        )
+
+        # Register executor
+        task_scheduler.task_executor_registry \
+            .add_task_executor(
+                DEEP_TASK_TYPE,
+                build_deep_executor(self),
+            )
+
+        # Register session
+        session_id = session.get_session_id()
+        task_scheduler.sessions[session_id] = (
+            session
+        )
+
+        # Create handler and inject dependencies
+        handler = DeepAgentEventHandler(self)
+        handler.config = config
+        handler.context_engine = context_engine
+        handler.task_scheduler = task_scheduler
+        handler.task_manager = task_manager
+        handler.ability_manager = (
+            self.ability_manager
+        )
+
+        event_queue.set_event_handler(handler)
+        self._event_queue = event_queue
+        self._event_handler = handler
+
+        agent_id = self.card.id
+
+        event_queue.start()
+        await task_scheduler.start()
+        try:
+            await event_queue.subscribe(
+                agent_id, session_id
+            )
+
+            # Outer task loop: iterate until
+            # coordinator says stop or no tasks remain
+            last_result: Dict[str, Any] = {}
+            while coordinator.should_continue():
+                # Publish user input as InputEvent;
+                # handler resolves the correct
+                # TaskPlan task_id internally
+                event = InputEvent.from_user_input(
+                    modified.query
+                )
+                await event_queue.publish_event(
+                    agent_id, session, event
+                )
+
+                last_result = handler.last_result or {}
+
+                # Check for abort after each iteration
+                if coordinator.is_aborted:
+                    break
+
+                # Check if TaskPlan has more tasks;
+                # if no plan exists, single iteration
+                from openjiuwen.deepagents.schema.state import (
+                    load_state as _load,
+                )
+                state_ctx = AgentCallbackContext(
+                    agent=self, session=session,
+                )
+                st = _load(state_ctx)
+                if st.task_plan is None:
+                    break
+                if st.task_plan.get_next_task() is None:
+                    break
+
+            return last_result
+        finally:
+            await event_queue.unsubscribe(
+                agent_id, session_id
+            )
+            await task_scheduler.stop()
+            await event_queue.stop()
+            self._event_queue = None
+            self._event_handler = None
 
     async def _run_single_round_stream(
         self,
@@ -297,19 +452,135 @@ class DeepAgent(BaseAgent):
         session: Optional[Session],
         stream_modes: Optional[List[StreamMode]],
     ) -> AsyncIterator[Any]:
-        """Stream in outer loop skeleton."""
-        _ = ctx
-        _ = session
+        """Stream in outer task loop via TaskScheduler.
+
+        Same structure as _run_task_loop_invoke but
+        yields intermediate results as chunks.
+
+        Args:
+            ctx: Callback context with InvokeInputs.
+            session: Current session.
+            stream_modes: Stream mode filters.
+
+        Yields:
+            Chunks from the task loop execution.
+        """
         _ = stream_modes
-        if False:
-            yield None
-        raise build_error(
-            StatusCode.DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED,
-            error_msg=(
-                "Task-loop stream path is reserved for upcoming "
-                "EventHandler/TaskExecutor-based integration."
+        modified = ctx.inputs
+        if not isinstance(modified, InvokeInputs):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg=(
+                    "ctx.inputs must be InvokeInputs "
+                    "for task-loop stream."
+                ),
+            )
+
+        if session is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg=(
+                    "session is required for "
+                    "task-loop mode."
+                ),
+            )
+
+        # Initialize coordinator
+        coordinator = LoopCoordinator(
+            stop_condition=(
+                self._deep_config.stop_condition
+                if self._deep_config
+                else None
             ),
         )
+        self._loop_coordinator = coordinator
+        coordinator.reset()
+
+        # Create full Controller infrastructure
+        config = ControllerConfig()
+        task_manager = TaskManager(config=config)
+        event_queue = EventQueue(config)
+        context_engine = ContextEngine()
+
+        task_scheduler = TaskScheduler(
+            config=config,
+            task_manager=task_manager,
+            context_engine=context_engine,
+            ability_manager=self.ability_manager,
+            event_queue=event_queue,
+            card=self.card,
+        )
+
+        # Register executor
+        task_scheduler.task_executor_registry \
+            .add_task_executor(
+                DEEP_TASK_TYPE,
+                build_deep_executor(self),
+            )
+
+        # Register session
+        session_id = session.get_session_id()
+        task_scheduler.sessions[session_id] = (
+            session
+        )
+
+        # Create handler and inject dependencies
+        handler = DeepAgentEventHandler(self)
+        handler.config = config
+        handler.context_engine = context_engine
+        handler.task_scheduler = task_scheduler
+        handler.task_manager = task_manager
+        handler.ability_manager = (
+            self.ability_manager
+        )
+
+        event_queue.set_event_handler(handler)
+        self._event_queue = event_queue
+        self._event_handler = handler
+
+        agent_id = self.card.id
+
+        event_queue.start()
+        await task_scheduler.start()
+        try:
+            await event_queue.subscribe(
+                agent_id, session_id
+            )
+
+            # Outer task loop: iterate and yield
+            while coordinator.should_continue():
+                event = InputEvent.from_user_input(
+                    modified.query
+                )
+                await event_queue.publish_event(
+                    agent_id, session, event
+                )
+
+                result = handler.last_result or {}
+                yield result
+
+                if coordinator.is_aborted:
+                    break
+
+                from openjiuwen.deepagents.schema.state import (
+                    load_state as _load,
+                )
+                state_ctx = AgentCallbackContext(
+                    agent=self, session=session,
+                )
+                st = _load(state_ctx)
+                if st.task_plan is None:
+                    break
+                if st.task_plan.get_next_task() is None:
+                    break
+        finally:
+            await event_queue.unsubscribe(
+                agent_id, session_id
+            )
+            await task_scheduler.stop()
+            await event_queue.stop()
+            self._event_queue = None
+            self._event_handler = None
 
     async def invoke(  # type: ignore[override]
         self,
@@ -381,19 +652,67 @@ class DeepAgent(BaseAgent):
         task_id: Optional[str] = None,
         session: Optional[Session] = None,
     ) -> None:
-        """Placeholder for future external follow-up event enqueue."""
-        _ = msg
-        _ = task_id
-        _ = session
+        """Enqueue a follow-up InputEvent.
 
-    async def steer(self, msg: str, session: Optional[Session] = None) -> None:
-        """Placeholder for future external steer event enqueue."""
-        _ = msg
-        _ = session
+        Args:
+            msg: Follow-up message text.
+            task_id: Optional task to associate.
+            session: Current session.
+        """
+        if self._event_queue is None or session is None:
+            return
+        event = InputEvent.from_user_input(msg)
+        if task_id:
+            event.metadata = {"task_id": task_id}
+        await self._event_queue.publish_event(
+            self.card.id, session, event
+        )
 
-    async def abort(self, session: Optional[Session] = None) -> None:
-        """Placeholder for future external abort request."""
+    async def steer(
+        self,
+        msg: str,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Enqueue a steer TaskInteractionEvent.
+
+        Args:
+            msg: Steering instruction text.
+            session: Current session.
+        """
+        if self._event_queue is None or session is None:
+            return
+        from openjiuwen.core.controller.schema.dataframe import (
+            TextDataFrame,
+        )
+        event = TaskInteractionEvent(
+            interaction=[TextDataFrame(text=msg)]
+        )
+        await self._event_queue.publish_event(
+            self.card.id, session, event
+        )
+
+    async def abort(
+        self,
+        session: Optional[Session] = None,
+    ) -> None:
+        """Request immediate abort of the task loop.
+
+        Sets the abort flag on the coordinator and
+        unblocks the handler's completion wait so the
+        outer loop can exit promptly.
+
+        Args:
+            session: Current session (unused).
+        """
         _ = session
+        if self._loop_coordinator is not None:
+            self._loop_coordinator.request_abort()
+        # Unblock handler waiting on completion
+        if self._event_handler is not None:
+            self._event_handler._completion_result = {
+                "error": "aborted",
+            }
+            self._event_handler._completion_event.set()
 
 
 __all__ = [

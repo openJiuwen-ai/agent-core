@@ -546,17 +546,30 @@ class TaskScheduler:
         task = tasks[0]
         payload_type = chunk.payload.type
         payload_data = chunk.payload.data if chunk.payload else []
+        payload_metadata = chunk.payload.metadata
 
         # Automatically construct event based on payload type
         if payload_type == EventType.TASK_COMPLETION:
-            event = TaskCompletionEvent(task_result=payload_data, task=task)
+            event = TaskCompletionEvent(
+                task_result=payload_data,
+                task=task,
+                metadata=payload_metadata,
+            )
         elif payload_type == EventType.TASK_INTERACTION:
-            event = TaskInteractionEvent(interaction=payload_data, task=task)
+            event = TaskInteractionEvent(
+                interaction=payload_data,
+                task=task,
+                metadata=payload_metadata,
+            )
         elif payload_type == EventType.TASK_FAILED:
             error_msg = payload_data[0].text if payload_data else "Unknown error"
             if task:
                 task.error_message = error_msg
-            event = TaskFailedEvent(error_message=error_msg, task=task)
+            event = TaskFailedEvent(
+                error_message=error_msg,
+                task=task,
+                metadata=payload_metadata,
+            )
         else:
             logger.error(f"Unsupported payload type: {payload_type}")
             return

@@ -12,13 +12,15 @@ from openjiuwen.deepagents.schema.loop_event import (
 from openjiuwen.deepagents.schema.state import (
     DeepAgentState,
     clear_state,
-    enqueue_event,
     load_state,
-    pop_outbox,
     save_state,
 )
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
-from openjiuwen.deepagents.schema.task import TaskPlan
+from openjiuwen.deepagents.schema.task import (
+    TaskItem,
+    TaskPlan,
+    TaskStatus,
+)
 
 __all__ = [
     "DeepAgentConfig",
@@ -28,10 +30,10 @@ __all__ = [
     "create_loop_event",
     "default_event_priority",
     "DeepAgentState",
+    "TaskItem",
     "TaskPlan",
+    "TaskStatus",
     "load_state",
     "save_state",
     "clear_state",
-    "enqueue_event",
-    "pop_outbox",
 ]

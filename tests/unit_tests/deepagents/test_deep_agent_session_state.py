@@ -9,7 +9,10 @@ from openjiuwen.deepagents.schema.state import (
     load_state,
     save_state,
 )
-from openjiuwen.deepagents.schema.task import TaskPlan
+from openjiuwen.deepagents.schema.task import (
+    TaskItem,
+    TaskPlan,
+)
 
 
 class FakeSession:
@@ -35,6 +38,7 @@ class FakeCtx:
 
 
 def test_load_empty_state() -> None:
+    """Loading from empty session yields defaults."""
     session = FakeSession()
     ctx = FakeCtx(session)
     state = load_state(ctx)
@@ -43,15 +47,20 @@ def test_load_empty_state() -> None:
 
 
 def test_save_and_reload_state() -> None:
+    """Round-trip: save → clear → load preserves data."""
     session = FakeSession()
     ctx = FakeCtx(session)
-    state = DeepAgentState(
-        iteration=3,
-        task_plan=TaskPlan({"goal": "demo"}),
+    plan = TaskPlan(
+        goal="demo",
+        tasks=[TaskItem(id="t1", title="first")],
     )
+    state = DeepAgentState(iteration=3, task_plan=plan)
     save_state(ctx, state)
     clear_state(ctx)
 
     loaded = load_state(ctx)
     assert loaded.iteration == 3
-    assert loaded.task_plan == TaskPlan({"goal": "demo"})
+    assert loaded.task_plan is not None
+    assert loaded.task_plan.goal == "demo"
+    assert len(loaded.task_plan.tasks) == 1
+    assert loaded.task_plan.tasks[0].id == "t1"
