@@ -10,6 +10,8 @@ featuring filtering, chaining, metrics, hooks, and circuit breakers.
 
 # Chain
 from openjiuwen.core.runner.callback.chain import CallbackChain
+# Errors
+from openjiuwen.core.runner.callback.errors import AbortError
 # Enumerations
 from openjiuwen.core.runner.callback.enums import (
     ChainAction,
@@ -78,6 +80,9 @@ __all__ = [
     "ConditionalFilter",
     # Chain
     "CallbackChain",
+    # Errors
+    "AbortError",
     # Framework
     "AsyncCallbackFramework",
 ]
+

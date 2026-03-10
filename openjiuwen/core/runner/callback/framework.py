@@ -53,6 +53,7 @@ from openjiuwen.core.runner.callback.filters import (
     CircuitBreakerFilter,
     EventFilter,
 )
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
     CallbackMetrics,
@@ -903,6 +904,34 @@ class AsyncCallbackFramework:
                 if callback_info.once:
                     callback_info.enabled = False
 
+            except AbortError as e:
+                execution_time = time.time() - start_time
+
+                if self.enable_metrics:
+                    key = f"{event}:{callback.__name__}"
+                    self._metrics[key].update(execution_time, is_error=True)
+
+                cb_key = f"{event}:{callback.__name__}"
+                if cb_key in self._circuit_breakers:
+                    await self._circuit_breakers[cb_key].record_failure(event, callback)
+
+                await self._execute_hooks(event, HookType.ERROR, e.cause or e, *args, **kwargs)
+
+                if self.enable_logging:
+                    if e.cause:
+                        self.logger.error(
+                            f"Callback execution aborted: {callback.__name__} - {e.reason} "
+                            f"(caused by {type(e.cause).__name__}: {e.cause})"
+                        )
+                    else:
+                        self.logger.error(
+                            f"Callback execution aborted: {callback.__name__} - {e.reason}"
+                        )
+
+                if e.cause is not None:
+                    raise e.cause
+                raise
+
             except Exception as e:
                 execution_time = time.time() - start_time
 
@@ -1719,3 +1748,4 @@ class AsyncCallbackFramework:
             "history_size": len(self._event_history),
             "metrics_collected": len(self._metrics)
         }
+
