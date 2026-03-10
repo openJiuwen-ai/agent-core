@@ -236,3 +236,22 @@ class RetrievalEvents(EventBase):
     DOCUMENT_RETRIEVED = EventBase.get_event("document_retrieved")
     DOCUMENT_RERANKED = EventBase.get_event("document_reranked")
     EMBEDDING_GENERATED = EventBase.get_event("embedding_generated")
+
+
+class TaskManagerEvents(EventBase):
+    """Standard event names for task manager lifecycle events.
+
+    Attributes:
+        TASK_CREATED: Task was created
+        TASK_RUNNING: Task started running
+        TASK_COMPLETED: Task completed successfully
+        TASK_FAILED: Task failed with an error
+        TASK_CANCELLED: Task was cancelled
+        TASK_TIMEOUT: Task timed out
+    """
+    TASK_CREATED = EventBase.get_event("task_created")
+    TASK_RUNNING = EventBase.get_event("task_running")
+    TASK_COMPLETED = EventBase.get_event("task_completed")
+    TASK_FAILED = EventBase.get_event("task_failed")
+    TASK_CANCELLED = EventBase.get_event("task_cancelled")
+    TASK_TIMEOUT = EventBase.get_event("task_timeout")

@@ -204,6 +204,9 @@ class StatusCode(Enum):
     # =======================================
     RUNNER_TERMINATION_ERROR = (110002, "runner is already terminate")
     RUNNER_RUN_AGENT_ERROR = (110022, "runner run agent '{agent}' failed, error='{reason}'")
+
+
+
     # =======================================
     # 1. distribute execution 110100 - 110199
     # =======================================
@@ -738,7 +741,9 @@ class StatusCode(Enum):
     COMMON_LOG_CONFIG_INVALID = (183003, "common log_config is invalid, reason: {error_msg}")
     COMMON_LOG_EXECUTION_RUNTIME_ERROR = (183004, "common log_execution runtime error, reason: {error_msg}")
 
-    # Foundation - Exception Handling 184000 - 184999
+    #Task Manager 184000 - 184099
+    COMMON_TASK_CONFIG_ERROR = (184000, "common coroutine task config error, reason: {error_msg}")
+    COMMON_TASK_NOT_FOUND = (184001, "common coroutine task not found, reason: {error_msg}")
     # Foundation - Support Mcp Tool 185000 - 185999
 
     # Foundation - Store supporting 186000 - 186100
