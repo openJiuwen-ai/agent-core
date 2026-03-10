@@ -49,11 +49,11 @@ from openjiuwen.core.runner.callback.enums import (
     FilterAction,
     HookType,
 )
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.runner.callback.filters import (
     CircuitBreakerFilter,
     EventFilter,
 )
-from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
     CallbackMetrics,
@@ -61,6 +61,30 @@ from openjiuwen.core.runner.callback.models import (
     ChainResult,
     FilterResult,
 )
+
+
+def _narrow_kwargs(func: Callable, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return only the kwargs that *func* actually accepts.
+
+    If *func* declares **kwargs (VAR_KEYWORD), all kwargs are returned unchanged.
+    Otherwise only the kwargs whose names match declared parameters are kept.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (ValueError, TypeError):
+        return kwargs
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return kwargs  # accepts **kwargs — pass everything through
+
+    def should_accept(p: inspect.Parameter) -> bool:
+        return p.kind not in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        )
+
+    accepted = {name for name, param in sig.parameters.items() if should_accept(param)}
+    return {k: v for k, v in kwargs.items() if k in accepted}
 
 
 class AsyncCallbackFramework:
@@ -268,7 +292,8 @@ class AsyncCallbackFramework:
             self,
             event: str,
             *,
-            pass_args: bool = True
+            pass_args: bool = True,
+            extra_kwargs: Optional[dict[str, Any]] = None,
     ):
         """Decorator to trigger event BEFORE the decorated function is called.
 
@@ -289,11 +314,13 @@ class AsyncCallbackFramework:
         Args:
             event: Event name to trigger
             pass_args: Whether to pass function arguments to callbacks
+            extra_kwargs: Additional keyword arguments merged into every trigger call
 
         Returns:
             Decorator function
         """
-        return create_emit_before_decorator(self, event, pass_args=pass_args)
+        return create_emit_before_decorator(self, event, pass_args=pass_args,
+                                            extra_kwargs=extra_kwargs)
 
     def emit_after(
             self,
@@ -303,6 +330,7 @@ class AsyncCallbackFramework:
             item_key: str = "item",
             pass_args: bool = False,
             stream_mode: Literal["per_item", "once"] = "per_item",
+            extra_kwargs: Optional[dict[str, Any]] = None,
     ):
         """Decorator to trigger event AFTER the decorated function completes.
 
@@ -348,6 +376,7 @@ class AsyncCallbackFramework:
             pass_args: Whether to include original args in event
             stream_mode: For generators - "per_item" triggers per item, "once"
                 triggers after all items are yielded with collected results
+            extra_kwargs: Additional keyword arguments merged into every trigger call
 
         Returns:
             Decorator function
@@ -358,6 +387,7 @@ class AsyncCallbackFramework:
             item_key=item_key,
             pass_args=pass_args,
             stream_mode=stream_mode,
+            extra_kwargs=extra_kwargs,
         )
 
     def emit_around(
@@ -646,8 +676,9 @@ class AsyncCallbackFramework:
             error_handler: Optional[Callable] = None,
             max_retries: int = 0,
             retry_delay: float = 0.0,
-            timeout: Optional[float] = None
-    ) -> None:
+        timeout: Optional[float] = None,
+        callback_type: str = "",
+    ) -> CallbackInfo:
         """Register a callback for an event.
 
         Args:
@@ -663,37 +694,69 @@ class AsyncCallbackFramework:
             max_retries: Maximum retry attempts
             retry_delay: Delay between retries in seconds
             timeout: Execution timeout in seconds
+            callback_type:
         """
         async with self._locks["registration"]:
-            callback_info = CallbackInfo(
-                callback=callback,
+            return self.register_sync(
+                event,
+                callback,
                 priority=priority,
                 once=once,
                 namespace=namespace,
-                tags=tags or set(),
+                tags=tags,
+                filters=filters,
+                rollback_handler=rollback_handler,
+                error_handler=error_handler,
                 max_retries=max_retries,
                 retry_delay=retry_delay,
-                timeout=timeout
+                timeout=timeout,
+                callback_type=callback_type,
             )
 
-            self._callbacks[event].append(callback_info)
-            self._callbacks[event].sort(key=lambda x: x.priority, reverse=True)
+    def unregister_sync(self, event: str, callback: Callable) -> None:
+        """Synchronous unregistration method for internal use.
 
-            if filters:
-                self._callback_filters[callback] = filters
+        Supports unregistering by either the original callback function or
+        the wrapper function returned by the @framework.on decorator.
 
-            # Add to chain if rollback/error handlers provided
-            if rollback_handler or error_handler:
-                if event not in self._chains:
-                    self._chains[event] = CallbackChain(event)
-                self._chains[event].add(
-                    callback_info,
-                    rollback_handler,
-                    error_handler
-                )
+        Args:
+            event: Event name
+            callback: Callback to remove (can be original function or decorator wrapper)
+        """
+        # Check if event exists
+        if event not in self._callbacks:
+            return
+
+        # Find the CallbackInfo to remove
+        callback_to_remove = None
+        for callback_info in self._callbacks[event]:
+            # Check if callback matches the original function
+            if callback_info.callback == callback:
+                callback_to_remove = callback_info.callback
+                break
+            # Check if callback matches the wrapper function
+            elif callback_info.wrapper == callback:
+                callback_to_remove = callback_info.callback
+                break
+            # Check if callback is a wrapper with __wrapped__ pointing to the original
+            elif hasattr(callback, '__wrapped__'):
+                wrapped_func = getattr(callback, '__wrapped__', None)
+                if wrapped_func is not None and callback_info.callback == wrapped_func:
+                    callback_to_remove = callback_info.callback
+                    break
+
+        if callback_to_remove is not None:
+            self._callbacks[event] = [
+                ci for ci in self._callbacks[event] if ci.callback != callback_to_remove
+            ]
+            self._callback_filters.pop(callback_to_remove, None)
+
+            if event in self._chains:
+                self._chains[event].remove(callback_to_remove)
 
             if self.enable_logging:
-                self.logger.info(f"Registered callback: {event} -> {callback.__name__}")
+                callback_name = getattr(callback_to_remove, '__name__', 'unknown')
+                self.logger.info(f"Unregistered callback: {event} -> {callback_name}")
 
     async def unregister(self, event: str, callback: Callable) -> None:
         """Unregister a callback from an event.
@@ -706,40 +769,7 @@ class AsyncCallbackFramework:
             callback: Callback to remove (can be original function or decorator wrapper)
         """
         async with self._locks["registration"]:
-            # Check if event exists
-            if event not in self._callbacks:
-                return
-
-            # Find the CallbackInfo to remove
-            callback_to_remove = None
-            for callback_info in self._callbacks[event]:
-                # Check if callback matches the original function
-                if callback_info.callback == callback:
-                    callback_to_remove = callback_info.callback
-                    break
-                # Check if callback matches the wrapper function
-                elif callback_info.wrapper == callback:
-                    callback_to_remove = callback_info.callback
-                    break
-                # Check if callback is a wrapper with __wrapped__ pointing to the original
-                elif hasattr(callback, '__wrapped__'):
-                    wrapped_func = getattr(callback, '__wrapped__', None)
-                    if wrapped_func is not None and callback_info.callback == wrapped_func:
-                        callback_to_remove = callback_info.callback
-                        break
-
-            if callback_to_remove is not None:
-                self._callbacks[event] = [
-                    ci for ci in self._callbacks[event] if ci.callback != callback_to_remove
-                ]
-                self._callback_filters.pop(callback_to_remove, None)
-
-                if event in self._chains:
-                    self._chains[event].remove(callback_to_remove)
-
-                if self.enable_logging:
-                    callback_name = getattr(callback_to_remove, '__name__', 'unknown')
-                    self.logger.info(f"Unregistered callback: {event} -> {callback_name}")
+            self.unregister_sync(event, callback)
 
     async def unregister_namespace(self, namespace: str) -> None:
         """Unregister all callbacks in a namespace.
@@ -786,7 +816,7 @@ class AsyncCallbackFramework:
                     # Remove circuit breakers for this callback
                     cb_key = f"{event}:{callback.__name__}"
                     self._circuit_breakers.pop(cb_key, None)
-                
+
                 # Clear callbacks
                 del self._callbacks[event]
 
@@ -874,7 +904,7 @@ class AsyncCallbackFramework:
                 start_time = time.time()
 
                 # Call callback (might return coroutine or async generator)
-                callback_result = callback(*final_args, **final_kwargs)
+                callback_result = callback(*final_args, **_narrow_kwargs(callback, final_kwargs))
 
                 # Check if it's an async generator
                 if inspect.isasyncgen(callback_result):

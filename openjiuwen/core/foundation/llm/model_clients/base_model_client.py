@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from abc import (
     ABC,
-    ABCMeta,
     abstractmethod,
 )
 from typing import (
@@ -42,33 +41,7 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
-class _BaseModelClientMeta(ABCMeta):
-    def __call__(cls, *args, **kwargs):
-        instance = super().__call__(*args, **kwargs)
-        from openjiuwen.core.runner import Runner
-        from openjiuwen.core.runner.callback.events import LLMCallEvents
-        _fw = Runner.callback_framework
-        fn = instance.invoke
-        fn = _fw.emit_before(LLMCallEvents.LLM_INVOKE_INPUT)(fn)
-        fn = _fw.transform_io(
-            input_event=LLMCallEvents.LLM_INVOKE_INPUT,
-            output_event=LLMCallEvents.LLM_INVOKE_OUTPUT,
-        )(fn)
-        fn = _fw.emit_after(LLMCallEvents.LLM_INVOKE_OUTPUT)(fn)
-        instance.invoke = fn
-
-        fn = instance.stream
-        fn = _fw.emit_before(LLMCallEvents.LLM_STREAM_INPUT)(fn)
-        fn = _fw.transform_io(
-            input_event=LLMCallEvents.LLM_STREAM_INPUT,
-            output_event=LLMCallEvents.LLM_STREAM_OUTPUT,
-        )(fn)
-        fn = _fw.emit_after(LLMCallEvents.LLM_STREAM_OUTPUT, item_key="result")(fn)
-        instance.stream = fn
-        return instance
-
-
-class BaseModelClient(ABC, metaclass=_BaseModelClientMeta):
+class BaseModelClient(ABC):
     """LLM Model Client Abstract Base Class
 
     All Model Client implementations must inherit from this class and implement the abstract methods.

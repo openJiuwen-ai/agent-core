@@ -72,15 +72,17 @@ def _make_workflow() -> _EchoWorkflow:
     return _EchoWorkflow()
 
 
-def _make_model() -> _EchoModelClient:
-    return _EchoModelClient(
-        ModelRequestConfig(),
-        ModelClientConfig(
-            client_provider="OpenAI",
-            api_key="test-key",
-            api_base="https://example.com",
-        ),
+def _make_model(monkeypatch):
+    from openjiuwen.core.foundation.llm.model import Model
+    model_config = ModelRequestConfig()
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="test-key",
+        api_base="https://example.com",
     )
+    echo = _EchoModelClient(model_config, client_config)
+    monkeypatch.setattr(Model, "_create_model_client", lambda self, cfg: echo)
+    return Model(model_client_config=client_config, model_config=model_config)
 
 
 # === Fixtures ===
@@ -283,10 +285,10 @@ async def test_workflow_stream_callbacks():
 
 
 @pytest.mark.asyncio
-async def test_model_invoke_callbacks():
+async def test_model_invoke_callbacks(monkeypatch):
     """Model invoke: transform and normal callbacks both fire with correct values."""
     fw = Runner.callback_framework
-    model = _make_model()
+    model = _make_model(monkeypatch)
     out_received = []
 
     @fw.on_transform(LLMCallEvents.LLM_INVOKE_OUTPUT)
@@ -303,10 +305,10 @@ async def test_model_invoke_callbacks():
 
 
 @pytest.mark.asyncio
-async def test_model_stream_callbacks():
+async def test_model_stream_callbacks(monkeypatch):
     """Model stream: transform and normal callbacks both fire per item with correct values."""
     fw = Runner.callback_framework
-    model = _make_model()
+    model = _make_model(monkeypatch)
     received = []
 
     @fw.on_transform(LLMCallEvents.LLM_STREAM_OUTPUT)
@@ -347,3 +349,44 @@ async def test_trigger_and_transform_fire_in_order():
     await tool.invoke("v")
     assert order[0] == ("transform", "v")
     assert order[1] == ("trigger", "v-T")
+
+
+# === Model extra_kwargs injection ===
+
+
+@pytest.mark.asyncio
+async def test_model_invoke_extra_kwargs_injected(monkeypatch):
+    """model_config and model_client_config are present in LLM_INVOKE_INPUT handler kwargs."""
+    fw = Runner.callback_framework
+    model = _make_model(monkeypatch)
+    captured = {}
+
+    @fw.on(LLMCallEvents.LLM_INVOKE_INPUT)
+    async def record_kwargs(**kwargs):
+        captured.update(kwargs)
+
+    await model.invoke(["msg"])
+    assert "model_config" in captured
+    assert "model_client_config" in captured
+    assert captured["model_config"] is model.model_config
+    assert captured["model_client_config"] is model.model_client_config
+
+
+@pytest.mark.asyncio
+async def test_model_stream_extra_kwargs_injected(monkeypatch):
+    """model_config and model_client_config are present in LLM_STREAM_OUTPUT per-item handler kwargs."""
+    fw = Runner.callback_framework
+    model = _make_model(monkeypatch)
+    captured = {}
+
+    @fw.on(LLMCallEvents.LLM_STREAM_OUTPUT)
+    async def record_kwargs(**kwargs):
+        captured.update(kwargs)
+
+    async for _ in model.stream(["msg"]):
+        pass
+
+    assert "model_config" in captured
+    assert "model_client_config" in captured
+    assert captured["model_config"] is model.model_config
+    assert captured["model_client_config"] is model.model_client_config

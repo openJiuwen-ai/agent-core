@@ -63,6 +63,33 @@ class Model:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config is none")
 
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.callback.events import LLMCallEvents
+        _fw = Runner.callback_framework
+        _extra = {
+            "model_config": model_config,
+            "model_client_config": model_client_config,
+        }
+
+        fn = self._client.invoke
+        fn = _fw.emit_before(LLMCallEvents.LLM_INVOKE_INPUT, extra_kwargs=_extra)(fn)
+        fn = _fw.transform_io(
+            input_event=LLMCallEvents.LLM_INVOKE_INPUT,
+            output_event=LLMCallEvents.LLM_INVOKE_OUTPUT,
+        )(fn)
+        fn = _fw.emit_after(LLMCallEvents.LLM_INVOKE_OUTPUT, extra_kwargs=_extra)(fn)
+        self._client.invoke = fn
+
+        fn = self._client.stream
+        fn = _fw.emit_before(LLMCallEvents.LLM_STREAM_INPUT, extra_kwargs=_extra)(fn)
+        fn = _fw.transform_io(
+            input_event=LLMCallEvents.LLM_STREAM_INPUT,
+            output_event=LLMCallEvents.LLM_STREAM_OUTPUT,
+        )(fn)
+        fn = _fw.emit_after(LLMCallEvents.LLM_STREAM_OUTPUT, item_key="result",
+                            extra_kwargs=_extra)(fn)
+        self._client.stream = fn
+
     def _create_model_client(self, client_config: ModelClientConfig) -> BaseModelClient:
         """Create corresponding ModelClient instance based on client_type
         

@@ -3,20 +3,35 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Union, AsyncGenerator
+from typing import (
+    Any,
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Dict,
+    List,
+    Optional,
+)
 from uuid import uuid4
 
 import anyio
 
-from openjiuwen.core.common.logging import LogEventType, runner_logger as logger
-
-from openjiuwen.core.common.task_manager.context import _current_task_id, get_task_group, set_task_group, \
-    reset_task_group
-from openjiuwen.core.common.task_manager.exceptions import DuplicateTaskError, TaskNotFoundError
+from openjiuwen.core.common.logging import (
+    LogEventType,
+    runner_logger as logger,
+)
+from openjiuwen.core.common.task_manager.context import (
+    _current_task_id,
+    get_task_group,
+    reset_task_group,
+    set_task_group,
+)
+from openjiuwen.core.common.task_manager.exceptions import (
+    DuplicateTaskError,
+)
 from openjiuwen.core.common.task_manager.registry import TaskRegistry
 from openjiuwen.core.common.task_manager.task import Task
-from openjiuwen.core.common.task_manager.types import TaskStatus
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import TaskManagerEvents
 
