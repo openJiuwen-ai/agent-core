@@ -35,7 +35,7 @@ class TaskPlanningRail(DeepAgentRail):
     def init(self, agent):
         if isinstance(agent, DeepAgent) and agent.deep_config.workspace and hasattr(agent, 'ability_manager'):
             self.workspace = agent.deep_config.workspace
-            tools = create_todos_tool(self.sys_operation, self.workspace)
+            tools = create_todos_tool(self.sys_operation, self.workspace.root_path)
             self.tools = tools
             for tool in tools:
                 agent.ability_manager.add(tool.card)

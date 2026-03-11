@@ -14,6 +14,9 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 from openjiuwen.deepagents.schema.stop_condition import (
     StopCondition,
 )
+from openjiuwen.deepagents.schema.workspace import (
+    Workspace,
+)
 
 
 @dataclass
@@ -49,6 +52,6 @@ class DeepAgentConfig:
     max_iterations: int = 15
     subagents: Optional[List[AgentCard]] = None
     tools: Optional[List[ToolCard]] = None
-    workspace: Optional[str] = None
+    workspace: Optional[Workspace] = None
     skills: Optional[List[Any]] = None
     backend: Optional[Any] = None

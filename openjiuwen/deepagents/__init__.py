@@ -12,6 +12,7 @@ from openjiuwen.deepagents.deep_agent_event_handler import (
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
+from openjiuwen.deepagents.schema.workspace import Workspace
 
 __all__ = [
     "DeepAgent",
@@ -20,4 +21,5 @@ __all__ = [
     "DeepAgentConfig",
     "StopCondition",
     "create_deep_agent",
+    "Workspace",
 ]

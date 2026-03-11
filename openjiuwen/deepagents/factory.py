@@ -13,6 +13,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents.deep_agent import DeepAgent
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
+from openjiuwen.deepagents.schema.workspace import Workspace
 
 
 def create_deep_agent(
@@ -26,7 +27,7 @@ def create_deep_agent(
     stop_condition: Optional[StopCondition] = None,
     enable_task_loop: bool = False,
     max_iterations: int = 15,
-    workspace: Optional[str] = None,
+    workspace: Optional[str | Workspace] = None,
     skills: Optional[List[Any]] = None,
     backend: Optional[Any] = None,
     **config_kwargs: Any,
@@ -66,6 +67,12 @@ def create_deep_agent(
             description="DeepAgent instance",
         )
 
+    workspace_obj = (
+        Workspace(root_path=workspace or "./")
+        if not workspace or isinstance(workspace, str)
+        else workspace
+    )
+
     config = DeepAgentConfig(
         model=model,
         card=card,
@@ -75,7 +82,7 @@ def create_deep_agent(
         max_iterations=max_iterations,
         subagents=subagents,
         tools=tools,
-        workspace=workspace,
+        workspace=workspace_obj,
         skills=skills,
         backend=backend,
     )
