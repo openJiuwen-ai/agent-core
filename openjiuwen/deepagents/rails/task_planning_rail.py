@@ -6,12 +6,16 @@ This rail wires all required lifecycle hooks first.
 Planning/replanning strategies are intentionally deferred.
 """
 from __future__ import annotations
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents import DeepAgent
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.tools.todo import create_todos_tool
+
+if TYPE_CHECKING:
+    from openjiuwen.core.runner.runner import Runner
 
 
 class TaskPlanningRail(DeepAgentRail):
@@ -37,6 +41,7 @@ class TaskPlanningRail(DeepAgentRail):
             self.workspace = agent.deep_config.workspace
             tools = create_todos_tool(self.sys_operation, self.workspace.root_path)
             self.tools = tools
+            Runner.resource_mgr.add_tool(tools)
             for tool in tools:
                 agent.ability_manager.add(tool.card)
 
@@ -46,6 +51,9 @@ class TaskPlanningRail(DeepAgentRail):
                 name = getattr(tool, 'name', None)
                 if name:
                     agent.ability_manager.remove(name)
+                tool_id = tool.card.id
+                if tool_id:
+                    Runner.resource_mgr.remove_tool(tool_id)
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Invoke-start placeholder."""

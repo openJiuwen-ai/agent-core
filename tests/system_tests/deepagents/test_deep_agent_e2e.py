@@ -10,6 +10,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 from typing import List
+from unittest.mock import patch
 
 import pytest
 
@@ -30,13 +31,19 @@ from openjiuwen.core.sys_operation import (
     OperationMode,
     SysOperationCard,
 )
+from openjiuwen.deepagents.rails import TaskPlanningRail
 from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.tools import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
+from tests.unit_tests.fixtures.mock_llm import (
+    MockLLMModel,
+    create_text_response,
+    create_tool_call_response,
+)
 
-API_BASE = os.getenv("API_BASE", "")
-API_KEY = os.getenv("API_KEY", "")
-MODEL_NAME = os.getenv("MODEL_NAME", "")
-MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
+API_BASE = os.getenv("API_BASE", "your api url")
+API_KEY = os.getenv("API_KEY", "your api key")
+MODEL_NAME = os.getenv("MODEL_NAME", "model name")
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "SiliconFlow")
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 
 
@@ -192,6 +199,47 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(beta_path.exists())
         self.assertTrue(alpha_path.read_text(encoding="utf-8").strip())
         self.assertTrue(beta_path.read_text(encoding="utf-8").strip())
+
+    @pytest.mark.asyncio
+    async def test_deep_agent_task_planning(self):
+        """复杂任务：agent的规划能力"""
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        task_planning = TaskPlanningRail(sys_oper)
+        
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response(
+                "todo_write",
+                '{"tasks": "设计打卡系统数据库表结构;实现用户打卡功能接口;开发前端打卡页面;添加打卡统计功能"}'
+            ),
+            create_tool_call_response(
+                "todo_read",
+                '{}'
+            ),
+            create_tool_call_response(
+                "todo_modify",
+                '{"action": "update", "todos": [{"id": "mock_task_id_1", "status": "completed"}]}'
+            ),
+            create_text_response("我已经帮你完成了打卡系统的任务规划，并完成了第一个任务的设计工作。")
+        ])
+        
+        agent = create_deep_agent(
+            model=self._create_model(),
+            rails=[task_planning],
+            enable_task_loop=False,
+            max_iterations=20
+        )
+        session = create_agent_session(
+            session_id=f"deepagent_complex_e_{uuid.uuid4().hex}"
+        )
+
+        query = "我想测试任务规划能力，帮我构建一个打卡系统，调用规划工具帮我模拟规划吧"
+        
+        with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
+            result = await agent.invoke({"query": query}, session=session)
+        
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("result_type"), "answer")
 
 
 if __name__ == "__main__":
