@@ -4,7 +4,6 @@
 import uuid
 from typing import Any
 
-from openjiuwen.core.session.callback.callback_manager import CallbackManager
 from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.session import BaseSession
 from openjiuwen.core.session.state.base import State
@@ -14,8 +13,7 @@ from openjiuwen.core.session.tracer.tracer import Tracer
 
 
 class WorkflowSession(BaseSession):
-    def __init__(self, workflow_id: str = '', parent: BaseSession = None, session_id: str = None, state: State = None,
-                 callback_manager: CallbackManager = None):
+    def __init__(self, workflow_id: str = '', parent: BaseSession = None, session_id: str = None, state: State = None):
         self._session_id = session_id
         self._parent = parent
         if parent is not None:
@@ -30,7 +28,6 @@ class WorkflowSession(BaseSession):
             self._tracer = None
 
         self._state = state if state is not None else InMemoryState()
-        self._callback_manager = callback_manager if callback_manager is not None else CallbackManager()
         self._stream_writer_manager = None  # type: StreamWriterManager
         self._actor_manager = None
         self._workflow_id = workflow_id
@@ -65,9 +62,6 @@ class WorkflowSession(BaseSession):
 
     def stream_writer_manager(self) -> StreamWriterManager:
         return self._stream_writer_manager
-
-    def callback_manager(self) -> CallbackManager:
-        return self._callback_manager
 
     def session_id(self) -> str:
         return self._session_id
@@ -158,9 +152,6 @@ class NodeSession(BaseSession):
 
     def stream_writer_manager(self) -> StreamWriterManager:
         return self._session.stream_writer_manager()
-
-    def callback_manager(self) -> CallbackManager:
-        return self._session.callback_manager()
 
     def session_id(self) -> str:
         return self._session.session_id()

@@ -657,8 +657,7 @@ class Workflow(metaclass=_WorkflowMeta):
             parent = session.get_parent()
             workflow_session = WorkflowSession(workflow_id=self._card.id,
                                                parent=parent if parent is not None else None,
-                                               session_id=session.get_session_id(),
-                                               callback_manager=session.get_callback_manager())
+                                               session_id=session.get_session_id())
             workflow_session.config().set_envs(session.get_envs())
             self._internal.auto_complete_abilities()
             workflow_session.config().add_workflow_config(workflow_id=self._card.id,
@@ -670,7 +669,7 @@ class Workflow(metaclass=_WorkflowMeta):
                 StreamWriterManager(stream_emitter=StreamEmitter(), modes=stream_modes))
             if workflow_session.tracer() is None and (stream_modes is None or BaseStreamMode.TRACE in stream_modes):
                 tracer = Tracer()
-                tracer.init(workflow_session.stream_writer_manager(), workflow_session.callback_manager())
+                tracer.init(workflow_session.stream_writer_manager())
                 workflow_session.set_tracer(tracer)
             return workflow_session
         else:

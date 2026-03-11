@@ -14,6 +14,7 @@ from openjiuwen.core.common.task_manager import (
     TaskManager,
     Task,
     TaskStatus,
+    TaskManagerEvents,
     DuplicateTaskError,
     TaskNotFoundError,
     get_task_manager,
@@ -219,7 +220,7 @@ class TestCoroutineTaskManager:
             if task:
                 events.append(("completed", task.task_id))
 
-        manager.on(TaskStatus.COMPLETED, on_completed)
+        await manager.on(TaskManagerEvents.TASK_COMPLETED, on_completed)
 
         async def quick_task():
             return "done"
@@ -842,8 +843,8 @@ class TestEventBus:
         async def cb(task):
             calls.append(task.task_id)
 
-        manager.on(TaskStatus.COMPLETED, cb)
-        manager.off(TaskStatus.COMPLETED, cb)
+        await manager.on(TaskManagerEvents.TASK_COMPLETED, cb)
+        await manager.off(TaskManagerEvents.TASK_COMPLETED, cb)
 
         async def quick():
             return "done"
@@ -851,7 +852,6 @@ class TestEventBus:
         async with manager.task_group() as tg:
             await manager.create_task(quick())
 
-        await asyncio.sleep(0.1)
         assert calls == []
 
     @pytest.mark.asyncio
@@ -865,8 +865,8 @@ class TestEventBus:
         async def cb2(**kwargs):
             calls.append("cb2")
 
-        manager.on(TaskStatus.COMPLETED, cb1)
-        manager.on(TaskStatus.COMPLETED, cb2)
+        await manager.on(TaskManagerEvents.TASK_COMPLETED, cb1)
+        await manager.on(TaskManagerEvents.TASK_COMPLETED, cb2)
 
         async def quick():
             return "done"
@@ -889,8 +889,8 @@ class TestEventBus:
         async def good_cb(**kwargs):
             calls.append("good")
 
-        manager.on(TaskStatus.COMPLETED, bad_cb)
-        manager.on(TaskStatus.COMPLETED, good_cb)
+        await manager.on(TaskManagerEvents.TASK_COMPLETED, bad_cb)
+        await manager.on(TaskManagerEvents.TASK_COMPLETED, good_cb)
 
         async def quick():
             return "done"

@@ -410,7 +410,7 @@ class TaskManager:
                 status=task.status.value if task.status else None,
             )
 
-    def on(self, event_type: str, callback: Callable) -> None:
+    async def on(self, event_type: str, callback: Callable) -> None:
         """Register a callback for an event.
 
         Examples:
@@ -421,55 +421,42 @@ class TaskManager:
             ...
             >>> async def main():
             ...     manager = get_task_manager()
-            ...     manager.on("task_completed", on_completed)
+            ...     await manager.on("task_completed", on_completed)
             ...     await manager.create_task(some_task(), name="my_task")
 
             Using convenience methods:
 
             >>> async def main():
             ...     manager = get_task_manager()
-            ...     manager.on_completed(lambda t: print(f"Completed: {t.name}"))
-            ...     manager.on_failed(lambda t: print(f"Failed: {t.name}"))
+            ...     await manager.on_completed(lambda t: print(f"Completed: {t.name}"))
+            ...     await manager.on_failed(lambda t: print(f"Failed: {t.name}"))
 
         Args:
-            event_type: Event name (string) or TaskStatus enum
+            event_type: Event name string (use TaskManagerEvents constants)
             callback: Callback function to register
         """
         if self._callback_framework:
-            # Convert TaskStatus to TaskManagerEvents string
-            if isinstance(event_type, TaskStatus):
-                # Map TaskStatus values to TaskManagerEvents names
-                event_type_map = {
-                    "created": TaskManagerEvents.TASK_CREATED,
-                    "running": TaskManagerEvents.TASK_RUNNING,
-                    "completed": TaskManagerEvents.TASK_COMPLETED,
-                    "failed": TaskManagerEvents.TASK_FAILED,
-                    "cancelled": TaskManagerEvents.TASK_CANCELLED,
-                    "timeout": TaskManagerEvents.TASK_TIMEOUT,
-                }
-                event_type = event_type_map.get(event_type.value, event_type.value)
-            # Use register_sync for synchronous registration
             self._callback_framework.register_sync(event_type, callback)
 
-    def on_created(self, callback: Callable[[Task], Awaitable[None]]) -> None:
-        self.on(TaskManagerEvents.TASK_CREATED, callback)
+    async def on_created(self, callback: Callable[[Task], Awaitable[None]]) -> None:
+        await self.on(TaskManagerEvents.TASK_CREATED, callback)
 
-    def on_running(self, callback: Callable[[Task], Awaitable[None]]) -> None:
-        self.on(TaskManagerEvents.TASK_RUNNING, callback)
+    async def on_running(self, callback: Callable[[Task], Awaitable[None]]) -> None:
+        await self.on(TaskManagerEvents.TASK_RUNNING, callback)
 
-    def on_completed(self, callback: Callable[[Task], Awaitable[None]]) -> None:
-        self.on(TaskManagerEvents.TASK_COMPLETED, callback)
+    async def on_completed(self, callback: Callable[[Task], Awaitable[None]]) -> None:
+        await self.on(TaskManagerEvents.TASK_COMPLETED, callback)
 
-    def on_failed(self, callback: Callable[[Task], Awaitable[None]]) -> None:
-        self.on(TaskManagerEvents.TASK_FAILED, callback)
+    async def on_failed(self, callback: Callable[[Task], Awaitable[None]]) -> None:
+        await self.on(TaskManagerEvents.TASK_FAILED, callback)
 
-    def on_cancelled(self, callback: Callable[[Task], Awaitable[None]]) -> None:
-        self.on(TaskManagerEvents.TASK_CANCELLED, callback)
+    async def on_cancelled(self, callback: Callable[[Task], Awaitable[None]]) -> None:
+        await self.on(TaskManagerEvents.TASK_CANCELLED, callback)
 
-    def on_timeout(self, callback: Callable[[Task], Awaitable[None]]) -> None:
-        self.on(TaskManagerEvents.TASK_TIMEOUT, callback)
+    async def on_timeout(self, callback: Callable[[Task], Awaitable[None]]) -> None:
+        await self.on(TaskManagerEvents.TASK_TIMEOUT, callback)
 
-    def off(self, event_type: str, callback: Callable) -> None:
+    async def off(self, event_type: str, callback: Callable) -> None:
         """Unregister a callback from an event.
 
         Examples:
@@ -480,26 +467,16 @@ class TaskManager:
             ...
             >>> async def main():
             ...     manager = get_task_manager()
-            ...     manager.on("task_completed", on_completed)
+            ...     await manager.on("task_completed", on_completed)
             ...     # Later, unregister the callback
-            ...     manager.off("task_completed", on_completed)
+            ...     await manager.off("task_completed", on_completed)
 
         Args:
-            event_type: Event name (string) or TaskStatus enum
+            event_type: Event name string (use TaskManagerEvents constants)
             callback: Callback function to unregister
         """
         if self._callback_framework:
-            # Convert TaskStatus to string if needed
-            if isinstance(event_type, TaskStatus):
-                event_type = TaskManagerEvents.get_event(event_type.value)
-            # Schedule the async unregister in the current event loop
-            try:
-                loop = asyncio.get_running_loop()
-                # Create a task to run the async unregister
-                loop.create_task(self._callback_framework.unregister(event_type, callback))
-            except RuntimeError:
-                # No running event loop, can't unregister - ignore
-                pass
+            await self._callback_framework.unregister(event_type, callback)
 
     def _remove_task_unsafe(self, task_id: str) -> None:
         self.registry.remove_unsafe(task_id)

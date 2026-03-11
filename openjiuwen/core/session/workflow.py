@@ -4,7 +4,6 @@ import uuid
 from typing import Any, TYPE_CHECKING
 
 from openjiuwen.core.session import BaseSession
-from openjiuwen.core.session.callback.callback_manager import CallbackManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session as AgentSession
@@ -17,7 +16,6 @@ class Session:
 
     def __init__(self, parent: BaseSession = None, session_id: str = None, envs: dict[str, Any] = None):
         self._envs = envs
-        self._callback_manager = CallbackManager()
         self._parent = parent
         if parent is not None:
             self._session_id = session_id
@@ -27,9 +25,6 @@ class Session:
         else:
             self._session_id = str(uuid.uuid4())
         self._workflow_card = None
-
-    def get_callback_manager(self) -> CallbackManager:
-        return self._callback_manager
 
     def get_session_id(self) -> str:
         return self._session_id

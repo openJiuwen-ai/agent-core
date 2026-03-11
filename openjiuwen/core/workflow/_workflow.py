@@ -64,8 +64,7 @@ async def execute_single_component(
     workflow_session = WorkflowSession(
         workflow_id=component_id,
         parent=None,
-        session_id=session.get_session_id(),
-        callback_manager=session.get_callback_manager()
+        session_id=session.get_session_id()
     )
 
     # 2. Create NodeSession
