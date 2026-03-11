@@ -461,14 +461,14 @@ class ReActAgent(BaseAgent):
                 await session.write_stream(OutputSchema(
                     type="llm_reasoning",
                     index=chunk_index,
-                    payload={"content": chunk.reasoning_content},
+                    payload={"content": chunk.reasoning_content, "result_type": "answer"},
                 ))
                 chunk_index += 1
             if chunk.content:
                 await session.write_stream(OutputSchema(
                     type="llm_output",
                     index=chunk_index,
-                    payload={"content": chunk.content},
+                    payload={"content": chunk.content, "result_type": "answer"},
                 ))
                 chunk_index += 1
 
