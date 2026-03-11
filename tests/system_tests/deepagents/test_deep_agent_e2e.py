@@ -31,14 +31,14 @@ from openjiuwen.core.sys_operation import (
     OperationMode,
     SysOperationCard,
 )
-from openjiuwen.deepagents.rails import TaskPlanningRail
 from openjiuwen.deepagents import create_deep_agent
-from openjiuwen.deepagents.tools import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
+from openjiuwen.deepagents.rails import TaskPlanningRail
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
     create_text_response,
     create_tool_call_response,
 )
+from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 
 API_BASE = os.getenv("API_BASE", "your api url")
 API_KEY = os.getenv("API_KEY", "your api key")
@@ -108,20 +108,9 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
                 "Set them before running tests."
             )
 
-    def _get_fs_tool_cards(self):
+    def _get_fs_rail(self):
         sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
-
-        read_tool = ReadFileTool(sys_oper)
-        write_tool = WriteFileTool(sys_oper)
-        edit_tool = EditFileTool(sys_oper)
-        glob_tool = GlobTool(sys_oper)
-        list_dir_tool = ListDirTool(sys_oper)
-        grep_tool = GrepTool(sys_oper)
-
-        tools = [read_tool, write_tool, edit_tool, glob_tool, list_dir_tool, grep_tool]
-        Runner.resource_mgr.add_tool(tools)
-
-        return [tool.card for tool in tools]
+        return FileSystemRail(operation=sys_oper)
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -157,6 +146,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         self._require_llm_config()
 
         tool_trace = ToolTraceRail()
+        fs_rail = self._get_fs_rail()
         model = self._create_model()
         agent = create_deep_agent(
             model=model,
@@ -164,8 +154,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
                 "你是一个严谨的任务执行助手。"
                 "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
             ),
-            tools=self._get_fs_tool_cards(),
-            rails=[tool_trace],
+            rails=[tool_trace, fs_rail],
             enable_task_loop=False,
             max_iterations=12,
         )
@@ -205,7 +194,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         """复杂任务：agent的规划能力"""
         sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
         task_planning = TaskPlanningRail(sys_oper)
-        
+
         mock_llm = MockLLMModel()
         mock_llm.set_responses([
             create_tool_call_response(
@@ -222,7 +211,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             ),
             create_text_response("我已经帮你完成了打卡系统的任务规划，并完成了第一个任务的设计工作。")
         ])
-        
+
         agent = create_deep_agent(
             model=self._create_model(),
             rails=[task_planning],
@@ -234,10 +223,10 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         )
 
         query = "我想测试任务规划能力，帮我构建一个打卡系统，调用规划工具帮我模拟规划吧"
-        
+
         with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
             result = await agent.invoke({"query": query}, session=session)
-        
+
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
 

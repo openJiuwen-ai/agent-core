@@ -153,6 +153,7 @@ class DeepAgent(BaseAgent):
             return
 
         for rail_inst in self._pending_rails:
+            rail_inst.init(self)
             await self._register_rail_selective(rail_inst)
         self._pending_rails.clear()
         self._initialized = True

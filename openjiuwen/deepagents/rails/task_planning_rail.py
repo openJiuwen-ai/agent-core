@@ -6,16 +6,13 @@ This rail wires all required lifecycle hooks first.
 Planning/replanning strategies are intentionally deferred.
 """
 from __future__ import annotations
-from typing import TYPE_CHECKING
 
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents import DeepAgent
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.tools.todo import create_todos_tool
-
-if TYPE_CHECKING:
-    from openjiuwen.core.runner.runner import Runner
 
 
 class TaskPlanningRail(DeepAgentRail):
