@@ -42,7 +42,6 @@ class MemoryRail(AgentRail):
         self._mem_scope_id = mem_scope_id
         self._agent_memory_config = agent_memory_config
         self._memory = LongTermMemory()
-        self._scope_initialized = False
 
         # Derive feature flags at construction time
         self._enable_long_term_mem = agent_memory_config.enable_long_term_mem
@@ -61,11 +60,6 @@ class MemoryRail(AgentRail):
         # Skip on resume path — memory already loaded in the first invoke
         if ctx.extra.get("is_resume"):
             return
-
-        # Lazy init memory scope config on first invoke
-        if not self._scope_initialized and self._mem_scope_id:
-            await self._memory.set_scope_config(self._mem_scope_id, MemoryScopeConfig())
-            self._scope_initialized = True
 
         user_id = ctx.extra.get("user_id", "")
         if not user_id:
