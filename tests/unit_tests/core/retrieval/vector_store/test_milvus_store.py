@@ -40,6 +40,7 @@ class TestMilvusVectorStore:
         mock_client_class.assert_called_once_with(
             uri="http://localhost:19530",
             token=None,
+            alias=None,
         )
 
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
@@ -57,6 +58,24 @@ class TestMilvusVectorStore:
         mock_client_class.assert_called_once_with(
             uri="http://localhost:19530",
             token="test_token",
+            alias=None,
+        )
+
+    @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
+    def test_init_with_milvus_alias(self, mock_client_class, vector_store_config):
+        """Test initialization with milvus_alias for connection isolation"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        store = MilvusVectorStore(
+            config=vector_store_config,
+            milvus_uri="http://localhost:19530",
+            milvus_alias="my_alias",
+        )
+        mock_client_class.assert_called_once_with(
+            uri="http://localhost:19530",
+            token=None,
+            alias="my_alias",
         )
 
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")

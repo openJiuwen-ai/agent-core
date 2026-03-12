@@ -45,6 +45,7 @@ class MilvusVectorStore(VectorStore):
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
+        milvus_alias: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -58,6 +59,7 @@ class MilvusVectorStore(VectorStore):
             vector_field: Vector field name (str) or definition (MilvusVectorField)
             sparse_vector_field: Sparse vector field name
             metadata_field: Metadata field name
+            milvus_alias: Optional connection alias
         """
         self.config = config
         self.collection_name = config.collection_name
@@ -91,6 +93,7 @@ class MilvusVectorStore(VectorStore):
             database_name=self.config.database_name,
             path_or_uri=self.milvus_uri,
             token=self.milvus_token,
+            alias=milvus_alias,
         )
         self._collection_loaded = False
 
@@ -107,7 +110,7 @@ class MilvusVectorStore(VectorStore):
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> MilvusClient:
         """Create Milvus client and ensure database exists"""
-        client = MilvusClient(uri=path_or_uri, token=token)
+        client = MilvusClient(uri=path_or_uri, token=token, **kwargs)
         if database_name and database_name != "default":
             if database_name not in client.list_databases():
                 client.create_database(database_name)
