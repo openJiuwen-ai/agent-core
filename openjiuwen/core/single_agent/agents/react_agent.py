@@ -33,7 +33,7 @@ from openjiuwen.core.foundation.llm import (
     SystemMessage
 )
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
@@ -428,13 +428,14 @@ class ReActAgent(BaseAgent):
     async def _railed_model_call(self, ctx: AgentCallbackContext) -> AssistantMessage:
         """Execute LLM call with @rail before/after/on_exception hooks.
 
-        Uses llm.stream() when session is present, falls back to llm.invoke() otherwise.
+        Uses llm.stream() when ctx.extra["_streaming"] is True,
+        falls back to llm.invoke() otherwise.
         Rail hooks may have modified ctx.inputs.messages / ctx.inputs.tools.
         """
         llm = self._get_llm()
         session = ctx.session
 
-        if session is None:
+        if not ctx.extra.get("_streaming"):
             ai_message = await llm.invoke(
                 model=self._config.model_name,
                 messages=ctx.inputs.messages,
@@ -817,7 +818,8 @@ class ReActAgent(BaseAgent):
     async def invoke(
             self,
             inputs: Any,
-            session: Optional[Session] = None
+            session: Optional[Session] = None,
+            **kwargs,
     ) -> Dict[str, Any]:
         """Execute ReAct process
 
@@ -826,6 +828,8 @@ class ReActAgent(BaseAgent):
                 - dict: {"query": "...", "conversation_id": "..."}
                 - str: Used directly as query
             session: Session object (required for tool execution)
+            **kwargs: Internal flags. _streaming=True selects
+                the llm.stream() path inside _railed_model_call.
 
         Returns:
             Dict with output and result_type
@@ -840,80 +844,96 @@ class ReActAgent(BaseAgent):
             query = inputs
             conversation_id = None
 
+        # Auto-create session when not provided
+        need_cleanup = False
+        if session is None:
+            session_id = conversation_id or "default_session"
+            session = create_agent_session(
+                session_id=session_id, card=self.card
+            )
+            await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+            need_cleanup = True
+
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+        ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
 
-        async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
-            user_input = ctx.inputs.query
-            if not user_input:
-                raise ValueError("Input must contain 'query'")
+        try:
+            async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
+                user_input = ctx.inputs.query
+                if not user_input:
+                    raise ValueError("Input must contain 'query'")
 
-            interruption_state = self._load_interruption_state(session)
-            if interruption_state is not None:
-                self._clear_interruption_state(session)
-                # Restore original query so MemoryRail.after_invoke writes the right UserMessage
-                ctx.extra["_original_query"] = interruption_state.original_query
+                interruption_state = self._load_interruption_state(session)
+                if interruption_state is not None:
+                    self._clear_interruption_state(session)
+                    # Restore original query so MemoryRail.after_invoke writes the right UserMessage
+                    ctx.extra["_original_query"] = interruption_state.original_query
 
-            context = await self._init_context(session)
-            ctx.context = context
+                context = await self._init_context(session)
+                ctx.context = context
 
-            system_messages = [
-                SystemMessage(role=msg["role"], content=msg["content"])
-                for msg in self._config.prompt_template
-                if msg.get("role") == "system"
-            ]
-            self._render_system_messages(system_messages, inputs)
+                system_messages = [
+                    SystemMessage(role=msg["role"], content=msg["content"])
+                    for msg in self._config.prompt_template
+                    if msg.get("role") == "system"
+                ]
+                self._render_system_messages(system_messages, inputs)
 
-            if system_messages and self._skill_util is not None and self._skill_util.has_skill():
-                await self._warn_missing_skill_read_file_tool()
-                skill_prompt = self._skill_util.get_skill_prompt()
-                system_messages[-1].content = (system_messages[-1].content or "") + "\n" + skill_prompt
+                if system_messages and self._skill_util is not None and self._skill_util.has_skill():
+                    await self._warn_missing_skill_read_file_tool()
+                    skill_prompt = self._skill_util.get_skill_prompt()
+                    system_messages[-1].content = (system_messages[-1].content or "") + "\n" + skill_prompt
 
-            tools = await self.ability_manager.list_tool_info()
-            await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                tools = await self.ability_manager.list_tool_info()
+                await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
 
-            start_iteration = 0
-            if interruption_state is not None:
-                resume_result = await self._handle_resume(
-                    interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
-                )
-                if resume_result is not None:
-                    pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
-                else:
-                    start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
-
-            if invoke_inputs.result is None:
-                for iteration in range(start_iteration, self._config.max_iterations):
-                    logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
-
-                    ai_message = await self._call_model(ctx, context, system_messages, tools)
-                    await context.add_messages(
-                        AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
+                start_iteration = 0
+                if interruption_state is not None:
+                    resume_result = await self._handle_resume(
+                        interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                     )
+                    if resume_result is not None:
+                        pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
+                    else:
+                        start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
 
-                    if not ai_message.tool_calls:
+                if invoke_inputs.result is None:
+                    for iteration in range(start_iteration, self._config.max_iterations):
+                        logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+
+                        ai_message = await self._call_model(ctx, context, system_messages, tools)
+                        await context.add_messages(
+                            AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
+                        )
+
+                        if not ai_message.tool_calls:
+                            await self.context_engine.save_contexts(session)
+                            result = {"output": ai_message.content, "result_type": "answer"}
+                            invoke_inputs.result = result
+                            break
+
+                        results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+                        interrupt = self._after_execute_tool_call(
+                            results, ai_message.tool_calls, ai_message, iteration,
+                            original_query=ctx.extra.get("_original_query", ""),
+                        )
+                        if interrupt:
+                            await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+                            break
+                    else:
                         await self.context_engine.save_contexts(session)
-                        result = {"output": ai_message.content, "result_type": "answer"}
+                        result = {"output": "Max iterations reached without completion", "result_type": "error"}
                         invoke_inputs.result = result
-                        break
 
-                    results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
-                    interrupt = self._after_execute_tool_call(
-                        results, ai_message.tool_calls, ai_message, iteration,
-                        original_query=ctx.extra.get("_original_query", ""),
-                    )
-                    if interrupt:
-                        await self._commit_interrupt(interrupt, context, session, invoke_inputs)
-                        break
-                else:
-                    await self.context_engine.save_contexts(session)
-                    result = {"output": "Max iterations reached without completion", "result_type": "error"}
-                    invoke_inputs.result = result
-
-        # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
-        return ctx.extra.get("invoke_result", invoke_inputs.result)
+            # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
+            return ctx.extra.get("invoke_result", invoke_inputs.result)
+        finally:
+            if need_cleanup:
+                await self.context_engine.save_contexts(session)
+                await session.post_run()
 
     async def _write_invoke_result_to_stream(
             self,
@@ -958,42 +978,59 @@ class ReActAgent(BaseAgent):
         """Stream execute ReAct process
 
         Args:
-            inputs: User input (required in new version)
-            session: Session object (required in new version)
+            inputs: User input
+            session: Session object (if None, auto create)
             stream_modes: Stream output modes (optional)
 
         Yields:
             OutputSchema objects from stream_iterator
         """
+        # Auto-create session when not provided
+        need_cleanup = False
+        if session is None:
+            if isinstance(inputs, dict):
+                conversation_id = inputs.get("conversation_id")
+            else:
+                conversation_id = None
+            session_id = conversation_id or "default_session"
+            session = create_agent_session(
+                session_id=session_id, card=self.card
+            )
+            need_cleanup = True
 
-        if session is not None:
-            await session.pre_run()
+        await session.pre_run(
+            inputs=inputs if isinstance(inputs, dict) else None
+        )
 
         async def stream_process():
             try:
-                final_result = await self.invoke(inputs, session)
-                if session is not None:
-                    if isinstance(final_result, list):
-                        # Already adapted (e.g. by InvokeResultAdapterRail) — write each schema directly
-                        for schema in final_result:
-                            await session.write_stream(schema)
-                    else:
-                        await self._write_invoke_result_to_stream(final_result, session)
+                final_result = await self.invoke(inputs, session, _streaming=True)
+                if isinstance(final_result, list):
+                    for schema in final_result:
+                        await session.write_stream(schema)
+                else:
+                    await self._write_invoke_result_to_stream(
+                        final_result, session
+                    )
             except Exception as e:
                 logger.error(f"ReActAgent stream error: {e}")
             finally:
-                if session is not None:
+                if need_cleanup:
                     await self.context_engine.save_contexts(session)
-                    await session.post_run()
+                await session.post_run()
 
         task = asyncio.create_task(stream_process())
 
-        # Read from stream_iterator and yield
-        if session is not None:
-            async for result in session.stream_iterator():
-                yield result
+        async for result in session.stream_iterator():
+            yield result
 
         await task
+
+    async def clear_session(self, session_id: str = "default_session"):
+        """Release session resources and clear context cache."""
+        from openjiuwen.core.runner import Runner
+        await Runner.release(session_id=session_id)
+        self.context_engine.clear_context(session_id=session_id)
 
 
 __all__ = [
