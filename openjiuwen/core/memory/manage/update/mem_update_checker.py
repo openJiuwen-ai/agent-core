@@ -145,7 +145,7 @@ class MemUpdateChecker:
                 - Redundant new memories are not included
         """
         # Skip checking if no old memories or no model
-        if not old_memories or not base_chat_model:
+        if not base_chat_model:
             memory_logger.debug(
                 "No need to check memories - no old memories or no model",
                 event_type=LogEventType.MEMORY_PROCESS,

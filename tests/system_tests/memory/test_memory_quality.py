@@ -296,6 +296,16 @@ class TestMemoryQuality(unittest.IsolatedAsyncioTestCase):
         ]
         await self._user_mem_check(messages, query_checklist)
 
+    async def test_user_mem_check_new_conflict(self):
+        messages = [
+            BaseMessage(role="user", content="你好，我是Tom，哦，不对，我是Tim"),
+            BaseMessage(role="assistant", content="你好Tim，很高兴认识你"),
+        ]
+        query_checklist = [
+            ("我是谁", [("Tim", True), ("Tom", False)])
+        ]
+        await self._user_mem_check(messages, query_checklist)
+
     async def test_user_mem_not_self(self):
         messages = [
             BaseMessage(role="user", content="你好，我是Tom"),
