@@ -45,7 +45,7 @@ dependencies = [
     # Utilities
     "numpy!=2.4.0",
     "cacheout>=0.16.0",
-    "mermaid-py>=0.8.0",
+    "mermaid-py>=0.8.0,<0.9",
     "pycryptodome>=3.23.0",
     "charset-normalizer>=3.4.4",
     "pysbd>=0.3.4",

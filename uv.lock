@@ -2792,7 +2792,7 @@ requires-dist = [
     { name = "filelock", specifier = ">=3.20.1" },
     { name = "greenlet", marker = "extra == 'sqlite'", specifier = ">=3.1.1" },
     { name = "json-repair", specifier = ">=0.55.0" },
-    { name = "mermaid-py", specifier = ">=0.8.0" },
+    { name = "mermaid-py", specifier = ">=0.8.0,<0.9" },
     { name = "numpy", specifier = "!=2.4.0" },
     { name = "oauthlib", specifier = ">=3.3.1" },
     { name = "openai", specifier = ">=1.108.0" },
