@@ -3,10 +3,10 @@
 from typing import Any, Dict, Optional, Union
 from pydantic import Field
 
+from openjiuwen.core.common.clients.connector_pool import get_connector_pool_manager
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm import ModelClientConfig
-from openjiuwen.core.common.clients.client_registry import client_registry
-from openjiuwen.core.common.clients.connector_pool import ConnectorPool, ConnectorPoolConfig, connector_pool_manager
+from openjiuwen.core.common.clients.client_registry import get_client_registry
+from openjiuwen.core.common.clients.connector_pool import ConnectorPool, ConnectorPoolConfig
 
 
 class HttpXConnectorPoolConfig(ConnectorPoolConfig):
@@ -36,7 +36,7 @@ class HttpXConnectorPoolConfig(ConnectorPoolConfig):
     )
 
 
-@connector_pool_manager.register('httpx')
+@get_connector_pool_manager().register('httpx')
 class HttpXConnectorPool(ConnectorPool):
     """
     HTTPX-based connector pool implementation.
@@ -62,7 +62,6 @@ class HttpXConnectorPool(ConnectorPool):
         pool_kwargs = {
             'max_connections': config.limit,
             'max_keepalive_connections': config.max_keepalive_connections,
-            'max_connections_per_host': config.limit_per_host,
             'keepalive_expiry': config.keepalive_timeout,
             'local_address': config.local_address,
             'ssl_context': config.create_ssl_context(),
@@ -94,7 +93,7 @@ class HttpXConnectorPool(ConnectorPool):
         return self._conn
 
 
-@client_registry.register_client("httpx")
+@get_client_registry().register_client("httpx")
 async def create_httpx_client(config: Union[HttpXConnectorPoolConfig, Dict[str, Any]],
                               need_async: bool = False) -> Union['httpx.Client', 'httpx.AsyncClient']:
     """
@@ -122,15 +121,15 @@ async def create_httpx_client(config: Union[HttpXConnectorPoolConfig, Dict[str, 
     import httpx
     if not isinstance(config, HttpXConnectorPoolConfig):
         config = HttpXConnectorPoolConfig(**config)
-    connector_pool = await connector_pool_manager.get_connector_pool("httpx", config=config)
+    connector_pool = await get_connector_pool_manager().get_connector_pool("httpx", config=config)
 
     if need_async:
         return httpx.AsyncClient(transport=connector_pool.conn())
     return httpx.Client(transport=connector_pool.conn())
 
 
-@client_registry.register_client("async_open_ai")
-async def create_async_openai_client(config: Union[ModelClientConfig, Dict[str, Any]],
+@get_client_registry().register_client("async_open_ai")
+async def create_async_openai_client(config: Union["ModelClientConfig", Dict[str, Any]],
                                      **kwargs) -> 'AsyncOpenAI':
     """
     Create an asynchronous OpenAI client with proper HTTP connection management.
@@ -159,7 +158,7 @@ async def create_async_openai_client(config: Union[ModelClientConfig, Dict[str, 
         response = await client.chat.completions.create(...)
     """
     from openai import AsyncOpenAI
-
+    from openjiuwen.core.foundation.llm import ModelClientConfig
     # Normalize configuration to ModelClientConfig
     if not isinstance(config, ModelClientConfig):
         config = ModelClientConfig(**config)
@@ -184,8 +183,8 @@ async def create_async_openai_client(config: Union[ModelClientConfig, Dict[str, 
     )
 
 
-@client_registry.register_client("openai")
-async def create_openai_client(config: Union[ModelClientConfig, Dict[str, Any]],
+@get_client_registry().register_client("openai")
+async def create_openai_client(config: Union["ModelClientConfig", Dict[str, Any]],
                                **kwargs) -> 'OpenAI':
     """
     Create a synchronous OpenAI client with proper HTTP connection management.
@@ -214,6 +213,7 @@ async def create_openai_client(config: Union[ModelClientConfig, Dict[str, Any]],
         response = client.chat.completions.create(...)
     """
     from openai import OpenAI
+    from openjiuwen.core.foundation.llm import ModelClientConfig
 
     # Normalize configuration to ModelClientConfig
     if not isinstance(config, ModelClientConfig):

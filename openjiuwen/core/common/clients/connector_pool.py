@@ -478,12 +478,12 @@ class ConnectorPoolManager(metaclass=Singleton):
         return stats
 
 
-def get_connector_manager():
+def get_connector_pool_manager():
     return ConnectorPoolManager()
 
 
 # Global instance
-connector_pool_manager = get_connector_manager()
+_connector_pool_manager = get_connector_pool_manager()
 
 
 @ConnectorPoolManager.register("default")

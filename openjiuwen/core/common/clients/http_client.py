@@ -10,12 +10,12 @@ import aiohttp
 from aiohttp import ClientSession
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.clients import get_connector_pool_manager
 from openjiuwen.core.common.clients.ref_counted import BaseRefResourceMgr, RefCountedResource
 from openjiuwen.core.common.utils.singleton import Singleton
 from openjiuwen.core.foundation.tool.service_api.response_parser import ParserRegistry
 from openjiuwen.core.common.clients.client_registry import BaseClient
-from openjiuwen.core.common.clients.connector_pool import ConnectorPoolConfig, \
-    connector_pool_manager
+from openjiuwen.core.common.clients.connector_pool import ConnectorPoolConfig
 
 
 class SessionConfig(BaseModel):
@@ -257,7 +257,8 @@ class HttpSessionManager(BaseRefResourceMgr[HttpSession], metaclass=Singleton):
         """
         # Build kwargs for aiohttp.ClientSession
         kwargs = {
-            'connector': (await connector_pool_manager.get_connector_pool(config=config.connector_pool_config)).conn(),
+            'connector': (
+                await get_connector_pool_manager().get_connector_pool(config=config.connector_pool_config)).conn(),
             'headers': config.headers,
             'proxy': config.proxy,
             'auth': config.auth,
@@ -279,11 +280,11 @@ class HttpSessionManager(BaseRefResourceMgr[HttpSession], metaclass=Singleton):
         return HttpSession(session, config)
 
 
+_http_session_manager = HttpSessionManager()
+
+
 def get_http_session_manager():
-    return HttpSessionManager()
-
-
-http_session_manager = get_http_session_manager()
+    return _http_session_manager
 
 
 class HttpClient(BaseClient):

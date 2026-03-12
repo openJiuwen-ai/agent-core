@@ -3,13 +3,14 @@
 
 from unittest.mock import Mock
 import pytest
-from openjiuwen.core.common.clients.client_registry import ClientRegistry
+
+from openjiuwen.core.common.clients.client_registry import get_client_registry
 
 
 class TestClientRegistry:
     @pytest.fixture
     def registry(self):
-        return ClientRegistry()
+        return get_client_registry()
 
     def test_register_client_decorator(self, registry):
         @registry.register_client('test_client', client_type='test')
@@ -45,6 +46,8 @@ class TestClientRegistry:
         result = registry.get_client('redis', client_type='cache')
         assert result == mock_instance
 
+        registry.unregister("redis", client_type="cache")
+
     def test_get_client_without_client_type(self, registry):
         mock_instance = Mock()
 
@@ -54,6 +57,9 @@ class TestClientRegistry:
 
         result = registry.get_client('default_client')
         assert result == mock_instance
+
+        registry.unregister("default_client", client_type=None)
+
 
     def test_get_client_empty_name(self, registry):
         with pytest.raises(ValueError, match="cannot be empty"):
@@ -94,4 +100,5 @@ class TestClientRegistry:
             return Mock()
 
         clients = registry.list_clients()
-        assert set(clients) == {'type1_client1', 'type2_client2'}
+        assert 'type1_client1' in set(clients)
+        assert 'type2_client2' in set(clients)

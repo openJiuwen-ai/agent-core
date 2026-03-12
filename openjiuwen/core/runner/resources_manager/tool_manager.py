@@ -8,7 +8,7 @@ from typing import Any, List, Optional
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import runner_logger as logger
-from openjiuwen.core.common.clients.client_registry import client_registry
+from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.session.tracer import decorate_tool_with_trace
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import McpToolCard, MCPTool, McpServerConfig
@@ -104,7 +104,7 @@ class ToolMgr:
     @staticmethod
     def _create_client(config: McpServerConfig) -> McpClient:
         try:
-            client = client_registry.get_client(name=config.client_type, client_type="mcp", config=config)
+            client = get_client_registry().get_client(name=config.client_type, client_type="mcp", config=config)
             if client is None or not isinstance(client, McpClient):
                 raise ValueError(f"Unsupported MCP client type: {config.client_type}")
             return client

@@ -13,7 +13,7 @@ from typing import (
     Union,
 )
 
-from openjiuwen.core.common.clients.client_registry import client_registry
+from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import (
@@ -66,7 +66,7 @@ class BaseModelClient(ABC):
         if hasattr(cls, '__client_name__') and hasattr(cls, '__client_type__'):
             # Automatically register with the global registry
             if cls.__client_name__ is not None:  # Ensure it's actually set
-                client_registry.register_class(cls)
+                get_client_registry().register_class(cls)
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         """Initialize Model Client

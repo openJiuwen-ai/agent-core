@@ -1,7 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from unittest.mock import AsyncMock, MagicMock, patch, ANY
+from unittest.mock import AsyncMock, MagicMock, patch, ANY, Mock
 import pytest
 
 from openjiuwen.core.common.clients.llm_client import (
@@ -11,7 +11,7 @@ from openjiuwen.core.common.clients.llm_client import (
     create_async_openai_client,
     create_openai_client,
 )
-from openjiuwen.core.common.clients.client_registry import client_registry
+from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.foundation.llm import ModelClientConfig
 
 
@@ -114,7 +114,6 @@ class TestHttpXConnectorPool:
         call_kwargs = mock_pool_class.call_args[1]
         assert call_kwargs['max_connections'] == 100
         assert call_kwargs['max_keepalive_connections'] == 20
-        assert call_kwargs['max_connections_per_host'] == 30
         assert call_kwargs['keepalive_expiry'] == 60
         assert 'proxy' not in call_kwargs or call_kwargs['proxy'] is None
 
@@ -217,7 +216,10 @@ class TestCreateHttpxClient:
     @pytest.fixture
     def mock_connector_pool_manager(self):
         """Mock connector_pool_manager.get_connector_pool."""
-        with patch('openjiuwen.core.common.clients.llm_client.connector_pool_manager') as mock_manager:
+        with (patch('openjiuwen.core.common.clients.llm_client.get_connector_pool_manager')
+              as mock_get_pool_manager):
+            mock_manager = MagicMock()
+            mock_get_pool_manager.return_value = mock_manager
             # Create a mock pool that's NOT an AsyncMock for the conn() method
             mock_pool = MagicMock()  # Use MagicMock instead of AsyncMock
             mock_pool.conn.return_value = MagicMock()  # conn() returns a MagicMock
@@ -427,7 +429,7 @@ class TestCreateOpenAIClients:
     def test_registration_with_client_registry(self):
         """Test that OpenAI client factories are properly registered."""
         # Check if factories are registered
-        registered_clients = client_registry.list_clients()
+        registered_clients = get_client_registry().list_clients()
         factory_names = [name for name in registered_clients]
         assert any('async_open_ai' in name for name in factory_names)
         assert any('openai' in name for name in factory_names)
@@ -443,19 +445,21 @@ class TestIntegration:
         config = HttpXConnectorPoolConfig(proxy="http://proxy:8080")
 
         # Mock the connector pool manager to avoid actual connection creation
-        with patch('openjiuwen.core.common.clients.llm_client.connector_pool_manager.get_connector_pool') as mock_get:
+        with (patch('openjiuwen.core.common.clients.llm_client.get_connector_pool_manager') as mock_get_pool_manager):
+            pool_manager = MagicMock()
+            mock_get_pool_manager.return_value = pool_manager
             # Create a regular MagicMock for the pool, not AsyncMock
             mock_pool = MagicMock()  # Changed from AsyncMock to MagicMock
             mock_transport = MagicMock()
             mock_pool.conn.return_value = mock_transport
-            mock_get.return_value = mock_pool
+            pool_manager.get_connector_pool = AsyncMock(return_value = mock_pool)
 
             with patch('httpx.Client') as mock_httpx_client:
                 mock_client_instance = MagicMock()
                 mock_httpx_client.return_value = mock_client_instance
 
                 # Get client through registry
-                client = await client_registry.get_client(
+                client = await get_client_registry().get_client(
                     "httpx",
                     client_type="common",
                     config=config,
@@ -463,7 +467,7 @@ class TestIntegration:
                 )
 
                 # Verify the factory was called correctly
-                mock_get.assert_called_once()
+                mock_get_pool_manager.assert_called_once()
                 mock_httpx_client.assert_called_once_with(
                     transport=mock_transport  # Use the stored transport mock
                 )
@@ -479,10 +483,13 @@ class TestIntegration:
             "client_provider": "openai"
         }
 
-        with patch('openjiuwen.core.common.clients.llm_client.connector_pool_manager') as mock_manager, \
+        with patch('openjiuwen.core.common.clients.llm_client.get_connector_pool_manager') as get_mock_manager, \
                 patch('openjiuwen.core.common.clients.llm_client.UrlUtils.get_global_proxy_url') as mock_url, \
                 patch('httpx.Client') as mock_httpx_client, \
                 patch('openai.OpenAI') as mock_openai:
+
+            mock_manager = MagicMock()
+            get_mock_manager.return_value=mock_manager
             mock_url.return_value = "http://proxy:8080"
 
             # Create a regular MagicMock for the pool
@@ -532,8 +539,10 @@ class TestErrorCases:
     @pytest.mark.asyncio
     async def test_connector_pool_creation_failure(self):
         """Test handling of connector pool creation failure."""
-        with patch('openjiuwen.core.common.clients.llm_client.connector_pool_manager.get_connector_pool') as mock_get:
-            mock_get.side_effect = Exception("Pool creation failed")
+        with patch('openjiuwen.core.common.clients.llm_client.get_connector_pool_manager') as mock_get_manager:
+            mock_manager = MagicMock()
+            mock_get_manager.return_value = mock_manager
+            mock_manager.get_connector_pool = AsyncMock(side_effect=Exception("Pool creation failed"))
 
             config = HttpXConnectorPoolConfig()
 

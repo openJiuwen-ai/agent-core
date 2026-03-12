@@ -154,41 +154,12 @@ class ClientRegistry:
         return list(self._factories.keys())
 
 
-# Global registry instance
-client_registry = ClientRegistry()
+_client_registry = ClientRegistry()
 
 
-# class ClientMeta(type):
-#     """Metaclass that automatically registers classes inheriting from BaseClient.
-#
-#     This metaclass intercepts class creation and automatically registers any
-#     class that defines __client_name__ and __client_type__ attributes with the
-#     global client registry.
-#     """
-#
-#     def __new__(mcs, name, bases, namespace):
-#         """Create a new class and register it if it's a client class.
-#
-#         Args:
-#             name: Name of the class being created.
-#             bases: Base classes of the new class.
-#             namespace: Namespace dictionary of the class.
-#
-#         Returns:
-#             The newly created class.
-#         """
-#         cls = super().__new__(mcs, name, bases, namespace)
-#
-#         # Skip registration for BaseClient itself
-#         if name == 'BaseClient':
-#             return cls
-#
-#         # Check if client name and type are defined
-#         if hasattr(cls, '__client_name__') and hasattr(cls, '__client_type__'):
-#             # Automatically register with the global registry
-#             client_registry.register_class(cls)
-#         return cls
-#
+def get_client_registry():
+    return _client_registry
+
 
 class BaseClient:
     """Abstract base class for asynchronous clients.
@@ -223,7 +194,7 @@ class BaseClient:
         if hasattr(cls, '__client_name__') and hasattr(cls, '__client_type__'):
             # Automatically register with the global registry
             if cls.__client_name__ is not None:  # Ensure it's actually set
-                client_registry.register_class(cls)
+                get_client_registry().register_class(cls)
 
     def __init__(self, **kwargs):
         """Initialize the client with configuration.

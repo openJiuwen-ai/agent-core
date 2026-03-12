@@ -4,7 +4,7 @@ from abc import abstractmethod
 from typing import Any, List, Optional
 
 from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT
-from openjiuwen.core.common.clients.client_registry import BaseClient
+from openjiuwen.core.common.clients import BaseClient
 
 
 class McpClient(BaseClient):
