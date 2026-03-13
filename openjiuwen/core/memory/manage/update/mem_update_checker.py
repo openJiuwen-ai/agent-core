@@ -267,11 +267,6 @@ class MemUpdateChecker:
                 new_content = new_memories.get(new_id, check_item.info_text)
                 action_items.append(MemoryActionItem(id=new_id, content=new_content, status=MemoryStatus.ADD))
 
-        # Add new memories that weren't in check results (shouldn't happen, but just in case)
-        for new_id, new_content in new_memories.items():
-            if new_id not in processed_new_ids:
-                action_items.append(MemoryActionItem(id=new_id, content=new_content, status=MemoryStatus.ADD))
-
         memory_logger.debug(
             f"Memory check completed, returning {len(action_items)} action items",
             event_type=LogEventType.MEMORY_PROCESS,
