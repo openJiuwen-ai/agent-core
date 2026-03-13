@@ -520,6 +520,319 @@ Implementation should:
     - Other custom properties (all values will be converted to strings)
 ----
 
+## class GaussVectorStore
+
+```python
+class openjiuwen.core.foundation.store.vector.gauss_vector_store.GaussVectorStore(BaseVectorStore)
+```
+
+Vector storage implementation based on GaussVector Database, inheriting from `BaseVectorStore` and implementing all abstract methods.
+
+Corresponding source code: `openjiuwen.core.foundation.store.vector.gauss_vector_store.GaussVectorStore`.
+
+```python
+GaussVectorStore(
+    host: str = "localhost",
+    port: int = 5432,
+    database: str = "postgres",
+    user: str = "postgres",
+    password: str = "",
+    **kwargs: Any,
+)
+```
+
+**Parameters**:
+
+- `host: str`: GaussVector server host address. Default: `"localhost"`.
+- `port: int`: GaussVector server port. Default: `5432`.
+- `database: str`: Database name. Default: `"postgres"`.
+- `user: str`: Database user. Default: `"postgres"`.
+- `password: str`: Database password. Default: `""`.
+- `**kwargs: Any`: Additional connection parameters (e.g., `connection_timeout`, `sslmode`).
+
+**Behavior**:
+
+1. Connection uses lazy loading mode, established on first use;
+2. Internally uses `psycopg2` to connect to GaussDB;
+3. Supports collection (table) management, document CRUD, and vector search operations.
+
+### property connection
+
+```python
+@property
+def connection(self) -> Any
+```
+
+Get database connection (lazy loading). Automatically creates connection on first access.
+
+**Returns**:
+
+- `Any`: psycopg2 database connection object.
+
+### close
+
+```python
+def close(self) -> None
+```
+
+Close the database connection.
+
+### create_collection
+
+```python
+async def create_collection(
+    self,
+    collection_name: str,
+    schema: Union[CollectionSchema, Dict[str, Any]],
+    **kwargs: Any,
+) -> None
+```
+
+Create a new collection (table).
+
+**Parameters**:
+
+- `collection_name: str`: Name of the collection to create.
+- `schema: Union[CollectionSchema, Dict[str, Any]]`: CollectionSchema instance or schema dictionary.
+- `**kwargs: Any`: Additional parameters
+    - `distance_metric: str`: Distance metric (default: `"COSINE"`, options: `"L2"`)
+    - `index_type: str`: Index type (default: `"diskann"`, currently only supports DiskANN)
+    - `pg_nseg: int`: PQ segment count (default: 128)
+    - `pg_nclus: int`: Number of clusters (default: 16)
+    - `num_parallels: int`: Number of parallels (default: 32)
+
+### delete_collection
+
+```python
+async def delete_collection(
+    self,
+    collection_name: str,
+    **kwargs: Any,
+) -> None
+```
+
+Delete a specified collection.
+
+**Parameters**:
+
+- `collection_name: str`: Name of the collection to delete.
+- `**kwargs: Any`: Additional parameters.
+
+### collection_exists
+
+```python
+async def collection_exists(
+    self,
+    collection_name: str,
+    **kwargs: Any,
+) -> bool
+```
+
+Check if a collection exists.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name.
+- `**kwargs: Any`: Additional parameters.
+
+**Returns**:
+
+- `bool`: Returns `True` if exists, `False` otherwise.
+
+### get_schema
+
+```python
+async def get_schema(
+    self,
+    collection_name: str,
+    **kwargs: Any,
+) -> CollectionSchema
+```
+
+Get the schema of a collection.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name.
+- `**kwargs: Any`: Additional parameters.
+
+**Returns**:
+
+- `CollectionSchema`: The schema of the collection.
+
+### add_docs
+
+```python
+async def add_docs(
+    self,
+    collection_name: str,
+    docs: List[Dict[str, Any]],
+    **kwargs: Any,
+) -> None
+```
+
+Add documents to a collection.
+
+**Parameters**:
+
+- `collection_name: str`: Name of the target collection.
+- `docs: List[Dict[str, Any]]`: List of documents to add, each containing:
+    - `id: str` (optional): Document ID
+    - `embedding: List[float]`: Document vector embedding
+    - `text: str`: Document text content
+    - `metadata: Dict[str, Any]` (optional): Additional metadata
+- `**kwargs: Any`: Additional parameters
+    - `batch_size: int` (optional): Batch size for bulk insertion (default: 128)
+
+### search
+
+```python
+async def search(
+    self,
+    collection_name: str,
+    query_vector: List[float],
+    vector_field: str,
+    top_k: int = 5,
+    filters: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> List[VectorSearchResult]
+```
+
+Search for the most relevant documents by vector similarity.
+
+**Parameters**:
+
+- `collection_name: str`: Name of the collection to search.
+- `query_vector: List[float]`: Query vector for similarity search.
+- `vector_field: str`: Name of the vector field to search against.
+- `top_k: int`: Number of most relevant documents to return, default 5.
+- `filters: Optional[Dict[str, Any]]`: Scalar field filters for filtering results (equality filter only), default `None`.
+- `**kwargs: Any`: Additional search parameters
+    - `metric_type: str` (optional): Distance metric type
+    - `output_fields: List[str]` (optional): Fields to return in results
+
+**Returns**:
+
+- `List[VectorSearchResult]`: List of search results, each containing:
+    - `score: float`: Relevance score (higher is more relevant)
+    - `fields: Dict[str, Any]`: All field values from the matched document
+
+### delete_docs_by_ids
+
+```python
+async def delete_docs_by_ids(
+    self,
+    collection_name: str,
+    ids: List[str],
+    **kwargs: Any,
+) -> None
+```
+
+Delete documents by their IDs.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name.
+- `ids: List[str]`: List of document IDs to delete.
+- `**kwargs: Any`: Additional parameters
+    - `id_column: str` (optional): ID field name (default: `"id"`).
+
+### delete_docs_by_filters
+
+```python
+async def delete_docs_by_filters(
+    self,
+    collection_name: str,
+    filters: Dict[str, Any],
+    **kwargs: Any,
+) -> None
+```
+
+Delete documents by scalar field filters.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name.
+- `filters: Dict[str, Any]`: Scalar field filters for matching documents to delete (equality filter only).
+- `**kwargs: Any`: Additional parameters.
+
+### list_collection_names
+
+```python
+async def list_collection_names(self) -> List[str]
+```
+
+List all collection names in the vector store.
+
+**Returns**:
+
+- `List[str]`: A list of collection names.
+
+### get_collection_metadata
+
+```python
+async def get_collection_metadata(
+    self,
+    collection_name: str,
+) -> Dict[str, Any]
+```
+
+Get collection metadata.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name.
+
+**Returns**:
+- `Dict[str, Any]`: Dictionary containing collection metadata with keys:
+    - `distance_metric: str`: The distance metric type (e.g., `"COSINE"`, `"L2"`)
+    - `vector_field: str`: The vector field name
+    - `schema_version: int`: The schema version number (0 if not set)
+
+### update_collection_metadata
+
+```python
+async def update_collection_metadata(
+    self,
+    collection_name: str,
+    metadata: Dict[str, Any],
+) -> None
+```
+
+Update collection metadata.
+
+**Parameters**:
+
+- `collection_name: str`: Collection name.
+- `metadata: Dict[str, Any]`: Dictionary of metadata to update. Supports keys:
+    - `schema_version: int`: The schema version number (must be a non-negative integer)
+    - Other custom properties.
+
+### update_schema
+
+```python
+async def update_schema(
+    self,
+    collection_name: str,
+    operations: List[BaseOperation],
+) -> None
+```
+
+Update the schema of a collection for vector data migration.
+
+This method applies a series of schema migration operations to modify the structure of a collection. Supported operations include:
+- `AddScalarFieldOperation`: Add a new scalar field
+- `RenameScalarFieldOperation`: Rename an existing scalar field
+- `UpdateScalarFieldTypeOperation`: Change the data type of a scalar field
+- `UpdateEmbeddingDimensionOperation`: Modify the dimension of vector embeddings
+
+**Parameters**:
+
+- `collection_name: str`: The name of the collection to modify.
+- `operations: List[BaseOperation]`: A list of migration operations to apply.
+
+---
+
 ## function create_vector_store
 
 ```python
@@ -533,7 +846,7 @@ Vector store factory function for creating vector store instances by type.
 
 **Parameters**:
 
-- `store_type: str`: Storage type, supports `"chroma"` or `"milvus"`
+- `store_type: str`: Storage type, supports `"chroma"`, `"milvus"`, or `"gaussvector"`
 - `**kwargs: Any`: Additional parameters passed to specific storage implementations
 
 **Returns**:

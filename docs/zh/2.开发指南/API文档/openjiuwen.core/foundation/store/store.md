@@ -502,6 +502,320 @@ async def update_collection_metadata(
     - 其他自定义属性（所有值会被转换为字符串）
 ---
 
+## class GaussVectorStore
+
+```python
+class openjiuwen.core.foundation.store.vector.gauss_vector_store.GaussVectorStore(BaseVectorStore)
+```
+
+基于 GaussVector 向量数据库的向量存储实现，继承自 `BaseVectorStore`，实现所有抽象方法。
+
+对应源码：`openjiuwen.core.foundation.store.vector.gauss_vector_store.GaussVectorStore`。
+
+```python
+GaussVectorStore(
+    host: str = "localhost",
+    port: int = 5432,
+    database: str = "postgres",
+    user: str = "postgres",
+    password: str = "",
+    **kwargs: Any,
+)
+```
+
+**参数**：
+
+- `host: str`：GaussVector 服务器主机地址。默认值：`"localhost"`。
+- `port: int`：GaussVector 服务器端口。默认值：`5432`。
+- `database: str`：数据库名称。默认值：`"postgres"`。
+- `user: str`：数据库用户。默认值：`"postgres"`。
+- `password: str`：数据库密码。默认值：`""`。
+- `**kwargs: Any`：额外连接参数（如 `connection_timeout`、`sslmode`）。
+
+**行为**：
+
+1. 连接采用懒加载模式，在首次使用时才建立连接；
+2. 内部使用 `psycopg2` 连接 GaussDB 数据库；
+3. 支持集合（表）管理、文档增删向量搜索等操作。
+
+### property connection
+
+```python
+@property
+def connection(self) -> Any
+```
+
+获取数据库连接（懒加载）。首次访问时自动创建连接。
+
+**返回**：
+
+- `Any`：psycopg2 数据库连接对象。
+
+### close
+
+```python
+def close(self) -> None
+```
+
+关闭数据库连接。
+
+### create_collection
+
+```python
+async def create_collection(
+    self,
+    collection_name: str,
+    schema: Union[CollectionSchema, Dict[str, Any]],
+    **kwargs: Any,
+) -> None
+```
+
+创建新集合（表）。
+
+**参数**：
+
+- `collection_name: str`：要创建的集合名称。
+- `schema: Union[CollectionSchema, Dict[str, Any]]`：CollectionSchema 实例或 schema 字典。
+- `**kwargs: Any`：额外参数
+    - `distance_metric: str`：距离度量（默认 `"COSINE"`，可选 `"L2"`）
+    - `index_type: str`：索引类型（默认 `"diskann"`，目前仅支持 DiskANN）
+    - `pg_nseg: int`：PQ 段数（默认 128）
+    - `pg_nclus: int`：聚类数（默认 16）
+    - `num_parallels: int`：并行数（默认 32）
+
+### delete_collection
+
+```python
+async def delete_collection(
+    self,
+    collection_name: str,
+    **kwargs: Any,
+) -> None
+```
+
+删除指定集合。
+
+**参数**：
+
+- `collection_name: str`：要删除的集合名称。
+- `**kwargs: Any`：额外参数。
+
+### collection_exists
+
+```python
+async def collection_exists(
+    self,
+    collection_name: str,
+    **kwargs: Any,
+) -> bool
+```
+
+检查集合是否存在。
+
+**参数**：
+
+- `collection_name: str`：集合名称。
+- `**kwargs: Any`：额外参数。
+
+**返回**：
+
+- `bool`：存在返回 `True`，否则返回 `False`。
+
+### get_schema
+
+```python
+async def get_schema(
+    self,
+    collection_name: str,
+    **kwargs: Any,
+) -> CollectionSchema
+```
+
+获取集合的 schema。
+
+**参数**：
+
+- `collection_name: str`：集合名称。
+- `**kwargs: Any`：额外参数。
+
+**返回**：
+
+- `CollectionSchema`：集合的 schema。
+
+### add_docs
+
+```python
+async def add_docs(
+    self,
+    collection_name: str,
+    docs: List[Dict[str, Any]],
+    **kwargs: Any,
+) -> None
+```
+
+向集合添加文档。
+
+**参数**：
+
+- `collection_name: str`：目标集合名称。
+- `docs: List[Dict[str, Any]]`：要添加的文档列表，每个文档包含：
+    - `id: str`（可选）：文档 ID
+    - `embedding: List[float]`：文档向量嵌入
+    - `text: str`：文档文本内容
+    - `metadata: Dict[str, Any]`（可选）：额外元数据
+- `**kwargs: Any`：额外参数
+    - `batch_size: int`（可选）：批量插入的批次大小（默认 128）
+
+### search
+
+```python
+async def search(
+    self,
+    collection_name: str,
+    query_vector: List[float],
+    vector_field: str,
+    top_k: int = 5,
+    filters: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> List[VectorSearchResult]
+```
+
+通过向量相似度搜索最相关的文档。
+
+**参数**：
+
+- `collection_name: str`：要搜索的集合名称。
+- `query_vector: List[float]`：用于相似度搜索的查询向量。
+- `vector_field: str`：要搜索的向量字段名称。
+- `top_k: int`：返回的最相关文档数量，默认 5。
+- `filters: Optional[Dict[str, Any]]`：标量字段过滤器（等值过滤），默认 `None`。
+- `**kwargs: Any`：额外搜索参数
+    - `metric_type: str`（可选）：距离度量类型
+    - `output_fields: List[str]`（可选）：返回的字段列表
+
+**返回**：
+
+- `List[VectorSearchResult]`：搜索结果列表，每个结果包含：
+    - `score: float`：相关性得分（越高越相关）
+    - `fields: Dict[str, Any]`：文档的所有字段值
+
+### delete_docs_by_ids
+
+```python
+async def delete_docs_by_ids(
+    self,
+    collection_name: str,
+    ids: List[str],
+    **kwargs: Any,
+) -> None
+```
+
+按文档 ID 删除文档。
+
+**参数**：
+
+- `collection_name: str`：集合名称。
+- `ids: List[str]`：要删除的文档 ID 列表。
+- `**kwargs: Any`：额外参数
+    - `id_column: str`（可选）：ID 字段名（默认 `"id"`）。
+
+### delete_docs_by_filters
+
+```python
+async def delete_docs_by_filters(
+    self,
+    collection_name: str,
+    filters: Dict[str, Any],
+    **kwargs: Any,
+) -> None
+```
+
+按标量字段过滤器删除文档。
+
+**参数**：
+
+- `collection_name: str`：集合名称。
+- `filters: Dict[str, Any]`：标量字段过滤器（等值过滤）。
+- `**kwargs: Any`：额外参数。
+
+### list_collection_names
+
+```python
+async def list_collection_names(self) -> List[str]
+```
+
+列出向量存储中的所有集合名称。
+
+**返回**：
+
+- `List[str]`：集合名称列表。
+
+### get_collection_metadata
+
+```python
+async def get_collection_metadata(
+    self,
+    collection_name: str,
+) -> Dict[str, Any]
+```
+
+获取集合的元数据信息。
+
+**参数**：
+
+- `collection_name: str`：集合名称。
+
+**返回**：
+
+- `Dict[str, Any]`：集合元数据字典，包含以下键：
+    - `distance_metric: str`：距离度量类型（如 `"COSINE"`、`"L2"`）
+    - `vector_field: str`：向量字段名称
+    - `schema_version: int`：schema 版本号（未设置时为 0）
+
+### update_collection_metadata
+
+```python
+async def update_collection_metadata(
+    self,
+    collection_name: str,
+    metadata: Dict[str, Any],
+) -> None
+```
+
+更新集合的元数据信息。
+
+**参数**：
+
+- `collection_name: str`：集合名称。
+- `metadata: Dict[str, Any]`：要更新的元数据字典，支持以下键：
+    - `schema_version: int`：schema 版本号（必须是非负整数）
+    - 其他自定义属性。
+
+### update_schema
+
+```python
+async def update_schema(
+    self,
+    collection_name: str,
+    operations: List[BaseOperation],
+) -> None
+```
+
+更新集合的 schema，用于向量数据迁移。
+
+该方法应用一系列 schema 迁移操作来修改集合的结构。支持的操作包括：
+- `AddScalarFieldOperation`：添加新的标量字段
+- `RenameScalarFieldOperation`：重命名现有标量字段
+- `UpdateScalarFieldTypeOperation`：更改标量字段的数据类型
+- `UpdateEmbeddingDimensionOperation`：修改向量嵌入的维度
+
+**参数**：
+
+- `collection_name: str`：要修改的集合名称。
+- `operations: List[BaseOperation]`：要应用的迁移操作列表。
+
+---
+
 ## function create_vector_store
 
 ```python
@@ -515,7 +829,7 @@ def openjiuwen.core.foundation.store.create_vector_store(
 
 **参数**：
 
-- `store_type: str`：存储类型，支持 `"chroma"` 或 `"milvus"`
+- `store_type: str`：存储类型，支持 `"chroma"`、`"milvus"` 或 `"gaussvector"`
 - `**kwargs: Any`：传递给具体存储实现的额外参数
 
 **返回**：
