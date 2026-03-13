@@ -193,11 +193,11 @@ class SchemaUtils:
         # Handle None data
         if result is None:
             instance = model()
-            return instance.model_dump(exclude_unset=False)
+            return instance.model_dump(exclude_unset=False, by_alias=True)
 
         # Validate and format using the model
         instance = model.model_validate(result)
-        final_result = instance.model_dump(exclude_unset=False)
+        final_result = instance.model_dump(exclude_unset=False, by_alias=True)
 
         return final_result
 
@@ -239,12 +239,30 @@ class SchemaUtils:
             if field_name not in required:
                 field_type = typing.Optional[field_type]
             field_config = SchemaUtils._convert_schema_to_field(field_schema, field_name in required)
-            field_definitions[field_name] = (field_type, field_config)
+
+            if field_schema.get("type") in ("integer", "number") and field_config.default == "":
+                field_config.default = None
+
+            # Handle field names with leading underscores (not allowed by Pydantic)
+            if field_name.startswith('_'):
+                # Create a sanitized field name by removing leading underscores
+                sanitized_name = field_name.lstrip('_')
+                # If sanitized name is empty or conflicts, use a prefix
+                if not sanitized_name or sanitized_name in properties:
+                    sanitized_name = f"field{field_name}"
+
+                # Update field config to use alias for the original name
+                field_config.alias = field_name
+                field_config.serialization_alias = field_name
+                field_definitions[sanitized_name] = (field_type, field_config)
+            else:
+                field_definitions[field_name] = (field_type, field_config)
 
         # Configure model behavior
         config = ConfigDict(
             extra=extra_config,
             validate_default=True,  # Validate default values
+            populate_by_name=True,  # Allow population by both field name and alias
             json_schema_extra={"schema": schema_dict}  # Preserve original schema
         )
 
