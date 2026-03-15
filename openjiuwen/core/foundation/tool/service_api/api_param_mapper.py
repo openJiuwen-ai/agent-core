@@ -92,8 +92,17 @@ class APIParamMapper:
 
                 result[location][param_name] = value
 
-        # Merge defaults (inputs override defaults)
+        # Merge defaults (inputs override defaults, but None/'' preserve defaults)
         for location in [APIParamLocation.PATH, APIParamLocation.QUERY, APIParamLocation.HEADER]:
-            result[location] = {**self.defaults.get(location, {}), **result[location]}
+            merged = {}
+            defaults = self.defaults.get(location, {})
+            mapped = result[location]
+            # Start with defaults
+            merged.update(defaults)
+            # Override with input values only if they are not None or empty string
+            for key, value in mapped.items():
+                if value is not None and value != '':
+                    merged[key] = value
+            result[location] = merged
 
         return result

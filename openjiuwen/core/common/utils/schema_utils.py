@@ -238,25 +238,31 @@ class SchemaUtils:
             # For optional fields and don't have default values
             if field_name not in required:
                 field_type = typing.Optional[field_type]
-            field_config = SchemaUtils._convert_schema_to_field(field_schema, field_name in required)
-
-            if field_schema.get("type") in ("integer", "number") and field_config.default == "":
-                field_config.default = None
-
+            
             # Handle field names with leading underscores (not allowed by Pydantic)
+            # Pass alias directly to Field constructor instead of mutating after creation
             if field_name.startswith('_'):
                 # Create a sanitized field name by removing leading underscores
                 sanitized_name = field_name.lstrip('_')
                 # If sanitized name is empty or conflicts, use a prefix
                 if not sanitized_name or sanitized_name in properties:
                     sanitized_name = f"field{field_name}"
-
-                # Update field config to use alias for the original name
-                field_config.alias = field_name
-                field_config.serialization_alias = field_name
+                
+                # Create FieldInfo with alias passed to constructor (not mutated after)
+                field_config = SchemaUtils._convert_schema_to_field(
+                    field_schema, 
+                    field_name in required,
+                    alias=field_name,
+                    serialization_alias=field_name
+                )
                 field_definitions[sanitized_name] = (field_type, field_config)
             else:
+                field_config = SchemaUtils._convert_schema_to_field(field_schema, field_name in required)
                 field_definitions[field_name] = (field_type, field_config)
+
+            # Handle numeric fields with empty string default
+            if field_schema.get("type") in ("integer", "number") and field_config.default == "":
+                field_config.default = None
 
         # Configure model behavior
         config = ConfigDict(
@@ -370,13 +376,17 @@ class SchemaUtils:
         return type_mapping.get(schema_type, Any)
 
     @staticmethod
-    def _convert_schema_to_field(schema: Dict[str, Any], required: bool = False) -> FieldInfo:
+    def _convert_schema_to_field(schema: Dict[str, Any], required: bool = False, 
+                                  alias: Optional[str] = None, 
+                                  serialization_alias: Optional[str] = None) -> FieldInfo:
         """
         Convert JSON Schema field definition to Pydantic Field configuration.
 
         Args:
             schema: JSON Schema field definition
             required: Whether the field is required
+            alias: Alias for the field name (for validation/input)
+            serialization_alias: Alias for serialization (output)
 
         Returns:
             Pydantic FieldInfo configuration
@@ -393,6 +403,12 @@ class SchemaUtils:
             field_kwargs["title"] = schema["title"]
         if "description" in schema:
             field_kwargs["description"] = schema["description"]
+
+        # Add alias parameters if provided
+        if alias is not None:
+            field_kwargs["alias"] = alias
+        if serialization_alias is not None:
+            field_kwargs["serialization_alias"] = serialization_alias
 
         # String-specific constraints
         if schema.get("type") == "string":

@@ -10,6 +10,7 @@ from pydantic import Field, field_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
@@ -97,8 +98,7 @@ class RestfulApiCard(ToolCard):
         # Warn if schema has path parameters not in URL (not an error, just informational)
         extra_in_schema = schema_path_params - url_path_params
         if extra_in_schema:
-            import warnings
-            warnings.warn(
+            logger.warn(
                 f"Schema defines path parameters {extra_in_schema} that are not used in URL {self.url}",
                 UserWarning
             )

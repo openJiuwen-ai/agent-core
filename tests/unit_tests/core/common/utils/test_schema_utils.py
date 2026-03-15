@@ -167,3 +167,61 @@ def test_create_model_from_simple_schema():
     assert instance.age == 30
     assert instance.email == "test@example.com"
     assert instance.is_active is True
+
+
+def test_underscore_field_alias_handling():
+    """Test that fields with leading underscores are properly handled with aliases.
+    
+    This tests the fix for underscore-prefixed fields that are not allowed by Pydantic.
+    The field should be accessible via a sanitized name while preserving the original
+    name through alias for validation/serialization.
+    """
+    schema_with_underscore = {
+        "type": "object",
+        "title": "UnderscoreTest",
+        "properties": {
+            "_id": {
+                "type": "integer",
+                "description": "Internal ID"
+            },
+            "_private": {
+                "type": "string",
+                "default": "secret"
+            },
+            "name": {
+                "type": "string"
+            },
+            "__dunder": {
+                "type": "string",
+                "default": "dunder_value"
+            }
+        },
+        "required": ["_id", "name"]
+    }
+    
+    model = SchemaUtils.get_schema_class(schema_with_underscore)
+    
+    # Create instance using original field names (via alias)
+    instance = model(
+        **{"_id": 123, "name": "Test", "_private": "my_secret", "__dunder": "test"}
+    )
+    
+    # Access via sanitized names
+    assert instance.id == 123
+    assert instance.name == "Test"
+    assert instance.private == "my_secret"
+    assert instance.dunder == "test"
+    
+    # Test serialization preserves original underscore names
+    serialized = instance.model_dump(by_alias=True)
+    assert "_id" in serialized
+    assert serialized["_id"] == 123
+    assert "_private" in serialized
+    assert serialized["_private"] == "my_secret"
+    assert "__dunder" in serialized
+    assert serialized["__dunder"] == "test"
+    
+    # Test default values work for underscore fields
+    instance_with_defaults = model(**{"_id": 456, "name": "Test2"})
+    assert instance_with_defaults.private == "secret"
+    assert instance_with_defaults.dunder == "dunder_value"
