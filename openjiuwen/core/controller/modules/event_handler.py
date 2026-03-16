@@ -14,7 +14,7 @@ Event handlers are responsible for handling different types of events:
 """
 
 from abc import abstractmethod, ABC
-from typing import TYPE_CHECKING, Optional, Dict
+from typing import Any, TYPE_CHECKING, Dict, Optional
 from pydantic import BaseModel
 
 from openjiuwen.core.context_engine import ContextEngine
@@ -159,3 +159,59 @@ class EventHandler(ABC):
             Optional[Dict]: Response data
         """
         ...
+
+    async def handle_follow_up(self, inputs: EventHandlerInput) -> Optional[Dict]:
+        """Handle follow-up events.
+
+        Default implementation returns an ack dict.
+        Not abstract — existing subclasses are not
+        required to override this method.
+
+        Args:
+            inputs: event handler input containing
+                event and session information.
+
+        Returns:
+            Dict with status (must be non-empty to
+            avoid MessageQueue ValueError).
+        """
+        return {"status": "not_supported"}
+
+    def prepare_round(self) -> int:
+        """Prepare a new execution round.
+
+        Returns round_id for correlation. Default
+        returns 0. Subclasses (e.g.
+        DeepAgentEventHandler) override with
+        Future-based round management.
+
+        Returns:
+            Round identifier for correlation.
+        """
+        return 0
+
+    async def wait_completion(
+        self,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Wait for round completion.
+
+        Default returns immediately. Subclasses
+        override with Future-based waiting.
+
+        Args:
+            timeout: Max seconds to wait.
+
+        Returns:
+            Result dict.
+        """
+        _ = timeout
+        return {"status": "completed"}
+
+    async def on_abort(self) -> None:
+        """Called when the session is being aborted.
+
+        Default implementation is a no-op. Subclasses
+        can override to perform cleanup or signal
+        completion waiters.
+        """
