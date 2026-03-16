@@ -16,6 +16,7 @@ from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging.utils import log_llm_request, log_llm_response
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
@@ -424,90 +425,11 @@ class ReActAgent(BaseAgent):
             tools=context_window.get_tools(),
         )
 
-        # Log LLM input
-        msgs = ctx.inputs.messages or []
-        tool_count = len(ctx.inputs.tools) if ctx.inputs.tools else 0
-        if UserConfig.is_sensitive():
-            logger.info(
-                f"[LLM] >>> request: msg_count={len(msgs)}, "
-                f"tool_count={tool_count}"
-            )
-        else:
-            logger.info(
-                f"[LLM] >>> request: msg_count={len(msgs)}, "
-                f"tool_count={tool_count}"
-            )
-            for idx, msg in enumerate(msgs):
-                if isinstance(msg, dict):
-                    role = msg.get("role", "")
-                    content = str(msg.get("content", ""))
-                    tool_calls = msg.get("tool_calls")
-                    tool_call_id = msg.get("tool_call_id", "")
-                else:
-                    role = getattr(msg, "role", "")
-                    content = str(getattr(msg, "content", ""))
-                    tool_calls = getattr(msg, "tool_calls", None)
-                    tool_call_id = getattr(msg, "tool_call_id", "")
-                parts = [f"[LLM]   msg[{idx}] role={role}"]
-                if content:
-                    parts.append(f"content={content[:300]}")
-                if tool_calls:
-                    tc_summary = []
-                    for tc in tool_calls:
-                        if isinstance(tc, dict):
-                            fn = tc.get("function", {})
-                            tc_summary.append(
-                                f"{fn.get('name', '?')}("
-                                f"{str(fn.get('arguments', ''))[:100]})"
-                            )
-                        else:
-                            fn = getattr(tc, "function", tc)
-                            name = getattr(
-                                fn, "name",
-                                getattr(tc, "name", "?"),
-                            )
-                            args = str(
-                                getattr(
-                                    fn, "arguments",
-                                    getattr(tc, "arguments", ""),
-                                )
-                            )[:100]
-                            tc_summary.append(f"{name}({args})")
-                    parts.append(
-                        f"tool_calls=[{', '.join(tc_summary)}]"
-                    )
-                if tool_call_id:
-                    parts.append(f"tool_call_id={tool_call_id}")
-                logger.info(", ".join(parts))
+        log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
 
         ai_message = await self._railed_model_call(ctx)
 
-        # Log LLM output
-        usage = getattr(ai_message, "usage_metadata", None)
-        usage_str = ""
-        if usage:
-            usage_str = (
-                f", tokens={{input={getattr(usage, 'input_tokens', '?')}, "
-                f"output={getattr(usage, 'output_tokens', '?')}}}"
-            )
-        if UserConfig.is_sensitive():
-            tc_count = len(ai_message.tool_calls) if ai_message.tool_calls else 0
-            logger.info(
-                f"[LLM] <<< response: "
-                f"content_len={len(ai_message.content or '')}, "
-                f"tool_call_count={tc_count}{usage_str}"
-            )
-        else:
-            logger.info(
-                f"[LLM] <<< response: "
-                f"content={ai_message.content or ''}{usage_str}"
-            )
-            if ai_message.tool_calls:
-                for tc in ai_message.tool_calls:
-                    logger.info(
-                        f"[LLM]   tool_call: "
-                        f"{tc.name}({tc.arguments})"
-                    )
+        log_llm_response(logger, ai_message)
 
         return ai_message
 
