@@ -755,6 +755,13 @@ class StatusCode(Enum):
     STORE_VECTOR_SCHEMA_INVALID = (186000, "store vector_schema is invalid, reason: {error_msg}")
     STORE_VECTOR_DOC_INVALID = (186001, "store vector_doc is invalid, reason: {error_msg}")
     STORE_VECTOR_COLLECTION_NOT_FOUND = (186002, "store vector_collection not found, collection_name={collection_name}")
+    STORE_GRAPH_PARAM_INVALID = (186003, "store graph_param invalid, reason: {error_msg}")
+    STORE_GRAPH_BACKEND_NAME_INVALID = (186004, "store graph_backend name invalid, reason: {error_msg}")
+    STORE_GRAPH_BACKEND_ALREADY_EXISTS = (186005, "store graph_backend exists, name={name}, existing={existing}")
+    STORE_GRAPH_PROTOCOL_NOT_IMPLEMENTED = (186006, "store graph_protocol not implemented, reason: {error_msg}")
+    STORE_GRAPH_BACKEND_NOT_FOUND = (186007, "store graph_backend not found, please register it first, name={name}")
+    STORE_GRAPH_FACTORY_NOT_INSTANTIABLE = (186008, "store graph_factory must not be instantiated, class={class_name}")
+    STORE_GRAPH_COLLECTION_NOT_SUPPORTED = (186009, "store graph_collection not supported, collection={collection}")
 
     # Foundation - Common Utility 188000 - 188999
     COMMON_SSL_CONTEXT_INIT_FAILED = (188000, "common ssl_context initialization failed, reason: {error_msg}")

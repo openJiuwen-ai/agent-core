@@ -6,6 +6,8 @@ Document Data Models
 Contains Document and TextChunk data models.
 """
 
+__all__ = ["Document", "TextChunk", "MultimodalDocument"]
+
 import base64
 import mimetypes
 import re
@@ -16,15 +18,9 @@ from typing import Any, Dict, Literal, Self, overload
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 from pydantic_core import PydanticCustomError
 
+from openjiuwen.core.foundation.store.base_reranker import Document
+
 NOT_SET = None
-
-
-class Document(BaseModel):
-    """Document data model"""
-
-    id_: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Document ID")
-    text: str = Field(..., description="Document text content")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Document metadata")
 
 
 class TextChunk(BaseModel):

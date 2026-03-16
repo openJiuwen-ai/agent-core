@@ -7,6 +7,7 @@ Provides a unified interface for embedding models.
 """
 
 from abc import ABC, abstractmethod
+import asyncio
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -22,6 +23,8 @@ class EmbeddingConfig(BaseModel):
 
 class Embedding(ABC):
     """Embedding model abstract base class"""
+
+    limiter: asyncio.Semaphore
 
     @abstractmethod
     async def embed_query(self, text: str, **kwargs) -> List[float]:

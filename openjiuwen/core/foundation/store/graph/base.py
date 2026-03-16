@@ -6,23 +6,28 @@ Graph Store Factory
 Factory class for creating and managing graph store backend instances
 """
 
-from threading import Lock
+from threading import RLock
 from typing import Dict, Optional, Type
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 
+from .base_graph_store import GraphStore
 from .config import GraphConfig
-from .graph_backend import GraphStore
 
 
 class GraphStoreFactory:
     """Factory class to assemble graph store instances"""
 
     class_map: Dict[str, Type[GraphStore]] = dict()
-    __thread_lock: Lock = Lock()
+    _thread_lock: RLock = RLock()
 
     def __init__(self, *args, **kwargs):
-        raise RuntimeError(f"Please do not instantiate {self.__class__.__name__}")
+        raise build_error(
+            StatusCode.STORE_GRAPH_FACTORY_NOT_INSTANTIABLE,
+            class_name=self.__class__.__name__,
+        )
 
     @classmethod
     def register_backend(cls, name: str, backend: Type[GraphStore], force: bool = False):
@@ -30,22 +35,33 @@ class GraphStoreFactory:
 
         Args:
             name (str): Name for the new graph store backend.
-            backend (Type[GraphBackend]): Class for the new graph store backend.
+            backend (Type[GraphStore]): Class for the new graph store backend.
             force (bool, optional): Whether to force register. Defaults to False.
 
-        Raises:
-            KeyError: 1) name is empty or 2) name already registered and force=False.
-            NotImplementedError: backend did not implement the GraphStore Protocol.
+        Raises error:
+            - name is empty
+            - name already registered and force=False.
+            - backend did not implement the GraphStore Protocol.
         """
-        with cls.__thread_lock:
+        with cls._thread_lock:
             if not name:
-                raise KeyError("Backend name cannot be registered as an empty value.")
+                raise build_error(
+                    StatusCode.STORE_GRAPH_BACKEND_NAME_INVALID,
+                    error_msg="Backend name cannot be registered as an empty value.",
+                )
             if name in cls.class_map and not force:
-                raise KeyError(f"Entry [{name}] -> {cls.class_map[name]} already exists.")
+                raise build_error(
+                    StatusCode.STORE_GRAPH_BACKEND_ALREADY_EXISTS,
+                    name=name,
+                    existing=cls.class_map[name].__name__,
+                )
             if not isinstance(backend, GraphStore):
                 err_msg = f"{name} did not implement GraphStore Protocol!"
                 if not force:
-                    raise NotImplementedError(err_msg)
+                    raise build_error(
+                        StatusCode.STORE_GRAPH_PROTOCOL_NOT_IMPLEMENTED,
+                        error_msg=err_msg,
+                    )
                 logger.warning(err_msg)
             cls.class_map[name] = backend
             logger.info("Graph Store registered: %s", name)
@@ -59,15 +75,21 @@ class GraphStoreFactory:
             backend_name (Optional[str], optional): If not None, overwrites database backend choice in config. \
                 Defaults to None.
 
-        Raises:
-            KeyError: The database backend choice has not been registered in GraphStoreFactory.
+        Raises error:
+            - the database backend choice has not been registered in GraphStoreFactory.
 
         Returns:
             GraphStore: instance of graph store.
         """
-        with cls.__thread_lock:
+        with cls._thread_lock:
             name = backend_name or config.backend
             backend_cls = cls.class_map.get(name)
             if backend_cls:
                 return backend_cls.from_config(config, **kwargs)
-            raise KeyError(f"Backend type [{name}] does not exist.")
+
+        if name == "milvus":
+            from .milvus import register_milvus_support
+
+            register_milvus_support()
+            return cls.from_config(config, backend_name=backend_name, **kwargs)
+        raise build_error(StatusCode.STORE_GRAPH_BACKEND_NOT_FOUND, name=name)

@@ -6,15 +6,17 @@ Graph Store Configuration
 Configuration models for graph store settings
 """
 
+__all__ = ["GraphConfig", "GraphStoreIndexConfig", "GraphStoreStorageConfig"]
+
 import os.path
 import socket
-from typing import Any, Dict, Mapping, Type, Union
+from typing import Any, Mapping, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from openjiuwen.core.common.logging import store_logger
-from openjiuwen.core.foundation.store.base_embedding import Embedding, EmbeddingConfig
+from openjiuwen.core.foundation.store.base_embedding import Embedding
 
 from .database_config import GraphStoreIndexConfig, GraphStoreStorageConfig
 
@@ -22,32 +24,28 @@ from .database_config import GraphStoreIndexConfig, GraphStoreStorageConfig
 class GraphConfig(BaseModel):
     """Configuration of Graph Store"""
 
+    # Pydantic model configuration
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     uri: str
     name: str = Field(default="")
-    user: str = Field(default="")
-    password: str = Field(default="")
     token: str = Field(default="")
     backend: str = Field(default="milvus")
-    timeout: Union[int, float] = Field(default=15.0, gt=0)
-    extras: dict = Field(default_factory=dict)
-    worker_threads: int = Field(default=30, ge=0)
+    timeout: int | float = Field(default=15.0, gt=0)
+    extras: dict = Field(default_factory=dict, description="extra kwargs to pass into database client, such as alias")
+    max_concurrent: int = Field(default=10, ge=0)
     embed_dim: int = Field(default=512, ge=32)
     embed_batch_size: int = Field(default=10, ge=1)
-    embedding_cls: Type[Embedding]
-    embedding_config: EmbeddingConfig
+    embedding_model: Optional[Embedding] = Field(default=None)
     db_storage_config: GraphStoreStorageConfig = Field(default_factory=GraphStoreStorageConfig)
     db_embed_config: GraphStoreIndexConfig = Field(default_factory=GraphStoreIndexConfig)
-    wipe_at_startup: bool = Field(default=False)
     request_max_retries: int = Field(
-        default=5, description="Max number of retries for sending embedding / chat completion requests"
-    )
-    request_retry_wait: float = Field(
-        default=0.1, description="Wait between retries for sending embedding / chat completion requests (second) "
+        default=5, description="Max number of retries for sending chat completion requests"
     )
 
     @field_validator("extras", mode="before")
     @classmethod
-    def check_extras(cls, value: Union[Any, Dict]):
+    def check_extras(cls, value: dict | Any):
         """Check the extras field"""
         if isinstance(value, Mapping) and all(isinstance(k, str) for k in value.keys()):
             return value

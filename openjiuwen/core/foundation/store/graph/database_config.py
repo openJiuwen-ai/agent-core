@@ -6,14 +6,13 @@ Graph Database Configuration
 Configuration models for graph database storage limits and indexing options
 """
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.store.vector_fields.base import VectorField
 
-VARCHAR_LIMIT = dict(gt=1, le=65535)
-ARRAY_LIMIT = dict(gt=1, le=4096)
+from .constants import ARRAY_LIMIT, VARCHAR_LIMIT
 
 
 class BM25Config(BaseModel):
@@ -27,6 +26,7 @@ class GraphStoreIndexConfig(BaseModel):
     """Graph Database Indexing Options"""
 
     index_type: VectorField = Field(description="Index type for Approximated Nearest Neighbour search")
+    distance_metric: Literal["cosine", "euclidean", "dot"] = Field(description="Distance metric to use")
     extra_configs: Dict[str, Any] = Field(default_factory=dict, description="Extra configuration arguments")
     bm25_config: Union[BM25Config, BaseModel] = Field(default_factory=BM25Config, description="BM25 configuration")
     bm25_analyzer_settings: Optional[Dict[str, Any]] = Field(

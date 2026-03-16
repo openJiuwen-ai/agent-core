@@ -6,15 +6,14 @@ Graph Store Protocol
 Protocol definition for graph vector store interface
 """
 
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Protocol, runtime_checkable
+import asyncio
+from typing import Any, Iterable, Optional, Protocol, runtime_checkable
 
 from openjiuwen.core.foundation.store.base_embedding import Embedding
+from openjiuwen.core.foundation.store.base_reranker import Reranker
 from openjiuwen.core.foundation.store.graph.config import GraphConfig
+from openjiuwen.core.foundation.store.graph.result_ranking import BaseRankConfig
 from openjiuwen.core.foundation.store.query import QueryExpr
-
-if TYPE_CHECKING:
-    from openjiuwen.core.retrieval.common.result_ranking import BaseRankConfig
 
 
 @runtime_checkable
@@ -24,41 +23,47 @@ class GraphStore(Protocol):
 
     This protocol defines the standard interface that all graph stores must implement, providing methods
     for data storage, retrieval, and search operations on graph-structured data.
-
-    Additional instance variables that should be implemented:
-    config: GraphConfig
-    embed_executor: ThreadPoolExecutor
-    embedder: Optional[Embedding]
     """
 
-    config: GraphConfig
-    embed_executor: ThreadPoolExecutor
-    embedder: Optional["Embedding"]
+    @property
+    def config(self) -> GraphConfig:
+        """Access graph store config"""
+
+    @property
+    def semophore(self) -> Optional[asyncio.Semaphore]:
+        """Access graph store semophore"""
+
+    @property
+    def embedder(self) -> Optional[Embedding]:
+        """Access graph store embedder"""
 
     # Factory method
     @classmethod
     def from_config(cls, config: GraphConfig, **kwargs) -> "GraphStore":
-        """Create a backend instance from configuration.
+        """Create a graph store instance from configuration.
 
         Args:
             config: Graph configuration object
             **kwargs: Additional configuration parameters
 
         Returns:
-            Configured backend instance
+            Configured graph store instance
         """
 
-    # Data addition methods
-    def refresh(self, *args, **kwargs):
-        """Refresh / flush inserted data to database"""
+    # Data management methods
+    def rebuild(self):
+        """Drop the collections and rebuild indices"""
+
+    async def refresh(self, *args, **kwargs):
+        """Refresh: flush data changes to database and compact segments"""
 
     # Data addition methods
-    async def add_data(self, collection: str, data: Iterable[Dict], flush: bool = True, upsert: bool = False, **kwargs):
+    async def add_data(self, collection: str, data: Iterable[dict], flush: bool = True, upsert: bool = False, **kwargs):
         """Add arbitrary data into database.
 
         Args:
             collection (str): Collection name for data insertion
-            data (Iterable[Dict]): Data to insert, must be Iterable type like list or tuple
+            data (Iterable[dict]): Data to insert, must be Iterable type like list or tuple
             flush: Whether to flush changes immediately
             upsert: Whether to upsert (update if exists, insert if not) instead of insert
         """
@@ -107,11 +112,11 @@ class GraphStore(Protocol):
     async def query(
         self,
         collection: str,
-        ids: Optional[List[Any]] = None,
+        ids: Optional[list[Any]] = None,
         expr: Optional[QueryExpr] = None,
         silence_errors: bool = False,
         **kwargs,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """Query graph objects from a collection.
 
         Args:
@@ -122,12 +127,12 @@ class GraphStore(Protocol):
             **kwargs: Additional arguments to pass into query, such as "limit".
 
         Returns:
-            List of query results
+            list of query results
         """
 
     async def delete(
-        self, collection: str, ids: Optional[List[Any]] = None, expr: Optional[QueryExpr] = None, **kwargs
-    ) -> Dict:
+        self, collection: str, ids: Optional[list[Any]] = None, expr: Optional[QueryExpr] = None, **kwargs
+    ) -> dict:
         """Delete graph objects from a collection.
 
         Args:
@@ -146,15 +151,16 @@ class GraphStore(Protocol):
         query: str,
         k: int,
         collection: str,
-        ranker_config: "BaseRankConfig",
+        ranker_config: BaseRankConfig,
         *,
+        reranker: Optional[Reranker] = None,
         bfs_depth: int = 0,
         bfs_k: int = 0,
         filter_expr: Optional[QueryExpr] = None,
-        output_fields: Optional[List[str]] = None,
-        query_embedding: Optional[List[float]] = None,
+        output_fields: Optional[list[str]] = None,
+        query_embedding: Optional[list[float]] = None,
         **kwargs,
-    ) -> Dict[str, List[Dict]]:
+    ) -> dict[str, list[dict]]:
         """Search for graph objects using hybrid search.
 
         Args:
@@ -162,6 +168,7 @@ class GraphStore(Protocol):
             k: Number of results to return
             collection: Collection to search ("entities", "relations", "episodes", or "all")
             ranker_config: Configuration for search ranking
+            reranker (Optional[BaseReranker], optional): Cross-encoder re-ranker to use. Defaults to None.
             bfs_depth: Breadth-first search depth for graph expansion
             bfs_k: Maximum number of nodes to expand in BFS
             filter_expr: Optional filter expression
@@ -172,22 +179,18 @@ class GraphStore(Protocol):
 
                 - language (str, optional): Language to use for reranking, "cn" for Chinese, "en" for English.\
                     Defaults to "en".
-                - reranker (Optional[BaseReranker], optional): Cross-encoder re-ranker to use. Defaults to None.
                 - min_score (float, optional): Minimum similarity / maximum distance score threshold. Defaults to 0.0.
 
         Returns:
-            Dict[str, List[Dict]]: dict mapping collection names to results
+            dict[str, list[dict]]: dict mapping collection names to results
         """
 
     # Embedding management
-    def attach_embedder(self, embedder: "Embedding") -> None:
-        """Attach an embedding service to the backend.
+    def attach_embedder(self, embedder: Embedding) -> None:
+        """Attach an embedding service to the graph store.
 
         Args:
-            embedder: Embedding service instance
-
-        Raises:
-            ValueError: If embedder is invalid or already attached
+            embedder (Embedding): Embedding service to use.
         """
 
     # Utility methods

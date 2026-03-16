@@ -15,9 +15,8 @@ from openjiuwen import __version__
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.common.config import RerankerConfig
-from openjiuwen.core.retrieval.common.document import Document, MultimodalDocument
-from openjiuwen.core.retrieval.reranker.base import Reranker
+from openjiuwen.core.foundation.store.base_reranker import Document, Reranker, RerankerConfig
+from openjiuwen.core.retrieval.common.document import MultimodalDocument
 from openjiuwen.core.retrieval.utils.api_requests import async_request_with_retry, sync_request_with_retry
 
 
