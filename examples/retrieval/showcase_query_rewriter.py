@@ -94,7 +94,7 @@ class InMemoryContext(ModelContext):
         self._messages = self._messages[:-size]
         return popped
 
-    def clear_messages(self, with_history: bool = True) -> None:
+    async def clear_messages(self, with_history: bool = True) -> None:
         self._messages.clear()
 
     async def add_messages(

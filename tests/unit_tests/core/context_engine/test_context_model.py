@@ -645,22 +645,22 @@ class TestModelContext:
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=1)
         assert window.context_messages == dialogues[-1]
-        context.clear_messages()
+        await context.clear_messages()
 
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=2)
         assert window.context_messages == dialogues[-2] + dialogues[-1]
-        context.clear_messages()
+        await context.clear_messages()
 
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=3)
         assert window.context_messages == messages
-        context.clear_messages()
+        await context.clear_messages()
 
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=4)
         assert window.context_messages == messages
-        context.clear_messages()
+        await context.clear_messages()
 
     # ---------- max_context_message_num ----------
     @pytest.mark.asyncio
@@ -895,7 +895,7 @@ class TestModelContext:
         history = [UserMessage(content="h1")]
         context = await self.create_context(history=history)
         await context.add_messages([UserMessage(content="n1")])
-        context.clear_messages(with_history=True)
+        await context.clear_messages(with_history=True)
         assert len(context) == 0
 
     @pytest.mark.asyncio
@@ -903,7 +903,7 @@ class TestModelContext:
         history = [UserMessage(content="h1")]
         context = await self.create_context(history=history)
         await context.add_messages([UserMessage(content="n1")])
-        context.clear_messages(with_history=False)
+        await context.clear_messages(with_history=False)
         assert len(context) == 1
         assert context.get_messages()[0].content == "h1"
 
@@ -951,20 +951,20 @@ class TestModelContext:
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=1)
         assert window.context_messages == dialogues[-1]
-        context.clear_messages()
+        await context.clear_messages()
 
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=2)
         assert window.context_messages == dialogues[-2] + dialogues[-1]
-        context.clear_messages()
+        await context.clear_messages()
 
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=3)
         assert window.context_messages == messages
-        context.clear_messages()
+        await context.clear_messages()
 
         await context.add_messages(messages)
         window = await context.get_context_window(dialogue_round=4)
         assert window.context_messages == messages
-        context.clear_messages()
+        await context.clear_messages()
 

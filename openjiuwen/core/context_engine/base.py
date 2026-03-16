@@ -91,7 +91,7 @@ class ModelContext(ABC):
         """
 
     @abstractmethod
-    def clear_messages(self, with_history: bool = True):
+    async def clear_messages(self, with_history: bool = True):
         """
         Remove all messages that have been added in the current turn.
 

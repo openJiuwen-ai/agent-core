@@ -16,7 +16,7 @@ from openjiuwen.core.graph.pregel.constants import END, TASK_STATUS_INTERRUPT, S
     PARENT_NS, NS, SESSION_ID, RECURSION_LIMIT
 from openjiuwen.core.graph.pregel.task import TaskExecutorPool
 from openjiuwen.core.graph.store import GraphState, PendingNode, Store, create_state
-from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 
@@ -239,12 +239,12 @@ class Pregel:
         loop = PregelLoop(self, inner_config)
         try:
             await loop.init()
-            await emit(
+            await trigger(
                 WorkflowEvents.LOOP_STARTED,
                 graph_id=inner_config.get(NS))
             while await loop.run_step():
                 pass
-            await emit(
+            await trigger(
                 WorkflowEvents.LOOP_FINISHED,
                 graph_id=inner_config.get(NS),
                 total_steps=loop.step)
@@ -258,7 +258,7 @@ class Pregel:
             )
             return {}
         except GraphInterrupt as e:
-            await emit(
+            await trigger(
                 WorkflowEvents.LOOP_FINISHED,
                 graph_id=inner_config.get(NS),
                 total_steps=loop.step)

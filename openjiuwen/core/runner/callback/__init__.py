@@ -23,6 +23,7 @@ from openjiuwen.core.runner.callback.events import (
     AgentEvents,
     ContextEvents,
     LLMCallEvents,
+    MemoryEvents,
     RetrievalEvents,
     SessionEvents,
     ToolCallEvents,
@@ -43,8 +44,9 @@ from openjiuwen.core.runner.callback.filters import (
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 # Utility functions
 from openjiuwen.core.runner.callback.utils import (
-    emit,
+    trigger,
     get_callback_framework,
+    lazy_callback_framework,
 )
 # Data Models
 from openjiuwen.core.runner.callback.models import (
@@ -64,6 +66,7 @@ __all__ = [
     "AgentEvents",
     "ContextEvents",
     "LLMCallEvents",
+    "MemoryEvents",
     "RetrievalEvents",
     "SessionEvents",
     "ToolCallEvents",
@@ -90,7 +93,8 @@ __all__ = [
     # Framework
     "AsyncCallbackFramework",
     # Utility functions
-    "emit",
+    "trigger",
     "get_callback_framework",
+    "lazy_callback_framework",
 ]
 

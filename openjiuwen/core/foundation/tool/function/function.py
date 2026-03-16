@@ -8,7 +8,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
-from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
@@ -64,7 +64,7 @@ class LocalFunction(Tool):
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         if self.card.input_params is not None:
-            await emit(
+            await trigger(
                 ToolCallEvents.TOOL_PARSE_STARTED,
                 tool_name=self.card.name, tool_id=self.card.id,
                 raw_inputs=inputs, schema=self._card.input_params)
@@ -72,7 +72,7 @@ class LocalFunction(Tool):
                                                     self._card.input_params,
                                                     skip_none_value=kwargs.get("skip_none_value", False),
                                                     skip_validate=kwargs.get("skip_inputs_validate", False))
-            await emit(
+            await trigger(
                 ToolCallEvents.TOOL_PARSE_FINISHED,
                 tool_name=self.card.name, tool_id=self.card.id,
                 formatted_inputs=inputs)
@@ -87,14 +87,14 @@ class LocalFunction(Tool):
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         if self.card.input_params is not None:
-            await emit(
+            await trigger(
                 ToolCallEvents.TOOL_PARSE_STARTED,
                 tool_name=self.card.name, tool_id=self.card.id,
                 raw_inputs=inputs, schema=self._card.input_params)
             inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                     skip_none_value=kwargs.get("skip_none_value", False),
                                                     skip_validate=kwargs.get("skip_inputs_validate"))
-            await emit(
+            await trigger(
                 ToolCallEvents.TOOL_PARSE_FINISHED,
                 tool_name=self.card.name, tool_id=self.card.id,
                 formatted_inputs=inputs)

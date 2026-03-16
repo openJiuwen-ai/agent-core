@@ -1030,7 +1030,7 @@ class ReActAgent(BaseAgent):
         """Release session resources and clear context cache."""
         from openjiuwen.core.runner import Runner
         await Runner.release(session_id=session_id)
-        self.context_engine.clear_context(session_id=session_id)
+        await self.context_engine.clear_context(session_id=session_id)
 
 
 __all__ = [

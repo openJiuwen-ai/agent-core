@@ -16,6 +16,8 @@ from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
+from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
+from openjiuwen.core.runner.callback.events import ContextEvents
 
 
 class ContextEngine:
@@ -42,6 +44,7 @@ class ContextEngine:
         self._config = config or ContextEngineConfig()
         self._context_pool: Dict[str, ModelContext] = dict()
 
+    @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
             self,
             context_id: str = "default_context_id",
@@ -117,7 +120,7 @@ class ContextEngine:
         full_context_id = f"{session_id}_{context_id}"
         return self._context_pool.get(full_context_id, None)
 
-    def clear_context(
+    async def clear_context(
             self,
             context_id: str = None,
             session_id: str = None
@@ -144,7 +147,11 @@ class ContextEngine:
         Logs a warning when the requested session or context cannot be found.
         """
         if session_id is None:
+            cleared_count = len(self._context_pool)
             self._context_pool.clear()
+            await trigger(ContextEvents.CONTEXT_CLEARED,
+                       context_id=context_id, session_id=session_id,
+                       cleared_count=cleared_count)
             return
 
         if context_id is None:
@@ -164,6 +171,9 @@ class ContextEngine:
             for context_id in delete_context_list:
                 full_context_id = f"{session_id}_{context_id}"
                 del self._context_pool[full_context_id]
+            await trigger(ContextEvents.CONTEXT_CLEARED,
+                       context_id=context_id, session_id=session_id,
+                       cleared_count=len(delete_context_list))
             return
 
         context_id = self._process_context_id(context_id)
@@ -177,7 +187,10 @@ class ContextEngine:
             return
 
         del self._context_pool[full_context_id]
+        await trigger(ContextEvents.CONTEXT_CLEARED,
+                   context_id=context_id, session_id=session_id)
 
+    @_fw.emit_after(ContextEvents.CONTEXT_OFFLOADED, result_key="result")
     async def save_contexts(self,
                             session: Session,
                             context_ids: List[str] = None
@@ -215,6 +228,7 @@ class ContextEngine:
             context_state = context.save_state()
             states[context_id] = context_state
         self._save_state_to_session(session, states)
+        return states
 
     @classmethod
     def register_processor(cls, processor_class=None):

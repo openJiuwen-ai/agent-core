@@ -24,7 +24,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
-from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
@@ -132,7 +132,7 @@ class InferenceAffinityModelClient(BaseModelClient):
         )
 
         try:
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_INPUT,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
@@ -148,7 +148,7 @@ class InferenceAffinityModelClient(BaseModelClient):
             # Parse response and apply output parser
             assistant_message = await self._parse_response(response_data, output_parser)
 
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_OUTPUT,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
@@ -159,7 +159,7 @@ class InferenceAffinityModelClient(BaseModelClient):
             return assistant_message
 
         except Exception as e:
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
@@ -219,7 +219,7 @@ class InferenceAffinityModelClient(BaseModelClient):
         )
 
         try:
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_INPUT,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
@@ -233,7 +233,7 @@ class InferenceAffinityModelClient(BaseModelClient):
             if output_parser:
                 # Use streaming parser
                 async for parsed_result in self._astream_with_parser(params, output_parser):
-                    await emit(
+                    await trigger(
                         LLMCallEvents.LLM_OUTPUT,
                         model_name=params.get("model"),
                         model_provider=self.model_client_config.client_provider,
@@ -244,7 +244,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                 # Direct return without parser
                 async for chunk in self._stream_response(params):
                     if chunk:
-                        await emit(
+                        await trigger(
                             LLMCallEvents.LLM_OUTPUT,
                             model_name=params.get("model"),
                             model_provider=self.model_client_config.client_provider,
@@ -253,7 +253,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                         yield chunk
 
         except Exception as e:
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,

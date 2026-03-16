@@ -12,7 +12,7 @@ from openjiuwen.core.graph.pregel.base import Message, PregelNode, GraphInterrup
 from openjiuwen.core.graph.pregel.config import PregelConfig, InnerPregelConfig, \
     create_inner_config
 from openjiuwen.core.graph.pregel.constants import TASK_STATUS_INTERRUPT, TASK_STATUS_ERROR, PARENT_NS, NS
-from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 
@@ -161,7 +161,7 @@ class NodeTask:
 
             if self.messages:
                 for msg in self.messages:
-                    await emit(
+                    await trigger(
                         WorkflowEvents.EDGE_TRAVERSED,
                         source_node=msg.sender,
                         target_node=msg.target,

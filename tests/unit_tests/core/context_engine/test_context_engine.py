@@ -78,7 +78,7 @@ class TestContextEngine:
         await engine.create_context(context_id="ctx1", session=session)
         await engine.create_context(context_id="ctx2", session=session)
 
-        engine.clear_context()
+        await engine.clear_context()
 
         assert engine.get_context(context_id="ctx1", session_id=session.get_session_id()) is None
         assert engine.get_context(context_id="ctx2", session_id=session.get_session_id()) is None
@@ -88,7 +88,7 @@ class TestContextEngine:
         await engine.create_context(context_id="ctx1", session=session)
         await engine.create_context(context_id="ctx2", session=another_session)
 
-        engine.clear_context(session_id=session.get_session_id())
+        await engine.clear_context(session_id=session.get_session_id())
 
         assert engine.get_context(context_id="ctx1", session_id=session.get_session_id()) is None
         assert engine.get_context(context_id="ctx2", session_id=another_session.get_session_id()) is not None
@@ -98,8 +98,8 @@ class TestContextEngine:
         await engine.create_context(context_id="ctx1", session=session)
         await engine.create_context(context_id="ctx2", session=another_session)
 
-        engine.clear_context(session_id=session.get_session_id(), context_id="ctx1")
-        engine.clear_context(session_id=another_session.get_session_id(), context_id="ctx2")
+        await engine.clear_context(session_id=session.get_session_id(), context_id="ctx1")
+        await engine.clear_context(session_id=another_session.get_session_id(), context_id="ctx2")
 
         assert engine.get_context(context_id="ctx1", session_id=session.get_session_id()) is None
         assert engine.get_context(context_id="ctx2", session_id=another_session.get_session_id()) is None
@@ -281,19 +281,19 @@ class TestContextEngine:
     # ---------- clear_context supplements ----------
     @pytest.mark.asyncio
     async def test_clear_context_by_session_when_session_has_no_contexts(self, engine, session):
-        engine.clear_context(session_id=session.get_session_id())
+        await engine.clear_context(session_id=session.get_session_id())
         assert engine.get_context(context_id="any", session_id=session.get_session_id()) is None
 
     @pytest.mark.asyncio
     async def test_clear_context_by_session_and_context_when_context_not_exists(self, engine, session):
-        engine.clear_context(session_id=session.get_session_id(), context_id="nonexistent")
+        await engine.clear_context(session_id=session.get_session_id(), context_id="nonexistent")
         assert engine.get_context(context_id="nonexistent", session_id=session.get_session_id()) is None
 
     @pytest.mark.asyncio
     async def test_clear_context_all_then_pool_empty(self, engine, session, another_session):
         await engine.create_context(context_id="c1", session=session)
         await engine.create_context(context_id="c2", session=another_session)
-        engine.clear_context()
+        await engine.clear_context()
         assert engine.get_context(context_id="c1", session_id=session.get_session_id()) is None
         assert engine.get_context(context_id="c2", session_id=another_session.get_session_id()) is None
 

@@ -22,7 +22,7 @@ from openjiuwen.core.session.stream import StreamEmitter
 from openjiuwen.core.graph.stream_actor.base import StreamConsumer
 from openjiuwen.core.session.tracer import TracerWorkflowUtils
 from openjiuwen.core.graph.pregel import GraphInterrupt
-from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 SUB_WORKFLOW_COMPONENT = "sub_workflow"
@@ -199,7 +199,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                         **self._log_message)
             node_output = self._session.state().get(self._node_id)
             # Emit node executed event with inputs and outputs
-            await emit(
+            await trigger(
                 WorkflowEvents.NODE_EXECUTED,
                 node_id=self._node_id,
                 ability=[a.name for a in self._component_ability],
@@ -229,7 +229,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                              **self._log_message)
             if not isinstance(e, GraphInterrupt):
                 # Emit node error event
-                await emit(
+                await trigger(
                     WorkflowEvents.NODE_ERROR,
                     node_id=self._node_id,
                     graph_id=self._session.workflow_id(),

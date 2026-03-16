@@ -86,16 +86,8 @@ class AgentEvents(EventBase):
 
     Attributes:
         AGENT_STARTED: Agent execution started
-        AGENT_FINISHED: Agent execution completed successfully
-        AGENT_ERROR: Agent execution failed with an error
-        AGENT_CANCELLED: Agent execution was cancelled
-        AGENT_STATE_CHANGED: Agent internal state changed
     """
     AGENT_STARTED = EventBase.get_event("agent_started")
-    AGENT_FINISHED = EventBase.get_event("agent_finished")
-    AGENT_ERROR = EventBase.get_event("agent_error")
-    AGENT_CANCELLED = EventBase.get_event("agent_cancelled")
-    AGENT_STATE_CHANGED = EventBase.get_event("agent_state_changed")
     AGENT_INVOKE_INPUT = EventBase.get_event("agent_invoke_input")
     AGENT_INVOKE_OUTPUT = EventBase.get_event("agent_invoke_output")
     AGENT_STREAM_INPUT = EventBase.get_event("agent_stream_input")
@@ -140,11 +132,8 @@ class LLMCallEvents(EventBase):
 
     Attributes:
         LLM_CALL_STARTED: LLM call initiated
-        LLM_CALL_FINISHED: LLM call completed successfully
         LLM_CALL_ERROR: LLM call failed with an error
         LLM_RESPONSE_RECEIVED: LLM response received (streaming)
-        LLM_RESPONSE_COMPLETED: LLM response completed (streaming)
-        PROMPT_GENERATED: Prompt was generated for LLM call
         LLM_INVOKE_INPUT: Fired before BaseModelClient.invoke with call arguments
         LLM_INVOKE_OUTPUT: Fired after BaseModelClient.invoke with the result
         LLM_STREAM_INPUT: Fired before BaseModelClient.stream with call arguments
@@ -153,11 +142,8 @@ class LLMCallEvents(EventBase):
         LLM_OUTPUT: Fired after LLM response with response/usage output data
     """
     LLM_CALL_STARTED = EventBase.get_event("llm_call_started")
-    LLM_CALL_FINISHED = EventBase.get_event("llm_call_finished")
     LLM_CALL_ERROR = EventBase.get_event("llm_call_error")
     LLM_RESPONSE_RECEIVED = EventBase.get_event("llm_response_received")
-    LLM_RESPONSE_COMPLETED = EventBase.get_event("llm_response_completed")
-    PROMPT_GENERATED = EventBase.get_event("prompt_generated")
     LLM_INVOKE_INPUT = EventBase.get_event("llm_invoke_input")
     LLM_INVOKE_OUTPUT = EventBase.get_event("llm_invoke_output")
     LLM_STREAM_INPUT = EventBase.get_event("llm_stream_input")
@@ -180,8 +166,6 @@ class ToolCallEvents(EventBase):
         TOOL_INVOKE_OUTPUT: Fired after Tool.invoke with the result
         TOOL_STREAM_INPUT: Fired before Tool.stream with call arguments
         TOOL_STREAM_OUTPUT: Fired for each item yielded by Tool.stream
-        BEFORE_TOOL_CALL: Fired before tool execution with inputs data
-        AFTER_TOOL_CALL: Fired after tool execution with result output data
     """
     TOOL_CALL_STARTED = EventBase.get_event("tool_call_started")
     TOOL_CALL_FINISHED = EventBase.get_event("tool_call_finished")
@@ -193,8 +177,6 @@ class ToolCallEvents(EventBase):
     TOOL_INVOKE_OUTPUT = EventBase.get_event("tool_invoke_output")
     TOOL_STREAM_INPUT = EventBase.get_event("tool_stream_input")
     TOOL_STREAM_OUTPUT = EventBase.get_event("tool_stream_output")
-    BEFORE_TOOL_CALL = EventBase.get_event("before_tool_call")
-    AFTER_TOOL_CALL = EventBase.get_event("after_tool_call")
 
 
 class ContextEvents(EventBase):
@@ -202,13 +184,11 @@ class ContextEvents(EventBase):
 
     Attributes:
         CONTEXT_UPDATED: Context was updated
-        CONTEXT_COMPRESSED: Context was compressed
         CONTEXT_OFFLOADED: Context was offloaded to storage
         CONTEXT_RETRIEVED: Context was retrieved from storage
         CONTEXT_CLEARED: Context was cleared
     """
     CONTEXT_UPDATED = EventBase.get_event("context_updated")
-    CONTEXT_COMPRESSED = EventBase.get_event("context_compressed")
     CONTEXT_OFFLOADED = EventBase.get_event("context_offloaded")
     CONTEXT_RETRIEVED = EventBase.get_event("context_retrieved")
     CONTEXT_CLEARED = EventBase.get_event("context_cleared")
@@ -219,16 +199,8 @@ class SessionEvents(EventBase):
 
     Attributes:
         SESSION_CREATED: Session was created
-        SESSION_UPDATED: Session was updated
-        SESSION_ENDED: Session was ended
-        SESSION_RESTORED: Session was restored from storage
-        SESSION_SAVED: Session was saved to storage
     """
     SESSION_CREATED = EventBase.get_event("session_created")
-    SESSION_UPDATED = EventBase.get_event("session_updated")
-    SESSION_ENDED = EventBase.get_event("session_ended")
-    SESSION_RESTORED = EventBase.get_event("session_restored")
-    SESSION_SAVED = EventBase.get_event("session_saved")
 
 
 class RetrievalEvents(EventBase):
@@ -236,18 +208,25 @@ class RetrievalEvents(EventBase):
 
     Attributes:
         RETRIEVAL_STARTED: Knowledge retrieval started
-        RETRIEVAL_FINISHED: Knowledge retrieval completed successfully
-        RETRIEVAL_ERROR: Knowledge retrieval failed with an error
-        DOCUMENT_RETRIEVED: Document was retrieved
-        DOCUMENT_RERANKED: Retrieved documents were reranked
-        EMBEDDING_GENERATED: Embedding was generated for query
     """
     RETRIEVAL_STARTED = EventBase.get_event("retrieval_started")
-    RETRIEVAL_FINISHED = EventBase.get_event("retrieval_finished")
-    RETRIEVAL_ERROR = EventBase.get_event("retrieval_error")
-    DOCUMENT_RETRIEVED = EventBase.get_event("document_retrieved")
-    DOCUMENT_RERANKED = EventBase.get_event("document_reranked")
-    EMBEDDING_GENERATED = EventBase.get_event("embedding_generated")
+
+
+class MemoryEvents(EventBase):
+    """Standard event names for memory operations.
+
+    Attributes:
+        MEMORY_ADDED: Memory add operation (before)
+        MEMORY_SEARCH_STARTED: Memory search operation started
+        MEMORY_SEARCH_FINISHED: Memory search operation completed successfully
+        MEMORY_UPDATED: Memory update operation (before)
+        MEMORY_DELETED: Memory delete operation (before)
+    """
+    MEMORY_ADDED = EventBase.get_event("memory_added")
+    MEMORY_SEARCH_STARTED = EventBase.get_event("memory_search_started")
+    MEMORY_SEARCH_FINISHED = EventBase.get_event("memory_search_finished")
+    MEMORY_UPDATED = EventBase.get_event("memory_updated")
+    MEMORY_DELETED = EventBase.get_event("memory_deleted")
 
 
 class TaskManagerEvents(EventBase):

@@ -675,5 +675,5 @@ class ControllerAgent(BaseAgent):
 
     async def clear_session(self, session_id: str = "default_session"):
         await super().clear_session(session_id=session_id)
-        self.context_engine.clear_context(session_id=session_id)
+        await self.context_engine.clear_context(session_id=session_id)
         await self.controller.cleanup_conversation(session_id)

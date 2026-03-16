@@ -35,6 +35,8 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 from openjiuwen.core.memory.migration.run_migrations import run_kv_migrations, run_vector_migrations, run_sql_migrations
+from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
+from openjiuwen.core.runner.callback.events import MemoryEvents
 
 
 class MemInfo(BaseModel):
@@ -383,6 +385,7 @@ class LongTermMemory(metaclass=Singleton):
         )
         return True
 
+    @_fw.emit_before(MemoryEvents.MEMORY_ADDED)
     async def add_messages(
             self,
             messages: list[BaseMessage],
@@ -403,6 +406,7 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id
             )
             return
+
         msg_id = "-1"
         llm = await self._get_scope_llm(scope_id)
         semantic_store = await self._create_semantic_store_with_embedding(scope_id)
@@ -499,7 +503,7 @@ class LongTermMemory(metaclass=Singleton):
                     error_msg=f"{str(e)}",
                     cause=e
                 ) from e
-            return
+        return
 
     async def get_recent_messages(
             self,
@@ -577,6 +581,7 @@ class LongTermMemory(metaclass=Singleton):
             scope_id=scope_id
         )
 
+    @_fw.emit_before(MemoryEvents.MEMORY_DELETED)
     async def delete_mem_by_id(self,
                                mem_id: str,
                                user_id: str = DEFAULT_VALUE,
@@ -614,6 +619,7 @@ class LongTermMemory(metaclass=Singleton):
                 semantic_store=semantic_store
             )
 
+    @_fw.emit_before(MemoryEvents.MEMORY_DELETED)
     async def delete_mem_by_user_id(self,
                                     user_id: str = DEFAULT_VALUE,
                                     scope_id: str = DEFAULT_VALUE):
@@ -649,6 +655,7 @@ class LongTermMemory(metaclass=Singleton):
                 semantic_store=semantic_store
             )
 
+    @_fw.emit_before(MemoryEvents.MEMORY_UPDATED)
     async def update_mem_by_id(self,
                                mem_id: str,
                                memory: str,
@@ -735,6 +742,7 @@ class LongTermMemory(metaclass=Singleton):
             error_msg=f"names must be str | list[str] | None",
         )
 
+    @_fw.emit_before(MemoryEvents.MEMORY_SEARCH_STARTED)
     async def search_user_mem(self,
                               query: str,
                               num: int,
@@ -742,7 +750,6 @@ class LongTermMemory(metaclass=Singleton):
                               scope_id: str = DEFAULT_VALUE,
                               threshold: float = 0.3
                               ) -> list[MemResult]:
-
         if not self._validate_id(event_type=LogEventType.MEMORY_RETRIEVE, scope_id=scope_id):
             memory_logger.error(
                 "Invalid scope_id format.",
@@ -784,6 +791,9 @@ class LongTermMemory(metaclass=Singleton):
                 )
                 for item in search_data
             ]
+            await trigger(MemoryEvents.MEMORY_SEARCH_FINISHED,
+                       scope_id=scope_id, user_id=user_id, query=query,
+                       result_count=len(mem_results), search_type="user_mem")
             return mem_results
         except AttributeError as e:
             memory_logger.debug(
@@ -816,6 +826,7 @@ class LongTermMemory(metaclass=Singleton):
             )
             return []
 
+    @_fw.emit_before(MemoryEvents.MEMORY_SEARCH_STARTED)
     async def search_user_history_summary(
             self,
             query: str,
@@ -875,6 +886,9 @@ class LongTermMemory(metaclass=Singleton):
                 )
                 for item in search_data
             ]
+            await trigger(MemoryEvents.MEMORY_SEARCH_FINISHED,
+                       scope_id=scope_id, user_id=user_id, query=query,
+                       result_count=len(mem_results), search_type="history_summary")
             return mem_results
         except AttributeError as e:
             memory_logger.debug(

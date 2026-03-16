@@ -17,7 +17,7 @@ from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool.base import Input, Output, ToolCard
 from openjiuwen.core.foundation.tool.service_api.api_param_mapper import APIParamLocation, APIParamMapper
 from openjiuwen.core.foundation.tool.service_api.response_parser import ParserRegistry
-from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
@@ -107,14 +107,14 @@ class RestfulApi(Tool):
         final_timeout = self._timeout
         try:
             if self._card.input_params is not None:
-                await emit(
+                await trigger(
                     ToolCallEvents.TOOL_PARSE_STARTED,
                     tool_name=self.card.name, tool_id=self.card.id,
                     raw_inputs=inputs, schema=self._card.input_params)
                 inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                         skip_none_value=kwargs.get("skip_none_value", False),
                                                         skip_validate=kwargs.get("skip_inputs_validate", False))
-                await emit(
+                await trigger(
                     ToolCallEvents.TOOL_PARSE_FINISHED,
                     tool_name=self.card.name, tool_id=self.card.id,
                     formatted_inputs=inputs)

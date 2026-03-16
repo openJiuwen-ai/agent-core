@@ -64,7 +64,7 @@ from openjiuwen.core.workflow.base import (
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.workflow.components.component import ComponentComposable
 from openjiuwen.core.workflow.workflow_config import WorkflowConfig
-from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 
@@ -471,7 +471,7 @@ class Workflow(metaclass=_WorkflowMeta):
 
         # workflow start tracer info
         await TracerWorkflowUtils.trace_workflow_start(session, inputs)
-        await emit(
+        await trigger(
             WorkflowEvents.WORKFLOW_STARTED,
             workflow_id=self._card.id,
             workflow_name=self._card.name,
@@ -512,7 +512,7 @@ class Workflow(metaclass=_WorkflowMeta):
             try:
                 await task
                 results = session.state().get_outputs(self._end_comp_id)
-                await emit(
+                await trigger(
                     WorkflowEvents.WORKFLOW_FINISHED,
                     workflow_id=self._card.id,
                     workflow_name=self._card.name,
@@ -528,7 +528,7 @@ class Workflow(metaclass=_WorkflowMeta):
                 )
                 raise
         except asyncio.CancelledError:
-            await emit(
+            await trigger(
                 WorkflowEvents.WORKFLOW_CANCELLED,
                 workflow_id=self._card.id,
                 workflow_name=self._card.name)
@@ -546,7 +546,7 @@ class Workflow(metaclass=_WorkflowMeta):
                     pass
             raise
         except BaseError as e:
-            await emit(
+            await trigger(
                 WorkflowEvents.WORKFLOW_ERROR,
                 workflow_id=self._card.id,
                 workflow_name=self._card.name,

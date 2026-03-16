@@ -25,7 +25,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
-from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
@@ -175,7 +175,7 @@ class SiliconFlowModelClient(BaseModelClient):
         )
 
         try:
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_INPUT,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
@@ -212,7 +212,7 @@ class SiliconFlowModelClient(BaseModelClient):
                 )
                 assistant_message = await self._parse_response(data, output_parser)
 
-                await emit(
+                await trigger(
                     LLMCallEvents.LLM_OUTPUT,
                     model_name=params.get("model"),
                     model_provider=self.model_client_config.client_provider,
@@ -223,7 +223,7 @@ class SiliconFlowModelClient(BaseModelClient):
                 return assistant_message
 
         except Exception as e:
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
@@ -296,7 +296,7 @@ class SiliconFlowModelClient(BaseModelClient):
             await tracer_record_data(llm_params=params)
 
         try:
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_INPUT,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
@@ -311,7 +311,7 @@ class SiliconFlowModelClient(BaseModelClient):
                 if output_parser:
                     # Use streaming parser
                     async for parsed_result in self._astream_with_parser(response, output_parser):
-                        await emit(
+                        await trigger(
                             LLMCallEvents.LLM_OUTPUT,
                             model_name=params.get("model"),
                             model_provider=self.model_client_config.client_provider,
@@ -324,7 +324,7 @@ class SiliconFlowModelClient(BaseModelClient):
                         if line:
                             parsed_chunk = self._parse_stream_chunk(line)
                             if parsed_chunk:
-                                await emit(
+                                await trigger(
                                     LLMCallEvents.LLM_OUTPUT,
                                     model_name=params.get("model"),
                                     model_provider=self.model_client_config.client_provider,
@@ -333,7 +333,7 @@ class SiliconFlowModelClient(BaseModelClient):
                                 yield parsed_chunk
 
         except Exception as e:
-            await emit(
+            await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,

@@ -320,7 +320,7 @@ class LLMAgentRefactor:
     async def clear_session(self, session_id: str = "default_session"):
         from openjiuwen.core.runner import Runner
         await Runner.release(session_id=session_id)
-        self.context_engine.clear_context(session_id=session_id)
+        await self.context_engine.clear_context(session_id=session_id)
 
 
 # ---------------------------------------------------------------------------

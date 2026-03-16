@@ -14,6 +14,8 @@ from openjiuwen.core.foundation.tool import ToolInfo, Tool, ToolCard, tool
 from openjiuwen.core.context_engine.base import ModelContext, ContextWindow, ContextStats
 from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.kv_cache_manager import KVCacheManager
+from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
+from openjiuwen.core.runner.callback.events import ContextEvents
 
 
 _RELOADER_SYSTEM_PROMPT = """
@@ -87,6 +89,7 @@ class SessionModelContext(ModelContext):
     def context_id(self) -> str:
         return self._context_id
 
+    @_fw.emit_after(ContextEvents.CONTEXT_UPDATED, result_key="messages")
     async def add_messages(
             self,
             messages: BaseMessage | List[BaseMessage],
@@ -131,11 +134,13 @@ class SessionModelContext(ModelContext):
         self._validate_and_init_messages(messages)
         self._message_buffer.set_messages(messages, with_history)
 
-    def clear_messages(self, with_history: bool = True):
+    @_fw.emit_before(ContextEvents.CONTEXT_CLEARED, pass_args=False)
+    async def clear_messages(self, with_history: bool = True):
         self.pop_messages(len(self), with_history=with_history)
         self._offload_message_buffer = OffloadMessageBuffer()
         return
 
+    @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="window")
     async def get_context_window(
             self,
             system_messages: List[BaseMessage] = None,
