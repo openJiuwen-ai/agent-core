@@ -174,7 +174,6 @@ class DeepAgent(BaseAgent):
 
         react_config = ReActAgentConfig()
         react_config.max_iterations = cfg.max_iterations
-        react_config.enable_streaming = cfg.enable_streaming
 
         prompt = cfg.system_prompt or _DEFAULT_SYSTEM_PROMPT
         react_config.prompt_template = [{"role": "system", "content": prompt}]

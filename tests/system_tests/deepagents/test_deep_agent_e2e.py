@@ -305,7 +305,6 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             rails=[planning_rail, observe_rail],
             enable_task_loop=True,
             max_iterations=12,
-            enable_streaming=False,
         )
 
         session = create_agent_session(

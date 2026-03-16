@@ -12,15 +12,12 @@ import contextvars
 import os
 from typing import (
     Any,
-    List,
     Optional,
-    Union,
 )
 
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.security.path_checker import is_sensitive_path
-from openjiuwen.core.common.security.user_config import UserConfig
 
 # Use ContextVar instead of threading.local() to support async environments
 # ContextVar maintains context isolation in async call chains, each coroutine has independent context
@@ -117,91 +114,4 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
         )
 
     return real_path
-
-
-def _summarize_tool_call(tc: Any) -> str:
-    """Format a single tool call for logging."""
-    if isinstance(tc, dict):
-        fn = tc.get("function", {})
-        return f"{fn.get('name', '?')}({str(fn.get('arguments', ''))[:100]})"
-    fn = getattr(tc, "function", tc)
-    name = getattr(fn, "name", getattr(tc, "name", "?"))
-    args = str(getattr(fn, "arguments", getattr(tc, "arguments", "")))[:100]
-    return f"{name}({args})"
-
-
-def log_llm_request(
-    log: Any,
-    messages: Optional[List[Any]],
-    tools: Optional[List[Any]],
-) -> None:
-    """Log LLM request messages and tools.
-
-    Args:
-        log: Logger instance
-        messages: Request messages
-        tools: Tool definitions
-    """
-    msgs = messages or []
-    tool_count = len(tools) if tools else 0
-    log.info(
-        f"[LLM] >>> request: msg_count={len(msgs)}, "
-        f"tool_count={tool_count}"
-    )
-    if UserConfig.is_sensitive():
-        return
-    for idx, msg in enumerate(msgs):
-        if isinstance(msg, dict):
-            role = msg.get("role", "")
-            content = str(msg.get("content", ""))
-            tool_calls = msg.get("tool_calls")
-            tool_call_id = msg.get("tool_call_id", "")
-        else:
-            role = getattr(msg, "role", "")
-            content = str(getattr(msg, "content", ""))
-            tool_calls = getattr(msg, "tool_calls", None)
-            tool_call_id = getattr(msg, "tool_call_id", "")
-        parts: List[str] = [f"[LLM]   msg[{idx}] role={role}"]
-        if content:
-            parts.append(f"content={content[:300]}")
-        if tool_calls:
-            tc_summary = [_summarize_tool_call(tc) for tc in tool_calls]
-            parts.append(f"tool_calls=[{', '.join(tc_summary)}]")
-        if tool_call_id:
-            parts.append(f"tool_call_id={tool_call_id}")
-        log.info(", ".join(parts))
-
-
-def log_llm_response(log: Any, ai_message: Any) -> None:
-    """Log LLM response content and tool calls.
-
-    Args:
-        log: Logger instance
-        ai_message: AssistantMessage from LLM
-    """
-    usage = getattr(ai_message, "usage_metadata", None)
-    usage_str = ""
-    if usage:
-        usage_str = (
-            f", tokens={{input={getattr(usage, 'input_tokens', '?')}, "
-            f"output={getattr(usage, 'output_tokens', '?')}}}"
-        )
-    if UserConfig.is_sensitive():
-        tc_count = len(ai_message.tool_calls) if ai_message.tool_calls else 0
-        log.info(
-            f"[LLM] <<< response: "
-            f"content_len={len(ai_message.content or '')}, "
-            f"tool_call_count={tc_count}{usage_str}"
-        )
-    else:
-        log.info(
-            f"[LLM] <<< response: "
-            f"content={ai_message.content or ''}{usage_str}"
-        )
-        if ai_message.tool_calls:
-            for tc in ai_message.tool_calls:
-                log.info(
-                    f"[LLM]   tool_call: "
-                    f"{tc.name}({tc.arguments})"
-                )
 

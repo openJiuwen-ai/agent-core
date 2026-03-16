@@ -59,4 +59,3 @@ class DeepAgentConfig:
     skills: Optional[Union[str, List[str]]] = None
     backend: Optional[Any] = None
     completion_timeout: float = 600.0
-    enable_streaming: bool = True
