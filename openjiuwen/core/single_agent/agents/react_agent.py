@@ -526,11 +526,7 @@ class ReActAgent(BaseAgent):
         llm = self._get_llm()
         session = ctx.session
 
-<<<<<<< HEAD
         if not ctx.extra.get("_streaming"):
-=======
-        if session is None or not self._config.enable_streaming:
->>>>>>> cf6bc70d (refactor(deepagents): split task-loop modules and update tests)
             ai_message = await llm.invoke(
                 model=self._config.model_name,
                 messages=ctx.inputs.messages,
@@ -985,7 +981,6 @@ class ReActAgent(BaseAgent):
                 tools = await self.ability_manager.list_tool_info()
                 await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
 
-<<<<<<< HEAD
                 start_iteration = 0
                 if interruption_state is not None:
                     resume_result = await self._handle_resume(
@@ -995,20 +990,11 @@ class ReActAgent(BaseAgent):
                         pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
                     else:
                         start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
-=======
-            for iteration in range(start_iteration, self._config.max_iterations):
-                logger.info(
-                    f"[InnerLoop] iteration={iteration + 1}/"
-                    f"{self._config.max_iterations}, "
-                    f"model={self._config.model_name}"
-                )
->>>>>>> cf6bc70d (refactor(deepagents): split task-loop modules and update tests)
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
-<<<<<<< HEAD
                         ai_message = await self._call_model(ctx, context, system_messages, tools)
                         await context.add_messages(
                             AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
@@ -1039,38 +1025,6 @@ class ReActAgent(BaseAgent):
             if need_cleanup:
                 await self.context_engine.save_contexts(session)
                 await session.post_run()
-=======
-                if not ai_message.tool_calls:
-                    logger.info(
-                        f"[InnerLoop] iteration={iteration + 1} "
-                        f"finished with answer, "
-                        f"output={str(ai_message.content)[:200]}"
-                    )
-                    await self.context_engine.save_contexts(session)
-                    result = {"output": ai_message.content, "result_type": "answer"}
-                    invoke_inputs.result = result
-                    return result
-
-                tool_names = [tc.name for tc in ai_message.tool_calls]
-                logger.info(
-                    f"[InnerLoop] iteration={iteration + 1} "
-                    f"LLM requested tools: {tool_names}"
-                )
-
-                results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
-                interrupt = self._after_execute_tool_call(results, ai_message.tool_calls, ai_message, iteration)
-                if interrupt:
-                    return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
-
-            logger.info(
-                f"[InnerLoop] max iterations "
-                f"({self._config.max_iterations}) reached"
-            )
-            await self.context_engine.save_contexts(session)
-            result = {"output": "Max iterations reached without completion", "result_type": "error"}
-            invoke_inputs.result = result
-            return result
->>>>>>> cf6bc70d (refactor(deepagents): split task-loop modules and update tests)
 
     async def _write_invoke_result_to_stream(
             self,
