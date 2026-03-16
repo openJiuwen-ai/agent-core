@@ -597,7 +597,7 @@ class TaskScheduler:
                 event.metadata = {}
             event.metadata.update(task.metadata)
 
-        await self._event_queue.publish_event_async(
+        await self._event_queue.publish_event(
             self._card.id, session, event
         )
         logger.info(f"Published {payload_type} for task {task_id}")

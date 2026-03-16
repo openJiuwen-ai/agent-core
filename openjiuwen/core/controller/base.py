@@ -498,9 +498,16 @@ class Controller:
         try:
             # Subscribe to 4 event types
             await self._event_queue.subscribe(agent_id, session_id)
-            # Fire-and-forget publish (non-blocking)
-            await self._event_queue.publish_event_async(
+            # Synchronous publish — wait for handler to finish so we
+            # can check whether any tasks were created.
+            await self._event_queue.publish_event(
                 agent_id, session, inputs
+            )
+            # If handle_input didn't create any tasks (e.g. a pure
+            # state-query round), send the completion signal now;
+            # otherwise the signal will be sent by _execute_task_wrapper.
+            await self._task_scheduler._ensure_session_completion_signal(
+                session_id
             )
 
             first_frame_timeout = (
