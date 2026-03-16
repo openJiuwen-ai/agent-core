@@ -1,7 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import inspect
 from abc import ABCMeta, abstractmethod
+from functools import wraps
 from typing import Any, AsyncIterator, Dict, Type
 from typing import TypeVar
 from pydantic import BaseModel, Field
@@ -29,6 +31,61 @@ class _ToolMeta(ABCMeta):
         from openjiuwen.core.runner import Runner
         from openjiuwen.core.runner.callback.events import ToolCallEvents
         _fw = Runner.callback_framework
+
+        _original_invoke = instance.invoke
+
+        @wraps(_original_invoke)
+        async def _lifecycle_invoke(*a, **kw):
+            await _fw.trigger(ToolCallEvents.TOOL_CALL_STARTED,
+                              tool_name=instance.card.name,
+                              tool_id=instance.card.id,
+                              inputs=(a, kw))
+            try:
+                result = await _original_invoke(*a, **kw)
+                await _fw.trigger(ToolCallEvents.TOOL_CALL_FINISHED,
+                                  tool_name=instance.card.name,
+                                  tool_id=instance.card.id,
+                                  inputs=(a, kw),
+                                  result=result)
+                return result
+            except Exception as e:
+                await _fw.trigger(ToolCallEvents.TOOL_CALL_ERROR,
+                                  tool_name=instance.card.name,
+                                  tool_id=instance.card.id,
+                                  error=e)
+                raise
+
+        instance.invoke = _lifecycle_invoke
+
+        _original_stream = instance.stream
+
+        if inspect.isasyncgenfunction(_original_stream):
+            @wraps(_original_stream)
+            async def _lifecycle_stream(*a, **kw):
+                await _fw.trigger(ToolCallEvents.TOOL_CALL_STARTED,
+                                  tool_name=instance.card.name,
+                                  tool_id=instance.card.id,
+                                  inputs=(a, kw))
+                try:
+                    async for chunk in _original_stream(*a, **kw):
+                        await _fw.trigger(ToolCallEvents.TOOL_RESULT_RECEIVED,
+                                          tool_name=instance.card.name,
+                                          tool_id=instance.card.id,
+                                          inputs=(a, kw),
+                                          result=chunk)
+                        yield chunk
+                    await _fw.trigger(ToolCallEvents.TOOL_CALL_FINISHED,
+                                      tool_name=instance.card.name,
+                                      tool_id=instance.card.id)
+                except Exception as e:
+                    await _fw.trigger(ToolCallEvents.TOOL_CALL_ERROR,
+                                      tool_name=instance.card.name,
+                                      tool_id=instance.card.id,
+                                      error=e)
+                    raise
+
+            instance.stream = _lifecycle_stream
+
         fn = instance.invoke
         fn = _fw.emit_before(ToolCallEvents.TOOL_INVOKE_INPUT)(fn)
         fn = _fw.transform_io(

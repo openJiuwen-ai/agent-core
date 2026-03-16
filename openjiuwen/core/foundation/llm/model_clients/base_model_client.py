@@ -81,7 +81,7 @@ class BaseModelClient(ABC):
 
     def _get_client_name(self) -> str:
         """Get client name for error messages (subclasses can override)
-        
+
         Returns:
             Client name string
         """

@@ -24,12 +24,13 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
 class InferenceAffinityModelClient(BaseModelClient):
     """Inference Affinity (vLLM) API client with cache release support"""
     __client_name__ = "inference_affinity"
-
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
@@ -131,15 +132,39 @@ class InferenceAffinityModelClient(BaseModelClient):
         )
 
         try:
+            await emit(
+                LLMCallEvents.LLM_INPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"))
+
             response_data = await self._make_async_request(params)
             logger.info(f"InferenceAffinity API response: {response_data}")
 
             # Parse response and apply output parser
             assistant_message = await self._parse_response(response_data, output_parser)
 
+            await emit(
+                LLMCallEvents.LLM_OUTPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                response=assistant_message.content,
+                usage=assistant_message.usage_metadata,
+                tool_calls=assistant_message.tool_calls)
+
             return assistant_message
 
         except Exception as e:
+            await emit(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=False,
+                error=e)
             logger.error(f"InferenceAffinity API async invoke error: {e}")
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
@@ -194,17 +219,46 @@ class InferenceAffinityModelClient(BaseModelClient):
         )
 
         try:
+            await emit(
+                LLMCallEvents.LLM_INPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=True)
+
             if output_parser:
                 # Use streaming parser
                 async for parsed_result in self._astream_with_parser(params, output_parser):
+                    await emit(
+                        LLMCallEvents.LLM_OUTPUT,
+                        model_name=params.get("model"),
+                        model_provider=self.model_client_config.client_provider,
+                        result=parsed_result,
+                        is_stream=True)
                     yield parsed_result
             else:
                 # Direct return without parser
                 async for chunk in self._stream_response(params):
                     if chunk:
+                        await emit(
+                            LLMCallEvents.LLM_OUTPUT,
+                            model_name=params.get("model"),
+                            model_provider=self.model_client_config.client_provider,
+                            result=chunk,
+                            is_stream=True)
                         yield chunk
 
         except Exception as e:
+            await emit(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                error=e)
             logger.error(f"InferenceAffinity API async stream error: {e}")
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,

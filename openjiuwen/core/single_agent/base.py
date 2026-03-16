@@ -16,7 +16,7 @@ Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 
-from abc import abstractmethod, ABC
+from abc import ABCMeta, abstractmethod
 from typing import (
     Dict,
     List,
@@ -51,7 +51,34 @@ from openjiuwen.core.single_agent.skills import GitHubTree
 # BaseAgent
 # =============================================================================
 
-class BaseAgent(ABC):
+class _AgentMeta(ABCMeta):
+    def __call__(cls, *args, **kwargs):
+        instance = super().__call__(*args, **kwargs)
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.runner.callback.events import AgentEvents
+        _fw = Runner.callback_framework
+
+        fn = instance.invoke
+        fn = _fw.emit_before(AgentEvents.AGENT_INVOKE_INPUT)(fn)
+        fn = _fw.transform_io(
+            input_event=AgentEvents.AGENT_INVOKE_INPUT,
+            output_event=AgentEvents.AGENT_INVOKE_OUTPUT,
+        )(fn)
+        fn = _fw.emit_after(AgentEvents.AGENT_INVOKE_OUTPUT)(fn)
+        instance.invoke = fn
+
+        fn = instance.stream
+        fn = _fw.emit_before(AgentEvents.AGENT_STREAM_INPUT)(fn)
+        fn = _fw.transform_io(
+            input_event=AgentEvents.AGENT_STREAM_INPUT,
+            output_event=AgentEvents.AGENT_STREAM_OUTPUT,
+        )(fn)
+        fn = _fw.emit_after(AgentEvents.AGENT_STREAM_OUTPUT, item_key="result")(fn)
+        instance.stream = fn
+        return instance
+
+
+class BaseAgent(metaclass=_AgentMeta):
     """Single Agent Base Class
 
     Design principles:

@@ -42,6 +42,14 @@ class Task:
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATES
 
+    def __hash__(self) -> int:
+        return hash(self.task_id)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Task):
+            return NotImplemented
+        return self.task_id == other.task_id
+
     @property
     def display_name(self) -> str:
         return self.name or self.task_id[:8]

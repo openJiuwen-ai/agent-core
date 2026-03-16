@@ -794,7 +794,7 @@ class TestWaitMethods:
 
     @pytest.mark.asyncio
     async def test_wait_group_partial_failure(self, manager):
-        """wait_group with a failing task returns None for that entry"""
+        """wait_group with return_exceptions=True returns Exception objects for failed tasks"""
         tasks = []
 
         async def ok():
@@ -807,9 +807,33 @@ class TestWaitMethods:
             tasks.append(await manager.create_task(ok(), group="mixed"))
             tasks.append(await manager.create_task(fail(), group="mixed", catch_exceptions=True))
 
-        results = await manager.wait_group("mixed")
+        # With return_exceptions=True, failed tasks return Exception objects
+        # Note: order of results is not guaranteed due to concurrent execution
+        results = await manager.wait_group("mixed", return_exceptions=True)
         assert len(results) == 2
-        assert None in results
+        assert "ok" in results
+        assert any(isinstance(r, ValueError) for r in results)
+
+    @pytest.mark.asyncio
+    async def test_wait_group_raise_on_failure(self, manager):
+        """wait_group with return_exceptions=False (default) raises first exception"""
+        async def ok():
+            return "ok"
+
+        async def fail():
+            raise ValueError("fail")
+
+        async with manager.task_group() as tg:
+            await manager.create_task(ok(), group="mixed")
+            await manager.create_task(fail(), group="mixed", catch_exceptions=True)
+
+        # With return_exceptions=False (default), exception is raised
+        # anyio TaskGroup wraps exceptions in ExceptionGroup
+        with pytest.raises(ExceptionGroup) as exc_info:
+            await manager.wait_group("mixed")
+
+        # Verify the original ValueError is in the ExceptionGroup
+        assert any(isinstance(e, ValueError) and str(e) == "fail" for e in exc_info.value.exceptions)
 
     @pytest.mark.asyncio
     async def test_wait_all(self, manager):
@@ -823,6 +847,45 @@ class TestWaitMethods:
 
         results = await manager.wait_all()
         assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_wait_all_partial_failure(self, manager):
+        """wait_all with return_exceptions=True returns Exception objects for failed tasks"""
+        async def ok():
+            return "ok"
+
+        async def fail():
+            raise ValueError("fail")
+
+        # Create tasks inside task group so they actually run
+        async with manager.task_group():
+            t1 = await manager.create_task(ok())
+            t2 = await manager.create_task(fail(), catch_exceptions=True)
+
+        # With return_exceptions=True, failed tasks return Exception objects
+        results = await manager.wait_all(return_exceptions=True)
+        assert len(results) == 2
+        # Check that we have both "ok" and ValueError (order may vary)
+        assert "ok" in results
+        assert any(isinstance(r, ValueError) for r in results)
+
+    @pytest.mark.asyncio
+    async def test_wait_all_raise_on_failure(self, manager):
+        """wait_all with return_exceptions=False (default) raises first exception"""
+        async def ok():
+            return "ok"
+
+        async def fail():
+            raise ValueError("fail")
+
+        async with manager.task_group() as tg:
+            await manager.create_task(ok())
+            await manager.create_task(fail(), catch_exceptions=True)
+            # Note: tasks must be stored in variables to prevent garbage collection
+
+        # With return_exceptions=False (default), first exception is raised
+        with pytest.raises(ValueError, match="fail"):
+            await manager.wait_all()
 
 
 class TestEventBus:

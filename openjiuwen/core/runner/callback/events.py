@@ -96,6 +96,10 @@ class AgentEvents(EventBase):
     AGENT_ERROR = EventBase.get_event("agent_error")
     AGENT_CANCELLED = EventBase.get_event("agent_cancelled")
     AGENT_STATE_CHANGED = EventBase.get_event("agent_state_changed")
+    AGENT_INVOKE_INPUT = EventBase.get_event("agent_invoke_input")
+    AGENT_INVOKE_OUTPUT = EventBase.get_event("agent_invoke_output")
+    AGENT_STREAM_INPUT = EventBase.get_event("agent_stream_input")
+    AGENT_STREAM_OUTPUT = EventBase.get_event("agent_stream_output")
 
 
 class WorkflowEvents(EventBase):
@@ -145,6 +149,8 @@ class LLMCallEvents(EventBase):
         LLM_INVOKE_OUTPUT: Fired after BaseModelClient.invoke with the result
         LLM_STREAM_INPUT: Fired before BaseModelClient.stream with call arguments
         LLM_STREAM_OUTPUT: Fired for each item yielded by BaseModelClient.stream
+        LLM_INPUT: Fired before LLM request with messages/tools input data
+        LLM_OUTPUT: Fired after LLM response with response/usage output data
     """
     LLM_CALL_STARTED = EventBase.get_event("llm_call_started")
     LLM_CALL_FINISHED = EventBase.get_event("llm_call_finished")
@@ -156,6 +162,8 @@ class LLMCallEvents(EventBase):
     LLM_INVOKE_OUTPUT = EventBase.get_event("llm_invoke_output")
     LLM_STREAM_INPUT = EventBase.get_event("llm_stream_input")
     LLM_STREAM_OUTPUT = EventBase.get_event("llm_stream_output")
+    LLM_INPUT = EventBase.get_event("llm_input")
+    LLM_OUTPUT = EventBase.get_event("llm_output")
 
 
 class ToolCallEvents(EventBase):
@@ -172,6 +180,8 @@ class ToolCallEvents(EventBase):
         TOOL_INVOKE_OUTPUT: Fired after Tool.invoke with the result
         TOOL_STREAM_INPUT: Fired before Tool.stream with call arguments
         TOOL_STREAM_OUTPUT: Fired for each item yielded by Tool.stream
+        BEFORE_TOOL_CALL: Fired before tool execution with inputs data
+        AFTER_TOOL_CALL: Fired after tool execution with result output data
     """
     TOOL_CALL_STARTED = EventBase.get_event("tool_call_started")
     TOOL_CALL_FINISHED = EventBase.get_event("tool_call_finished")
@@ -183,6 +193,8 @@ class ToolCallEvents(EventBase):
     TOOL_INVOKE_OUTPUT = EventBase.get_event("tool_invoke_output")
     TOOL_STREAM_INPUT = EventBase.get_event("tool_stream_input")
     TOOL_STREAM_OUTPUT = EventBase.get_event("tool_stream_output")
+    BEFORE_TOOL_CALL = EventBase.get_event("before_tool_call")
+    AFTER_TOOL_CALL = EventBase.get_event("after_tool_call")
 
 
 class ContextEvents(EventBase):

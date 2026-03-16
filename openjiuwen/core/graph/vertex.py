@@ -22,11 +22,14 @@ from openjiuwen.core.session.stream import StreamEmitter
 from openjiuwen.core.graph.stream_actor.base import StreamConsumer
 from openjiuwen.core.session.tracer import TracerWorkflowUtils
 from openjiuwen.core.graph.pregel import GraphInterrupt
+from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 SUB_WORKFLOW_COMPONENT = "sub_workflow"
 
 
 class Vertex(AsyncAtomicNode, StreamConsumer):
+
     def __init__(self, node_id: str, executable: Executable = None):
         self._node_id = node_id
         self._executable = executable
@@ -194,6 +197,15 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             logger.info(f"Succeed to call batch-in node [{self._node_id}]",
                         event_type=LogEventType.GRAPH_VERTEX_CALL_END,
                         **self._log_message)
+            node_output = self._session.state().get(self._node_id)
+            # Emit node executed event with inputs and outputs
+            await emit(
+                WorkflowEvents.NODE_EXECUTED,
+                node_id=self._node_id,
+                ability=[a.name for a in self._component_ability],
+                graph_id=self._session.workflow_id(),
+                inputs=state,
+                outputs=node_output)
 
             return {"source_node_id": [self._node_id]}
         except Exception as e:
@@ -215,6 +227,13 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                              event_type=LogEventType.GRAPH_VERTEX_CALL_END,
                              exception=e,
                              **self._log_message)
+            if not isinstance(e, GraphInterrupt):
+                # Emit node error event
+                await emit(
+                    WorkflowEvents.NODE_ERROR,
+                    node_id=self._node_id,
+                    graph_id=self._session.workflow_id(),
+                    error=e)
             raise e
         finally:
             self._call_count += 1

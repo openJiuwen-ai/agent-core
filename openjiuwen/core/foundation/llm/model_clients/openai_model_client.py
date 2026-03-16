@@ -24,6 +24,8 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
+from openjiuwen.core.runner.callback import emit
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 if TYPE_CHECKING:
     import openai
@@ -170,6 +172,16 @@ class OpenAIModelClient(BaseModelClient):
 
         async_client = None
         try:
+            await emit(
+                LLMCallEvents.LLM_INPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"))
+
             async_client = self._create_async_openai_client(timeout=timeout)
 
             # Call API
@@ -199,9 +211,23 @@ class OpenAIModelClient(BaseModelClient):
             )
             assistant_message = await self._parse_response(response, output_parser)
 
+            await emit(
+                LLMCallEvents.LLM_OUTPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                response=assistant_message.content,
+                usage=assistant_message.usage_metadata,
+                tool_calls=assistant_message.tool_calls)
+
             return assistant_message
 
         except Exception as e:
+            await emit(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=False,
+                error=e)
             llm_logger.error(
                 "OpenAI API async invoke error.",
                 event_type=LogEventType.LLM_CALL_ERROR,
@@ -270,8 +296,20 @@ class OpenAIModelClient(BaseModelClient):
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
+
         async_client = None
         try:
+            await emit(
+                LLMCallEvents.LLM_INPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=True)
+
             async_client = self._create_async_openai_client(timeout=timeout)
 
             # Call API with streaming
@@ -280,14 +318,34 @@ class OpenAIModelClient(BaseModelClient):
             if output_parser:
                 # Use streaming parser
                 async for parsed_result in self._astream_with_parser(response_stream, output_parser):
+                    await emit(
+                        LLMCallEvents.LLM_RESPONSE_RECEIVED,
+                        model_name=params.get("model"),
+                        model_provider=self.model_client_config.client_provider)
                     yield parsed_result
             else:
                 async for chunk in response_stream:
                     parsed_chunk = self._parse_stream_chunk(chunk)
                     if parsed_chunk:
+                        await emit(
+                            LLMCallEvents.LLM_RESPONSE_RECEIVED,
+                            model_name=params.get("model"),
+                            model_provider=self.model_client_config.client_provider)
                         yield parsed_chunk
 
+            await emit(
+                LLMCallEvents.LLM_OUTPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True)
+
         except Exception as e:
+            await emit(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                error=e)
             llm_logger.error(
                 "OpenAI API async stream error.",
                 event_type=LogEventType.LLM_CALL_ERROR,

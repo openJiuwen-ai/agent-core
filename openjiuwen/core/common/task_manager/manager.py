@@ -6,12 +6,14 @@ from contextlib import asynccontextmanager
 from typing import (
     Any,
     AsyncGenerator,
+    AsyncIterator,
     Awaitable,
     Callable,
     Coroutine,
     Dict,
     List,
     Optional,
+    Tuple,
 )
 from uuid import uuid4
 
@@ -330,7 +332,12 @@ class TaskManager:
         for child in children:
             self._build_tree_recursive(child.task_id, lines, indent + 1)
 
-    async def wait_group(self, group: str, timeout: Optional[float] = None) -> List[Any]:
+    async def wait_group(
+            self,
+            group: str,
+            timeout: Optional[float] = None,
+            return_exceptions: bool = False,
+    ) -> List[Any]:
         """Wait for all tasks in a group to complete.
 
         Examples:
@@ -345,12 +352,27 @@ class TaskManager:
             ...     results = await manager.wait_group("math")
             ...     print(f"Results: {results}")  # [3, 7]
 
+            Wait with return_exceptions=True (like asyncio.gather):
+
+            >>> async def main():
+            ...     manager = get_task_manager()
+            ...     # Create tasks where some may fail
+            ...     await manager.create_task(failing_task(), group="workers")
+            ...     await manager.create_task(working_task(), group="workers")
+            ...     # Get results including exceptions
+            ...     results = await manager.wait_group("workers", return_exceptions=True)
+            ...     # results contains Exception objects for failed tasks
+
         Args:
             group: The group name to wait for
             timeout: Optional timeout in seconds
+            return_exceptions: If False (default), raise first exception and cancel
+                              other tasks. If True, return exception objects instead
+                              of raising them.
 
         Returns:
-            List of results from all tasks in the group
+            List of results from all tasks in the group. If return_exceptions=True,
+            failed tasks will contain Exception objects.
         """
         async with self._lock:
             task_ids = self.registry.get_group_task_ids(group)
@@ -358,20 +380,39 @@ class TaskManager:
         tasks = [self.registry.get(tid) for tid in task_ids if self.registry.contains(tid)]
 
         results = []
+        first_exception = None
+
         async with anyio.create_task_group() as tg:
             async def wait_one(task: Task) -> None:
-                try:
-                    result = await task.wait()
-                    results.append(result)
-                except Exception:
-                    results.append(None)
+                nonlocal first_exception
+                if return_exceptions:
+                    try:
+                        result = await task.wait()
+                        results.append(result)
+                    except Exception as e:
+                        results.append(e)
+                else:
+                    try:
+                        result = await task.wait()
+                        results.append(result)
+                    except Exception as e:
+                        first_exception = e
+                        raise
 
             for task in tasks:
                 tg.start_soon(wait_one, task)
 
+        # If we have an exception and return_exceptions=False, raise it
+        if first_exception and not return_exceptions:
+            raise first_exception
+
         return results
 
-    async def wait_all(self, timeout: Optional[float] = None) -> List[Any]:
+    async def wait_all(
+            self,
+            timeout: Optional[float] = None,
+            return_exceptions: bool = False,
+    ) -> List[Any]:
         """Wait for all tasks managed by this manager to complete.
 
         Examples:
@@ -386,21 +427,46 @@ class TaskManager:
             ...     results = await manager.wait_all()
             ...     print(f"All results: {results}")
 
+            Wait with return_exceptions=True (like asyncio.gather):
+
+            >>> async def main():
+            ...     manager = get_task_manager()
+            ...     # Create tasks where some may fail
+            ...     await manager.create_task(failing_task())
+            ...     await manager.create_task(working_task())
+            ...     # Get results including exceptions
+            ...     results = await manager.wait_all(return_exceptions=True)
+            ...     # results contains Exception objects for failed tasks
+
         Args:
             timeout: Optional timeout in seconds for all tasks
+            return_exceptions: If False (default), raise first exception and cancel
+                              other tasks. If True, return exception objects instead
+                              of raising them.
 
         Returns:
-            List of results from all tasks
+            List of results from all tasks. If return_exceptions=True, failed tasks
+            will contain Exception objects.
         """
         async with self._lock:
             task_ids = list(self.registry.keys())
 
         results = []
+        first_exception = None
+
         for task_id in task_ids:
             task = self.registry.get(task_id)
             if not task:
                 results.append(None)
                 continue
+
+            # If we already have an exception and return_exceptions=False,
+            # cancel remaining tasks
+            if first_exception and not return_exceptions:
+                await task.cancel(reason="other_task_failed")
+                results.append(None)
+                continue
+
             try:
                 if timeout:
                     with anyio.fail_after(timeout):
@@ -408,10 +474,77 @@ class TaskManager:
                 else:
                     result = await task.wait()
                 results.append(result)
-            except Exception:
-                results.append(None)
+            except Exception as e:
+                if return_exceptions:
+                    results.append(e)
+                else:
+                    first_exception = e
+                    results.append(None)
+                    # Cancel remaining tasks
+                    for remaining_id in task_ids[task_ids.index(task_id) + 1:]:
+                        remaining_task = self.registry.get(remaining_id)
+                        if remaining_task:
+                            await remaining_task.cancel(reason="other_task_failed")
+
+        # If we have a first exception and return_exceptions=False, raise it
+        if first_exception and not return_exceptions:
+            raise first_exception
 
         return results
+
+    async def as_completed(
+            self,
+            tasks: List[Task],
+            timeout: Optional[float] = None
+    ) -> AsyncIterator[Tuple[Task, Any]]:
+        """Return an iterator that yields completed tasks as they finish.
+
+        Similar to asyncio.as_completed. Yields (task, result) tuples,
+        with completed tasks yielded first.
+
+        Args:
+            tasks: List of Task objects to wait on
+            timeout: Optional timeout in seconds for all tasks
+
+        Yields:
+            Tuples of (task, result) as tasks complete
+        """
+        if not tasks:
+            return
+
+        result_queue: anyio.abc.Queue[Tuple[Task, Any]] = anyio.create_queue(len(tasks))
+        completed_count = 0
+        total_tasks = len(tasks)
+
+        async def wait_task(task: Task) -> None:
+            """Wait for a single task to complete and put result in queue."""
+            nonlocal completed_count
+            try:
+                result = await task.wait()
+                await result_queue.put((task, result))
+            except Exception as e:
+                await result_queue.put((task, e))
+            finally:
+                completed_count += 1
+
+        tg = anyio.create_task_group()
+        for task in tasks:
+            tg.start_soon(wait_task, task)
+        tg.start()
+
+        try:
+            while completed_count < total_tasks:
+                try:
+                    if timeout is not None:
+                        with anyio.fail_after(timeout):
+                            result = await result_queue.get()
+                    else:
+                        result = await result_queue.get()
+                    yield result
+                except anyio.TimeoutError as e:
+                    raise TimeoutError(f"as_completed() timed out after {timeout} second(s)") from e
+        finally:
+            tg.cancel_scope.cancel()
 
     async def _trigger_event(self, event_type: str, task: Task) -> None:
         """Trigger an event through the callback framework."""
@@ -687,3 +820,23 @@ def print_task_tree(task_id: Optional[str] = None) -> None:
             task_tree = manager.get_task_tree(task.task_id)
             logger.debug("Task tree", event_type=LogEventType.CORO_MANAGER_DEBUG_TASK_TREE,
                          metadata={"task_id": task.task_id, "tree": task_tree})
+
+
+async def as_completed(
+        tasks: List[Task],
+        timeout: Optional[float] = None
+) -> AsyncIterator[Tuple[Task, Any]]:
+    """Return an iterator that yields completed tasks as they finish (convenience function).
+
+    Similar to asyncio.as_completed. Yields (task, result) tuples,
+    with completed tasks yielded first.
+
+    Args:
+        tasks: List of Task objects to wait on
+        timeout: Optional timeout in seconds for all tasks
+
+    Yields:
+        Tuples of (task, result) as tasks complete
+    """
+    async for task, result in get_task_manager().as_completed(tasks, timeout):
+        yield task, result

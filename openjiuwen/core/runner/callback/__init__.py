@@ -41,6 +41,11 @@ from openjiuwen.core.runner.callback.filters import (
 )
 # Main Framework
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
+# Utility functions
+from openjiuwen.core.runner.callback.utils import (
+    emit,
+    get_callback_framework,
+)
 # Data Models
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
@@ -84,5 +89,8 @@ __all__ = [
     "AbortError",
     # Framework
     "AsyncCallbackFramework",
+    # Utility functions
+    "emit",
+    "get_callback_framework",
 ]
 
