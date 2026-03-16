@@ -790,28 +790,6 @@ class openjiuwen.core.workflow.Session(parent: "AgentSession" = None, session_id
 >>> 
 ```
 
-### get_callback_manager
-
-```python
-get_callback_manager(self) -> CallbackManager
-```
-
-获取本次工作流执行的回调函数管理器。
-
-**返回**：
-
-**CallbackManager**：当前工作流执行的回调函数管理器。
-
-**样例**：
-
-```python
->>> from openjiuwen.core.workflow import Session
->>> 
->>> session = Session()
->>> 
->>> callback_manager = session.get_callback_manager()
-```
-
 ### get_session_id
 
 ```python

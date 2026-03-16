@@ -1184,51 +1184,6 @@ Create custom node StreamNode, invoke outputs a custom format streaming message
 content="这是一条流式消息" idx=1 message="消息"
 ```
 
-### get_callback_manager
-
-```python
-get_callback_manager(self) -> CallbackManager
-```
-
-Get the callback function manager for this workflow execution.
-
-**Returns**:
-
-**CallbackManager**: Callback function manager for current workflow execution.
-
-**Example**:
-
-```python
->>> import asyncio
->>> from openjiuwen.core.workflow import WorkflowComponent
->>> from openjiuwen.core.workflow import End
->>> from openjiuwen.core.workflow import Start
->>> from openjiuwen.core.context_engine import ModelContext
->>> from openjiuwen.core.workflow import Input, Output
->>> from openjiuwen.core.workflow.components import Session
->>> from openjiuwen.core.workflow import create_workflow_session
->>> from openjiuwen.core.workflow import Workflow
->>>
->>> class CustomComponent(WorkflowComponent):
-...    def __init__(self, workflow_id):
-...        super().__init__()
-...        self._workflow_id = workflow_id
-...
-...    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-...        callback_manager = session.get_callback_manager()
-...        return {}
-...
->>> flow = Workflow()
->>> flow.set_start_comp("start", Start())
->>> flow.add_workflow_comp("custom", CustomComponent("custom"))
->>> flow.set_end_comp("end", End())
->>> flow.add_connection("start", "custom")
->>> flow.add_connection("custom", "end")
->>>
->>> if __name__ == "__main__":
-...    asyncio.run(flow.invoke(inputs={}, session=create_workflow_session()))
-```
-
 ### get_env
 
 ```python
