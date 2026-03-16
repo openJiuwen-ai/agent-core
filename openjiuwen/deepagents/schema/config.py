@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import ToolCard
@@ -53,5 +53,5 @@ class DeepAgentConfig:
     subagents: Optional[List[AgentCard]] = None
     tools: Optional[List[ToolCard]] = None
     workspace: Optional[Workspace] = None
-    skills: Optional[List[Any]] = None
+    skills: Optional[Union[str, List[str]]] = None
     backend: Optional[Any] = None

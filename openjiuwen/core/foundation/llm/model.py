@@ -372,7 +372,7 @@ def init_model(
         verify_ssl=verify_ssl,
     )
     request_config = ModelRequestConfig(
-        model_name=model_name,
+        model=model_name,
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_tokens,
