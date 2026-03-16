@@ -21,7 +21,7 @@ from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.session import InteractiveInput, InteractionOutput
 from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import create_workflow_session
 from openjiuwen.core.session.stream import BaseStreamMode, CustomSchema, TraceSchema
@@ -1248,6 +1248,45 @@ async def test_workflow_with_loop_component_multi_abilities():
     result = await flow.invoke({"input_array": [1, 2, 3]}, create_workflow_session())
     assert result == WorkflowOutput(result={"result1": [1, 2, 3], "result2": [1, 2, 3]},
                                     state=WorkflowExecutionState.COMPLETED)
+
+
+
+async def test_executor_single_interupt_component():
+    class CustomQuesNode(WorkflowComponent):
+        async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+            print(f'inputs: {inputs}')
+            result = await session.interact("please input:")
+            print(f'result: {result}')
+
+            return {"result": result, 'inputs': inputs}
+    component = CustomQuesNode()
+    session = create_workflow_session(session_id="123")
+    # 3. create Vertex instance
+    component_id = "test_component"
+    inputs = {"a": "测试输入", "b": "测试输入2"}
+
+    # 4. call execute_single_component method
+    result = await execute_single_component(
+        component_id=component_id,
+        session=session,
+        inputs_schema={"a": "${a}", "b": "${b}"},
+        executor=component,
+        inputs=inputs,
+    )
+    print(f"1.result: {result}")
+    # 分步验证，更易调试
+    assert result.payload is not None, "payload属性为空"
+    assert hasattr(result.payload, 'value'), "payload缺少value属性"
+    assert result.payload.value is not None, "value属性为空"
+    assert 'please input' in result.payload.value, f"未找到'please input'，实际value：{result.payload.value}"
+    result = await execute_single_component(
+        component_id=component_id,
+        session=session,
+        executor=component,
+        inputs=InteractiveInput("shanghai"),
+    )
+    print(f"2. result: {result}")
+    assert result == {'result': 'shanghai'}
 
 
 async def test_sub_flow_multi_stream_output():
