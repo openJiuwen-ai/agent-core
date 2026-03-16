@@ -231,3 +231,6 @@ openjiuwen/integrations/retriever/service.yaml
 openjiuwen/integrations/retriever/upload/
 
 .cursor/
+
+# Git worktrees
+.worktrees/
