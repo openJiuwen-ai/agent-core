@@ -67,9 +67,16 @@ class TaskPlanningRail(DeepAgentRail):
         self.workspace = getattr(
             agent.deep_config, "workspace", None
         )
+        workspace_path = None
+        if self.workspace is not None:
+            workspace_path = (
+                self.workspace.root_path
+                if hasattr(self.workspace, "root_path")
+                else str(self.workspace)
+            )
         tools = create_todos_tool(
             self.sys_operation,
-            self.workspace.root_path if self.workspace else None,
+            workspace_path,
         )
         self.tools = tools
         Runner.resource_mgr.add_tool(list(tools))

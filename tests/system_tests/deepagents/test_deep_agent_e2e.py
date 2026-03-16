@@ -55,6 +55,7 @@ API_BASE = os.getenv("API_BASE", "your api url")
 API_KEY = os.getenv("API_KEY", "your api key")
 MODEL_NAME = os.getenv("MODEL_NAME", "model name")
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "SiliconFlow")
+MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 os.environ.setdefault("IS_SENSITIVE", "false")
 

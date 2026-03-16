@@ -120,7 +120,7 @@ class SkillRail(DeepAgentRail):
             if not root.is_dir():
                 raise NotADirectoryError(f"skills_dir is not a directory: {root}")
 
-            for item in root.iterdir():
+            for item in sorted(root.iterdir(), key=lambda p: p.name):
                 if not item.is_dir():
                     continue
 
@@ -462,7 +462,7 @@ class SkillRail(DeepAgentRail):
             if not root.is_dir():
                 raise NotADirectoryError(f"skills_dir is not a directory: {root}")
 
-            for item in root.iterdir():
+            for item in sorted(root.iterdir(), key=lambda p: p.name):
                 if not item.is_dir():
                     continue
 
