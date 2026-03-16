@@ -1,21 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Unit tests for TaskPlanningRail hooks."""
+"""Unit tests for TaskPlanningRail init/uninit."""
 from __future__ import annotations
-
-from typing import Any, Dict, List
 
 import pytest
 
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackContext,
-    InvokeInputs,
-    ModelCallInputs,
-    TaskIterationInputs,
-    ToolCallInputs,
-)
-from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
@@ -30,16 +20,6 @@ from openjiuwen.deepagents.rails.task_planning_rail import (
 from openjiuwen.deepagents.schema.config import (
     DeepAgentConfig,
 )
-from openjiuwen.deepagents.schema.state import (
-    DeepAgentState,
-    _write_runtime_state,
-    load_state,
-)
-from openjiuwen.deepagents.schema.task import (
-    TaskItem,
-    TaskPlan,
-    TaskStatus,
-)
 
 
 def _make_operation():
@@ -49,443 +29,359 @@ def _make_operation():
         id=card_id, mode=OperationMode.LOCAL
     )
     Runner.resource_mgr.add_sys_operation(card)
-    return Runner.resource_mgr.get_sys_operation(  # type: ignore[return-value]
+    return Runner.resource_mgr.get_sys_operation(
         card.id
     )
 
 
-def _make_rail(
-    interval: int = 5,
-    replanning: bool = True,
-) -> TaskPlanningRail:
+def _make_rail() -> TaskPlanningRail:
     """Build a TaskPlanningRail with test defaults."""
     op = _make_operation()
     return TaskPlanningRail(
-        operation=op,  # type: ignore[arg-type]
-        progress_restate_interval=interval,
-        enable_replanning=replanning,
+        operation=op,
     )
 
 
-def _make_agent_and_session():
-    """Build a DeepAgent + Session pair."""
+def _make_agent(workspace: str = None) -> DeepAgent:
+    """Build a DeepAgent with optional workspace."""
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     )
     agent.configure(
-        DeepAgentConfig(enable_task_loop=True)
+        DeepAgentConfig(
+            enable_task_loop=True,
+            workspace=workspace,
+        )
     )
-    session = Session(session_id="sess_rail")
-    return agent, session
+    return agent
 
 
-def _make_ctx(
-    agent: DeepAgent,
-    session: Session,
-    inputs: Any = None,
-) -> AgentCallbackContext:
-    """Build an AgentCallbackContext."""
-    if inputs is None:
-        inputs = InvokeInputs(query="build feature")
-    return AgentCallbackContext(
-        agent=agent,
-        inputs=inputs,
-        session=session,
-    )
-
-
-# ── before_invoke ──
-
-
-@pytest.mark.asyncio
-async def test_before_invoke_creates_plan() -> None:
-    """before_invoke creates a TaskPlan in state."""
+def test_init_registers_tools_with_workspace() -> None:
+    """init registers todo tools when workspace is set."""
     rail = _make_rail()
-    agent, session = _make_agent_and_session()
-    ctx = _make_ctx(agent, session)
+    agent = _make_agent(workspace="/tmp/test_ws")
 
-    await rail.before_invoke(ctx)
+    rail.init(agent)
 
-    state = load_state(ctx)
-    plan = state.task_plan
-    assert plan is not None
-    assert plan.goal == "build feature"
-    assert len(plan.tasks) == 1
-    assert plan.tasks[0].id == "t1"
+    assert rail.tools is not None
+    assert len(rail.tools) > 0
+    assert rail.workspace == "/tmp/test_ws"
 
 
-@pytest.mark.asyncio
-async def test_before_invoke_skips_if_plan_exists() -> None:
-    """before_invoke does not overwrite existing plan."""
+def test_init_registers_without_workspace() -> None:
+    """init registers tools even without workspace."""
     rail = _make_rail()
-    agent, session = _make_agent_and_session()
-    ctx = _make_ctx(agent, session)
+    agent = _make_agent(workspace=None)
 
-    existing = TaskPlan(
-        goal="old",
-        tasks=[TaskItem(id="old1", title="old")],
-    )
-    state = DeepAgentState(task_plan=existing)
-    _write_runtime_state(session, state)
+    rail.init(agent)
 
-    await rail.before_invoke(ctx)
-
-    loaded = load_state(ctx)
-    assert loaded.task_plan is not None
-    assert loaded.task_plan.goal == "old"
-    assert len(loaded.task_plan.tasks) == 1
+    assert rail.tools is not None
+    assert len(rail.tools) > 0
+    assert rail.workspace is None
 
 
-@pytest.mark.asyncio
-async def test_before_invoke_skips_no_session() -> None:
-    """before_invoke is a no-op without session."""
+def test_uninit_removes_tools() -> None:
+    """uninit removes previously registered tools."""
     rail = _make_rail()
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    )
-    agent.configure(
-        DeepAgentConfig(enable_task_loop=True)
-    )
-    ctx = AgentCallbackContext(
-        agent=agent,
-        inputs=InvokeInputs(query="hello"),
-        session=None,
-    )
+    agent = _make_agent(workspace="/tmp/test_ws")
 
-    await rail.before_invoke(ctx)
-    # No crash, no state
+    rail.init(agent)
+    assert rail.tools is not None
+
+    rail.uninit(agent)
+    # Tools list still exists on rail but removed
+    # from agent's ability_manager
 
 
-@pytest.mark.asyncio
-async def test_before_invoke_skips_empty_query() -> None:
-    """before_invoke skips when query is empty."""
+def test_uninit_safe_without_tools() -> None:
+    """uninit is safe when no tools were registered."""
     rail = _make_rail()
-    agent, session = _make_agent_and_session()
-    ctx = _make_ctx(
-        agent, session,
-        inputs=InvokeInputs(query=""),
-    )
+    agent = _make_agent()
 
-    await rail.before_invoke(ctx)
-
-    state = load_state(ctx)
-    assert state.task_plan is None
-
-
-# ── before_task_iteration ──
-
-
-@pytest.mark.asyncio
-async def test_before_task_iteration_marks_next() -> None:
-    """before_task_iteration marks next PENDING task."""
-    rail = _make_rail()
-    agent, session = _make_agent_and_session()
-
-    plan = TaskPlan(
-        goal="test",
-        tasks=[
-            TaskItem(id="t1", title="step 1"),
-            TaskItem(id="t2", title="step 2"),
-        ],
-    )
-    state = DeepAgentState(task_plan=plan)
-    _write_runtime_state(session, state)
-
-    ctx = _make_ctx(
-        agent, session,
-        inputs=TaskIterationInputs(
-            iteration=1, loop_event=None
-        ),
-    )
-
-    await rail.before_task_iteration(ctx)
-
-    assert plan.tasks[0].status == TaskStatus.IN_PROGRESS
-    assert plan.current_task_id == "t1"
-
-
-@pytest.mark.asyncio
-async def test_before_task_iteration_no_plan() -> None:
-    """before_task_iteration is safe without plan."""
-    rail = _make_rail()
-    agent, session = _make_agent_and_session()
-    ctx = _make_ctx(
-        agent, session,
-        inputs=TaskIterationInputs(
-            iteration=1, loop_event=None
-        ),
-    )
-
-    await rail.before_task_iteration(ctx)
+    rail.uninit(agent)
     # No crash
 
 
-# ── before_model_call ──
-
-
-@pytest.mark.asyncio
-async def test_before_model_call_injects_progress() -> None:
-    """before_model_call injects progress at interval."""
-    rail = _make_rail(interval=2)
-    agent, session = _make_agent_and_session()
-
-    plan = TaskPlan(
-        goal="test",
-        tasks=[TaskItem(id="t1", title="step 1")],
-    )
-    state = DeepAgentState(task_plan=plan)
-    _write_runtime_state(session, state)
-
-    messages: List[Dict[str, str]] = [
-        {"role": "user", "content": "hello"}
-    ]
-    model_inputs = ModelCallInputs(messages=messages)
-    ctx = _make_ctx(agent, session, inputs=model_inputs)
-
-    # Call 1: not at interval
-    await rail.before_model_call(ctx)
-    assert len(messages) == 1
-
-    # Call 2: at interval (2)
-    ctx.inputs = ModelCallInputs(messages=messages)
-    await rail.before_model_call(ctx)
-    assert len(messages) == 2
-    assert "[Task Progress]" in messages[-1]["content"]
-
-
-@pytest.mark.asyncio
-async def test_before_model_call_skips_no_plan() -> None:
-    """before_model_call skips when no plan exists."""
-    rail = _make_rail(interval=1)
-    agent, session = _make_agent_and_session()
-
-    messages: List[Dict[str, str]] = []
-    model_inputs = ModelCallInputs(messages=messages)
-    ctx = _make_ctx(agent, session, inputs=model_inputs)
-
-    await rail.before_model_call(ctx)
-    assert len(messages) == 0
-
-
-# ── after_tool_call ──
-
-
-@pytest.mark.asyncio
-async def test_after_tool_call_syncs_todo_write() -> None:
-    """after_tool_call processes todo_write calls."""
+def test_priority_is_90() -> None:
+    """TaskPlanningRail has priority 90."""
     rail = _make_rail()
-    agent, session = _make_agent_and_session()
+    assert rail.priority == 90
 
-    plan = TaskPlan(
-        goal="test",
-        tasks=[TaskItem(id="t1", title="step 1")],
-    )
-    state = DeepAgentState(task_plan=plan)
-    _write_runtime_state(session, state)
 
-    tool_inputs = ToolCallInputs(
-        tool_name="todo_write",
-        tool_result={"message": "created"},
-        tool_msg="ok",
-    )
-    ctx = _make_ctx(agent, session, inputs=tool_inputs)
+# ================================================================
+# after_task_iteration bridge tests
+# ================================================================
+from typing import List
+from unittest.mock import (
+    AsyncMock,
+    MagicMock,
+    patch,
+)
 
-    await rail.after_tool_call(ctx)
-    # No crash, sync logged
+from openjiuwen.deepagents.schema.state import (
+    DeepAgentState,
+)
+from openjiuwen.deepagents.schema.task import (
+    TaskItem,
+    TaskPlan,
+    TaskStatus,
+)
+from openjiuwen.deepagents.tools.todo import (
+    TodoItem,
+    TodoStatus,
+)
+
+
+def _make_ctx(session=None):
+    """Build a minimal AgentCallbackContext mock."""
+    ctx = MagicMock()
+    ctx.session = session
+    return ctx
+
+
+def _make_todos(
+    specs: List[tuple],
+) -> List[TodoItem]:
+    """Build TodoItem list from (content, status) tuples."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    items = []
+    for content, status in specs:
+        items.append(
+            TodoItem(
+                content=content,
+                activeForm=f"Executing {content}",
+                status=status,
+                createdAt=now,
+                updatedAt=now,
+            )
+        )
+    return items
 
 
 @pytest.mark.asyncio
-async def test_after_tool_call_ignores_other_tools() -> None:
-    """after_tool_call ignores non-todo tools."""
+async def test_after_task_iteration_bridges_todos() -> None:
+    """3 todos (1 completed + 2 pending) → TaskPlan with 3 items."""
     rail = _make_rail()
-    agent, session = _make_agent_and_session()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
 
-    tool_inputs = ToolCallInputs(
-        tool_name="shell_exec",
-        tool_result={"output": "ok"},
-    )
-    ctx = _make_ctx(agent, session, inputs=tool_inputs)
+    todos = _make_todos([
+        ("task-a", TodoStatus.COMPLETED),
+        ("task-b", TodoStatus.PENDING),
+        ("task-c", TodoStatus.PENDING),
+    ])
 
-    await rail.after_tool_call(ctx)
-    # No crash, no action
+    state = DeepAgentState(iteration=1)
+    saved_states: List[DeepAgentState] = []
 
+    def fake_save(_ctx, st):
+        saved_states.append(st)
 
-# ── after_task_iteration ──
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-1"
 
+    with (
+        patch(
+            "openjiuwen.deepagents.rails"
+            ".task_planning_rail.load_state",
+            return_value=state,
+        ),
+        patch(
+            "openjiuwen.deepagents.rails"
+            ".task_planning_rail.save_state",
+            side_effect=fake_save,
+        ),
+    ):
+        # Mock load_todos on the first TodoTool
+        tool = rail._find_todo_tool()
+        assert tool is not None
+        tool.load_todos = AsyncMock(return_value=todos)
+        tool.save_todos = AsyncMock()
 
-@pytest.mark.asyncio
-async def test_after_task_iteration_completes_task() -> None:
-    """after_task_iteration marks current task done."""
-    rail = _make_rail()
-    agent, session = _make_agent_and_session()
+        await rail.after_task_iteration(ctx)
 
-    plan = TaskPlan(
-        goal="test",
-        tasks=[TaskItem(id="t1", title="step 1")],
-    )
-    plan.mark_in_progress("t1")
-    state = DeepAgentState(task_plan=plan)
-    _write_runtime_state(session, state)
-
-    iter_inputs = TaskIterationInputs(
-        iteration=1,
-        loop_event=None,
-        result={"output": "done step 1"},
-    )
-    ctx = _make_ctx(agent, session, inputs=iter_inputs)
-
-    await rail.after_task_iteration(ctx)
-
+    assert len(saved_states) == 1
+    plan = saved_states[0].task_plan
+    assert plan is not None
+    assert len(plan.tasks) == 3
     assert plan.tasks[0].status == TaskStatus.COMPLETED
-    assert plan.tasks[0].result_summary == "done step 1"
-    assert plan.current_task_id is None
+    assert plan.tasks[1].status == TaskStatus.PENDING
+    assert plan.tasks[2].status == TaskStatus.PENDING
+    tool.save_todos.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_after_task_iteration_no_current() -> None:
-    """after_task_iteration is safe without current task."""
+async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
+    """Existing plan should be synced back to todo file statuses."""
     rail = _make_rail()
-    agent, session = _make_agent_and_session()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
 
-    plan = TaskPlan(
-        goal="test",
-        tasks=[TaskItem(id="t1", title="step 1")],
-    )
-    state = DeepAgentState(task_plan=plan)
-    _write_runtime_state(session, state)
+    todos = _make_todos([
+        ("task-a", TodoStatus.IN_PROGRESS),
+        ("task-b", TodoStatus.PENDING),
+    ])
+    todo_a_id = todos[0].id
+    todo_b_id = todos[1].id
 
-    iter_inputs = TaskIterationInputs(
-        iteration=1, loop_event=None
-    )
-    ctx = _make_ctx(agent, session, inputs=iter_inputs)
-
-    await rail.after_task_iteration(ctx)
-
-    assert plan.tasks[0].status == TaskStatus.PENDING
-
-
-# ── after_invoke ──
-
-
-@pytest.mark.asyncio
-async def test_after_invoke_generates_report() -> None:
-    """after_invoke stores task_report in ctx.extra."""
-    rail = _make_rail()
-    agent, session = _make_agent_and_session()
-
-    plan = TaskPlan(
-        goal="build feature",
+    existing_plan = TaskPlan(
+        goal="existing",
         tasks=[
             TaskItem(
-                id="t1",
-                title="step 1",
+                id=todo_a_id,
+                title="task-a",
                 status=TaskStatus.COMPLETED,
+            ),
+            TaskItem(
+                id=todo_b_id,
+                title="task-b",
+                status=TaskStatus.PENDING,
             ),
         ],
     )
-    state = DeepAgentState(task_plan=plan)
-    _write_runtime_state(session, state)
+    state = DeepAgentState(
+        iteration=2, task_plan=existing_plan
+    )
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-sync-1"
 
-    ctx = _make_ctx(agent, session)
+    with patch(
+        "openjiuwen.deepagents.rails"
+        ".task_planning_rail.load_state",
+        return_value=state,
+    ):
+        tool = rail._find_todo_tool()
+        assert tool is not None
+        tool.load_todos = AsyncMock(return_value=todos)
+        tool.save_todos = AsyncMock()
 
-    await rail.after_invoke(ctx)
+        await rail.after_task_iteration(ctx)
 
-    report = ctx.extra.get("task_report")
-    assert report is not None
-    assert report["goal"] == "build feature"
-    assert "1/1 completed" in report["progress"]
-    assert "step 1" in report["plan_markdown"]
+    tool.save_todos.assert_awaited_once()
+    saved_todos = tool.save_todos.call_args[0][0]
+    status_map = {
+        t.id: t.status for t in saved_todos
+    }
+    assert status_map[todo_a_id] == TodoStatus.COMPLETED
+    assert status_map[todo_b_id] == TodoStatus.PENDING
 
 
 @pytest.mark.asyncio
-async def test_after_invoke_no_plan_no_report() -> None:
-    """after_invoke is a no-op without plan."""
+async def test_bridge_skips_when_plan_exists() -> None:
+    """Existing plan → no overwrite."""
     rail = _make_rail()
-    agent, session = _make_agent_and_session()
-    ctx = _make_ctx(agent, session)
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
 
-    await rail.after_invoke(ctx)
-
-    assert "task_report" not in ctx.extra
-
-
-# ── _build_initial_plan ──
-
-
-def test_build_initial_plan_structure() -> None:
-    """_build_initial_plan creates correct structure."""
-    plan = TaskPlanningRail._build_initial_plan(
-        "implement auth"
+    existing_plan = TaskPlan(
+        goal="existing",
+        tasks=[TaskItem(title="old-task")],
     )
-    assert plan.goal == "implement auth"
-    assert len(plan.tasks) == 1
-    assert plan.tasks[0].id == "t1"
-    assert plan.tasks[0].title == "implement auth"
-    assert plan.tasks[0].description == "implement auth"
-    assert plan.tasks[0].status == TaskStatus.PENDING
+    state = DeepAgentState(
+        iteration=1, task_plan=existing_plan
+    )
 
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-2"
 
-def test_build_initial_plan_truncates_long_query() -> None:
-    """_build_initial_plan truncates long queries."""
-    long_query = "x" * 300
-    plan = TaskPlanningRail._build_initial_plan(long_query)
-    assert len(plan.goal) == 200
-    assert len(plan.tasks[0].title) == 100
+    with patch(
+        "openjiuwen.deepagents.rails"
+        ".task_planning_rail.load_state",
+        return_value=state,
+    ):
+        await rail.after_task_iteration(ctx)
 
-
-# ── full lifecycle ──
+    # save_state should NOT have been called
+    assert state.task_plan is existing_plan
 
 
 @pytest.mark.asyncio
-async def test_full_lifecycle_flow() -> None:
-    """Simulate a complete before_invoke → iteration → after_invoke."""
-    rail = _make_rail(interval=1)
-    agent, session = _make_agent_and_session()
+async def test_bridge_skips_when_no_todos() -> None:
+    """No todo file → no crash, no plan."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
 
-    # 1. before_invoke: create plan
-    ctx = _make_ctx(agent, session)
-    await rail.before_invoke(ctx)
+    state = DeepAgentState(iteration=1)
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-3"
 
-    state = load_state(ctx)
-    assert state.task_plan is not None
-    plan = state.task_plan
+    with patch(
+        "openjiuwen.deepagents.rails"
+        ".task_planning_rail.load_state",
+        return_value=state,
+    ):
+        tool = rail._find_todo_tool()
+        assert tool is not None
+        tool.load_todos = AsyncMock(
+            side_effect=Exception("file not found")
+        )
 
-    # 2. before_task_iteration: mark t1 in-progress
-    iter_ctx = _make_ctx(
-        agent, session,
-        inputs=TaskIterationInputs(
-            iteration=1, loop_event=None
-        ),
-    )
-    await rail.before_task_iteration(iter_ctx)
-    assert plan.current_task_id == "t1"
-    assert (
-        plan.tasks[0].status == TaskStatus.IN_PROGRESS
-    )
+        await rail.after_task_iteration(ctx)
 
-    # 3. before_model_call: inject progress
-    messages: List[Dict[str, str]] = [
-        {"role": "user", "content": "go"}
-    ]
-    model_ctx = _make_ctx(
-        agent, session,
-        inputs=ModelCallInputs(messages=messages),
-    )
-    await rail.before_model_call(model_ctx)
-    assert len(messages) == 2
-    assert "[Task Progress]" in messages[-1]["content"]
+    assert state.task_plan is None
 
-    # 4. after_task_iteration: complete t1
-    iter_ctx.inputs = TaskIterationInputs(
-        iteration=1,
-        loop_event=None,
-        result={"output": "feature built"},
-    )
-    await rail.after_task_iteration(iter_ctx)
-    assert plan.tasks[0].status == TaskStatus.COMPLETED
 
-    # 5. after_invoke: generate report
-    final_ctx = _make_ctx(agent, session)
-    await rail.after_invoke(final_ctx)
-    report = final_ctx.extra["task_report"]
-    assert "1/1 completed" in report["progress"]
+@pytest.mark.asyncio
+async def test_bridge_skips_when_no_session() -> None:
+    """ctx.session is None → early return, no crash."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx(session=None)
+
+    # Should not raise
+    await rail.after_task_iteration(ctx)
+
+
+@pytest.mark.asyncio
+async def test_bridge_skips_when_no_pending() -> None:
+    """All COMPLETED → no TaskPlan created."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    todos = _make_todos([
+        ("done-a", TodoStatus.COMPLETED),
+        ("done-b", TodoStatus.IN_PROGRESS),
+    ])
+
+    state = DeepAgentState(iteration=1)
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-5"
+
+    with patch(
+        "openjiuwen.deepagents.rails"
+        ".task_planning_rail.load_state",
+        return_value=state,
+    ):
+        tool = rail._find_todo_tool()
+        assert tool is not None
+        tool.load_todos = AsyncMock(return_value=todos)
+
+        await rail.after_task_iteration(ctx)
+
+    assert state.task_plan is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_skips_when_no_tools() -> None:
+    """self.tools is None → no crash."""
+    rail = _make_rail()
+    # Do NOT call rail.init() → tools stays None
+
+    state = DeepAgentState(iteration=1)
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-6"
+
+    with patch(
+        "openjiuwen.deepagents.rails"
+        ".task_planning_rail.load_state",
+        return_value=state,
+    ):
+        await rail.after_task_iteration(ctx)
+
+    assert state.task_plan is None

@@ -1,50 +1,43 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""TaskPlanningRail — lifecycle hooks for task planning.
-
-Implements 6 hooks that drive the outer task loop:
-  - before_invoke: generate initial TaskPlan from query
-  - before_task_iteration: mark current task in-progress
-  - before_model_call: inject progress into messages
-  - after_tool_call: sync todo_write state to TaskPlan
-  - after_task_iteration: dynamic replanning
-  - after_invoke: generate completion report
-"""
+"""TaskPlanningRail — registers todo tools on DeepAgent."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
-    InvokeInputs,
-    ModelCallInputs,
-    TaskIterationInputs,
-    ToolCallInputs,
 )
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents.rails.base import DeepAgentRail
-from openjiuwen.deepagents.schema.state import load_state
+from openjiuwen.deepagents.schema.state import (
+    load_state,
+    save_state,
+)
 from openjiuwen.deepagents.schema.task import (
     TaskItem,
     TaskPlan,
+    TaskStatus,
 )
-from openjiuwen.deepagents.tools.todo import create_todos_tool
+from openjiuwen.deepagents.tools.todo import (
+    TodoStatus,
+    TodoTool,
+    create_todos_tool,
+)
 
 
 class TaskPlanningRail(DeepAgentRail):
-    """Task planning rail with full lifecycle hooks.
+    """Rail that registers todo tools on the agent.
 
-    Manages TaskPlan creation, progress tracking,
-    and dynamic replanning across the outer task loop.
+    After the first task-loop iteration, bridges the
+    LLM-created todo list into a ``TaskPlan`` so the
+    outer loop can schedule subsequent steps.
 
     Attributes:
         priority: Execution priority (90 = high).
-        progress_restate_interval: Inject progress
-            markdown every N model calls.
-        enable_replanning: Whether to replan after
-            each iteration.
     """
 
     priority = 90
@@ -52,18 +45,11 @@ class TaskPlanningRail(DeepAgentRail):
     def __init__(
         self,
         operation: SysOperation,
-        progress_restate_interval: int = 5,
-        enable_replanning: bool = True,
     ) -> None:
         super().__init__()
         self.tools = None
         self.workspace: Optional[str] = None
         self.sys_operation = operation
-        self.progress_restate_interval = (
-            progress_restate_interval
-        )
-        self.enable_replanning = enable_replanning
-        self._model_call_count: int = 0
 
     def init(self, agent) -> None:
         """Register todo tools on the agent."""
@@ -71,21 +57,24 @@ class TaskPlanningRail(DeepAgentRail):
             DeepAgent,
         )
 
-        if (
+        if not (
             isinstance(agent, DeepAgent)
             and agent.deep_config
-            and agent.deep_config.workspace
             and hasattr(agent, "ability_manager")
         ):
-            self.workspace = agent.deep_config.workspace
-            tools = create_todos_tool(
-                self.sys_operation,
-                self.workspace.root_path,
-            )
-            self.tools = tools
-            Runner.resource_mgr.add_tool(tools)
-            for tool in tools:
-                agent.ability_manager.add(tool.card)
+            return
+
+        self.workspace = getattr(
+            agent.deep_config, "workspace", None
+        )
+        tools = create_todos_tool(
+            self.sys_operation,
+            self.workspace.root_path if self.workspace else None,
+        )
+        self.tools = tools
+        Runner.resource_mgr.add_tool(list(tools))
+        for tool in tools:
+            agent.ability_manager.add(tool.card)
 
     def uninit(self, agent) -> None:
         """Remove todo tools from the agent."""
@@ -98,243 +87,169 @@ class TaskPlanningRail(DeepAgentRail):
                 if tool_id:
                     Runner.resource_mgr.remove_tool(tool_id)
 
-    async def before_invoke(
-        self, ctx: AgentCallbackContext
-    ) -> None:
-        """Generate initial TaskPlan from user query.
-
-        Decomposes the user query into a TaskPlan and
-        stores it in the session state. The first task
-        is marked IN_PROGRESS.
-
-        Args:
-            ctx: Callback context with InvokeInputs.
-        """
-        if not isinstance(ctx.inputs, InvokeInputs):
-            return
-        if ctx.session is None:
-            return
-
-        query = ctx.inputs.query
-        if not query:
-            return
-
-        state = load_state(ctx)
-        if state.task_plan is not None:
-            return
-
-        plan = self._build_initial_plan(query)
-        state.task_plan = plan
-        self._model_call_count = 0
-
-        logger.info(
-            f"TaskPlanningRail: created plan "
-            f"with {len(plan.tasks)} task(s)"
-        )
-
-    async def before_task_iteration(
-        self, ctx: AgentCallbackContext
-    ) -> None:
-        """Mark the next pending task as in-progress.
-
-        Args:
-            ctx: Callback context with
-                TaskIterationInputs.
-        """
-        if ctx.session is None:
-            return
-
-        state = load_state(ctx)
-        plan = state.task_plan
-        if plan is None:
-            return
-
-        next_task = plan.get_next_task()
-        if next_task is not None:
-            plan.mark_in_progress(next_task.id)
-            logger.info(
-                f"TaskPlanningRail: starting task "
-                f"'{next_task.title}'"
-            )
-
-    async def before_model_call(
-        self, ctx: AgentCallbackContext
-    ) -> None:
-        """Inject TaskPlan progress into LLM messages.
-
-        Every ``progress_restate_interval`` model calls,
-        appends a system message with the current plan
-        markdown to keep the LLM aware of progress.
-
-        Args:
-            ctx: Callback context with ModelCallInputs.
-        """
-        self._model_call_count += 1
-
-        if (
-            self._model_call_count
-            % self.progress_restate_interval
-            != 0
-        ):
-            return
-
-        if ctx.session is None:
-            return
-        if not isinstance(ctx.inputs, ModelCallInputs):
-            return
-
-        state = load_state(ctx)
-        plan = state.task_plan
-        if plan is None or not plan.tasks:
-            return
-
-        progress_msg = {
-            "role": "system",
-            "content": (
-                "[Task Progress]\n"
-                f"{plan.to_markdown()}\n"
-                f"Progress: {plan.get_progress_summary()}"
-            ),
-        }
-        ctx.inputs.messages.append(progress_msg)
-
-    async def after_tool_call(
-        self, ctx: AgentCallbackContext
-    ) -> None:
-        """Sync todo_write tool calls to TaskPlan.
-
-        When the LLM calls ``todo_write``, extracts
-        task items from the result and merges them
-        into the existing TaskPlan.
-
-        Args:
-            ctx: Callback context with ToolCallInputs.
-        """
-        if not isinstance(ctx.inputs, ToolCallInputs):
-            return
-        if ctx.inputs.tool_name not in (
-            "todo_write",
-            "todo_modify",
-        ):
-            return
-        if ctx.session is None:
-            return
-
-        state = load_state(ctx)
-        if state.task_plan is None:
-            return
-
-        logger.info(
-            "TaskPlanningRail: synced after "
-            f"tool '{ctx.inputs.tool_name}'"
-        )
+    # -- task-loop hook --
 
     async def after_task_iteration(
         self, ctx: AgentCallbackContext
     ) -> None:
-        """Mark current task completed and optionally replan.
-
-        After each iteration completes, marks the
-        current task as COMPLETED with a result summary.
-        If ``enable_replanning`` is True, checks whether
-        additional tasks should be added.
-
-        Args:
-            ctx: Callback context with
-                TaskIterationInputs.
-        """
-        if ctx.session is None:
-            return
-
-        state = load_state(ctx)
-        plan = state.task_plan
-        if plan is None:
-            return
-
-        # Mark current task completed
-        if plan.current_task_id is not None:
-            result = {}
-            if isinstance(ctx.inputs, TaskIterationInputs):
-                result = ctx.inputs.result or {}
-            summary = str(
-                result.get("output", "")
-            )[:200]
-            plan.mark_completed(
-                plan.current_task_id, summary
-            )
-
-        if self.enable_replanning:
-            self._check_replan(plan)
-
-        logger.info(
-            f"TaskPlanningRail: iteration done, "
-            f"{plan.get_progress_summary()}"
-        )
-
-    async def after_invoke(
-        self, ctx: AgentCallbackContext
-    ) -> None:
-        """Generate completion report.
-
-        Stores a summary of the completed plan in
-        ``ctx.extra['task_report']``.
-
-        Args:
-            ctx: Callback context with InvokeInputs.
-        """
-        if ctx.session is None:
-            return
-
-        state = load_state(ctx)
-        plan = state.task_plan
-        if plan is None:
-            return
-
-        ctx.extra["task_report"] = {
-            "goal": plan.goal,
-            "progress": plan.get_progress_summary(),
-            "plan_markdown": plan.to_markdown(),
-        }
+        """Bridge todo list to TaskPlan after iteration."""
+        await self._bridge_todos_to_plan(ctx)
+        await self._sync_todos_from_plan(ctx)
 
     # -- internal helpers --
 
-    @staticmethod
-    def _build_initial_plan(query: str) -> TaskPlan:
-        """Build a single-task plan from the query.
+    async def _bridge_todos_to_plan(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Convert LLM-created todos into a TaskPlan.
 
-        In production this would call the LLM to
-        decompose the query. For now, creates a
-        single task matching the query.
-
-        Args:
-            query: User query string.
-
-        Returns:
-            TaskPlan with one task.
+        Guards:
+            - ctx.session must exist
+            - state.task_plan must be empty (no re-entry)
+            - A TodoTool must be registered
+            - At least one PENDING todo must exist
         """
-        task = TaskItem(
-            id="t1",
-            title=query[:100],
-            description=query,
+        if ctx.session is None:
+            return
+
+        state = load_state(ctx)
+
+        if (
+            state.task_plan is not None
+            and len(state.task_plan.tasks) > 0
+        ):
+            return
+
+        tool = self._find_todo_tool()
+        if tool is None:
+            return
+
+        session_id = ctx.session.get_session_id()
+        tool.file = f"{session_id}.json"
+
+        try:
+            todos = await tool.load_todos()
+        except Exception:
+            logger.debug(
+                "TaskPlanningRail: no todos to bridge"
+            )
+            return
+
+        if not todos:
+            return
+
+        has_pending = any(
+            t.status == TodoStatus.PENDING for t in todos
         )
-        return TaskPlan(
-            goal=query[:200],
-            tasks=[task],
+        if not has_pending:
+            return
+
+        plan = TaskPlan(goal="bridged from todo list")
+        for todo in todos:
+            if todo.status in (
+                TodoStatus.IN_PROGRESS,
+                TodoStatus.COMPLETED,
+            ):
+                task_status = TaskStatus.COMPLETED
+            else:
+                task_status = TaskStatus.PENDING
+
+            plan.add_task(
+                TaskItem(
+                    id=todo.id,
+                    title=todo.content,
+                    status=task_status,
+                )
+            )
+
+        state.task_plan = plan
+        save_state(ctx, state)
+        logger.info(
+            "TaskPlanningRail: bridged %d todos "
+            "into TaskPlan (%s)",
+            len(todos),
+            plan.get_progress_summary(),
+        )
+
+    async def _sync_todos_from_plan(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Sync Todo file statuses from current TaskPlan.
+
+        This keeps todo persistence and task-plan status aligned.
+        Without this sync, a task can be marked completed in
+        TaskPlan while still being ``in_progress`` in todo file,
+        which later causes todo validation conflicts.
+        """
+        if ctx.session is None:
+            return
+
+        state = load_state(ctx)
+        plan = state.task_plan
+        if plan is None or len(plan.tasks) == 0:
+            return
+
+        tool = self._find_todo_tool()
+        if tool is None:
+            return
+
+        session_id = ctx.session.get_session_id()
+        tool.file = f"{session_id}.json"
+
+        try:
+            todos = await tool.load_todos()
+        except Exception:
+            logger.debug(
+                "TaskPlanningRail: no todos for sync"
+            )
+            return
+
+        if not todos:
+            return
+
+        status_by_task_id = {
+            task.id: self._to_todo_status(task.status)
+            for task in plan.tasks
+        }
+        changed = False
+        now = datetime.now(timezone.utc).isoformat()
+
+        for todo in todos:
+            desired = status_by_task_id.get(todo.id)
+            if desired is None:
+                continue
+            if todo.status != desired:
+                todo.status = desired
+                todo.updatedAt = now
+                changed = True
+
+        if not changed:
+            return
+
+        await tool.save_todos(todos)
+        logger.info(
+            "TaskPlanningRail: synced %d todos from TaskPlan",
+            len(todos),
         )
 
     @staticmethod
-    def _check_replan(plan: TaskPlan) -> None:
-        """Check if replanning is needed.
+    def _to_todo_status(status: TaskStatus) -> TodoStatus:
+        """Map TaskPlan status to Todo status."""
+        if status == TaskStatus.PENDING:
+            return TodoStatus.PENDING
+        if status == TaskStatus.IN_PROGRESS:
+            return TodoStatus.IN_PROGRESS
+        # Todo has no FAILED status; map terminal states to COMPLETED.
+        return TodoStatus.COMPLETED
 
-        Placeholder for LLM-based dynamic replanning.
-        Currently a no-op — future iterations will
-        call the LLM to add/adjust tasks based on
-        intermediate results.
-
-        Args:
-            plan: Current task plan.
-        """
-        _ = plan
+    def _find_todo_tool(self) -> Optional[TodoTool]:
+        """Return the first TodoTool in self.tools."""
+        if not self.tools:
+            return None
+        for tool in self.tools:
+            if isinstance(tool, TodoTool):
+                return tool
+        return None
 
 
 __all__ = [

@@ -275,6 +275,8 @@ EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.BEFORE_TOOL_CALL: "before_tool_call",
     AgentCallbackEvent.AFTER_TOOL_CALL: "after_tool_call",
     AgentCallbackEvent.ON_TOOL_EXCEPTION: "on_tool_exception",
+    AgentCallbackEvent.BEFORE_TASK_ITERATION: "before_task_iteration",
+    AgentCallbackEvent.AFTER_TASK_ITERATION: "after_task_iteration",
 }
 
 
@@ -360,6 +362,18 @@ class AgentRail(ABC):
         self, ctx: AgentCallbackContext
     ) -> None:
         """Called when tool execution raises."""
+        pass
+
+    async def before_task_iteration(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Called before each task-loop iteration."""
+        pass
+
+    async def after_task_iteration(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Called after each task-loop iteration."""
         pass
 
     def get_callbacks(

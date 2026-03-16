@@ -42,6 +42,9 @@ class DeepAgentConfig:
         workspace: Workspace path for file operations.
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).
+        completion_timeout: Max seconds to wait for a
+            single task-loop iteration to complete.
+            Used by the outer loop's wait_completion().
     """
     model: Optional[Model] = None
     card: Optional[AgentCard] = None
@@ -55,3 +58,5 @@ class DeepAgentConfig:
     workspace: Optional[Workspace] = None
     skills: Optional[Union[str, List[str]]] = None
     backend: Optional[Any] = None
+    completion_timeout: float = 600.0
+    enable_streaming: bool = True

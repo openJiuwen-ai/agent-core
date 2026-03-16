@@ -22,11 +22,13 @@ class EventType(str, Enum):
     - TASK_INTERACTION: Task interaction event (requires user interaction during task execution)
     - TASK_COMPLETION: Task completion event
     - TASK_FAILED: Task failed event
+    - FOLLOW_UP: Follow-up event for continuing task loop
     """
     INPUT = "input"
     TASK_INTERACTION = "task_interaction",
     TASK_COMPLETION = "task_completion",
     TASK_FAILED = "task_failed"
+    FOLLOW_UP = "follow_up"
 
 
 class Event(BaseModel):
@@ -135,3 +137,32 @@ class TaskFailedEvent(Event):
     event_type: EventType = EventType.TASK_FAILED
     error_message: Optional[str] = None
     task: Optional[Task] = None
+
+
+class FollowUpEvent(Event):
+    """Follow-up Event
+
+    Event for continuing the task loop with new input.
+    Published to the FOLLOW_UP topic, which runs concurrently
+    with INPUT and does not block the current iteration.
+
+    Attributes:
+        event_type: Event type, fixed as EventType.FOLLOW_UP
+        input_data: Follow-up content data list
+    """
+    event_type: EventType = EventType.FOLLOW_UP
+    input_data: List[DataFrame] = Field(default_factory=list)
+
+    @classmethod
+    def from_text(cls, text: str) -> "FollowUpEvent":
+        """Create a follow-up event from text.
+
+        Args:
+            text: Follow-up message text.
+
+        Returns:
+            FollowUpEvent instance.
+        """
+        return cls(
+            input_data=[TextDataFrame(text=text)]
+        )

@@ -270,6 +270,9 @@ class TaskScheduler:
         # Lock used for synchronized access
         self._lock = asyncio.Lock()
 
+        # Event-driven wakeup for new SUBMITTED tasks
+        self._submit_event = asyncio.Event()
+
     @property
     def config(self) -> ControllerConfig:
         """Get configuration"""
@@ -294,6 +297,16 @@ class TaskScheduler:
     def task_executor_registry(self):
         """Get task executor registry"""
         return self._task_executor_registry
+
+    def notify_task_submitted(self) -> None:
+        """Wake up the schedule loop.
+
+        Called synchronously by TaskManager when a task
+        enters SUBMITTED status. Sets the internal
+        asyncio.Event so the scheduler picks it up
+        without waiting for the poll interval.
+        """
+        self._submit_event.set()
 
     async def _handle_task_execution_failure(self, task_id: str, session: Session, error_message: str):
         """Handle task failure by updating status and publishing failure event
@@ -488,6 +501,9 @@ class TaskScheduler:
         Args:
             session_id: Session ID
         """
+        if self._config.suppress_completion_signal:
+            return
+
         try:
             # Check if all tasks are done
             if not await self._are_all_tasks_completed(session_id):
@@ -574,7 +590,16 @@ class TaskScheduler:
             logger.error(f"Unsupported payload type: {payload_type}")
             return
 
-        await self._event_queue.publish_event(self._card.id, session, event)
+        # Merge task.metadata into event.metadata so
+        # that _handler_round_id propagates correctly.
+        if task.metadata:
+            if event.metadata is None:
+                event.metadata = {}
+            event.metadata.update(task.metadata)
+
+        await self._event_queue.publish_event_async(
+            self._card.id, session, event
+        )
         logger.info(f"Published {payload_type} for task {task_id}")
 
     async def pause_task(self, task_id: str) -> bool:
@@ -779,8 +804,17 @@ class TaskScheduler:
 
                     logger.info(f"Task {task.task_id} ({task.task_type}) started")
 
-                # 3. Sleep briefly (loop remains non-blocking)
-                await asyncio.sleep(self._config.schedule_interval)
+                # 3. Wait for new SUBMITTED task or timeout
+                self._submit_event.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._submit_event.wait(),
+                        timeout=(
+                            self._config.schedule_interval
+                        ),
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
             except asyncio.CancelledError:
                 logger.info("TaskScheduler schedule loop cancelled")

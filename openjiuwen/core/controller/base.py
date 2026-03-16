@@ -90,6 +90,11 @@ class Controller:
             card=card
         )
 
+        # Wire up submit notification
+        self._task_manager._on_task_submitted = (
+            self._task_scheduler.notify_task_submitted
+        )
+
     @property
     def event_queue(self) -> EventQueue:
         """Get event queue"""
@@ -348,35 +353,13 @@ class Controller:
                 cause=e
             ) from e
 
-    async def stream(
-            self,
-            inputs: 'InputEvent',
-            session: Session,
-            stream_modes: Optional[List[StreamMode]] = None,
-            **kwargs
-    ) -> AsyncIterator[ControllerOutputChunk]:
-        """Stream execution using controller
+    async def _ensure_started(self) -> None:
+        """Lazy start with event loop detection.
 
-        Args:
-            inputs: input event
-            session: session object (created and managed by caller)
-            stream_modes: list of stream output modes (optional)
-            **kwargs: additional parameters
-
-        Yields:
-            ControllerOutputChunk: controller output chunk
-
-        Note:
-            1. Restore controller state (including task_manager state)
-            2. Put Session into task_scheduler.sessions
-            3. Subscribe via self._event_queue.subscribe
-            4. Publish input event to self._event_queue
-            5. Read event handling results and stream them out
-            6. Deactivate all subscriptions
-            7. Save controller state (including task_manager state)
-            8. Remove Session from task_scheduler.sessions
+        Ensures the event queue and task scheduler are
+        running in the current event loop. Handles event
+        loop changes by recreating components.
         """
-        # Lazy start with event loop detection
         try:
             current_loop = asyncio.get_running_loop()
         except RuntimeError as e:
@@ -411,11 +394,95 @@ class Controller:
                     card=self._card
                 )
 
+                # Re-wire submit notification
+                self._task_manager._on_task_submitted = (
+                    self._task_scheduler
+                    .notify_task_submitted
+                )
+
             self._event_queue.start()
             self._event_queue.set_event_handler(self._event_handler)
             await self._task_scheduler.start()
             self._event_loop = current_loop
             logger.info(f"Controller started in event loop {id(current_loop)}")
+
+    async def bind_session(self, session: Session) -> None:
+        """Bind a session to Controller infrastructure.
+
+        Performs setup logic: ensure started, restore
+        task manager state, register session, subscribe
+        event queue.
+
+        Args:
+            session: Session object.
+        """
+        await self._ensure_started()
+        session_id = session.get_session_id()
+        await self._restore_task_manager_state(session)
+        self._task_scheduler.sessions[session_id] = session
+        await self._event_queue.subscribe(
+            self._card.id, session_id
+        )
+
+    async def unbind_session(self, session: Session) -> None:
+        """Unbind a session and perform cleanup.
+
+        Saves task manager state, unsubscribes event
+        queue, removes session from task scheduler.
+
+        Args:
+            session: Session object.
+        """
+        session_id = session.get_session_id()
+        await self._save_task_manager_state(session)
+        await self._event_queue.unsubscribe(
+            self._card.id, session_id
+        )
+        if session_id in self._task_scheduler.sessions:
+            del self._task_scheduler.sessions[session_id]
+
+    async def publish_event_async(
+        self, session: Session, event: "InputEvent",
+    ) -> None:
+        """Fire-and-forget event publish.
+
+        Args:
+            session: Session object.
+            event: Event to publish.
+        """
+        await self._event_queue.publish_event_async(
+            self._card.id, session, event
+        )
+
+    async def stream(
+            self,
+            inputs: 'InputEvent',
+            session: Session,
+            stream_modes: Optional[List[StreamMode]] = None,
+            **kwargs
+    ) -> AsyncIterator[ControllerOutputChunk]:
+        """Stream execution using controller
+
+        Args:
+            inputs: input event
+            session: session object (created and managed by caller)
+            stream_modes: list of stream output modes (optional)
+            **kwargs: additional parameters
+
+        Yields:
+            ControllerOutputChunk: controller output chunk
+
+        Note:
+            1. Restore controller state (including task_manager state)
+            2. Put Session into task_scheduler.sessions
+            3. Subscribe via self._event_queue.subscribe
+            4. Publish input event to self._event_queue
+            5. Read event handling results and stream them out
+            6. Deactivate all subscriptions
+            7. Save controller state (including task_manager state)
+            8. Remove Session from task_scheduler.sessions
+        """
+        await self._ensure_started()
 
         agent_id = self._card.id
         session_id = session.get_session_id()
@@ -431,18 +498,77 @@ class Controller:
         try:
             # Subscribe to 4 event types
             await self._event_queue.subscribe(agent_id, session_id)
-            # Publish input event to trigger event handling and task scheduling
-            await self._event_queue.publish_event(agent_id, session, inputs)
+            # Fire-and-forget publish (non-blocking)
+            await self._event_queue.publish_event_async(
+                agent_id, session, inputs
+            )
 
-            # Read from session stream and forward until all tasks are completed
-            async for chunk in session.stream_iterator():
-                if isinstance(chunk, ControllerOutputChunk):
-                    # 检查是否是完成消息
-                    if chunk.payload and chunk.payload.type == "all_tasks_processed":
-                        logger.info(f"All tasks handled for session {session_id}, stopping stream")
-                        break
+            first_frame_timeout = (
+                self._config.stream_first_frame_timeout
+                if self._config
+                else 30.0
+            )
 
-                yield chunk
+            # Read from session stream with first-frame
+            # timeout safety net
+            got_first = False
+            stream_iter = session.stream_iterator(
+            ).__aiter__()
+            # Wait for first chunk with timeout
+            try:
+                first_chunk = await asyncio.wait_for(
+                    stream_iter.__anext__(),
+                    timeout=first_frame_timeout,
+                )
+                got_first = True
+            except asyncio.TimeoutError:
+                logger.error(
+                    "First frame timeout after "
+                    f"{first_frame_timeout}s for "
+                    f"session {session_id}"
+                )
+                raise build_error(
+                    StatusCode
+                    .AGENT_CONTROLLER_RUNTIME_ERROR,
+                    error_msg=(
+                        "Stream first frame timeout"
+                    ),
+                )
+            except StopAsyncIteration:
+                got_first = False
+
+            if got_first:
+                if isinstance(
+                    first_chunk, ControllerOutputChunk
+                ):
+                    if not (
+                        first_chunk.payload
+                        and first_chunk.payload.type
+                        == "all_tasks_processed"
+                    ):
+                        yield first_chunk
+                else:
+                    yield first_chunk
+
+                # Continue reading remaining chunks
+                async for chunk in stream_iter:
+                    if isinstance(
+                        chunk,
+                        ControllerOutputChunk,
+                    ):
+                        if (
+                            chunk.payload
+                            and chunk.payload.type
+                            == "all_tasks_processed"
+                        ):
+                            logger.info(
+                                "All tasks handled for "
+                                f"session {session_id}"
+                                ", stopping stream"
+                            )
+                            break
+
+                    yield chunk
 
         except BaseError:
             raise

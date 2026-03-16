@@ -3,6 +3,7 @@
 """DeepAgent 端到端系统测试（真实 LLM + sys_operation 文件工具）。"""
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
@@ -32,19 +33,30 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
 )
 from openjiuwen.deepagents import create_deep_agent
-from openjiuwen.deepagents.rails import TaskPlanningRail
+from openjiuwen.deepagents.rails.task_planning_rail import (
+    TaskPlanningRail,
+)
+from openjiuwen.deepagents.schema.task import (
+    TaskPlan,
+    TaskStatus,
+)
+from openjiuwen.deepagents.tools import (
+    ReadFileTool, WriteFileTool, EditFileTool,
+    GlobTool, ListDirTool, GrepTool,
+)
+from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
     create_text_response,
     create_tool_call_response,
 )
-from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 
 API_BASE = os.getenv("API_BASE", "your api url")
 API_KEY = os.getenv("API_KEY", "your api key")
 MODEL_NAME = os.getenv("MODEL_NAME", "model name")
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "SiliconFlow")
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
+os.environ.setdefault("IS_SENSITIVE", "false")
 
 
 class ToolTraceRail(AgentRail):
@@ -57,6 +69,41 @@ class ToolTraceRail(AgentRail):
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         if isinstance(ctx.inputs, ToolCallInputs) and ctx.inputs.tool_name:
             self.tool_calls.append(ctx.inputs.tool_name)
+
+
+class LoopObserveRail(AgentRail):
+    """观测外循环轮次，并检查 steer 文本是否进入模型消息。"""
+
+    def __init__(self, steer_text: str):
+        super().__init__()
+        self.iteration_count: int = 0
+        self.steer_text = steer_text
+        self.steer_seen_in_model_messages: bool = False
+        self._iteration_events: dict[int, asyncio.Event] = {}
+
+    def iteration_event(self, idx: int) -> asyncio.Event:
+        if idx not in self._iteration_events:
+            self._iteration_events[idx] = asyncio.Event()
+        return self._iteration_events[idx]
+
+    async def before_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        _ = ctx
+        self.iteration_count += 1
+        self.iteration_event(self.iteration_count).set()
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        messages = getattr(ctx.inputs, "messages", None)
+        if not isinstance(messages, list):
+            return
+        for msg in messages:
+            if isinstance(msg, dict):
+                content = msg.get("content")
+            else:
+                content = getattr(msg, "content", None)
+            text = str(content) if content else ""
+            if self.steer_text in text:
+                self.steer_seen_in_model_messages = True
+                return
 
 
 class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
@@ -89,6 +136,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             client_provider=MODEL_PROVIDER,
             api_key=API_KEY,
             api_base=API_BASE,
+            timeout=MODEL_TIMEOUT,
             verify_ssl=False,
         )
         model_request_config = ModelRequestConfig(
@@ -229,6 +277,104 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
+
+    @pytest.mark.asyncio
+    @unittest.skipUnless(
+        API_KEY and API_BASE and MODEL_NAME and MODEL_PROVIDER,
+        "requires API_BASE/API_KEY/MODEL_NAME/MODEL_PROVIDER",
+    )
+    async def test_deep_agent_task_loop_real_multistep_steer_follow_up(self):
+        """真实 LLM 外循环：LLM 生成多步任务规划 + steer + follow_up。"""
+        self._require_llm_config()
+
+        steer_text = "输出请使用简洁中文要点"
+        follow_up_text = "在结尾追加一条风险提示"
+        observe_rail = LoopObserveRail(steer_text=steer_text)
+
+        model = self._create_model()
+        sys_oper = Runner.resource_mgr.get_sys_operation(
+            self._sys_operation_id
+        )
+        planning_rail = TaskPlanningRail(
+            sys_oper
+        )
+        agent = create_deep_agent(
+            model=model,
+            system_prompt=(
+                "你是一个严谨的任务执行助手。"
+                "根据当前任务逐步输出结果。"
+            ),
+            rails=[planning_rail, observe_rail],
+            enable_task_loop=True,
+            max_iterations=12,
+            enable_streaming=False,
+        )
+
+        session = create_agent_session(
+            session_id=f"deepagent_outer_loop_real_{uuid.uuid4().hex}"
+        )
+
+        query = (
+            "请制定一个简短的项目启动计划，包含以下方面："
+            "1. 需求分析；2. 技术选型；3. 实施方案。"
+            "每个方面给出简要说明。"
+        )
+        invoke_task = asyncio.create_task(
+            agent.invoke(
+                {"query": query},
+                session=session,
+            )
+        )
+
+        # 等第一轮进入后注入 steer，让下一轮携带约束。
+        await asyncio.wait_for(
+            observe_rail.iteration_event(1).wait(),
+            timeout=180.0,
+        )
+        await agent.steer(steer_text, session=session)
+
+        # 等第二轮进入后注入 follow_up，请求额外追加一轮。
+        await asyncio.wait_for(
+            observe_rail.iteration_event(2).wait(),
+            timeout=300.0,
+        )
+        await agent.follow_up(
+            follow_up_text, session=session
+        )
+
+        result = await asyncio.wait_for(
+            invoke_task, timeout=600.0
+        )
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(
+            result.get("result_type"), "answer"
+        )
+        self.assertIn("output", result)
+        self.assertTrue(bool(result["output"]))
+
+        # LLM 生成的任务 + follow_up 触发的额外轮次
+        self.assertGreaterEqual(
+            observe_rail.iteration_count, 2
+        )
+        self.assertTrue(
+            observe_rail.steer_seen_in_model_messages
+        )
+
+        persisted = session.get_state("deepagent")
+        self.assertIsInstance(persisted, dict)
+        persisted_plan = TaskPlan.from_dict(
+            persisted.get("task_plan")
+        )
+        # LLM 应生成 >= 2 个任务
+        self.assertGreaterEqual(
+            len(persisted_plan.tasks), 2
+        )
+        # 所有任务应已完成
+        for task in persisted_plan.tasks:
+            self.assertEqual(
+                task.status, TaskStatus.COMPLETED,
+            )
 
 
 if __name__ == "__main__":

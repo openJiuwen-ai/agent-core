@@ -19,6 +19,8 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.deep_agent import DeepAgent
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
+from openjiuwen.deepagents.task_loop.task_loop_event_handler import TaskLoopEventHandler
+from openjiuwen.deepagents.task_loop.loop_coordinator import LoopCoordinator
 
 
 class DummyModel:
@@ -236,8 +238,8 @@ async def test_invoke_task_loop_delegates_to_event_queue() -> None:
     result = await agent.invoke("loop_input", session=session)
 
     assert result["output"] == "echo:loop_input"
-    assert agent.loop_coordinator is not None
-    assert agent.loop_coordinator.current_iteration == 1
+    # _loop_ctx is cleaned up after invoke completes
+    assert agent.loop_coordinator is None
 
 
 @pytest.mark.asyncio
@@ -300,13 +302,34 @@ async def test_abort_sets_coordinator_flag() -> None:
     fake_react = FakeReactAgent()
     agent.set_react_agent(fake_react, initialized=True)
 
-    # Run one loop iteration to create coordinator
-    session = Session(session_id="s1")
-    await agent.invoke("setup", session=session)
-    assert agent.loop_coordinator is not None
+    # Manually set up loop state to simulate mid-loop
+    coordinator = LoopCoordinator()
+    coordinator.reset()
+    handler = TaskLoopEventHandler(agent)
+
+    class FakeController:
+        """Minimal Controller stub."""
+        def __init__(self) -> None:
+            self.event_handler = handler
+            self.event_queue = None
+
+        async def stop(self) -> None:
+            pass
+
+    agent._loop_coordinator = coordinator
+    agent._loop_controller = FakeController()
+    agent._loop_session = None
+
+    handler.prepare_round()
 
     await agent.abort()
-    assert agent.loop_coordinator.is_aborted is True
+    assert coordinator.is_aborted is True
+
+    # Future should be resolved with abort error
+    fut_result = await handler.wait_completion(
+        timeout=1.0
+    )
+    assert fut_result == {"error": "aborted"}
 
 
 @pytest.mark.asyncio

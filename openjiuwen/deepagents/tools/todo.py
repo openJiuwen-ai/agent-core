@@ -278,9 +278,11 @@ class TodoCreateTool(TodoTool):
         return result.strip()
 
     def _parse_task_string(self, tasks_str: str) -> List[str]:
-        """Parse delimited task string into individual task list
+        """Parse delimited task string into individual task list.
 
-        Supported delimiters: newline, semicolon, Chinese semicolon, Chinese enumeration comma
+        Supported delimiters: newline, semicolon, Chinese semicolon.
+        Note: do not split on Chinese enumeration comma ``、`` because
+        it is commonly used inside a single task sentence.
 
         Args:
             tasks_str: Delimited string of task descriptions
@@ -288,7 +290,7 @@ class TodoCreateTool(TodoTool):
         Returns:
             List of trimmed non-empty task descriptions
         """
-        parsed_tasks = re.split(r'[\n;；、]', tasks_str)
+        parsed_tasks = re.split(r'[\n;；]', tasks_str)
         parsed_tasks = [t.strip() for t in parsed_tasks if t.strip()]
         tool_logger.info(
             "Parsed single task string",
@@ -725,10 +727,12 @@ class TodoModifyTool(TodoTool):
         return result_msg
 
     async def _update_todos(self, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
-        """Batch update todo items from complete JSON array data
+        """Batch update todo items.
 
         Args:
-            todos_data: List of updated todo item dictionaries
+            todos_data: List of updated todo item dictionaries.
+                Supports partial update; missing fields
+                fall back to current values.
             current_todos: Current list of todo items
 
         Returns:
@@ -742,8 +746,12 @@ class TodoModifyTool(TodoTool):
         now = datetime.now(timezone.utc).isoformat()
 
         for todo_data in todos_data:
-            self._validate_single_todo_item(todo_data)
             todo_id = todo_data.get("id")
+            if not todo_id:
+                raise build_error(
+                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                    reason="Batch update failed: Missing required field: 'id'"
+                )
 
             if todo_id not in todo_map:
                 raise build_error(
@@ -752,10 +760,28 @@ class TodoModifyTool(TodoTool):
                 )
 
             current_todo = todo_map[todo_id]
+            normalized_todo_data = {
+                "id": todo_id,
+                "content": todo_data.get(
+                    "content", current_todo.content
+                ),
+                "activeForm": todo_data.get(
+                    "activeForm", current_todo.activeForm
+                ),
+                "status": todo_data.get(
+                    "status", current_todo.status.value
+                ),
+            }
+            self._validate_single_todo_item(normalized_todo_data)
+
             # Update all fields
-            current_todo.content = todo_data["content"]
-            current_todo.activeForm = todo_data["activeForm"]
-            current_todo.status = TodoStatus(todo_data["status"])
+            current_todo.content = normalized_todo_data["content"]
+            current_todo.activeForm = normalized_todo_data[
+                "activeForm"
+            ]
+            current_todo.status = TodoStatus(
+                normalized_todo_data["status"]
+            )
             current_todo.updatedAt = now
             updated_count += 1
 

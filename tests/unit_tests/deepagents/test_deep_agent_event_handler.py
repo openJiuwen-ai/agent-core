@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Unit tests for DeepAgentEventHandler."""
+"""Unit tests for TaskLoopEventHandler."""
 from __future__ import annotations
 
 import asyncio
@@ -26,26 +26,32 @@ from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
 from openjiuwen.deepagents.deep_agent import DeepAgent
-from openjiuwen.deepagents.deep_agent_event_handler import (
-    DeepAgentEventHandler,
+from openjiuwen.deepagents.task_loop.task_loop_event_handler import (
+    TaskLoopEventHandler,
 )
-from openjiuwen.deepagents.deep_agent_event_executor import (
+from openjiuwen.deepagents.task_loop.task_loop_event_executor import (
     DEEP_TASK_TYPE,
 )
-from openjiuwen.deepagents.loop_coordinator import (
+from openjiuwen.deepagents.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
 from openjiuwen.deepagents.schema.config import (
     DeepAgentConfig,
 )
-from openjiuwen.deepagents.schema.state import (
-    DeepAgentState,
+from openjiuwen.deepagents.task_loop.loop_queues import (
+    LoopQueues,
 )
-from openjiuwen.deepagents.schema.task import (
-    TaskItem,
-    TaskPlan,
-    TaskStatus,
-)
+
+
+class FakeController:
+    """Minimal Controller stub."""
+
+    def __init__(self) -> None:
+        self.event_handler = None
+        self.event_queue = None
+
+    async def stop(self) -> None:
+        pass
 
 
 class FakeSession:
@@ -128,8 +134,13 @@ def _make_agent() -> DeepAgent:
     )
     fake = FakeReactAgent()
     agent.set_react_agent(fake, initialized=True)
-    agent._loop_coordinator = LoopCoordinator()
-    agent._loop_coordinator.reset()
+    coordinator = LoopCoordinator()
+    coordinator.reset()
+    fake_ctrl = FakeController()
+    fake_ctrl.event_handler = None
+    agent._loop_coordinator = coordinator
+    agent._loop_controller = fake_ctrl
+    agent._loop_session = None
     return agent
 
 
@@ -138,7 +149,7 @@ async def test_handle_input_creates_task() -> None:
     """handle_input creates a core Task via
     TaskManager instead of direct invoke."""
     agent = _make_agent()
-    handler = DeepAgentEventHandler(agent)
+    handler = TaskLoopEventHandler(agent)
 
     # Inject fake task_manager
     fake_tm = FakeTaskManager()
@@ -152,20 +163,20 @@ async def test_handle_input_creates_task() -> None:
         event=event, session=session
     )
 
-    # Simulate completion signal in background
-    async def _signal_completion():
-        await asyncio.sleep(0.05)
-        handler._completion_result = {
-            "output": "done:hello world",
-        }
-        handler._completion_event.set()
+    # Prepare a round so handle_input has a Future
+    round_id = handler.prepare_round()
+    event.metadata = event.metadata or {}
+    event.metadata["_handler_round_id"] = round_id
 
-    task = asyncio.create_task(
-        _signal_completion()
+    # handle_input is now fire-and-forget (returns ack)
+    ack = await handler.handle_input(inputs)
+
+    # Simulate completion signal in background
+    handler._resolve_future(
+        {"output": "done:hello world"}, round_id,
     )
 
-    result = await handler.handle_input(inputs)
-    await task
+    result = await handler.wait_completion(timeout=1.0)
 
     # Verify task was created
     assert len(fake_tm.added_tasks) == 1
@@ -178,6 +189,7 @@ async def test_handle_input_creates_task() -> None:
     assert result is not None
     assert result["output"] == "done:hello world"
     assert handler.last_result is result
+    assert ack["status"] == "submitted"
 
     coord = agent.loop_coordinator
     assert coord is not None
@@ -199,7 +211,7 @@ async def test_handle_input_no_coordinator() -> None:
     )
     # No loop_coordinator set
 
-    handler = DeepAgentEventHandler(agent)
+    handler = TaskLoopEventHandler(agent)
     event = InputEvent.from_user_input("test")
     session = FakeSession()
     inputs = EventHandlerInput.model_construct(
@@ -207,14 +219,17 @@ async def test_handle_input_no_coordinator() -> None:
     )
 
     result = await handler.handle_input(inputs)
-    assert result is None
+    assert result is not None
+    assert result["status"] == "failed"
 
 
 @pytest.mark.asyncio
 async def test_handle_task_interaction() -> None:
-    """handle_task_interaction returns ack."""
+    """handle_task_interaction pushes to steering queue."""
     agent = _make_agent()
-    handler = DeepAgentEventHandler(agent)
+    handler = TaskLoopEventHandler(agent)
+    queues = LoopQueues()
+    handler.interaction_queues = queues
 
     event = TaskInteractionEvent(
         interaction=[
@@ -230,29 +245,34 @@ async def test_handle_task_interaction() -> None:
         inputs
     )
     assert result is not None
-    assert result["status"] == "steer_acknowledged"
+    assert result["status"] == "steer_injected"
     assert "change plan" in result["msg"]
+
+    # Verify message was pushed to steering queue
+    msgs = queues.drain_steering()
+    assert len(msgs) == 1
+    assert msgs[0] == "change plan"
 
 
 @pytest.mark.asyncio
 async def test_handle_task_completion_signals() \
         -> None:
-    """handle_task_completion sets the completion
-    event."""
+    """handle_task_completion resolves the per-round
+    Future."""
     agent = _make_agent()
-    handler = DeepAgentEventHandler(agent)
+    handler = TaskLoopEventHandler(agent)
 
-    event = TaskFailedEvent(
-        error_message="timeout",
-        metadata={"task_id": "t2"},
-    )
-    # Use a completion event instead
+    round_id = handler.prepare_round()
+
     from openjiuwen.core.controller.schema.event import (
         TaskCompletionEvent,
     )
     comp_event = TaskCompletionEvent(
         task_result=[],
-        metadata={"task_id": "t1"},
+        metadata={
+            "task_id": "t1",
+            "_handler_round_id": round_id,
+        },
     )
     session = FakeSession()
     inputs = EventHandlerInput.model_construct(
@@ -264,31 +284,35 @@ async def test_handle_task_completion_signals() \
     )
     assert result is not None
     assert result["status"] == "completed"
-    assert handler._completion_event.is_set()
+
+    # Future should be resolved
+    fut_result = await handler.wait_completion(
+        timeout=1.0
+    )
+    assert fut_result == {"status": "completed"}
 
 
 @pytest.mark.asyncio
 async def test_handle_task_failed_signals() -> None:
-    """handle_task_failed sets the completion event
-    and updates TaskPlan."""
-    agent = _make_agent()
-    handler = DeepAgentEventHandler(agent)
+    """handle_task_failed resolves the per-round
+    Future with error.
 
-    plan = TaskPlan(
-        goal="test",
-        tasks=[TaskItem(id="t2", title="step 2")],
-    )
-    session = FakeSession()
-    from openjiuwen.deepagents.schema.state import (
-        _write_runtime_state,
-    )
-    state = DeepAgentState(task_plan=plan)
-    _write_runtime_state(session, state)
+    Note: handler no longer writes TaskPlan state
+    (that is now solely the executor's job).
+    """
+    agent = _make_agent()
+    handler = TaskLoopEventHandler(agent)
+
+    round_id = handler.prepare_round()
 
     event = TaskFailedEvent(
         error_message="timeout",
-        metadata={"task_id": "t2"},
+        metadata={
+            "task_id": "t2",
+            "_handler_round_id": round_id,
+        },
     )
+    session = FakeSession()
     inputs = EventHandlerInput.model_construct(
         event=event, session=session
     )
@@ -298,24 +322,21 @@ async def test_handle_task_failed_signals() -> None:
     )
     assert result is not None
     assert result["status"] == "failed"
-    assert handler._completion_event.is_set()
-    assert (
-        handler._completion_result["error"]
-        == "timeout"
-    )
 
-    task = plan.get_task("t2")
-    assert task is not None
-    assert task.status == TaskStatus.FAILED
+    # Future should be resolved with error
+    fut_result = await handler.wait_completion(
+        timeout=1.0
+    )
+    assert fut_result["error"] == "timeout"
 
 
 @pytest.mark.asyncio
 async def test_handle_input_waits_for_completion() \
         -> None:
-    """handle_input blocks until completion event
-    is signalled."""
+    """handle_input submits task; wait_completion
+    blocks until Future is resolved."""
     agent = _make_agent()
-    handler = DeepAgentEventHandler(agent)
+    handler = TaskLoopEventHandler(agent)
     handler._task_manager = FakeTaskManager()
 
     event = InputEvent.from_user_input("wait test")
@@ -324,22 +345,30 @@ async def test_handle_input_waits_for_completion() \
         event=event, session=session
     )
 
+    round_id = handler.prepare_round()
+    event.metadata = event.metadata or {}
+    event.metadata["_handler_round_id"] = round_id
+
     completed = False
 
     async def _delayed_signal():
         nonlocal completed
         await asyncio.sleep(0.1)
-        handler._completion_result = {
-            "output": "waited",
-        }
-        handler._completion_event.set()
+        handler._resolve_future(
+            {"output": "waited"}, round_id,
+        )
         completed = True
 
     signal_task = asyncio.create_task(
         _delayed_signal()
     )
 
-    result = await handler.handle_input(inputs)
+    ack = await handler.handle_input(inputs)
+    assert ack["status"] == "submitted"
+
+    result = await handler.wait_completion(
+        timeout=2.0
+    )
     await signal_task
 
     assert completed is True

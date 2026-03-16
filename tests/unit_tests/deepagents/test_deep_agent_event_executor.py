@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Unit tests for DeepAgentEventExecutor."""
+"""Unit tests for TaskLoopEventExecutor."""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,16 +38,22 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 from openjiuwen.deepagents.deep_agent import (
     DeepAgent,
 )
-from openjiuwen.deepagents.deep_agent_event_executor import (
+from openjiuwen.deepagents.task_loop.task_loop_event_executor import (
     DEEP_TASK_TYPE,
-    DeepAgentEventExecutor,
+    TaskLoopEventExecutor,
     build_deep_executor,
 )
-from openjiuwen.deepagents.loop_coordinator import (
+from openjiuwen.deepagents.task_loop.task_loop_event_handler import (
+    TaskLoopEventHandler,
+)
+from openjiuwen.deepagents.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
 from openjiuwen.deepagents.schema.config import (
     DeepAgentConfig,
+)
+from openjiuwen.deepagents.task_loop.loop_queues import (
+    LoopQueues,
 )
 
 
@@ -165,8 +171,23 @@ def _make_agent(
     agent.set_react_agent(
         fake, initialized=True
     )
-    agent._loop_coordinator = LoopCoordinator()
-    agent._loop_coordinator.reset()
+    coordinator = LoopCoordinator()
+    coordinator.reset()
+    handler = TaskLoopEventHandler(agent)
+    handler.interaction_queues = LoopQueues()
+
+    class FakeController:
+        """Minimal Controller stub."""
+        def __init__(self) -> None:
+            self.event_handler = handler
+            self.event_queue = None
+
+        async def stop(self) -> None:
+            pass
+
+    agent._loop_coordinator = coordinator
+    agent._loop_controller = FakeController()
+    agent._loop_session = None
     return agent
 
 
@@ -177,7 +198,7 @@ async def test_executor_init_with_deps() -> None:
     agent = _make_agent()
     deps, tm = _make_deps()
 
-    executor = DeepAgentEventExecutor(
+    executor = TaskLoopEventExecutor(
         deps, agent
     )
 
@@ -205,7 +226,7 @@ async def test_execute_ability_yields_completion() \
     )
     await tm.add_task(core_task)
 
-    executor = DeepAgentEventExecutor(
+    executor = TaskLoopEventExecutor(
         deps, agent
     )
 
@@ -251,7 +272,7 @@ async def test_execute_ability_yields_failure() \
     )
     await tm.add_task(core_task)
 
-    executor = DeepAgentEventExecutor(
+    executor = TaskLoopEventExecutor(
         deps, agent
     )
 
@@ -280,7 +301,7 @@ async def test_cancel_marks_failed_and_aborts() \
     agent = _make_agent()
     deps, _ = _make_deps()
 
-    executor = DeepAgentEventExecutor(
+    executor = TaskLoopEventExecutor(
         deps, agent
     )
     session = FakeSession()
@@ -304,6 +325,6 @@ async def test_build_deep_executor_factory() \
     executor = builder(deps)
 
     assert isinstance(
-        executor, DeepAgentEventExecutor
+        executor, TaskLoopEventExecutor
     )
     assert executor._deep_agent is agent

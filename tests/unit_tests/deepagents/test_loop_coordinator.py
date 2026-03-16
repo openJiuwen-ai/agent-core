@@ -3,7 +3,7 @@
 """Unit tests for LoopCoordinator."""
 from __future__ import annotations
 
-from openjiuwen.deepagents.loop_coordinator import (
+from openjiuwen.deepagents.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
 from openjiuwen.deepagents.schema.stop_condition import (

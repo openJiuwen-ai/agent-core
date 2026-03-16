@@ -16,6 +16,7 @@ from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig
@@ -68,6 +69,10 @@ class ReActAgentConfig(BaseModel):
     )
 
     max_iterations: int = Field(default=5, description="Maximum iterations")
+    enable_streaming: bool = Field(
+        default=True,
+        description="Use streaming LLM calls when session is present",
+    )
 
     # LLM configuration objects (for Model initialization)
     model_client_config: Optional[ModelClientConfig] = Field(
@@ -418,7 +423,93 @@ class ReActAgent(BaseAgent):
             messages=context_window.get_messages(),
             tools=context_window.get_tools(),
         )
-        return await self._railed_model_call(ctx)
+
+        # Log LLM input
+        msgs = ctx.inputs.messages or []
+        tool_count = len(ctx.inputs.tools) if ctx.inputs.tools else 0
+        if UserConfig.is_sensitive():
+            logger.info(
+                f"[LLM] >>> request: msg_count={len(msgs)}, "
+                f"tool_count={tool_count}"
+            )
+        else:
+            logger.info(
+                f"[LLM] >>> request: msg_count={len(msgs)}, "
+                f"tool_count={tool_count}"
+            )
+            for idx, msg in enumerate(msgs):
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = str(msg.get("content", ""))
+                    tool_calls = msg.get("tool_calls")
+                    tool_call_id = msg.get("tool_call_id", "")
+                else:
+                    role = getattr(msg, "role", "")
+                    content = str(getattr(msg, "content", ""))
+                    tool_calls = getattr(msg, "tool_calls", None)
+                    tool_call_id = getattr(msg, "tool_call_id", "")
+                parts = [f"[LLM]   msg[{idx}] role={role}"]
+                if content:
+                    parts.append(f"content={content[:300]}")
+                if tool_calls:
+                    tc_summary = []
+                    for tc in tool_calls:
+                        if isinstance(tc, dict):
+                            fn = tc.get("function", {})
+                            tc_summary.append(
+                                f"{fn.get('name', '?')}("
+                                f"{str(fn.get('arguments', ''))[:100]})"
+                            )
+                        else:
+                            fn = getattr(tc, "function", tc)
+                            name = getattr(
+                                fn, "name",
+                                getattr(tc, "name", "?"),
+                            )
+                            args = str(
+                                getattr(
+                                    fn, "arguments",
+                                    getattr(tc, "arguments", ""),
+                                )
+                            )[:100]
+                            tc_summary.append(f"{name}({args})")
+                    parts.append(
+                        f"tool_calls=[{', '.join(tc_summary)}]"
+                    )
+                if tool_call_id:
+                    parts.append(f"tool_call_id={tool_call_id}")
+                logger.info(", ".join(parts))
+
+        ai_message = await self._railed_model_call(ctx)
+
+        # Log LLM output
+        usage = getattr(ai_message, "usage_metadata", None)
+        usage_str = ""
+        if usage:
+            usage_str = (
+                f", tokens={{input={getattr(usage, 'input_tokens', '?')}, "
+                f"output={getattr(usage, 'output_tokens', '?')}}}"
+            )
+        if UserConfig.is_sensitive():
+            tc_count = len(ai_message.tool_calls) if ai_message.tool_calls else 0
+            logger.info(
+                f"[LLM] <<< response: "
+                f"content_len={len(ai_message.content or '')}, "
+                f"tool_call_count={tc_count}{usage_str}"
+            )
+        else:
+            logger.info(
+                f"[LLM] <<< response: "
+                f"content={ai_message.content or ''}{usage_str}"
+            )
+            if ai_message.tool_calls:
+                for tc in ai_message.tool_calls:
+                    logger.info(
+                        f"[LLM]   tool_call: "
+                        f"{tc.name}({tc.arguments})"
+                    )
+
+        return ai_message
 
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
@@ -435,7 +526,11 @@ class ReActAgent(BaseAgent):
         llm = self._get_llm()
         session = ctx.session
 
+<<<<<<< HEAD
         if not ctx.extra.get("_streaming"):
+=======
+        if session is None or not self._config.enable_streaming:
+>>>>>>> cf6bc70d (refactor(deepagents): split task-loop modules and update tests)
             ai_message = await llm.invoke(
                 model=self._config.model_name,
                 messages=ctx.inputs.messages,
@@ -890,6 +985,7 @@ class ReActAgent(BaseAgent):
                 tools = await self.ability_manager.list_tool_info()
                 await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
 
+<<<<<<< HEAD
                 start_iteration = 0
                 if interruption_state is not None:
                     resume_result = await self._handle_resume(
@@ -899,11 +995,20 @@ class ReActAgent(BaseAgent):
                         pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
                     else:
                         start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
+=======
+            for iteration in range(start_iteration, self._config.max_iterations):
+                logger.info(
+                    f"[InnerLoop] iteration={iteration + 1}/"
+                    f"{self._config.max_iterations}, "
+                    f"model={self._config.model_name}"
+                )
+>>>>>>> cf6bc70d (refactor(deepagents): split task-loop modules and update tests)
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
+<<<<<<< HEAD
                         ai_message = await self._call_model(ctx, context, system_messages, tools)
                         await context.add_messages(
                             AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
@@ -934,6 +1039,38 @@ class ReActAgent(BaseAgent):
             if need_cleanup:
                 await self.context_engine.save_contexts(session)
                 await session.post_run()
+=======
+                if not ai_message.tool_calls:
+                    logger.info(
+                        f"[InnerLoop] iteration={iteration + 1} "
+                        f"finished with answer, "
+                        f"output={str(ai_message.content)[:200]}"
+                    )
+                    await self.context_engine.save_contexts(session)
+                    result = {"output": ai_message.content, "result_type": "answer"}
+                    invoke_inputs.result = result
+                    return result
+
+                tool_names = [tc.name for tc in ai_message.tool_calls]
+                logger.info(
+                    f"[InnerLoop] iteration={iteration + 1} "
+                    f"LLM requested tools: {tool_names}"
+                )
+
+                results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+                interrupt = self._after_execute_tool_call(results, ai_message.tool_calls, ai_message, iteration)
+                if interrupt:
+                    return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+
+            logger.info(
+                f"[InnerLoop] max iterations "
+                f"({self._config.max_iterations}) reached"
+            )
+            await self.context_engine.save_contexts(session)
+            result = {"output": "Max iterations reached without completion", "result_type": "error"}
+            invoke_inputs.result = result
+            return result
+>>>>>>> cf6bc70d (refactor(deepagents): split task-loop modules and update tests)
 
     async def _write_invoke_result_to_stream(
             self,

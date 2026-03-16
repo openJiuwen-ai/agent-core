@@ -132,3 +132,24 @@ class ControllerConfig(BaseModel):
                     "create_task, pause_task, resume_task, cancel_task, unknown_task"
                     "create_dependent_task, modify_task, supplement_task"
     )
+
+    # ==================== Completion signal config ====================
+    suppress_completion_signal: bool = Field(
+        default=False,
+        description=(
+            "When True, TaskScheduler will not send "
+            "'all_tasks_processed' signal to session "
+            "stream. Used by multi-round callers that "
+            "manage their own completion logic."
+        ),
+    )
+
+    # ==================== Stream config ====================
+    stream_first_frame_timeout: Optional[float] = Field(
+        default=30.0,
+        description=(
+            "Max seconds to wait for the first chunk "
+            "from session stream after fire-and-forget "
+            "publish. None means no timeout."
+        ),
+    )

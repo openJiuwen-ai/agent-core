@@ -70,7 +70,8 @@ class Session:
         await self._inner.stream_writer_manager().get_writer(BaseStreamMode.CUSTOM).write(data)
 
     def stream_iterator(self) -> AsyncIterator[Any]:
-        return self._inner.stream_writer_manager().stream_output()
+        return self._inner.stream_writer_manager(
+        ).stream_output()
 
     async def pre_run(self, **kwargs):
         if self._pre_run_done:
