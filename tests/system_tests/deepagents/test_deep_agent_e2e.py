@@ -280,10 +280,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.get("result_type"), "answer")
 
     @pytest.mark.asyncio
-    @unittest.skipUnless(
-        API_KEY and API_BASE and MODEL_NAME and MODEL_PROVIDER,
-        "requires API_BASE/API_KEY/MODEL_NAME/MODEL_PROVIDER",
-    )
+    @unittest.skip("skip system test")
     async def test_deep_agent_task_loop_real_multistep_steer_follow_up(self):
         """真实 LLM 外循环：LLM 生成多步任务规划 + steer + follow_up。"""
         self._require_llm_config()

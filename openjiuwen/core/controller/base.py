@@ -506,7 +506,7 @@ class Controller:
             # If handle_input didn't create any tasks (e.g. a pure
             # state-query round), send the completion signal now;
             # otherwise the signal will be sent by _execute_task_wrapper.
-            await self._task_scheduler._ensure_session_completion_signal(
+            await self._task_scheduler.ensure_session_completion_signal(
                 session_id
             )
 

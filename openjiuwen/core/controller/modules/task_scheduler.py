@@ -490,6 +490,14 @@ class TaskScheduler:
             logger.error(f"Error checking task completion status: {e}", exc_info=True)
             return False
 
+    async def ensure_session_completion_signal(self, session_id: str):
+        """Public wrapper for _ensure_session_completion_signal.
+
+        Called by Controller.stream() after publish_event returns,
+        so that rounds with no new tasks can emit the completion signal.
+        """
+        await self._ensure_session_completion_signal(session_id)
+
     async def _ensure_session_completion_signal(self, session_id: str):
         """Ensure completion signal is sent if all tasks are done
 
