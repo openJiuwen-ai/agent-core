@@ -51,7 +51,12 @@ def __getattr__(name: str) -> Any:
             "TaskLoopEventExecutor": TaskLoopEventExecutor,
             "build_deep_executor": build_deep_executor,
         }
-        return mapping[name]
+        result = mapping.get(name)
+        if result is not None:
+            return result
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}"
+        )
     if name == "TaskLoopEventHandler":
         from openjiuwen.deepagents.task_loop.task_loop_event_handler import (
             TaskLoopEventHandler,

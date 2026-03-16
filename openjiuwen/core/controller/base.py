@@ -91,7 +91,7 @@ class Controller:
         )
 
         # Wire up submit notification
-        self._task_manager._on_task_submitted = (
+        self._task_manager.set_on_task_submitted(
             self._task_scheduler.notify_task_submitted
         )
 
@@ -395,7 +395,7 @@ class Controller:
                 )
 
                 # Re-wire submit notification
-                self._task_manager._on_task_submitted = (
+                self._task_manager.set_on_task_submitted(
                     self._task_scheduler
                     .notify_task_submitted
                 )
@@ -521,7 +521,7 @@ class Controller:
                     timeout=first_frame_timeout,
                 )
                 got_first = True
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
                 logger.error(
                     "First frame timeout after "
                     f"{first_frame_timeout}s for "
@@ -533,7 +533,7 @@ class Controller:
                     error_msg=(
                         "Stream first frame timeout"
                     ),
-                )
+                ) from exc
             except StopAsyncIteration:
                 got_first = False
 

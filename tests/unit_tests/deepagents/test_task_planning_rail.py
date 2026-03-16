@@ -1,7 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Unit tests for TaskPlanningRail init/uninit."""
+# pylint: disable=protected-access
 from __future__ import annotations
+
+from typing import List
+from unittest.mock import (
+    AsyncMock,
+    MagicMock,
+    patch,
+)
 
 import pytest
 
@@ -19,6 +27,18 @@ from openjiuwen.deepagents.rails.task_planning_rail import (
 )
 from openjiuwen.deepagents.schema.config import (
     DeepAgentConfig,
+)
+from openjiuwen.deepagents.schema.state import (
+    DeepAgentState,
+)
+from openjiuwen.deepagents.schema.task import (
+    TaskItem,
+    TaskPlan,
+    TaskStatus,
+)
+from openjiuwen.deepagents.tools.todo import (
+    TodoItem,
+    TodoStatus,
 )
 
 
@@ -111,25 +131,6 @@ def test_priority_is_90() -> None:
 # ================================================================
 # after_task_iteration bridge tests
 # ================================================================
-from typing import List
-from unittest.mock import (
-    AsyncMock,
-    MagicMock,
-    patch,
-)
-
-from openjiuwen.deepagents.schema.state import (
-    DeepAgentState,
-)
-from openjiuwen.deepagents.schema.task import (
-    TaskItem,
-    TaskPlan,
-    TaskStatus,
-)
-from openjiuwen.deepagents.tools.todo import (
-    TodoItem,
-    TodoStatus,
-)
 
 
 def _make_ctx(session=None):

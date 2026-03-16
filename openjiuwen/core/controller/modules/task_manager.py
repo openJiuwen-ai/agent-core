@@ -23,7 +23,7 @@ Index Structure:
 
 import asyncio
 from typing import (
-    Callable, Dict, Any, List, Union, Set, Optional,
+    Callable, Dict, List, Union, Set, Optional,
 )
 from collections import defaultdict
 from pydantic import BaseModel, model_validator
@@ -148,6 +148,18 @@ class TaskManager:
         self._on_task_submitted: Optional[
             Callable[[], None]
         ] = None
+
+    def set_on_task_submitted(
+        self, callback: Optional[Callable[[], None]]
+    ) -> None:
+        """Register callback for task-submitted events.
+
+        Args:
+            callback: Callable to invoke when a task
+                enters SUBMITTED status, or None to
+                clear.
+        """
+        self._on_task_submitted = callback
 
     def _notify_if_submitted(
         self, tasks: List[Task],

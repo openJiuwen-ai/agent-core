@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Unit tests for TaskLoopEventHandler."""
+# pylint: disable=protected-access
 from __future__ import annotations
 
 import asyncio
@@ -146,8 +147,7 @@ def _make_agent() -> DeepAgent:
 
 @pytest.mark.asyncio
 async def test_handle_input_creates_task() -> None:
-    """handle_input creates a core Task via
-    TaskManager instead of direct invoke."""
+    """handle_input creates a core Task via TaskManager instead of direct invoke."""
     agent = _make_agent()
     handler = TaskLoopEventHandler(agent)
 
@@ -198,8 +198,7 @@ async def test_handle_input_creates_task() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_input_no_coordinator() -> None:
-    """handle_input returns None without
-    coordinator."""
+    """handle_input returns None without coordinator."""
     agent = DeepAgent(
         AgentCard(name="test", description="t")
     )
@@ -257,8 +256,7 @@ async def test_handle_task_interaction() -> None:
 @pytest.mark.asyncio
 async def test_handle_task_completion_signals() \
         -> None:
-    """handle_task_completion resolves the per-round
-    Future."""
+    """handle_task_completion resolves the per-round Future."""
     agent = _make_agent()
     handler = TaskLoopEventHandler(agent)
 
@@ -333,8 +331,7 @@ async def test_handle_task_failed_signals() -> None:
 @pytest.mark.asyncio
 async def test_handle_input_waits_for_completion() \
         -> None:
-    """handle_input submits task; wait_completion
-    blocks until Future is resolved."""
+    """handle_input submits task; wait_completion blocks until Future is resolved."""
     agent = _make_agent()
     handler = TaskLoopEventHandler(agent)
     handler._task_manager = FakeTaskManager()

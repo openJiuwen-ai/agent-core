@@ -239,7 +239,7 @@ class TaskPlanningRail(DeepAgentRail):
             return TodoStatus.PENDING
         if status == TaskStatus.IN_PROGRESS:
             return TodoStatus.IN_PROGRESS
-        # Todo has no FAILED status; map terminal states to COMPLETED.
+        # TodoStatus lacks FAILED; map terminal states to COMPLETED.
         return TodoStatus.COMPLETED
 
     def _find_todo_tool(self) -> Optional[TodoTool]:

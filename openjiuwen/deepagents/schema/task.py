@@ -72,12 +72,12 @@ class TaskPlan(BaseModel):
 
     def get_next_task(self) -> Optional[TaskItem]:
         """Return the first PENDING task whose deps are met."""
-        done_ids = {
-            t.id
-            for t in self.tasks
-            if t.status
-            in (TaskStatus.COMPLETED, TaskStatus.FAILED)
-        }
+        done_ids: set[str] = set()
+        for t in self.tasks:
+            if t.status in (
+                TaskStatus.COMPLETED, TaskStatus.FAILED
+            ):
+                done_ids.add(t.id)
         for t in self.tasks:
             if t.status != TaskStatus.PENDING:
                 continue

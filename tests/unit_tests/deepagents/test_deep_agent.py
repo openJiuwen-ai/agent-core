@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Unit tests for DeepAgent public APIs."""
+# pylint: disable=protected-access
 from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -269,10 +270,11 @@ async def test_stream_task_loop_yields_result() -> None:
     agent.set_react_agent(fake_react, initialized=True)
 
     session = Session(session_id="s1")
-    chunks = [
-        chunk async for chunk
-        in agent.stream("loop_input", session=session)
-    ]
+    chunks = []
+    async for chunk in agent.stream(
+        "loop_input", session=session
+    ):
+        chunks.append(chunk)
 
     assert len(chunks) >= 1
     assert chunks[0]["output"] == "echo:loop_input"

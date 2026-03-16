@@ -8,12 +8,15 @@ StopCondition fields with OR semantics.
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional
 
 from openjiuwen.deepagents.schema.stop_condition import (
     StopCondition,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LoopCoordinator:
@@ -112,7 +115,10 @@ class LoopCoordinator:
                 if sc.custom(None):  # type: ignore[arg-type]
                     return False
             except Exception:
-                pass
+                logger.warning(
+                    "Custom stop-condition raised an error",
+                    exc_info=True,
+                )
 
         return True
 

@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Unit tests for TaskLoopEventExecutor."""
+# pylint: disable=protected-access
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -193,8 +194,7 @@ def _make_agent(
 
 @pytest.mark.asyncio
 async def test_executor_init_with_deps() -> None:
-    """Executor correctly calls super().__init__
-    with dependencies."""
+    """Executor correctly calls super().__init__ with dependencies."""
     agent = _make_agent()
     deps, tm = _make_deps()
 
@@ -210,8 +210,7 @@ async def test_executor_init_with_deps() -> None:
 @pytest.mark.asyncio
 async def test_execute_ability_yields_completion() \
         -> None:
-    """Normal execution yields a TASK_COMPLETION
-    chunk."""
+    """Normal execution yields a TASK_COMPLETION chunk."""
     agent = _make_agent()
     deps, tm = _make_deps()
 
@@ -257,8 +256,7 @@ async def test_execute_ability_yields_completion() \
 @pytest.mark.asyncio
 async def test_execute_ability_yields_failure() \
         -> None:
-    """Exception in invoke yields a TASK_FAILED
-    chunk."""
+    """Exception in invoke yields a TASK_FAILED chunk."""
     agent = _make_agent(fail=True)
     deps, tm = _make_deps()
 
@@ -296,8 +294,7 @@ async def test_execute_ability_yields_failure() \
 @pytest.mark.asyncio
 async def test_cancel_marks_failed_and_aborts() \
         -> None:
-    """cancel() marks TaskPlan failed and requests
-    abort."""
+    """cancel() marks TaskPlan failed and requests abort."""
     agent = _make_agent()
     deps, _ = _make_deps()
 
@@ -316,8 +313,7 @@ async def test_cancel_marks_failed_and_aborts() \
 @pytest.mark.asyncio
 async def test_build_deep_executor_factory() \
         -> None:
-    """build_deep_executor returns a callable
-    that creates executors."""
+    """build_deep_executor returns a callable that creates executors."""
     agent = _make_agent()
     deps, _ = _make_deps()
 
