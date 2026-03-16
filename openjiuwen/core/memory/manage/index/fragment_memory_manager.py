@@ -368,7 +368,7 @@ class FragmentMemoryManager(BaseMemoryManager):
             )
         )
         if not vector_success:
-            await self.delete(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
+            await self.delete(user_id=user_id, scope_id=scope_id, mem_id=mem_id, semantic_store=semantic_store)
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
                 memory_type=memory.mem_type,
