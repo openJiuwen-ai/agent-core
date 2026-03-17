@@ -9,6 +9,7 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import MilvusVectorStore, SearchResult, VectorStoreConfig
+from openjiuwen.core.retrieval.utils.common import create_milvus_alias
 
 
 @pytest.fixture
@@ -40,7 +41,7 @@ class TestMilvusVectorStore:
         mock_client_class.assert_called_once_with(
             uri="http://localhost:19530",
             token=None,
-            alias=None,
+            alias=create_milvus_alias(None, uri="http://localhost:19530", token=None),
         )
 
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
@@ -58,7 +59,7 @@ class TestMilvusVectorStore:
         mock_client_class.assert_called_once_with(
             uri="http://localhost:19530",
             token="test_token",
-            alias=None,
+            alias=create_milvus_alias(None, uri="http://localhost:19530", token="test_token"),
         )
 
     @patch("openjiuwen.core.retrieval.vector_store.milvus_store.MilvusClient")
