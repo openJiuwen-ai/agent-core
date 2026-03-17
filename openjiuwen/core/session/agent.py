@@ -92,6 +92,9 @@ class Session:
         return self._inner.stream_writer_manager(
         ).stream_output()
 
+    async def close_stream(self):
+        await self._inner.stream_writer_manager().stream_emitter().close()
+
     async def pre_run(self, **kwargs):
         if self._pre_run_done:
             return
@@ -112,7 +115,7 @@ class Session:
         if self._post_run_done:
             return
         if self._close_stream_on_post_run:
-            await self._inner.stream_writer_manager().stream_emitter().close()
+            await self.close_stream()
         await self._inner.checkpointer().post_agent_execute(self._inner)
         self._post_run_done = True
 

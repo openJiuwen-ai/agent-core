@@ -6,9 +6,15 @@ from typing import Any
 from openjiuwen.core.session import Config
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.internal.agent_group import AgentGroupSession
-from openjiuwen.core.session.stream import BaseStreamMode, OutputSchema
+from openjiuwen.core.session.stream import (
+    BaseStreamMode,
+    OutputSchema,
+)
+from openjiuwen.core.single_agent import (
+    create_agent_session,
+    Session as AgentSession,
+)
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.single_agent import Session as AgentSession, create_agent_session
 
 
 class Session:
@@ -60,6 +66,9 @@ class Session:
     def stream_iterator(self):
         return self._inner.stream_writer_manager().stream_output()
 
+    async def close_stream(self):
+        await self._inner.stream_writer_manager().stream_emitter().close()
+
     async def pre_run(self, **kwargs):
         if self._pre_run_done:
             return
@@ -69,7 +78,7 @@ class Session:
     async def post_run(self):
         if self._post_run_done:
             return
-        await self._inner.stream_writer_manager().stream_emitter().close()
+        await self.close_stream()
         await self._inner.checkpointer().post_agent_group_execute(self._inner)
         self._post_run_done = True
 
@@ -113,6 +122,7 @@ class Session:
         return OutputSchema(type="message", index=0, payload=data)
 
 
-def create_agent_group_session(session_id: str = None, envs: dict[str, Any] = None, group_id: str = "agent_group") -> Session:
+def create_agent_group_session(session_id: str = None, envs: dict[str, Any] = None,
+                               group_id: str = "agent_group") -> Session:
     """Create AgentGroup Session"""
     return Session(session_id=session_id, envs=envs, group_id=group_id)

@@ -2,17 +2,27 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import uuid
-from typing import Any, AsyncIterator
+from typing import (
+    Any,
+    AsyncIterator,
+)
 
 import pytest
 
-from openjiuwen.core.multi_agent import BaseGroup, GroupConfig, GroupCard
+from openjiuwen.core.multi_agent import (
+    BaseGroup,
+    GroupCard,
+    GroupConfig,
+)
 from openjiuwen.core.multi_agent.group_runtime import CommunicableAgent
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent_group import create_agent_group_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import InMemoryCheckpointer
-from openjiuwen.core.single_agent import BaseAgent, AgentCard
+from openjiuwen.core.single_agent import (
+    AgentCard,
+    BaseAgent,
+)
 
 
 @pytest.fixture
@@ -64,7 +74,8 @@ class CountingGroup(BaseGroup):
 
 
 @pytest.mark.asyncio
-async def test_runner_run_agent_group_recovers_group_and_child_state(isolated_checkpointer):
+async def test_runneder_run_agent_group_recovers_group_and_child_state(isolated_checkpointer):
+    await Runner.start()
     group = CountingGroup(f"group_{uuid.uuid4().hex}")
     session_id = f"session_{uuid.uuid4().hex}"
 
