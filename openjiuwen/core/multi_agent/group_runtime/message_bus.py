@@ -41,7 +41,7 @@ class MessageBusConfig(BaseModel):
 class MessageBus:
     """Message bus providing P2P and Pub-Sub routing for agent communication."""
 
-    def __init__(self, config: Optional[MessageBusConfig] = None):
+    def __init__(self, config: Optional[MessageBusConfig] = None, runtime=None):
         self._config = config or MessageBusConfig()
         self._group_id = self._config.group_id or "default"
 
@@ -64,7 +64,7 @@ class MessageBus:
         self._subscription_lock = asyncio.Lock()
 
         self._subscription_manager = SubscriptionManager()
-        self._router = MessageRouter(self._subscription_manager)
+        self._router = MessageRouter(self._subscription_manager, runtime=runtime)
         self._running = False
 
         logger.info(f"[{self.__class__.__name__}] Initialized with group_id: {self._group_id}")

@@ -63,7 +63,8 @@ class GroupRuntime:
         self._config.message_bus.group_id = self._group_id
 
         self._agent_cards: dict[str, AgentCard] = {}
-        self._message_bus = MessageBus(config=self._config.message_bus)
+        self._message_bus = MessageBus(config=self._config.message_bus, runtime=self)
+        self._active_group_sessions = {}
         self._running = False
         self._start_lock: asyncio.Lock = asyncio.Lock()
 
@@ -270,6 +271,17 @@ class GroupRuntime:
             Agent count
         """
         return len(self._agent_cards)
+
+    def bind_group_session(self, session) -> None:
+        self._active_group_sessions[session.get_session_id()] = session
+
+    def unbind_group_session(self, session_id: str) -> None:
+        self._active_group_sessions.pop(session_id, None)
+
+    def get_group_session(self, session_id: Optional[str]):
+        if session_id is None:
+            return None
+        return self._active_group_sessions.get(session_id)
 
     # ========== Subscription Query ==========
 
