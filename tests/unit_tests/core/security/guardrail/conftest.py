@@ -11,6 +11,8 @@ from openjiuwen.core.runner.callback import AsyncCallbackFramework
 from openjiuwen.core.security.guardrail import (
     BaseGuardrail,
     GuardrailBackend,
+    GuardrailContext,
+    GuardrailContentType,
     GuardrailError,
     GuardrailResult,
     RiskAssessment,
@@ -81,7 +83,7 @@ def risky_backend_with_details():
         async def analyze(self, data):
             return RiskAssessment(
                 has_risk=True,
-                risk_level=RiskLevel.CRITICAL,
+                risk_level=RiskLevel.HIGH,
                 risk_type="prompt_injection",
                 details={"matched_pattern": "ignore previous instructions", "confidence": 0.95}
             )
@@ -95,6 +97,14 @@ def simple_guardrail():
 
     class SimpleGuardrail(BaseGuardrail):
         DEFAULT_EVENTS = ["test_event"]
+
+        def extract_context(self, event, *args, **kwargs):
+            return GuardrailContext(
+                content_type=GuardrailContentType.TEXT,
+                content=kwargs.get("text", ""),
+                event=str(event),
+                metadata=kwargs
+            )
 
         async def detect(self, event_name, *args, **kwargs):
             return GuardrailResult.pass_()

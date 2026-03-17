@@ -10,6 +10,8 @@ import pytest
 from openjiuwen.core.security.guardrail import (
     BaseGuardrail,
     GuardrailBackend,
+    GuardrailContext,
+    GuardrailContentType,
     GuardrailError,
     GuardrailResult,
     RiskAssessment,
@@ -120,6 +122,14 @@ class TestBaseGuardrail:
 
         class NoDefaultEventsGuardrail(BaseGuardrail):
             DEFAULT_EVENTS = []
+
+            def extract_context(self, event, *args, **kwargs):
+                return GuardrailContext(
+                    content_type=GuardrailContentType.TEXT,
+                    content="",
+                    event=str(event),
+                    metadata={}
+                )
 
             async def detect(self, event_name, *args, **kwargs):
                 return GuardrailResult.pass_()
@@ -278,6 +288,66 @@ class TestBaseGuardrailRegistration:
         assert len(callbacks1) == 1
         assert len(callbacks2) == 1
 
+    @pytest.mark.asyncio
+    async def test_get_registered_events_returns_copy(self, framework):
+        """Test get_registered_events() returns a copy."""
+        guardrail = CustomTestGuardrail(events=["event1", "event2"])
+        await guardrail.register(framework)
+
+        events1 = guardrail.get_registered_events()
+        events2 = guardrail.get_registered_events()
+
+        assert events1 is not events2
+        assert events1 == events2
+        assert set(events1) == {"event1", "event2"}
+
+        await guardrail.unregister()
+
+    @pytest.mark.asyncio
+    async def test_get_registered_events_empty_before_registration(self):
+        """Test get_registered_events() returns empty list before registration."""
+        guardrail = CustomTestGuardrail()
+
+        assert guardrail.get_registered_events() == []
+
+    @pytest.mark.asyncio
+    async def test_get_registered_events_after_unregister(self, framework):
+        """Test get_registered_events() returns empty list after unregister."""
+        guardrail = CustomTestGuardrail()
+        await guardrail.register(framework)
+        await guardrail.unregister()
+
+        assert guardrail.get_registered_events() == []
+
+    @pytest.mark.asyncio
+    async def test_is_event_registered_true(self, framework):
+        """Test is_event_registered() returns True for registered event."""
+        guardrail = CustomTestGuardrail(events=["event1", "event2"])
+        await guardrail.register(framework)
+
+        assert guardrail.is_event_registered("event1") is True
+        assert guardrail.is_event_registered("event2") is True
+
+        await guardrail.unregister()
+
+    @pytest.mark.asyncio
+    async def test_is_event_registered_false(self, framework):
+        """Test is_event_registered() returns False for unregistered event."""
+        guardrail = CustomTestGuardrail(events=["event1"])
+        await guardrail.register(framework)
+
+        assert guardrail.is_event_registered("event1") is True
+        assert guardrail.is_event_registered("not_registered") is False
+
+        await guardrail.unregister()
+
+    @pytest.mark.asyncio
+    async def test_is_event_registered_before_registration(self):
+        """Test is_event_registered() returns False before registration."""
+        guardrail = CustomTestGuardrail(events=["event1"])
+
+        assert guardrail.is_event_registered("event1") is False
+
 
 class TestGuardrailBackend:
     """Tests for GuardrailBackend abstract class."""
@@ -405,7 +475,7 @@ class TestDetectCallback:
         assert error.details is not None
         # Check core risk info
         assert error.details["risk_type"] == "prompt_injection"
-        assert error.details["risk_level"] == "CRITICAL"
+        assert error.details["risk_level"] == "HIGH"
         assert error.details["event"] == "llm_input_event"
         # Check backend-specific details are merged
         assert "matched_pattern" in error.details
@@ -539,6 +609,14 @@ class SpyGuardrail(BaseGuardrail):
         self.detected_event_name = None
         self.detected_kwargs = None
 
+    def extract_context(self, event, *args, **kwargs):
+        return GuardrailContext(
+            content_type=GuardrailContentType.TEXT,
+            content=kwargs.get("text", "") or kwargs.get("prompt", ""),
+            event=str(event),
+            metadata=kwargs
+        )
+
     async def detect(self, event_name, *args, **kwargs):
         self.detect_called = True
         self.detected_event_name = event_name
@@ -555,6 +633,14 @@ class CustomTestGuardrail(BaseGuardrail):
         self._test_backend = None
         self._test_framework = None
         self._test_registered_events = []
+
+    def extract_context(self, event, *args, **kwargs):
+        return GuardrailContext(
+            content_type=GuardrailContentType.TEXT,
+            content=kwargs.get("text", "") or kwargs.get("prompt", "") or kwargs.get("data", ""),
+            event=str(event),
+            metadata=kwargs
+        )
 
     def get_backend(self):
         """Get the backend for testing."""
@@ -586,6 +672,14 @@ class DataCaptureGuardrail(BaseGuardrail):
         super().__init__(backend=backend)
         self.captured_data = None
 
+    def extract_context(self, event, *args, **kwargs):
+        return GuardrailContext(
+            content_type=GuardrailContentType.TEXT,
+            content=kwargs.get("text", "") or kwargs.get("prompt", ""),
+            event=str(event),
+            metadata=kwargs
+        )
+
     async def detect(self, event_name, *args, **kwargs):
         self.captured_data = kwargs
         if self._backend:
@@ -600,6 +694,14 @@ class DataCaptureGuardrail(BaseGuardrail):
 class DirectBaseCallGuardrail(BaseGuardrail):
     """Test guardrail that directly calls base detect()."""
     DEFAULT_EVENTS = ["test_event"]
+
+    def extract_context(self, event, *args, **kwargs):
+        return GuardrailContext(
+            content_type=GuardrailContentType.TEXT,
+            content=kwargs.get("text", "") or kwargs.get("data", ""),
+            event=str(event),
+            metadata=kwargs
+        )
 
     async def detect(self, event_name, *args, **kwargs):
         # Directly call base class detect without checking backend
