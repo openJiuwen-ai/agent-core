@@ -316,7 +316,7 @@ class TestRefresh:
     @pytest.mark.asyncio
     @staticmethod
     async def test_refresh_flushes_and_compacts_collections(store):
-        await store.refresh()
+        await store.refresh(skip_compact=False)
         assert store.client.flush.call_count >= 1
         assert store.client.compact.call_count >= 1
 
@@ -812,7 +812,7 @@ class TestFlushAndCompact:
     @staticmethod
     async def test_flush_and_compact_skip_compact_does_not_compact(store):
         await getattr(store, "_flush_and_compact")(ENTITY_COLLECTION, skip_compact=True)
-        store.client.flush.assert_called_once_with(ENTITY_COLLECTION, skip_compact=True)
+        store.client.flush.assert_called_once_with(ENTITY_COLLECTION)
         store.client.compact.assert_not_called()
 
 
@@ -820,15 +820,15 @@ class TestGetRankerAndReqs:
     """Tests for _get_ranker_and_reqs."""
 
     @staticmethod
-    def test_get_ranker_and_reqs_episode_zeroes_dense_name(store):
-        """Episode collection: dense_name/dense_content zeroed for RRF, fewer requests."""
+    def test_get_ranker_and_reqs_episode_zeroes_name_dense(store):
+        """Episode collection: name_dense/content_dense zeroed for RRF, fewer requests."""
         reqs = getattr(store, "_get_search_req")("q", [0.0] * 64, k=5, expr="")
         ranker, filtered = getattr(store, "_get_ranker_and_reqs")(RRFRankConfig(), EPISODE_COLLECTION, reqs)
         assert ranker is not None
         assert len(filtered) <= len(reqs)
 
     @staticmethod
-    def test_get_ranker_and_reqs_relation_zeroes_dense_name(store):
+    def test_get_ranker_and_reqs_relation_zeroes_name_dense(store):
         """Relation collection: first weight zeroed for RRF."""
         reqs = getattr(store, "_get_search_req")("q", [0.0] * 64, k=5, expr="")
         ranker, _ = getattr(store, "_get_ranker_and_reqs")(RRFRankConfig(), RELATION_COLLECTION, reqs)

@@ -93,16 +93,16 @@ class TestWeightedRankConfig:
 
     @staticmethod
     def test_defaults():
-        """Defaults: dense_name=0.15, dense_content=0.6, sparse_content=0.25."""
+        """Defaults: name_dense=0.15, content_dense=0.6, content_sparse=0.25."""
         cfg = WeightedRankConfig()
-        assert cfg.dense_name == 0.15
-        assert cfg.dense_content == 0.6
-        assert cfg.sparse_content == 0.25
+        assert cfg.name_dense == 0.15
+        assert cfg.content_dense == 0.6
+        assert cfg.content_sparse == 0.25
 
     @staticmethod
     def test_args_normalized_weights_sum_one():
         """args: normalized weights (sum 1) when sum > 0; else [], {}."""
-        cfg = WeightedRankConfig(dense_name=0.2, dense_content=0.2, sparse_content=0.2)
+        cfg = WeightedRankConfig(name_dense=0.2, content_dense=0.2, content_sparse=0.2)
         args_list, args_dict = cfg.args
         assert sum(args_list) == pytest.approx(1.0)
         assert args_dict == {}
@@ -110,7 +110,7 @@ class TestWeightedRankConfig:
     @staticmethod
     def test_args_zero_weights_returns_empty():
         """When all weights 0, args returns [], {}."""
-        cfg = WeightedRankConfig(dense_name=0, dense_content=0, sparse_content=0)
+        cfg = WeightedRankConfig(name_dense=0, content_dense=0, content_sparse=0)
         args_list, args_dict = cfg.args
         assert args_list == []
         assert args_dict == {}
@@ -118,12 +118,12 @@ class TestWeightedRankConfig:
     @staticmethod
     def test_bounds_weights_in_zero_one():
         """Bounds: weights in [0, 1]."""
-        cfg = WeightedRankConfig(dense_name=0, dense_content=1, sparse_content=0.5)
-        assert 0 <= cfg.dense_name <= 1
-        assert 0 <= cfg.dense_content <= 1
-        assert 0 <= cfg.sparse_content <= 1
+        cfg = WeightedRankConfig(name_dense=0, content_dense=1, content_sparse=0.5)
+        assert 0 <= cfg.name_dense <= 1
+        assert 0 <= cfg.content_dense <= 1
+        assert 0 <= cfg.content_sparse <= 1
         with pytest.raises(ValidationError):
-            WeightedRankConfig(dense_name=1.5)
+            WeightedRankConfig(name_dense=1.5)
 
 
 class TestRRFRankConfig:
@@ -131,14 +131,14 @@ class TestRRFRankConfig:
 
     @staticmethod
     def test_name_rrf_higher_is_better_k_default():
-        """name='rrf', higher_is_better=True, k=40, dense_name/content/sparse_content bools."""
+        """name='rrf', higher_is_better=True, k=40, name_dense/content/content_sparse bools."""
         cfg = RRFRankConfig()
         assert cfg.name == "rrf"
         assert cfg.higher_is_better is True
         assert cfg.k == 40
-        assert cfg.dense_name is True
-        assert cfg.dense_content is True
-        assert cfg.sparse_content is True
+        assert cfg.name_dense is True
+        assert cfg.content_dense is True
+        assert cfg.content_sparse is True
 
     @staticmethod
     def test_args_returns_k_and_empty_dict():
@@ -151,7 +151,7 @@ class TestRRFRankConfig:
     @staticmethod
     def test_is_active_from_bools():
         """is_active returns list of 0/1 from the three bools."""
-        cfg = RRFRankConfig(dense_name=True, dense_content=False, sparse_content=True)
+        cfg = RRFRankConfig(name_dense=True, content_dense=False, content_sparse=True)
         assert cfg.is_active == [1, 0, 1]
-        cfg2 = RRFRankConfig(dense_name=False, dense_content=False, sparse_content=False)
+        cfg2 = RRFRankConfig(name_dense=False, content_dense=False, content_sparse=False)
         assert cfg2.is_active == [0, 0, 0]

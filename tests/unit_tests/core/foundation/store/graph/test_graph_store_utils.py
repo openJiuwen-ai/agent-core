@@ -90,45 +90,49 @@ class TestGetUuid:
 class TestEnsureUniqueUuids:
     """Tests for ensure_unique_uuids."""
 
+    @pytest.mark.asyncio
     @staticmethod
-    def test_replaces_none_empty_with_new_uuid():
+    async def test_replaces_none_empty_with_new_uuid():
         """Replaces None/empty ids with new UUIDs."""
         backend = MagicMock()
         backend.is_empty.return_value = True
         ids = [None, "", "existing_id"]
-        out = graph_utils.ensure_unique_uuids(backend, ids, "entities")
+        out = await graph_utils.ensure_unique_uuids(backend, ids, "entities")
         assert out[0] != "" and out[0] is not None and len(out[0]) == 32
         assert out[1] != "" and out[1] is not None and len(out[1]) == 32
         assert out[2] == "existing_id"
 
+    @pytest.mark.asyncio
     @staticmethod
-    def test_skip_true_returns_after_uuid_fill():
+    async def test_skip_true_returns_after_uuid_fill():
         """When skip=True, returns list as-is after filling uuids (no de-dup)."""
         backend = MagicMock()
         ids = [None, "id1"]
-        out = graph_utils.ensure_unique_uuids(backend, ids, "entities", skip=True)
+        out = await graph_utils.ensure_unique_uuids(backend, ids, "entities", skip=True)
         backend.is_empty.assert_not_called()
         assert len(out) == 2
         assert out[1] == "id1"
 
+    @pytest.mark.asyncio
     @staticmethod
-    def test_backend_empty_returns_unique_ids():
+    async def test_backend_empty_returns_unique_ids():
         """When backend is_empty(collection) True, returns unique_ids."""
         backend = MagicMock()
         backend.is_empty.return_value = True
         ids = ["a", "b"]
-        out = graph_utils.ensure_unique_uuids(backend, ids, "entities")
+        out = await graph_utils.ensure_unique_uuids(backend, ids, "entities")
         assert out == ["a", "b"]
         backend.query.assert_not_called()
 
+    @pytest.mark.asyncio
     @staticmethod
-    def test_backend_has_duplicates_replaces_until_unique():
+    async def test_backend_has_duplicates_replaces_until_unique():
         """When backend has duplicates, mock query returns existing uuids and de-dup replaces them."""
         backend = MagicMock()
         backend.is_empty.return_value = False
         call_count = [0]
 
-        def query_side_effect(**kwargs):
+        async def query_side_effect(**kwargs):
             ids = kwargs.get("ids", [])
             # First call: report "id1" as duplicate; second call: no duplicates
             call_count[0] += 1
@@ -138,7 +142,7 @@ class TestEnsureUniqueUuids:
 
         backend.query.side_effect = query_side_effect
         ids = ["id1", "id2"]
-        out = graph_utils.ensure_unique_uuids(backend, ids, "entities")
+        out = await graph_utils.ensure_unique_uuids(backend, ids, "entities")
         assert out[1] == "id2"
         assert out[0] != "id1" and len(out[0]) == 32
         assert backend.query.called

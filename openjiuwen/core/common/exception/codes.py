@@ -553,6 +553,13 @@ class StatusCode(Enum):
     )
     MEMORY_MIGRATE_MEMORY_EXECUTION_ERROR = (158010, "failed to migrate memory, reason: {error_msg}")
 
+    # Memory Engine - Common Utility 158200 - 158299
+    MEMORY_GRAPH_LANGUAGE_INVALID = (158200, "graph memory language invalid: {error_msg}")
+    MEMORY_GRAPH_EMBEDDING_CALL_FAILED = (158201, "graph memory embedding call failed, reason: {error_msg}")
+    MEMORY_GRAPH_EMBED_MODEL_NOT_FOUND = (158202, "graph memory embedder not configured: {error_msg}")
+    MEMORY_GRAPH_INVOKE_LLM_FAILED = (158203, "graph memory LLM invoke failed, reason: {error_msg}")
+    MEMORY_GRAPH_PROMPT_FILES_MISSING = (158204, "graph memory prompt files not found in directory {prompt_dir}")
+
     # =========================
     # Foundation Tool 160000–169999
     # =========================
