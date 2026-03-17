@@ -1,7 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import (
     Any,
     Dict,
@@ -100,50 +100,79 @@ class BaseRedisStorage(Storage, ABC):
         return ":".join(list(args))
 
 
-class AgentStorage(BaseRedisStorage):
-    _STATE_BLOBS = "agent_state_blobs"
-    _STATE_BLOBS_DUMP_TYPE = "agent_state_blobs_dump_type"
+class BaseSingleStateStorage(BaseRedisStorage, ABC):
     _KEY_NUMS = 2
 
+    @property
+    @abstractmethod
+    def _namespace(self) -> str:
+        ...
+
+    @property
+    @abstractmethod
+    def _entity_name(self) -> str:
+        ...
+
+    @property
+    @abstractmethod
+    def _state_blobs_key(self) -> str:
+        ...
+
+    @property
+    @abstractmethod
+    def _state_dump_type_key(self) -> str:
+        ...
+
+    @abstractmethod
+    def _get_entity_id(self, session: BaseSession) -> str:
+        ...
+
+    @abstractmethod
+    def _get_state_to_save(self, session: BaseSession) -> Any:
+        ...
+
+    @abstractmethod
+    def _restore_state(self, session: BaseSession, state: Any) -> None:
+        ...
+
+    def _build_state_keys(self, session_id: str, entity_id: str) -> tuple[str, str]:
+        dump_type_key = build_key_with_namespace(
+            session_id, self._namespace, entity_id, self._state_dump_type_key
+        )
+        blob_key = build_key_with_namespace(
+            session_id, self._namespace, entity_id, self._state_blobs_key
+        )
+        return dump_type_key, blob_key
+
     async def save(self, session: BaseSession):
-        state = session.state().get_state()
+        state = self._get_state_to_save(session)
         session_id = session.session_id()
-        agent_id = session.agent_id()
+        entity_id = self._get_entity_id(session)
 
         state_blob = self._serialize_state(state)
         if not state_blob:
-            logger.warning(f"Failed to serialize state for agent {agent_id}, session {session_id}")
+            logger.warning(f"Failed to serialize state for {self._entity_name} {entity_id}, session {session_id}")
             return
 
         try:
             dump_type, blob = state_blob
             pipeline = self._redis_store.pipeline()
-            dump_type_key = build_key_with_namespace(
-                session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS_DUMP_TYPE
-            )
-            blob_key = build_key_with_namespace(
-                session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
-            )
+            dump_type_key, blob_key = self._build_state_keys(session_id, entity_id)
             await (pipeline
                    .set(dump_type_key, dump_type, self._ttl_seconds)
                    .set(blob_key, blob, self._ttl_seconds)
                    .execute())
-            logger.debug(f"Saved state for agent {agent_id}, session {session_id}")
+            logger.debug(f"Saved state for {self._entity_name} {entity_id}, session {session_id}")
         except Exception as e:
-            logger.error(f"Failed to save state for agent {agent_id}, session {session_id}: {e}")
+            logger.error(f"Failed to save state for {self._entity_name} {entity_id}, session {session_id}: {e}")
             raise
 
     async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
         session_id = session.session_id()
-        agent_id = session.agent_id()
+        entity_id = self._get_entity_id(session)
 
         pipeline = self._redis_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
-        )
+        dump_type_key, blob_key = self._build_state_keys(session_id, entity_id)
         results = await (pipeline
                          .get(dump_type_key)
                          .get(blob_key)
@@ -152,47 +181,36 @@ class AgentStorage(BaseRedisStorage):
         if len(results) != self._KEY_NUMS:
             logger.debug(
                 f"Expected {self._KEY_NUMS} keys but got {len(results)} results "
-                f"for agent {agent_id}, session {session_id}")
+                f"for {self._entity_name} {entity_id}, session {session_id}")
             return
 
         dump_type, blob = results[0], results[1]
         state = self._deserialize_state(dump_type, blob)
         if state is None:
-            logger.debug(f"No state found for agent {agent_id}, session {session_id}")
+            logger.debug(f"No state found for {self._entity_name} {entity_id}, session {session_id}")
             return
 
         try:
-            session.state().set_state(state)
-            logger.debug(f"Recovered state for agent {agent_id}, session {session_id}")
+            self._restore_state(session, state)
+            logger.debug(f"Recovered state for {self._entity_name} {entity_id}, session {session_id}")
         except Exception as e:
-            logger.error(f"Failed to set state for agent {agent_id}, session {session_id}: {e}")
+            logger.error(f"Failed to set state for {self._entity_name} {entity_id}, session {session_id}: {e}")
             raise
         finally:
             # Always try to refresh TTL if enabled, even if set_state failed
-            await self._refresh_ttl([dump_type_key, blob_key], "agent", agent_id)
+            await self._refresh_ttl([dump_type_key, blob_key], self._entity_name, entity_id)
 
-    async def clear(self, agent_id: str, session_id: str):
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
-        )
-        # Use batch_delete for multiple keys
+    async def clear(self, entity_id: str, session_id: str):
+        dump_type_key, blob_key = self._build_state_keys(session_id, entity_id)
         deleted = await self._redis_store.batch_delete([dump_type_key, blob_key])
-        logger.debug(f"Cleared {deleted} keys for agent {agent_id}, session {session_id}")
+        logger.debug(f"Cleared {deleted} keys for {self._entity_name} {entity_id}, session {session_id}")
 
     async def exists(self, session: BaseSession) -> bool:
         session_id = session.session_id()
-        agent_id = session.agent_id()
+        entity_id = self._get_entity_id(session)
 
         pipeline = self._redis_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
-        )
+        dump_type_key, blob_key = self._build_state_keys(session_id, entity_id)
         results = await (pipeline
                          .exists(dump_type_key)
                          .exists(blob_key)
@@ -204,90 +222,37 @@ class AgentStorage(BaseRedisStorage):
         # Both keys must exist for the state to be considered existing
         return results[0] == 1 and results[1] == 1
 
-class AgentGroupStorage(BaseRedisStorage):
-    _STATE_BLOBS = "agent_group_state_blobs"
-    _STATE_BLOBS_DUMP_TYPE = "agent_group_state_blobs_dump_type"
-    _KEY_NUMS = 2
 
-    async def save(self, session: BaseSession):
-        state = session.state().get_global(None)
-        session_id = session.session_id()
-        group_id = session.group_id()
+class AgentStorage(BaseSingleStateStorage):
+    _namespace = SESSION_NAMESPACE_AGENT
+    _entity_name = "agent"
+    _state_blobs_key = "agent_state_blobs"
+    _state_dump_type_key = "agent_state_blobs_dump_type"
 
-        state_blob = self._serialize_state(state)
-        if not state_blob:
-            logger.warning(f"Failed to serialize state for agent group {group_id}, session {session_id}")
-            return
+    def _get_entity_id(self, session: BaseSession) -> str:
+        return session.agent_id()
 
-        dump_type, blob = state_blob
-        pipeline = self._redis_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
-        )
-        await (pipeline
-               .set(dump_type_key, dump_type, self._ttl_seconds)
-               .set(blob_key, blob, self._ttl_seconds)
-               .execute())
+    def _get_state_to_save(self, session: BaseSession) -> Any:
+        return session.state().get_state()
 
-    async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
-        session_id = session.session_id()
-        group_id = session.group_id()
+    def _restore_state(self, session: BaseSession, state: Any) -> None:
+        session.state().set_state(state)
 
-        pipeline = self._redis_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
-        )
-        results = await (pipeline
-                         .get(dump_type_key)
-                         .get(blob_key)
-                         .execute())
 
-        if len(results) != self._KEY_NUMS:
-            return
+class AgentGroupStorage(BaseSingleStateStorage):
+    _namespace = SESSION_NAMESPACE_AGENT_GROUP
+    _entity_name = "agent_group"
+    _state_blobs_key = "agent_group_state_blobs"
+    _state_dump_type_key = "agent_group_state_blobs_dump_type"
 
-        dump_type, blob = results[0], results[1]
-        state = self._deserialize_state(dump_type, blob)
-        if state is None:
-            return
+    def _get_entity_id(self, session: BaseSession) -> str:
+        return session.group_id()
 
+    def _get_state_to_save(self, session: BaseSession) -> Any:
+        return session.state().get_global(None)
+
+    def _restore_state(self, session: BaseSession, state: Any) -> None:
         session.state().global_state.set_state(state)
-        await self._refresh_ttl([dump_type_key, blob_key], "agent_group", group_id)
-
-    async def clear(self, group_id: str, session_id: str):
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
-        )
-        await self._redis_store.batch_delete([dump_type_key, blob_key])
-
-    async def exists(self, session: BaseSession) -> bool:
-        session_id = session.session_id()
-        group_id = session.group_id()
-
-        pipeline = self._redis_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
-        )
-        results = await (pipeline
-                         .exists(dump_type_key)
-                         .exists(blob_key)
-                         .execute())
-
-        if len(results) != self._KEY_NUMS:
-            return False
-
-        return results[0] == 1 and results[1] == 1
 
 
 class WorkflowStorage(BaseRedisStorage):

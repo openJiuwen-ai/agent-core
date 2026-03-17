@@ -9,7 +9,7 @@ for persistent storage, supporting any KV store implementation (shelve, database
 """
 
 import base64
-from abc import ABC
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import (
     Any,
@@ -111,83 +111,118 @@ class BaseStorage(Storage, ABC):
             return None
 
 
-class AgentStorage(BaseStorage):
-    """Agent state storage using BaseKVStore."""
-
-    _STATE_BLOBS = "agent_state_blobs"
-    _STATE_BLOBS_DUMP_TYPE = "agent_state_blobs_dump_type"
+class BaseSingleStateStorage(BaseStorage, ABC):
     _KEY_NUMS = 2
 
+    @property
+    @abstractmethod
+    def _namespace(self) -> str:
+        ...
+
+    @property
+    @abstractmethod
+    def _entity_label(self) -> str:
+        ...
+
+    @property
+    @abstractmethod
+    def _state_blobs_key(self) -> str:
+        ...
+
+    @property
+    @abstractmethod
+    def _state_dump_type_key(self) -> str:
+        ...
+
+    @abstractmethod
+    def _get_entity_id(self, session: BaseSession) -> str:
+        ...
+
+    @abstractmethod
+    def _get_state_to_save(self, session: BaseSession) -> Any:
+        ...
+
+    @abstractmethod
+    def _restore_state(self, session: BaseSession, state: Any) -> None:
+        ...
+
+    def _build_state_keys(self, session_id: str, entity_id: str) -> tuple[str, str]:
+        dump_type_key = build_key_with_namespace(
+            session_id, self._namespace, entity_id, self._state_dump_type_key
+        )
+        blob_key = build_key_with_namespace(
+            session_id, self._namespace, entity_id, self._state_blobs_key
+        )
+        return dump_type_key, blob_key
+
+    def _entity_log_extra(self, entity_id: str) -> dict[str, str]:
+        if self._entity_label == "agent":
+            return {"agent_id": entity_id}
+        return {"workflow_id": entity_id}
+
+    def _log_kwargs(self, session_id: str, entity_id: str, operation: str) -> dict[str, Any]:
+        log_kwargs = {
+            "event_type": LogEventType.CHECKPOINT_ERROR,
+            "session_id": session_id,
+            "metadata": {"operation": operation, "storage_type": "persistence"},
+        }
+        log_kwargs.update(self._entity_log_extra(entity_id))
+        return log_kwargs
+
     async def save(self, session: BaseSession):
-        """Save agent state to KV store."""
-        state = session.state().get_state()
+        """Save state to KV store."""
+        state = self._get_state_to_save(session)
         session_id = session.session_id()
-        agent_id = session.agent_id()
+        entity_id = self._get_entity_id(session)
 
         state_blob = self._serialize_state(state)
         if not state_blob:
             session_logger.warning(
-                "Failed to serialize agent state",
-                event_type=LogEventType.CHECKPOINT_ERROR,
-                session_id=session_id,
-                agent_id=agent_id,
-                metadata={"operation": "serialize"}
+                f"Failed to serialize {self._entity_label} state",
+                **self._log_kwargs(session_id, entity_id, "serialize"),
             )
             return
 
         try:
             dump_type, blob = state_blob
             pipeline = self._kv_store.pipeline()
-            dump_type_key = build_key_with_namespace(
-                session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS_DUMP_TYPE
-            )
-            blob_key = build_key_with_namespace(
-                session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
-            )
+            dump_type_key, blob_key = self._build_state_keys(session_id, entity_id)
             await pipeline.set(dump_type_key, dump_type)
             await pipeline.set(blob_key, blob)
             await pipeline.execute()
             session_logger.debug(
-                "Agent state saved successfully",
+                f"{self._entity_label.capitalize()} state saved successfully",
                 event_type=LogEventType.CHECKPOINT_SAVE,
                 session_id=session_id,
-                agent_id=agent_id,
-                metadata={"storage_type": "persistence"}
+                metadata={"storage_type": "persistence"},
+                **self._entity_log_extra(entity_id),
             )
         except Exception as e:
             session_logger.error(
-                "Failed to save agent state",
-                event_type=LogEventType.CHECKPOINT_ERROR,
-                session_id=session_id,
-                agent_id=agent_id,
+                f"Failed to save {self._entity_label} state",
                 error_message=str(e),
-                metadata={"operation": "save", "storage_type": "persistence"}
+                **self._log_kwargs(session_id, entity_id, "save"),
             )
             raise
 
     async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
-        """Recover agent state from KV store."""
+        """Recover state from KV store."""
         session_id = session.session_id()
-        agent_id = session.agent_id()
+        entity_id = self._get_entity_id(session)
 
         pipeline = self._kv_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
-        )
+        dump_type_key, blob_key = self._build_state_keys(session_id, entity_id)
         await pipeline.get(dump_type_key)
         await pipeline.get(blob_key)
         results = await pipeline.execute()
 
         if len(results) != self._KEY_NUMS:
             session_logger.debug(
-                "Unexpected key count during agent state recovery",
+                f"Unexpected key count during {self._entity_label} state recovery",
                 event_type=LogEventType.CHECKPOINT_RESTORE,
                 session_id=session_id,
-                agent_id=agent_id,
-                metadata={"expected_keys": self._KEY_NUMS, "actual_keys": len(results)}
+                metadata={"expected_keys": self._KEY_NUMS, "actual_keys": len(results)},
+                **self._entity_log_extra(entity_id),
             )
             return
 
@@ -195,64 +230,50 @@ class AgentStorage(BaseStorage):
         state = self._deserialize_state(dump_type, blob)
         if state is None:
             session_logger.debug(
-                "No agent state found",
+                f"No {self._entity_label} state found",
                 event_type=LogEventType.CHECKPOINT_RESTORE,
                 session_id=session_id,
-                agent_id=agent_id,
-                metadata={"storage_type": "persistence"}
+                metadata={"storage_type": "persistence"},
+                **self._entity_log_extra(entity_id),
             )
             return
 
         try:
-            session.state().set_state(state)
+            self._restore_state(session, state)
             session_logger.debug(
-                "Agent state recovered successfully",
+                f"{self._entity_label.capitalize()} state recovered successfully",
                 event_type=LogEventType.CHECKPOINT_RESTORE,
                 session_id=session_id,
-                agent_id=agent_id,
-                metadata={"storage_type": "persistence"}
+                metadata={"storage_type": "persistence"},
+                **self._entity_log_extra(entity_id),
             )
         except Exception as e:
             session_logger.error(
-                "Failed to set agent state",
-                event_type=LogEventType.CHECKPOINT_ERROR,
-                session_id=session_id,
-                agent_id=agent_id,
+                f"Failed to set {self._entity_label} state",
                 error_message=str(e),
-                metadata={"operation": "set_state"}
+                **self._log_kwargs(session_id, entity_id, "set_state"),
             )
             raise
 
-    async def clear(self, agent_id: str, session_id: str):
-        """Clear agent state from KV store."""
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
-        )
-        # Use batch_delete for multiple keys
+    async def clear(self, entity_id: str, session_id: str):
+        """Clear state from KV store."""
+        dump_type_key, blob_key = self._build_state_keys(session_id, entity_id)
         deleted = await self._kv_store.batch_delete([dump_type_key, blob_key])
         session_logger.debug(
-            "Agent checkpoint cleared",
+            f"{self._entity_label.capitalize()} checkpoint cleared",
             event_type=LogEventType.CHECKPOINT_CLEAR,
             session_id=session_id,
-            agent_id=agent_id,
+            **self._entity_log_extra(entity_id),
             metadata={"deleted_keys": deleted, "storage_type": "persistence"}
         )
 
     async def exists(self, session: BaseSession) -> bool:
-        """Check if agent state exists in KV store."""
+        """Check if state exists in KV store."""
         session_id = session.session_id()
-        agent_id = session.agent_id()
+        entity_id = self._get_entity_id(session)
 
         pipeline = self._kv_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT, agent_id, self._STATE_BLOBS
-        )
+        dump_type_key, blob_key = self._build_state_keys(session_id, entity_id)
         await pipeline.exists(dump_type_key)
         await pipeline.exists(blob_key)
         results = await pipeline.execute()
@@ -263,93 +284,41 @@ class AgentStorage(BaseStorage):
         # Both keys must exist for the state to be considered existing
         return results[0] is True and results[1] is True
 
-class AgentGroupStorage(BaseStorage):
+
+class AgentStorage(BaseSingleStateStorage):
+    """Agent state storage using BaseKVStore."""
+
+    _namespace = SESSION_NAMESPACE_AGENT
+    _entity_label = "agent"
+    _state_blobs_key = "agent_state_blobs"
+    _state_dump_type_key = "agent_state_blobs_dump_type"
+
+    def _get_entity_id(self, session: BaseSession) -> str:
+        return session.agent_id()
+
+    def _get_state_to_save(self, session: BaseSession) -> Any:
+        return session.state().get_state()
+
+    def _restore_state(self, session: BaseSession, state: Any) -> None:
+        session.state().set_state(state)
+
+
+class AgentGroupStorage(BaseSingleStateStorage):
     """Agent group global state storage using BaseKVStore."""
 
-    _STATE_BLOBS = "agent_group_state_blobs"
-    _STATE_BLOBS_DUMP_TYPE = "agent_group_state_blobs_dump_type"
-    _KEY_NUMS = 2
+    _namespace = SESSION_NAMESPACE_AGENT_GROUP
+    _entity_label = "agent_group"
+    _state_blobs_key = "agent_group_state_blobs"
+    _state_dump_type_key = "agent_group_state_blobs_dump_type"
 
-    async def save(self, session: BaseSession):
-        state = session.state().get_global(None)
-        session_id = session.session_id()
-        group_id = session.group_id()
+    def _get_entity_id(self, session: BaseSession) -> str:
+        return session.group_id()
 
-        state_blob = self._serialize_state(state)
-        if not state_blob:
-            session_logger.warning(
-                "Failed to serialize agent group state",
-                event_type=LogEventType.CHECKPOINT_ERROR,
-                session_id=session_id,
-                workflow_id=group_id,
-                metadata={"operation": "serialize"}
-            )
-            return
+    def _get_state_to_save(self, session: BaseSession) -> Any:
+        return session.state().get_global(None)
 
-        dump_type, blob = state_blob
-        pipeline = self._kv_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
-        )
-        await pipeline.set(dump_type_key, dump_type)
-        await pipeline.set(blob_key, blob)
-        await pipeline.execute()
-
-    async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
-        session_id = session.session_id()
-        group_id = session.group_id()
-
-        pipeline = self._kv_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
-        )
-        await pipeline.get(dump_type_key)
-        await pipeline.get(blob_key)
-        results = await pipeline.execute()
-
-        if len(results) != self._KEY_NUMS:
-            return
-
-        dump_type, blob = results[0], results[1]
-        state = self._deserialize_state(dump_type, blob)
-        if state is None:
-            return
+    def _restore_state(self, session: BaseSession, state: Any) -> None:
         session.state().global_state.set_state(state)
-
-    async def clear(self, group_id: str, session_id: str):
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
-        )
-        await self._kv_store.batch_delete([dump_type_key, blob_key])
-
-    async def exists(self, session: BaseSession) -> bool:
-        session_id = session.session_id()
-        group_id = session.group_id()
-
-        pipeline = self._kv_store.pipeline()
-        dump_type_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
-        )
-        blob_key = build_key_with_namespace(
-            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
-        )
-        await pipeline.exists(dump_type_key)
-        await pipeline.exists(blob_key)
-        results = await pipeline.execute()
-
-        if len(results) != self._KEY_NUMS:
-            return False
-
-        return results[0] is True and results[1] is True
 
 
 class WorkflowStorage(BaseStorage):
