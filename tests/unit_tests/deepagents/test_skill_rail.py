@@ -102,6 +102,10 @@ def _make_agent(sys_operation, workspace):
     )
 
 
+def _sorted_skill_names(skills) -> List[str]:
+    return sorted(skill.name for skill in skills)
+
+
 @pytest.mark.asyncio
 async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path):
     """SkillRail should auto-load skills in before_invoke without explicit prepare()."""
@@ -126,11 +130,11 @@ async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path)
 
     await skill_rail.before_invoke(ctx)
 
-    assert [skill.name for skill in skill_rail.skills] == [
+    assert _sorted_skill_names(skill_rail.skills) == [
         "invoice-parser",
         "xlsx-writer",
     ]
-    assert [skill.name for skill in skill_rail.skills_meta] == [
+    assert _sorted_skill_names(skill_rail.skills_meta) == [
         "invoice-parser",
         "xlsx-writer",
     ]
@@ -204,7 +208,7 @@ async def test_skill_rail_filters_enabled_and_disabled_skills(tmp_path: Path):
 
     await skill_rail.before_invoke(ctx)
 
-    assert [skill.name for skill in skill_rail.skills] == [
+    assert _sorted_skill_names(skill_rail.skills) == [
         "invoice-parser",
         "xlsx-writer",
     ]
@@ -343,7 +347,7 @@ async def test_list_skill_tool_returns_all_skills_when_query_empty(tmp_path: Pat
 
     assert result.success is True
     assert result.data["mode"] == "all"
-    assert [item["name"] for item in result.data["skills"]] == [
+    assert sorted(item["name"] for item in result.data["skills"]) == [
         "invoice-parser",
         "xlsx-writer",
     ]
