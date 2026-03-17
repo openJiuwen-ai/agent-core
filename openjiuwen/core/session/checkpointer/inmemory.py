@@ -1,5 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from abc import ABC, abstractmethod
+
 from pymilvus.client.utils import is_successful
 
 from openjiuwen.core.common.constants.constant import INTERACTIVE_INPUT
@@ -384,35 +386,57 @@ class InMemoryCheckpointer(Checkpointer):
         return self._graph_store
 
 
-class AgentStorage(Storage):
+class BaseSingleStateStorage(Storage, ABC):
     def __init__(self):
         self.state_blobs: dict[
             str,
             tuple[str, bytes],
         ] = {}
-
         self.serde: Serializer = create_serializer("pickle")
 
+    @abstractmethod
+    def _get_entity_id(self, session: BaseSession) -> str:
+        ...
+
+    @abstractmethod
+    def _get_state_to_save(self, session: BaseSession):
+        ...
+
+    @abstractmethod
+    def _restore_state(self, session: BaseSession, state) -> None:
+        ...
+
     async def save(self, session: BaseSession):
-        agent_id = session.agent_id()
-        state = session.state().get_state()
+        entity_id = self._get_entity_id(session)
+        state = self._get_state_to_save(session)
         state_blob = self.serde.dumps_typed(state)
         if state_blob:
-            self.state_blobs[agent_id] = state_blob
+            self.state_blobs[entity_id] = state_blob
 
     async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
-        agent_id = session.agent_id()
-        state_blob = self.state_blobs.get(agent_id)
+        entity_id = self._get_entity_id(session)
+        state_blob = self.state_blobs.get(entity_id)
         if state_blob is None:
             return
         state = self.serde.loads_typed(state_blob)
-        session.state().set_state(state)
+        self._restore_state(session, state)
 
-    async def clear(self, agent_id: str):
-        self.state_blobs.pop(agent_id, None)
+    async def clear(self, entity_id: str):
+        self.state_blobs.pop(entity_id, None)
 
     async def exists(self, session: BaseSession) -> bool:
-        return self.state_blobs.get(session.agent_id()) is not None
+        return self.state_blobs.get(self._get_entity_id(session)) is not None
+
+
+class AgentStorage(BaseSingleStateStorage):
+    def _get_entity_id(self, session: BaseSession) -> str:
+        return session.agent_id()
+
+    def _get_state_to_save(self, session: BaseSession):
+        return session.state().get_state()
+
+    def _restore_state(self, session: BaseSession, state) -> None:
+        session.state().set_state(state)
 
 
 class WorkflowStorage(Storage):
@@ -478,28 +502,12 @@ class WorkflowStorage(Storage):
         return False
 
 
-class AgentGroupStorage(Storage):
-    def __init__(self):
-        self.state_blobs: dict[str, tuple[str, bytes]] = {}
-        self.serde: Serializer = create_serializer("pickle")
+class AgentGroupStorage(BaseSingleStateStorage):
+    def _get_entity_id(self, session: BaseSession) -> str:
+        return session.group_id()
 
-    async def save(self, session: BaseSession):
-        group_id = session.group_id()
-        state = session.state().get_global(None)
-        state_blob = self.serde.dumps_typed(state)
-        if state_blob:
-            self.state_blobs[group_id] = state_blob
+    def _get_state_to_save(self, session: BaseSession):
+        return session.state().get_global(None)
 
-    async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
-        group_id = session.group_id()
-        state_blob = self.state_blobs.get(group_id)
-        if state_blob is None:
-            return
-        state = self.serde.loads_typed(state_blob)
+    def _restore_state(self, session: BaseSession, state) -> None:
         session.state().global_state.set_state(state)
-
-    async def clear(self, group_id: str):
-        self.state_blobs.pop(group_id, None)
-
-    async def exists(self, session: BaseSession) -> bool:
-        return self.state_blobs.get(session.group_id()) is not None
