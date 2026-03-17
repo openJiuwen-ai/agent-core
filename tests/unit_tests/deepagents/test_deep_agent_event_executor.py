@@ -101,6 +101,7 @@ class FakeReactAgent:
         self,
         inputs: Dict[str, Any],
         session: Any = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         self.invoke_calls.append(inputs)
         if self._fail:

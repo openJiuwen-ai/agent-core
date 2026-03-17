@@ -16,6 +16,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentRail,
 )
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents import create_deep_agent
@@ -65,6 +66,7 @@ class FakeReactAgent:
         self,
         inputs: Dict[str, Any],
         session: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         self.invoke_calls.append({"inputs": inputs, "session": session})
         return {
@@ -266,23 +268,32 @@ async def test_stream_single_round_branch() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_task_loop_yields_result() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=True)
-    )
-    fake_react = FakeReactAgent()
-    agent.set_react_agent(fake_react, initialized=True)
+    await Runner.start()
+    try:
+        agent = DeepAgent(
+            AgentCard(name="deep", description="test")
+        ).configure(
+            DeepAgentConfig(enable_task_loop=True)
+        )
+        fake_react = FakeReactAgent()
+        agent.set_react_agent(fake_react, initialized=True)
 
-    session = Session(session_id="s1")
-    chunks = []
-    async for chunk in agent.stream(
-        "loop_input", session=session
-    ):
-        chunks.append(chunk)
+        chunks = []
+        async for chunk in Runner.run_agent_streaming(
+            agent, {"query": "loop_input"}
+        ):
+            chunks.append(chunk)
 
-    assert len(chunks) >= 1
-    assert chunks[0]["output"] == "echo:loop_input"
+        from openjiuwen.core.session.stream.base import OutputSchema
+        assert len(chunks) >= 1
+        # Chunks should be OutputSchema instances (token-level streaming)
+        assert isinstance(chunks[-1], OutputSchema)
+        # Last chunk should be an answer with the round result
+        answer_chunks = [c for c in chunks if c.type == "answer"]
+        assert len(answer_chunks) >= 1
+        assert answer_chunks[0].payload["output"] == "echo:loop_input"
+    finally:
+        await Runner.stop()
 
 
 @pytest.mark.asyncio

@@ -479,7 +479,17 @@ class DeepAgent(BaseAgent):
         session: Optional[Session],
         stream_modes: Optional[List[StreamMode]],
     ) -> AsyncIterator[Any]:
-        """Stream the outer task loop, yield each result.
+        """Stream the outer task loop with per-token chunks.
+
+        Uses the same coroutine pattern as ReActAgent.stream():
+        background task runs _run_task_loop (which triggers
+        invoke with _streaming=True), foreground reads from
+        session.stream_iterator().
+
+        Session lifecycle (pre_run/post_run) is managed by the
+        caller (Runner or direct caller), not by this method.
+        Only the stream emitter is closed here to send END_FRAME
+        and unblock stream_iterator().
 
         Args:
             ctx: Callback context with InvokeInputs.
@@ -487,7 +497,7 @@ class DeepAgent(BaseAgent):
             stream_modes: Stream mode filters.
 
         Yields:
-            Chunks from the task loop execution.
+            OutputSchema chunks (llm_reasoning / llm_output / answer).
         """
         _ = stream_modes
         if session is None:
@@ -499,10 +509,42 @@ class DeepAgent(BaseAgent):
                 ),
             )
 
-        async for result in self._run_task_loop(
-            ctx, session
-        ):
-            yield result
+        import asyncio
+
+        async def _stream_process() -> None:
+            try:
+                async for result in self._run_task_loop(ctx, session):
+                    await self._write_round_result_to_stream(result, session)
+            except Exception as e:
+                logger.error(f"Task loop stream error: {e}")
+            finally:
+                # Only close the stream emitter to send END_FRAME,
+                # so stream_iterator() can terminate.
+                # Full session cleanup (post_run) is left to the caller.
+                await session.close_stream()
+
+        task = asyncio.create_task(_stream_process())
+
+        async for chunk in session.stream_iterator():
+            yield chunk
+
+        await task
+
+    @staticmethod
+    async def _write_round_result_to_stream(
+        result: Dict[str, Any],
+        session: Session,
+    ) -> None:
+        """Write a task-loop round result as an answer chunk."""
+        from openjiuwen.core.session.stream.base import OutputSchema
+        await session.write_stream(OutputSchema(
+            type="answer",
+            index=0,
+            payload={
+                "output": result.get("output", ""),
+                "result_type": result.get("result_type", ""),
+            },
+        ))
 
     async def _run_single_round_stream(
         self,

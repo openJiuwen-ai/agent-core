@@ -80,6 +80,15 @@ class Session:
         await CheckpointerFactory.get_checkpointer().pre_agent_execute(self._inner, inputs)
         self._pre_run_done = True
 
+    async def close_stream(self):
+        """Close the stream emitter to send END_FRAME.
+
+        This unblocks stream_iterator() without triggering
+        full session cleanup (checkpointer). Use this when
+        the caller (e.g. Runner) manages the session lifecycle.
+        """
+        await self._inner.stream_writer_manager().stream_emitter().close()
+
     async def post_run(self):
         if self._post_run_done:
             return

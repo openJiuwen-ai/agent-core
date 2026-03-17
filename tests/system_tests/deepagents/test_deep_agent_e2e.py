@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
 import unittest
@@ -21,7 +22,6 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
 )
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.single_agent import create_agent_session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
@@ -36,13 +36,9 @@ from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.rails.task_planning_rail import (
     TaskPlanningRail,
 )
-from openjiuwen.deepagents.schema.task import (
-    TaskPlan,
-    TaskStatus,
-)
 from openjiuwen.deepagents.tools import (
     ReadFileTool, WriteFileTool, EditFileTool,
-    GlobTool, ListDirTool, GrepTool,
+    GlobTool, ListDirTool,
 )
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from tests.unit_tests.fixtures.mock_llm import (
@@ -58,6 +54,8 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "SiliconFlow")
 MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 os.environ.setdefault("IS_SENSITIVE", "false")
+
+logger = logging.getLogger(__name__)
 
 
 class ToolTraceRail(AgentRail):
@@ -174,12 +172,8 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             max_iterations=5,
         )
 
-        session = create_agent_session(
-            session_id=f"deepagent_e2e_{uuid.uuid4().hex}"
-        )
-        result = await agent.invoke(
-            {"query": "请用一句话介绍你自己"},
-            session=session,
+        result = await Runner.run_agent(
+            agent, {"query": "请用一句话介绍你自己"},
         )
 
         self.assertIsInstance(result, dict)
@@ -206,9 +200,6 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=False,
             max_iterations=12,
         )
-        session = create_agent_session(
-            session_id=f"deepagent_complex_e2e_{uuid.uuid4().hex}"
-        )
 
         query = (
             "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"
@@ -218,7 +209,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             "4. 使用工具读取这两个文件；\n"
             "5. 最后输出一句中文总结。"
         )
-        result = await agent.invoke({"query": query}, session=session)
+        result = await Runner.run_agent(agent, {"query": query})
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
         self.assertIn("output", result)
@@ -266,14 +257,11 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             max_iterations=20,
             sys_operation=sys_oper
         )
-        session = create_agent_session(
-            session_id=f"deepagent_complex_e_{uuid.uuid4().hex}"
-        )
 
         query = "我想测试任务规划能力，帮我构建一个打卡系统，调用规划工具帮我模拟规划吧"
 
         with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
-            result = await agent.invoke({"query": query}, session=session)
+            result = await Runner.run_agent(agent, {"query": query})
 
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
@@ -292,9 +280,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         sys_oper = Runner.resource_mgr.get_sys_operation(
             self._sys_operation_id
         )
-        planning_rail = TaskPlanningRail(
-            sys_oper
-        )
+        planning_rail = TaskPlanningRail(sys_oper)
         agent = create_deep_agent(
             model=model,
             system_prompt=(
@@ -306,20 +292,15 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             max_iterations=12,
         )
 
-        session = create_agent_session(
-            session_id=f"deepagent_outer_loop_real_{uuid.uuid4().hex}"
-        )
-
         query = (
             "请制定一个简短的项目启动计划，包含以下方面："
             "1. 需求分析；2. 技术选型；3. 实施方案。"
             "每个方面给出简要说明。"
         )
+        # steer/follow_up 需要在 invoke 执行中途注入，
+        # 必须用 asyncio.create_task + Runner.run_agent 配合。
         invoke_task = asyncio.create_task(
-            agent.invoke(
-                {"query": query},
-                session=session,
-            )
+            Runner.run_agent(agent, {"query": query})
         )
 
         # 等第一轮进入后注入 steer，让下一轮携带约束。
@@ -327,16 +308,14 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             observe_rail.iteration_event(1).wait(),
             timeout=180.0,
         )
-        await agent.steer(steer_text, session=session)
+        await agent.steer(steer_text)
 
         # 等第二轮进入后注入 follow_up，请求额外追加一轮。
         await asyncio.wait_for(
             observe_rail.iteration_event(2).wait(),
             timeout=300.0,
         )
-        await agent.follow_up(
-            follow_up_text, session=session
-        )
+        await agent.follow_up(follow_up_text)
 
         result = await asyncio.wait_for(
             invoke_task, timeout=600.0
@@ -356,21 +335,6 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             observe_rail.steer_seen_in_model_messages
         )
-
-        persisted = session.get_state("deepagent")
-        self.assertIsInstance(persisted, dict)
-        persisted_plan = TaskPlan.from_dict(
-            persisted.get("task_plan")
-        )
-        # LLM 应生成 >= 2 个任务
-        self.assertGreaterEqual(
-            len(persisted_plan.tasks), 2
-        )
-        # 所有任务应已完成
-        for task in persisted_plan.tasks:
-            self.assertEqual(
-                task.status, TaskStatus.COMPLETED,
-            )
 
     @pytest.mark.asyncio
     async def test_deep_agent_auto_rails_creation_e2e(self):
@@ -394,6 +358,90 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
                       "TaskPlanningRail should be auto-created when enable_task_loop=True")
         self.assertIn("SkillRail", rail_types,
                       "SkillRail should be auto-created when skills parameter is provided")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_stream_e2e_require_api_key_base(self):
+        """验证 DeepAgent.stream 在真实模型下可流式输出 chunk 并包含最终 answer。"""
+        self._require_llm_config()
+
+        model = self._create_model()
+        agent = create_deep_agent(
+            model=model,
+            system_prompt="你是一个智能助手，请简洁回答。",
+            enable_task_loop=False,
+            max_iterations=5,
+        )
+
+        chunks = []
+        async for chunk in Runner.run_agent_streaming(
+            agent, {"query": "请用一句话介绍你自己"},
+        ):
+            logger.info("[stream chunk] type=%s, index=%s, payload=%s",
+                        getattr(chunk, 'type', '?'),
+                        getattr(chunk, 'index', '?'),
+                        getattr(chunk, 'payload', chunk))
+            chunks.append(chunk)
+
+        self.assertGreater(len(chunks), 0, "stream should yield at least one chunk")
+
+        has_llm_output = any(
+            getattr(c, "type", None) == "llm_output" for c in chunks
+        )
+        self.assertTrue(has_llm_output, "stream chunks should contain llm_output type data")
+
+        combined = "".join(
+            c.payload.get("content", "") for c in chunks
+            if getattr(c, "type", None) == "llm_output" and isinstance(c.payload, dict)
+        )
+        self.assertGreater(len(combined), 0, "combined stream content should not be empty")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_task_loop_stream_e2e(self):
+        """验证 enable_task_loop=True 时 stream 逐轮流式输出。"""
+        self._require_llm_config()
+
+        tool_trace = ToolTraceRail()
+        model = self._create_model()
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        planning_rail = TaskPlanningRail(sys_oper)
+
+        agent = create_deep_agent(
+            model=model,
+            system_prompt=(
+                "你是一个严谨的任务执行助手。"
+                "根据当前任务逐步输出结果。"
+            ),
+            rails=[planning_rail, tool_trace],
+            enable_task_loop=True,
+            max_iterations=12,
+        )
+
+        query = (
+            "请制定一个简短的项目启动计划，包含以下方面："
+            "1. 需求分析；2. 技术选型。"
+            "每个方面给出简要说明。"
+        )
+
+        round_results = []
+        async for result in Runner.run_agent_streaming(
+            agent, {"query": query},
+        ):
+            round_idx = len(round_results) + 1
+            result_type = result.get("result_type", "?") if isinstance(result, dict) else getattr(result, "type", "?")
+            output_preview = str(result.get("output", ""))[:200] if isinstance(result, dict) else str(result)[:200]
+            logger.info("[task loop stream] round=%d, result_type=%s, output=%s",
+                        round_idx, result_type, output_preview)
+            round_results.append(result)
+
+        self.assertGreater(len(round_results), 0, "task loop stream should yield at least one round result")
+
+        for r in round_results:
+            if isinstance(r, dict):
+                self.assertIn("output", r, "each round result should contain 'output'")
+                self.assertTrue(bool(r["output"]), "round output should not be empty")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

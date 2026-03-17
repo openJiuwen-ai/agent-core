@@ -44,6 +44,7 @@ class ControlledReactAgent:
         self,
         inputs: Dict[str, Any],
         session: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         call_no = len(self.invoke_calls) + 1
         self.invoke_calls.append(
@@ -179,4 +180,3 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
-
