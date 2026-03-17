@@ -158,8 +158,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             )
 
     def _get_fs_rail(self):
-        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
-        return FileSystemRail(operation=sys_oper)
+        return FileSystemRail()
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -242,8 +241,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
     async def test_deep_agent_task_planning(self):
         """复杂任务：agent的规划能力"""
         sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
-        task_planning = TaskPlanningRail(sys_oper)
-
+        task_planning = TaskPlanningRail()
         mock_llm = MockLLMModel()
         mock_llm.set_responses([
             create_tool_call_response(
@@ -265,7 +263,8 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             model=self._create_model(),
             rails=[task_planning],
             enable_task_loop=False,
-            max_iterations=20
+            max_iterations=20,
+            sys_operation=sys_oper
         )
         session = create_agent_session(
             session_id=f"deepagent_complex_e_{uuid.uuid4().hex}"
@@ -373,6 +372,28 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
                 task.status, TaskStatus.COMPLETED,
             )
 
+    @pytest.mark.asyncio
+    async def test_deep_agent_auto_rails_creation_e2e(self):
+        """Test automatic creation of TaskPlanningRail and SkillRail."""
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+
+        skills = ["name", "test_skill", "description", "test"]
+        agent = create_deep_agent(
+            model=self._create_model(),
+            enable_task_loop=True,
+            skills=skills,
+            sys_operation=sys_oper,
+            max_iterations=10,
+        )
+
+        pending_rails = agent._pending_rails
+
+        rail_types = [type(rail).__name__ for rail in pending_rails if rail is not None]
+
+        self.assertIn("TaskPlanningRail", rail_types,
+                      "TaskPlanningRail should be auto-created when enable_task_loop=True")
+        self.assertIn("SkillRail", rail_types,
+                      "SkillRail should be auto-created when skills parameter is provided")
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

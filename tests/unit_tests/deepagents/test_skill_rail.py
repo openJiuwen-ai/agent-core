@@ -19,6 +19,7 @@ from openjiuwen.core.sys_operation import (
     OperationMode,
     SysOperationCard,
 )
+from openjiuwen.deepagents import Workspace
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.rails.skill_rail import SkillRail
 from openjiuwen.deepagents.tools.list_skill import ListSkillTool
@@ -81,7 +82,7 @@ def _make_sys_operation(tmp_path: Path):
     return Runner.resource_mgr.get_sys_operation(card.id)
 
 
-def _make_agent():
+def _make_agent(sys_operation, workspace):
     """Create a DeepAgent for tests."""
     model = init_model(
         provider="OpenAI",
@@ -96,6 +97,8 @@ def _make_agent():
         system_prompt="You are a test assistant.",
         max_iterations=3,
         enable_task_loop=False,
+        workspace=workspace,
+        sys_operation=sys_operation
     )
 
 
@@ -111,7 +114,6 @@ async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path)
     sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="all",
         include_tools=True,
     )
@@ -146,11 +148,11 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="all",
         include_tools=True,
     )
-
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
     ctx = AgentCallbackContext(
         agent=None,
         inputs=ModelCallInputs(
@@ -188,7 +190,6 @@ async def test_skill_rail_filters_enabled_and_disabled_skills(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="all",
         enabled_skills="invoice-parser,xlsx-writer,legacy-skill",
         disabled_skills="legacy-skill",
@@ -222,11 +223,10 @@ async def test_skill_rail_register_rail_auto_list_registers_list_skill_tool(tmp_
     routing_model = _DummyModel(
         content='{"skills": ["invoice-parser"]}'
     )
-    agent = _make_agent()
+    agent = _make_agent(sys_operation, skills_root)
 
     skill_rail = SkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="auto_list",
         list_skill_model=routing_model,
         include_tools=True,
@@ -257,7 +257,6 @@ async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path
     sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="auto_list",
         include_tools=True,
     )
@@ -294,7 +293,6 @@ async def test_list_skill_tool_reads_latest_skills_from_skill_rail(tmp_path: Pat
     )
     skill_rail = SkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="auto_list",
         list_skill_model=routing_model,
         include_tools=True,
@@ -329,7 +327,6 @@ async def test_list_skill_tool_returns_all_skills_when_query_empty(tmp_path: Pat
     sys_operation = _make_sys_operation(tmp_path)
     skill_rail = SkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="auto_list",
         include_tools=True,
     )
@@ -364,10 +361,11 @@ async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     skill_rail = _TrackingSkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="all",
         include_tools=False,
     )
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
 
     ctx1 = AgentCallbackContext(
         agent=None,
@@ -399,10 +397,11 @@ async def test_skill_rail_only_loads_new_skill_on_incremental_refresh(tmp_path: 
     sys_operation = _make_sys_operation(tmp_path)
     skill_rail = _TrackingSkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="all",
         include_tools=False,
     )
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
 
     ctx1 = AgentCallbackContext(
         agent=None,
@@ -436,11 +435,11 @@ async def test_skill_rail_reload_updated_skill_by_update_at(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     skill_rail = _TrackingSkillRail(
         skills_dir=str(skills_root),
-        operation=sys_operation,
         skill_mode="all",
         include_tools=False,
     )
-
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
     ctx1 = AgentCallbackContext(
         agent=None,
         inputs=ModelCallInputs(messages=[SystemMessage(content="x")], tools=[]),

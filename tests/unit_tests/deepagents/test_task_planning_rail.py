@@ -57,9 +57,9 @@ def _make_operation():
 def _make_rail() -> TaskPlanningRail:
     """Build a TaskPlanningRail with test defaults."""
     op = _make_operation()
-    return TaskPlanningRail(
-        operation=op,
-    )
+    tpr = TaskPlanningRail()
+    tpr.set_sys_operation(op)
+    return tpr
 
 
 def _make_agent(workspace: str = None) -> DeepAgent:

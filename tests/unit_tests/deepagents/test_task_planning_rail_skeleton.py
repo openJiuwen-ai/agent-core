@@ -28,7 +28,7 @@ async def test_task_planning_rail_lifecycle_hooks_noop() -> None:
     card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL)
     Runner.resource_mgr.add_sys_operation(card)
     op = Runner.resource_mgr.get_sys_operation(card.id)
-    rail = TaskPlanningRail(operation=op)
+    rail = TaskPlanningRail()
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     )

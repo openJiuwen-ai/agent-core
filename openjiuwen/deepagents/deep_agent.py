@@ -23,6 +23,7 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.deepagents.rails import DeepAgentRail
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.context_engine import ContextEngine
@@ -205,6 +206,9 @@ class DeepAgent(BaseAgent):
             return
 
         for rail_inst in self._pending_rails:
+            if isinstance(rail_inst, DeepAgentRail):
+                rail_inst.set_sys_operation(self._deep_config.sys_operation)
+                rail_inst.set_workspace(self._deep_config.workspace)
             rail_inst.init(self)
             await self._register_rail_selective(rail_inst)
         self._pending_rails.clear()
@@ -241,6 +245,9 @@ class DeepAgent(BaseAgent):
 
     async def register_rail(self, rail: AgentRail) -> "DeepAgent":
         """Register a rail with selective routing."""
+        if isinstance(rail, DeepAgentRail):
+            rail.set_sys_operation(self.deep_config.sys_operation)
+            rail.set_workspace(self.deep_config.workspace)
         rail.init(self)
         await self._register_rail_selective(rail)
         return self

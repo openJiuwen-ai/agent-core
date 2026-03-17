@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import pytest
 
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.rail.base import (
@@ -24,12 +25,16 @@ from openjiuwen.deepagents.task_loop.task_loop_event_handler import TaskLoopEven
 from openjiuwen.deepagents.task_loop.loop_coordinator import LoopCoordinator
 
 
-class DummyModel:
-    """Minimal model stub for create_deep_agent unit tests."""
-
-    def __init__(self) -> None:
-        self.model_client_config = None
-        self.model_config = None
+def _create_dummy_model() -> Model:
+    """Create a dummy Model instance for testing."""
+    model_client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="test-key",
+        api_base="http://test-base",
+        verify_ssl=False,
+    )
+    model_config = ModelRequestConfig(model="test-model")
+    return Model(model_client_config=model_client_config, model_config=model_config)
 
 
 
@@ -341,7 +346,7 @@ async def test_create_deep_agent_factory_public_api() -> None:
     subagent = AgentCard(name="subagent_a", description="sub")
 
     agent = create_deep_agent(
-        model=DummyModel(),
+        model=_create_dummy_model(),
         system_prompt="factory prompt",
         tools=[tool],
         subagents=[subagent],
@@ -365,7 +370,69 @@ async def test_create_deep_agent_factory_public_api() -> None:
 
 def test_create_deep_agent_with_custom_card() -> None:
     custom_card = AgentCard(name="custom_deep", description="custom")
-    agent = create_deep_agent(model=DummyModel(), card=custom_card)
+    agent = create_deep_agent(model=_create_dummy_model(), card=custom_card)
 
     assert isinstance(agent, DeepAgent)
     assert agent.card is custom_card
+
+
+def test_create_deep_agent_auto_add_task_planning_rail() -> None:
+    """Test that TaskPlanningRail is auto-added when enable_task_loop=True."""
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        enable_task_loop=True,
+    )
+
+    pending_rails = agent._pending_rails
+    assert len(pending_rails) > 0
+
+    rail_types = [type(rail).__name__ for rail in pending_rails if rail is not None]
+    assert "TaskPlanningRail" in rail_types
+
+
+def test_create_deep_agent_auto_add_skill_rail() -> None:
+    """Test that SkillRail is auto-added when skills parameter is provided."""
+    skills = ["name", "test_skill", "description", "test"]
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        skills=skills,
+    )
+
+    pending_rails = agent._pending_rails
+    assert len(pending_rails) > 0
+
+    rail_types = [type(rail).__name__ for rail in [r for r in pending_rails if r is not None]]
+    assert "SkillRail" in rail_types
+
+
+def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
+    """Test that TaskPlanningRail is not duplicated when manually provided."""
+    from openjiuwen.deepagents.rails import TaskPlanningRail
+
+    manual_rail = TaskPlanningRail()
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        enable_task_loop=True,
+        rails=[manual_rail],
+    )
+
+    pending_rails = agent._pending_rails
+    task_planning_count = sum(1 for rail in pending_rails if isinstance(rail, TaskPlanningRail))
+    assert task_planning_count == 1, f"Expected 1 TaskPlanningRail, but found {task_planning_count}"
+
+
+def test_create_deep_agent_no_duplicate_skill_rail() -> None:
+    """Test that SkillRail is not duplicated when manually provided."""
+    from openjiuwen.deepagents.rails import SkillRail
+
+    manual_rail = SkillRail(skills_dir="./", skill_mode="all")
+    skills = [{"name": "test_skill", "description": "test"}]
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        skills=skills,
+        rails=[manual_rail],
+    )
+
+    pending_rails = agent._pending_rails
+    skill_rail_count = sum(1 for rail in pending_rails if isinstance(rail, SkillRail))
+    assert skill_rail_count == 1, f"Expected 1 SkillRail, but found {skill_rail_count}"
