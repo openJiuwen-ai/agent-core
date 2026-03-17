@@ -959,5 +959,128 @@ class TestTypedEventInputs(
         assert failed_calls == ["mock_call_missing"]
 
 
+class TestForceFinish(
+    unittest.IsolatedAsyncioTestCase
+):
+    """Tests for request_force_finish / consume_force_finish."""
+
+    async def test_before_model_call_force_finish(self):
+        """before_model_call force_finish skips LLM, returns result."""
+        agent, _ = _make_agent()
+        expected = {"output": "forced", "result_type": "answer"}
+
+        class ForceRail(AgentRail):
+            async def before_model_call(self, ctx):
+                ctx.request_force_finish(expected)
+
+        await agent.register_rail(ForceRail())
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_text_response("should not reach"),
+        ])
+        with patch.object(
+            agent, "_get_llm", return_value=mock_llm
+        ):
+            result = await agent.invoke({"query": "test"})
+
+        assert result == expected
+        # LLM should NOT have been called
+        assert mock_llm.call_count == 0
+
+    async def test_after_model_call_force_finish(self):
+        """after_model_call force_finish stops before tool exec."""
+        agent, _ = _make_agent()
+        expected = {"output": "stopped", "result_type": "answer"}
+        tool_executed = {"called": False}
+
+        class ForceRail(AgentRail):
+            async def after_model_call(self, ctx):
+                ctx.request_force_finish(expected)
+
+            async def before_tool_call(self, ctx):
+                tool_executed["called"] = True
+
+        await agent.register_rail(ForceRail())
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response("add", '{"a": 1, "b": 2}'),
+            create_text_response("should not reach"),
+        ])
+        with patch.object(
+            agent, "_get_llm", return_value=mock_llm
+        ):
+            result = await agent.invoke({"query": "test"})
+
+        assert result == expected
+        assert not tool_executed["called"]
+
+    async def test_after_tool_call_force_finish(self):
+        """after_tool_call force_finish breaks loop after tool exec."""
+        agent, _ = _make_agent()
+        expected = {"output": "done_early", "result_type": "answer"}
+
+        class ForceRail(AgentRail):
+            async def after_tool_call(self, ctx):
+                ctx.request_force_finish(expected)
+
+        await agent.register_rail(ForceRail())
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response("add", '{"a": 1, "b": 2}'),
+            create_text_response("should not reach"),
+        ])
+        with patch.object(
+            agent, "_get_llm", return_value=mock_llm
+        ):
+            result = await agent.invoke({"query": "test"})
+
+        assert result == expected
+        # Only one LLM call (the one that returned tool_calls)
+        assert mock_llm.call_count == 1
+
+    async def test_force_finish_result_in_after_invoke(self):
+        """force_finish result is visible in after_invoke via invoke_inputs."""
+        agent, _ = _make_agent()
+        expected = {"output": "forced", "result_type": "answer"}
+        captured_result = []
+
+        class ForceRail(AgentRail):
+            async def before_model_call(self, ctx):
+                ctx.request_force_finish(expected)
+
+            async def after_invoke(self, ctx):
+                captured_result.append(ctx.inputs.result)
+
+        await agent.register_rail(ForceRail())
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_text_response("nope"),
+        ])
+        with patch.object(
+            agent, "_get_llm", return_value=mock_llm
+        ):
+            await agent.invoke({"query": "test"})
+
+        assert len(captured_result) == 1
+        assert captured_result[0] == expected
+
+    async def test_consume_clears_signal(self):
+        """consume_force_finish clears the signal; second call returns None."""
+        agent, _ = _make_agent()
+        ctx = AgentCallbackContext(agent=agent)
+        ctx.request_force_finish({"output": "x"})
+
+        first = ctx.consume_force_finish()
+        assert first is not None
+        assert first.result == {"output": "x"}
+
+        second = ctx.consume_force_finish()
+        assert second is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
