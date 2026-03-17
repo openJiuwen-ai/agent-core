@@ -205,6 +205,9 @@ class MilvusIndexer(Indexer):
             # Delete old data first
             await self.delete_index(doc_id, config.index_name)
 
+            # Flush to make delete visible before rebuild (Milvus eventual consistency)
+            self._client.flush(collection_name=config.index_name)
+
             # Rebuild
             return await self.build_index(chunks, config, embed_model, **kwargs)
         except Exception as e:
