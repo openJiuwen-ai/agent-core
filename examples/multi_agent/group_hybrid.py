@@ -39,16 +39,23 @@ class OrchestratorAgent(CommunicableAgent, BaseAgent):
     async def invoke(self, inputs: Any, session: Optional[AgentSession] = None) -> Any:
         task = inputs.get("task", "") if isinstance(inputs, dict) else str(inputs)
         multi_agent_logger.info(f"  [Orchestrator] task: {task}")
+        if session:
+            await session.write_stream({"event": "orchestrator_received", "task": task})
         session_id = session.get_session_id() if session else None
         await self.publish(
             message={"event": "execution_request", "task": task},
             topic_id="execution_events",
             session_id=session_id,
         )
-        return {"status": "broadcast_done", "task": task}
+        result = {"status": "broadcast_done", "task": task}
+        if session:
+            await session.write_stream({"event": "orchestrator_published", **result})
+        return result
 
     async def stream(self, inputs: Any, session: Optional[AgentSession] = None) -> AsyncIterator[Any]:
-        yield await self.invoke(inputs, session)
+        await self.invoke(inputs, session)
+        if False:
+            yield None
 
 
 class ExecutorAgent(CommunicableAgent, BaseAgent):
@@ -65,6 +72,10 @@ class ExecutorAgent(CommunicableAgent, BaseAgent):
         if not isinstance(inputs, dict) or inputs.get("event") != "execution_request":
             return {"status": "ignored"}
         task = inputs.get("task", "")
+        if session:
+            await session.write_stream(
+                {"event": "executor_started", "executor": self.executor_id, "task": task}
+            )
         result = f"executor-{self.executor_id} done: {task}"
         multi_agent_logger.info(f"  [Executor-{self.executor_id}] {result}")
         session_id = session.get_session_id() if session else None
@@ -73,10 +84,15 @@ class ExecutorAgent(CommunicableAgent, BaseAgent):
             topic_id="completion_events",
             session_id=session_id,
         )
-        return {"status": "executed"}
+        response = {"status": "executed", "executor": self.executor_id, "result": result}
+        if session:
+            await session.write_stream({"event": "executor_completed", **response})
+        return response
 
     async def stream(self, inputs: Any, session: Optional[AgentSession] = None) -> AsyncIterator[Any]:
-        yield await self.invoke(inputs, session)
+        await self.invoke(inputs, session)
+        if False:
+            yield None
 
 
 class AggregatorAgent(CommunicableAgent, BaseAgent):
@@ -107,12 +123,33 @@ class AggregatorAgent(CommunicableAgent, BaseAgent):
             self._results.append(inputs.get("result", ""))
             count = len(self._results)
             multi_agent_logger.info(f"  [Aggregator]   ({count}/{self._expected}): {inputs.get('result')}")
+            if session:
+                await session.write_stream(
+                    {
+                        "event": "aggregator_progress",
+                        "status": "aggregating",
+                        "count": count,
+                        "total": self._expected,
+                        "result": inputs.get("result", ""),
+                    }
+                )
             if count == self._expected:
                 self._done_event.set()
-        return {"status": "aggregated"}
+                if session:
+                    await session.write_stream(
+                        {
+                            "event": "aggregator_done",
+                            "status": "aggregated",
+                            "count": count,
+                            "total": self._expected,
+                        }
+                    )
+        return {"status": "aggregated", "count": count, "total": self._expected}
 
     async def stream(self, inputs: Any, session: Optional[AgentSession] = None) -> AsyncIterator[Any]:
-        yield await self.invoke(inputs, session)
+        await self.invoke(inputs, session)
+        if False:
+            yield None
 
 
 class ReporterAgent(CommunicableAgent, BaseAgent):
@@ -124,12 +161,19 @@ class ReporterAgent(CommunicableAgent, BaseAgent):
     async def invoke(self, inputs: Any, session: Optional[AgentSession] = None) -> Any:
         results = inputs.get("results", []) if isinstance(inputs, dict) else []
         multi_agent_logger.info(f"  [Reporter]     report ({len(results)} items):")
+        if session:
+            await session.write_stream({"event": "reporter_started", "total": len(results)})
         for i, r in enumerate(results, 1):
             multi_agent_logger.info(f"                 {i}. {r}")
-        return {"status": "report_generated", "total": len(results)}
+        result = {"status": "report_generated", "total": len(results)}
+        if session:
+            await session.write_stream({"event": "reporter_completed", **result})
+        return result
 
     async def stream(self, inputs: Any, session: Optional[AgentSession] = None) -> AsyncIterator[Any]:
-        yield await self.invoke(inputs, session)
+        await self.invoke(inputs, session)
+        if False:
+            yield None
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +224,12 @@ class TaskExecutionGroup(BaseGroup):
         await self.subscribe("aggregator", "completion_events")
         self._subscriptions_ready = True
 
-    async def invoke(self, message: Any, session: Optional[Session] = None) -> Any:
+    @staticmethod
+    async def _write_group_stream(session: Optional[Session], payload: dict[str, Any]) -> None:
+        if session:
+            await session.write_stream(payload)
+
+    async def _run_workflow(self, message: Any, session: Optional[Session] = None) -> Any:
         done_event = asyncio.Event()
         session_id = session.get_session_id() if session else None
         self.aggregator.reset(done_event=done_event, expected=self._expected_result_count())
@@ -188,6 +237,10 @@ class TaskExecutionGroup(BaseGroup):
         await self.runtime.start()
         await self._setup_subscriptions()
         try:
+            await self._write_group_stream(
+                session,
+                {"event": "group_started", "task": message.get("task", "") if isinstance(message, dict) else str(message)},
+            )
             # Step 1a: P2P -> orchestrator
             # orchestrator 内部会 publish 到 execution_events
             multi_agent_logger.info("  [Main] 使用 P2P 发送到 orchestrator")
@@ -197,28 +250,40 @@ class TaskExecutionGroup(BaseGroup):
                 sender="main_process",
                 session_id=session_id,
             )
-            
+
             # Step 1b: 主流程直接 publish 示例
             # 直接发布消息到 topic，与 P2P 并行使用
             multi_agent_logger.info("  [Main] 同时使用直接 publish 发送额外通知")
+            await self._write_group_stream(
+                session,
+                {
+                    "event": "group_direct_publish",
+                    "task": f"{message.get('task', '')} [直接发布]" if isinstance(message, dict) else f"{message} [直接发布]",
+                },
+            )
             await self.runtime.publish(
                 message={
-                    "event": "execution_request", 
+                    "event": "execution_request",
                     "task": f"{message.get('task', '')} [直接发布]",
-                    "source": "main_process"
+                    "source": "main_process",
                 },
                 topic_id="execution_events",
                 sender="main_process",
                 session_id=session_id,
             )
-            
+
             # Step 2: 等待 aggregator 收集完成
             # 注意：现在会收到 6 个结果（3个来自 orchestrator，3个来自直接 publish）
+            await self._write_group_stream(
+                session,
+                {"event": "group_waiting_aggregation", "expected": self._expected_result_count()},
+            )
             try:
                 await asyncio.wait_for(done_event.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 multi_agent_logger.info("  [warn] aggregator timeout")
-            
+                await self._write_group_stream(session, {"event": "group_timeout", "status": "timeout"})
+
             # Step 3: P2P -> reporter 生成最终报告
             report = await self.runtime.send(
                 message={"results": self.aggregator.get_results()},
@@ -226,13 +291,39 @@ class TaskExecutionGroup(BaseGroup):
                 sender="main_process",
                 session_id=session_id,
             )
-            
-            return {"orchestration": orch_result, "report": report}
+
+            result = {"orchestration": orch_result, "report": report}
+            await self._write_group_stream(
+                session,
+                {"event": "group_completed", "status": "completed", "result": result},
+            )
+            return result
         finally:
             await self.runtime.stop()
 
+    async def invoke(self, message: Any, session: Optional[Session] = None) -> Any:
+        if session is None:
+            raise ValueError("TaskExecutionGroup.invoke requires a group session. Use Runner.run_agent_group(...).")
+        return await self._run_workflow(message, session)
+
     async def stream(self, message: Any, session: Optional[Session] = None) -> AsyncIterator[Any]:
-        yield await self.invoke(message, session)
+        if session is None:
+            raise ValueError(
+                "TaskExecutionGroup.stream requires a group session. Use Runner.run_agent_group_streaming(...)."
+            )
+
+        async def run_workflow() -> None:
+            try:
+                await self._run_workflow(message, session)
+            finally:
+                await session.close_stream()
+
+        task = asyncio.create_task(run_workflow())
+        try:
+            async for chunk in session.stream_iterator():
+                yield chunk
+        finally:
+            await task
 
 
 # ---------------------------------------------------------------------------

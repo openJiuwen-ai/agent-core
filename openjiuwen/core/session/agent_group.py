@@ -60,6 +60,9 @@ class Session:
     def stream_iterator(self):
         return self._inner.stream_writer_manager().stream_output()
 
+    async def close_stream(self):
+        await self._inner.stream_writer_manager().stream_emitter().close()
+
     async def pre_run(self, **kwargs):
         if self._pre_run_done:
             return
@@ -69,7 +72,7 @@ class Session:
     async def post_run(self):
         if self._post_run_done:
             return
-        await self._inner.stream_writer_manager().stream_emitter().close()
+        await self.close_stream()
         await self._inner.checkpointer().post_agent_group_execute(self._inner)
         self._post_run_done = True
 
