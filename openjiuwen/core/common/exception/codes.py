@@ -386,6 +386,7 @@ class StatusCode(Enum):
     AGENT_GROUP_ADD_RUNTIME_ERROR = (132000, "agent group_add runtime error, reason: {error_msg}")
     AGENT_GROUP_CREATE_RUNTIME_ERROR = (132001, "agent group_create runtime error, reason: {error_msg}")
     AGENT_GROUP_EXECUTION_ERROR = (132002, "agent group execution error, reason: {error_msg}")
+    AGENT_GROUP_AGENT_NOT_FOUND = (132003, "agent group agent not found error, reason: {error_msg}")
 
     # =========================
     # ContextEngine 150000 - 154999
