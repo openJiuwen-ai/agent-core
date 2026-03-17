@@ -15,6 +15,7 @@ import asyncio
 from typing import Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.logging import multi_agent_logger
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.multi_agent.group import BaseGroup
 from openjiuwen.core.multi_agent.group_runtime import CommunicableAgent
 from openjiuwen.core.multi_agent.schema.group_card import GroupCard
@@ -91,6 +92,11 @@ class AggregatorAgent(CommunicableAgent, BaseAgent):
     def configure(self, config) -> 'AggregatorAgent':
         return self
 
+    def reset(self, done_event: asyncio.Event, expected: int) -> None:
+        self._results.clear()
+        self._done_event = done_event
+        self._expected = expected
+
     def get_results(self) -> list:
         return list(self._results)
 
@@ -133,36 +139,51 @@ class ReporterAgent(CommunicableAgent, BaseAgent):
 class TaskExecutionGroup(BaseGroup):
     """任务执行团队：封装混合通信。"""
 
-    def _build_agents(self, done_event: asyncio.Event) -> AggregatorAgent:
-        """注册所有 Agent，返回 aggregator 实例以便主流程读取结果。"""
-        orchestrator_card = AgentCard(id="orchestrator", name="orchestrator", description="orchestrator")
-        executor1_card = AgentCard(id="executor1", name="executor1", description="executor1")
-        executor2_card = AgentCard(id="executor2", name="executor2", description="executor2")
-        executor3_card = AgentCard(id="executor3", name="executor3", description="executor3")
-        aggregator_card = AgentCard(id="aggregator", name="aggregator", description="aggregator")
-        reporter_card = AgentCard(id="reporter", name="reporter", description="reporter")
+    EXECUTOR_COUNT = 3
+    EXTRA_PUBLISH_COUNT = 1
 
-        agg = AggregatorAgent(card=aggregator_card, done_event=done_event, expected=3)
+    def __init__(self, card: GroupCard, config: Optional[GroupConfig] = None):
+        super().__init__(card=card, config=config)
+        self._subscriptions_ready = False
+
+        self.orchestrator_card = AgentCard(id="orchestrator", name="orchestrator", description="orchestrator")
+        self.executor1_card = AgentCard(id="executor1", name="executor1", description="executor1")
+        self.executor2_card = AgentCard(id="executor2", name="executor2", description="executor2")
+        self.executor3_card = AgentCard(id="executor3", name="executor3", description="executor3")
+        self.aggregator_card = AgentCard(id="aggregator", name="aggregator", description="aggregator")
+        self.reporter_card = AgentCard(id="reporter", name="reporter", description="reporter")
+
+        self.aggregator = AggregatorAgent(
+            card=self.aggregator_card,
+            done_event=asyncio.Event(),
+            expected=self._expected_result_count(),
+        )
 
         (self
-         .add_agent(orchestrator_card, lambda: OrchestratorAgent(card=orchestrator_card))
-         .add_agent(executor1_card, lambda: ExecutorAgent(card=executor1_card, executor_id=1))
-         .add_agent(executor2_card, lambda: ExecutorAgent(card=executor2_card, executor_id=2))
-         .add_agent(executor3_card, lambda: ExecutorAgent(card=executor3_card, executor_id=3))
-         .add_agent(aggregator_card, lambda: agg)
-         .add_agent(reporter_card, lambda: ReporterAgent(card=reporter_card)))
+         .add_agent(self.orchestrator_card, lambda: OrchestratorAgent(card=self.orchestrator_card))
+         .add_agent(self.executor1_card, lambda: ExecutorAgent(card=self.executor1_card, executor_id=1))
+         .add_agent(self.executor2_card, lambda: ExecutorAgent(card=self.executor2_card, executor_id=2))
+         .add_agent(self.executor3_card, lambda: ExecutorAgent(card=self.executor3_card, executor_id=3))
+         .add_agent(self.aggregator_card, lambda: self.aggregator)
+         .add_agent(self.reporter_card, lambda: ReporterAgent(card=self.reporter_card)))
 
-        return agg
+    @classmethod
+    def _expected_result_count(cls) -> int:
+        return cls.EXECUTOR_COUNT * (1 + cls.EXTRA_PUBLISH_COUNT)
 
     async def _setup_subscriptions(self) -> None:
+        if self._subscriptions_ready:
+            return
         await self.subscribe("executor1", "execution_events")
         await self.subscribe("executor2", "execution_events")
         await self.subscribe("executor3", "execution_events")
         await self.subscribe("aggregator", "completion_events")
+        self._subscriptions_ready = True
 
     async def invoke(self, message: Any, session: Optional[Session] = None) -> Any:
         done_event = asyncio.Event()
-        agg = self._build_agents(done_event)
+        session_id = session.get_session_id() if session else None
+        self.aggregator.reset(done_event=done_event, expected=self._expected_result_count())
 
         await self.runtime.start()
         await self._setup_subscriptions()
@@ -173,8 +194,8 @@ class TaskExecutionGroup(BaseGroup):
             orch_result = await self.runtime.send(
                 message=message,
                 recipient="orchestrator",
-                sender="orchestrator",
-                session_id=session.get_session_id() if session else None,
+                sender="main_process",
+                session_id=session_id,
             )
             
             # Step 1b: 主流程直接 publish 示例
@@ -188,6 +209,7 @@ class TaskExecutionGroup(BaseGroup):
                 },
                 topic_id="execution_events",
                 sender="main_process",
+                session_id=session_id,
             )
             
             # Step 2: 等待 aggregator 收集完成
@@ -199,9 +221,10 @@ class TaskExecutionGroup(BaseGroup):
             
             # Step 3: P2P -> reporter 生成最终报告
             report = await self.runtime.send(
-                message={"results": agg.get_results()},
+                message={"results": self.aggregator.get_results()},
                 recipient="reporter",
-                sender="orchestrator",
+                sender="main_process",
+                session_id=session_id,
             )
             
             return {"orchestration": orch_result, "report": report}
@@ -221,15 +244,23 @@ async def main():
     multi_agent_logger.info("BaseGroup 混合通信封装示例")
     multi_agent_logger.info("=" * 55)
 
-    group_card = GroupCard(name="task_execution_group", description="任务执行团队")
+    group_card = GroupCard(id="task_execution_group", name="task_execution_group", description="任务执行团队")
     group_config = GroupConfig(max_agents=10)
     group = TaskExecutionGroup(card=group_card, config=group_config)
 
     multi_agent_logger.info("\n--- 混合通信示例 (P2P + Pub-Sub) ---\n")
-    result = await group.invoke(message={"task": "开发新功能模块"})
+    await Runner.resource_mgr.add_agent_group(group.card, lambda: group)
+    try:
+        result = await Runner.run_agent_group(
+            agent_group=group.card.id,
+            inputs={"task": "开发新功能模块"},
+        )
 
-    multi_agent_logger.info("\n--- 任务完成 ---")
-    multi_agent_logger.info(f"结果: {result}")
+        multi_agent_logger.info("\n--- 任务完成 ---")
+        multi_agent_logger.info(f"结果: {result}")
+    finally:
+        await Runner.resource_mgr.remove_agent_group(group_id=group.card.id)
+        await group.runtime.stop()
 
 
 if __name__ == "__main__":

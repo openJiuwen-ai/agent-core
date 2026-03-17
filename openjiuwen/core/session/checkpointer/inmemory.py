@@ -21,6 +21,7 @@ from openjiuwen.core.session.session import BaseSession
 class InMemoryCheckpointer(Checkpointer):
     def __init__(self):
         self._agent_stores = {}
+        self._agent_group_stores = {}
         self._workflow_stores = {}
         from openjiuwen.core.graph import InMemoryStore
         self._graph_store = InMemoryStore()
@@ -184,6 +185,31 @@ class InMemoryCheckpointer(Checkpointer):
         if inputs is not None:
             session.state().set_state({INTERACTIVE_INPUT: [inputs]})
 
+    async def pre_agent_group_execute(self, session: BaseSession, inputs):
+        group_id = session.group_id() if hasattr(session, "group_id") else "Na"
+        session_id = session.session_id()
+        is_new_group_store = session_id not in self._agent_group_stores
+        group_store = self._agent_group_stores.setdefault(session_id, AgentGroupStorage())
+        log_message = dict(
+            session_id=session_id,
+            workflow_id=group_id,
+            metadata={"storage_type": "inmemory"}
+        )
+        if is_new_group_store:
+            session_logger.info("Create a new agent group checkpointer store before group execute",
+                                event_type=LogEventType.CHECKPOINTER_STORE_ADD, **log_message)
+        session_logger.info(
+            "Begin to restore agent group session before execute",
+            event_type=LogEventType.CHECKPOINT_RESTORE, **log_message
+        )
+        await group_store.recover(session)
+        session_logger.info(
+            "Succeed to restore agent group session before execute",
+            event_type=LogEventType.CHECKPOINT_RESTORE, **log_message
+        )
+        if inputs is not None:
+            session.state().update_global({INTERACTIVE_INPUT: [inputs]})
+
     async def interrupt_agent_execute(self, session: BaseSession):
         agent_id = session.agent_id()
         session_id = session.session_id()
@@ -243,8 +269,42 @@ class InMemoryCheckpointer(Checkpointer):
             )
             raise
 
+    async def post_agent_group_execute(self, session: BaseSession):
+        group_id = session.group_id()
+        session_id = session.session_id()
+        group_store = self._agent_group_stores.get(session_id)
+        if group_store is None:
+            raise build_error(StatusCode.CHECKPOINTER_POST_AGENT_EXECUTION_ERROR,
+                              agent=group_id, reason="agent group store not found")
+        log_message = dict(
+            session_id=session_id,
+            workflow_id=group_id,
+            metadata={"storage_type": "inmemory"}
+        )
+        session_logger.info(
+            "Begin to save agent group checkpoint on group execute completion",
+            event_type=LogEventType.CHECKPOINT_SAVE, **log_message
+        )
+        try:
+            await group_store.save(session)
+            session_logger.info(
+                "Succeed to save agent group checkpoint on group execute completion",
+                event_type=LogEventType.CHECKPOINT_SAVE, **log_message
+            )
+        except Exception as e:
+            session_logger.error(
+                "Failed to save agent group checkpoint on group execute completion",
+                exception=e,
+                event_type=LogEventType.CHECKPOINT_SAVE, **log_message
+            )
+            raise
+
     async def session_exists(self, session_id: str) -> bool:
-        return session_id in self._agent_stores or session_id in self._workflow_stores
+        return (
+            session_id in self._agent_stores
+            or session_id in self._agent_group_stores
+            or session_id in self._workflow_stores
+        )
 
     async def release(self, session_id: str, agent_id: str = None):
         if agent_id is not None:
@@ -308,6 +368,15 @@ class InMemoryCheckpointer(Checkpointer):
                     event_type=LogEventType.CHECKPOINTER_STORE_REMOVE,
                     session_id=session_id,
                     agent_id=agent_id,
+                    metadata={"storage_type": "inmemory"}
+                )
+
+            removed = self._agent_group_stores.pop(session_id, None)
+            if removed:
+                session_logger.info(
+                    f"Remove agent group checkpoint store on manually release",
+                    event_type=LogEventType.CHECKPOINTER_STORE_REMOVE,
+                    session_id=session_id,
                     metadata={"storage_type": "inmemory"}
                 )
 
@@ -407,3 +476,30 @@ class WorkflowStorage(Storage):
         if state_blob and state_blob[0] != "empty":
             return True
         return False
+
+
+class AgentGroupStorage(Storage):
+    def __init__(self):
+        self.state_blobs: dict[str, tuple[str, bytes]] = {}
+        self.serde: Serializer = create_serializer("pickle")
+
+    async def save(self, session: BaseSession):
+        group_id = session.group_id()
+        state = session.state().get_global(None)
+        state_blob = self.serde.dumps_typed(state)
+        if state_blob:
+            self.state_blobs[group_id] = state_blob
+
+    async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
+        group_id = session.group_id()
+        state_blob = self.state_blobs.get(group_id)
+        if state_blob is None:
+            return
+        state = self.serde.loads_typed(state_blob)
+        session.state().global_state.set_state(state)
+
+    async def clear(self, group_id: str):
+        self.state_blobs.pop(group_id, None)
+
+    async def exists(self, session: BaseSession) -> bool:
+        return self.state_blobs.get(session.group_id()) is not None

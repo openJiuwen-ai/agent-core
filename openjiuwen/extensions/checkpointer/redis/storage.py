@@ -26,6 +26,7 @@ from openjiuwen.core.session.checkpointer import (
     build_key,
     build_key_with_namespace,
     SESSION_NAMESPACE_AGENT,
+    SESSION_NAMESPACE_AGENT_GROUP,
     SESSION_NAMESPACE_WORKFLOW,
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
@@ -201,6 +202,91 @@ class AgentStorage(BaseRedisStorage):
             return False
 
         # Both keys must exist for the state to be considered existing
+        return results[0] == 1 and results[1] == 1
+
+class AgentGroupStorage(BaseRedisStorage):
+    _STATE_BLOBS = "agent_group_state_blobs"
+    _STATE_BLOBS_DUMP_TYPE = "agent_group_state_blobs_dump_type"
+    _KEY_NUMS = 2
+
+    async def save(self, session: BaseSession):
+        state = session.state().get_global(None)
+        session_id = session.session_id()
+        group_id = session.group_id()
+
+        state_blob = self._serialize_state(state)
+        if not state_blob:
+            logger.warning(f"Failed to serialize state for agent group {group_id}, session {session_id}")
+            return
+
+        dump_type, blob = state_blob
+        pipeline = self._redis_store.pipeline()
+        dump_type_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
+        )
+        blob_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
+        )
+        await (pipeline
+               .set(dump_type_key, dump_type, self._ttl_seconds)
+               .set(blob_key, blob, self._ttl_seconds)
+               .execute())
+
+    async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
+        session_id = session.session_id()
+        group_id = session.group_id()
+
+        pipeline = self._redis_store.pipeline()
+        dump_type_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
+        )
+        blob_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
+        )
+        results = await (pipeline
+                         .get(dump_type_key)
+                         .get(blob_key)
+                         .execute())
+
+        if len(results) != self._KEY_NUMS:
+            return
+
+        dump_type, blob = results[0], results[1]
+        state = self._deserialize_state(dump_type, blob)
+        if state is None:
+            return
+
+        session.state().global_state.set_state(state)
+        await self._refresh_ttl([dump_type_key, blob_key], "agent_group", group_id)
+
+    async def clear(self, group_id: str, session_id: str):
+        dump_type_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
+        )
+        blob_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
+        )
+        await self._redis_store.batch_delete([dump_type_key, blob_key])
+
+    async def exists(self, session: BaseSession) -> bool:
+        session_id = session.session_id()
+        group_id = session.group_id()
+
+        pipeline = self._redis_store.pipeline()
+        dump_type_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
+        )
+        blob_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
+        )
+        results = await (pipeline
+                         .exists(dump_type_key)
+                         .exists(blob_key)
+                         .execute())
+
+        if len(results) != self._KEY_NUMS:
+            return False
+
         return results[0] == 1 and results[1] == 1
 
 

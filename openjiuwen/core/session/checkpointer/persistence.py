@@ -51,6 +51,7 @@ from openjiuwen.core.session.checkpointer import (
     CheckpointerFactory,
     CheckpointerProvider,
     SESSION_NAMESPACE_AGENT,
+    SESSION_NAMESPACE_AGENT_GROUP,
     SESSION_NAMESPACE_WORKFLOW,
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
@@ -260,6 +261,94 @@ class AgentStorage(BaseStorage):
             return False
 
         # Both keys must exist for the state to be considered existing
+        return results[0] is True and results[1] is True
+
+class AgentGroupStorage(BaseStorage):
+    """Agent group global state storage using BaseKVStore."""
+
+    _STATE_BLOBS = "agent_group_state_blobs"
+    _STATE_BLOBS_DUMP_TYPE = "agent_group_state_blobs_dump_type"
+    _KEY_NUMS = 2
+
+    async def save(self, session: BaseSession):
+        state = session.state().get_global(None)
+        session_id = session.session_id()
+        group_id = session.group_id()
+
+        state_blob = self._serialize_state(state)
+        if not state_blob:
+            session_logger.warning(
+                "Failed to serialize agent group state",
+                event_type=LogEventType.CHECKPOINT_ERROR,
+                session_id=session_id,
+                workflow_id=group_id,
+                metadata={"operation": "serialize"}
+            )
+            return
+
+        dump_type, blob = state_blob
+        pipeline = self._kv_store.pipeline()
+        dump_type_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
+        )
+        blob_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
+        )
+        await pipeline.set(dump_type_key, dump_type)
+        await pipeline.set(blob_key, blob)
+        await pipeline.execute()
+
+    async def recover(self, session: BaseSession, inputs: InteractiveInput = None):
+        session_id = session.session_id()
+        group_id = session.group_id()
+
+        pipeline = self._kv_store.pipeline()
+        dump_type_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
+        )
+        blob_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
+        )
+        await pipeline.get(dump_type_key)
+        await pipeline.get(blob_key)
+        results = await pipeline.execute()
+
+        if len(results) != self._KEY_NUMS:
+            return
+
+        dump_type, blob = results[0], results[1]
+        state = self._deserialize_state(dump_type, blob)
+        if state is None:
+            return
+        session.state().global_state.set_state(state)
+
+    async def clear(self, group_id: str, session_id: str):
+        dump_type_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
+        )
+        blob_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
+        )
+        await self._kv_store.batch_delete([dump_type_key, blob_key])
+
+    async def exists(self, session: BaseSession) -> bool:
+        session_id = session.session_id()
+        group_id = session.group_id()
+
+        pipeline = self._kv_store.pipeline()
+        dump_type_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS_DUMP_TYPE
+        )
+        blob_key = build_key_with_namespace(
+            session_id, SESSION_NAMESPACE_AGENT_GROUP, group_id, self._STATE_BLOBS
+        )
+        await pipeline.exists(dump_type_key)
+        await pipeline.exists(blob_key)
+        results = await pipeline.execute()
+
+        if len(results) != self._KEY_NUMS:
+            return False
+
         return results[0] is True and results[1] is True
 
 
@@ -681,6 +770,7 @@ class PersistenceCheckpointer(Checkpointer):
         """
         self._kv_store = kv_store
         self._agent_storage = AgentStorage(kv_store)
+        self._agent_group_storage = AgentGroupStorage(kv_store)
         self._workflow_storage = WorkflowStorage(kv_store)
         self._graph_state = GraphStore(kv_store)
 
@@ -696,6 +786,18 @@ class PersistenceCheckpointer(Checkpointer):
         await self._agent_storage.recover(session)
         if inputs is not None:
             session.state().update({INTERACTIVE_INPUT: [inputs]})
+
+    async def pre_agent_group_execute(self, session: BaseSession, inputs):
+        session_logger.info(
+            "Agent group checkpoint restore initiated",
+            event_type=LogEventType.CHECKPOINT_RESTORE,
+            session_id=session.session_id(),
+            workflow_id=session.group_id(),
+            metadata={"operation": "pre_execute", "storage_type": "persistence"}
+        )
+        await self._agent_group_storage.recover(session)
+        if inputs is not None:
+            session.state().update_global({INTERACTIVE_INPUT: [inputs]})
 
     async def interrupt_agent_execute(self, session: BaseSession):
         """Save agent state when interaction is required."""
@@ -718,6 +820,16 @@ class PersistenceCheckpointer(Checkpointer):
             metadata={"reason": "agent_finished", "storage_type": "persistence"}
         )
         await self._agent_storage.save(session)
+
+    async def post_agent_group_execute(self, session: BaseSession):
+        session_logger.info(
+            "Agent group checkpoint save on completion",
+            event_type=LogEventType.CHECKPOINT_SAVE,
+            session_id=session.session_id(),
+            workflow_id=session.group_id(),
+            metadata={"reason": "group_finished", "storage_type": "persistence"}
+        )
+        await self._agent_group_storage.save(session)
 
     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
         """

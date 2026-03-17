@@ -1373,13 +1373,12 @@ class ResourceMgr:
                 if removed_card or not remove_by_tag:
                     results.append(Ok(removed_card))
             if not error:
-                logger.error(f"remove resource failed",
-                             event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
-                             resource_id=remove_id,
-                             resource_type=resource_type,
-                             exception=error,
-                             tag=tag if tag else GLOBAL,
-                             card=removed_card.str() if removed_card else None)
+                logger.info("remove resource succeed",
+                            event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
+                            resource_id=remove_id,
+                            resource_type=resource_type,
+                            tag=tag if tag else GLOBAL,
+                            card=removed_card.str() if removed_card else None)
         return results if not isinstance(resource_id, str) else results[0]
 
     def _inner_find_resource_ids(self, *, resource_id: Optional[str | list[str]], tag: Tag | list[Tag],

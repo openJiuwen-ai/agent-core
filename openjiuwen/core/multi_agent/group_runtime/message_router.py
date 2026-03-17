@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Message Router Module
+"""Message Router Module.
 
 Routes P2P and Pub-Sub messages to agents via Runner.run_agent.
 """
@@ -15,6 +15,7 @@ from openjiuwen.core.common.exception.errors import build_error
 
 if TYPE_CHECKING:
     from openjiuwen.core.multi_agent.group_runtime.envelope import MessageEnvelope
+    from openjiuwen.core.multi_agent.group_runtime.group_runtime import GroupRuntime
     from openjiuwen.core.multi_agent.group_runtime.subscription_manager import SubscriptionManager
 
 
@@ -24,8 +25,9 @@ class MessageRouter:
     Supports both P2P (point-to-point) and Pub-Sub (fan-out) patterns.
     """
 
-    def __init__(self, subscription_manager: SubscriptionManager):
+    def __init__(self, subscription_manager: SubscriptionManager, runtime: "GroupRuntime"):
         self._subscription_manager = subscription_manager
+        self._runtime = runtime
 
     async def route_p2p_message(self, envelope: MessageEnvelope) -> Any:
         """Route a P2P message to the recipient and return the response.
@@ -44,10 +46,11 @@ class MessageRouter:
         from openjiuwen.core.runner import Runner
 
         try:
+            session = self._build_agent_session(envelope.session_id, envelope.recipient)
             response = await Runner.run_agent(
                 agent=envelope.recipient,
                 inputs=envelope.message,
-                session=envelope.session_id,
+                session=session if session is not None else envelope.session_id,
             )
             logger.debug(
                 f"[{self.__class__.__name__}] P2P message {envelope.message_id} completed"
@@ -121,10 +124,11 @@ class MessageRouter:
         """
         try:
             from openjiuwen.core.runner import Runner
+            session = self._build_agent_session(envelope.session_id, subscriber)
             await Runner.run_agent(
                 agent=subscriber,
                 inputs=envelope.message,
-                session=envelope.session_id
+                session=session if session is not None else envelope.session_id
             )
         except AttributeError as e:
             error_msg = f"Runner.run_agent not available for subscriber {subscriber}: {e}"
@@ -132,3 +136,10 @@ class MessageRouter:
         except Exception as e:
             error_msg = f"Error invoking subscriber {subscriber}: {e}"
             logger.error(f"[{self.__class__.__name__}] {error_msg}", exc_info=True)
+
+    def _build_agent_session(self, session_id: str | None, agent_id: str):
+        group_session = self._runtime.get_group_session(session_id)
+        if group_session is None:
+            return None
+        card = self._runtime.get_agent_card(agent_id)
+        return group_session.create_agent_session(card=card, agent_id=agent_id)
