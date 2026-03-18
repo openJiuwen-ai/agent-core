@@ -32,8 +32,8 @@ dependencies = [
     "transformers>=4.52.4",
     "tiktoken>=0.12.0",
     "dashscope>=1.25.6",
-    # Vector database
-    "pymilvus>=2.6.2",
+    # Vector database (2.6.10 changed interface)
+    "pymilvus>=2.6.2,<2.6.10",
     # MCP server
     "fastmcp>=2.14.2,<3.0",
     "mcp>=1.26.0",

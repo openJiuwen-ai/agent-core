@@ -2817,7 +2817,7 @@ requires-dist = [
     { name = "psycopg2-binary", marker = "extra == 'gaussvector'", specifier = ">=2.9.10" },
     { name = "pulsar-client", marker = "extra == 'pulsar'", specifier = ">=3.5.0" },
     { name = "pycryptodome", specifier = ">=3.23.0" },
-    { name = "pymilvus", specifier = ">=2.6.2" },
+    { name = "pymilvus", specifier = ">=2.6.2,<2.6.10" },
     { name = "pysbd", specifier = ">=0.3.4" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "python-docx", specifier = ">=1.2.0" },
