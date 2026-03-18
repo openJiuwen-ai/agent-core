@@ -406,6 +406,17 @@ class StatusCode(Enum):
     AGENT_BUILDER_TRANSFORMER_ERROR = (
         140060, "agent builder transformer error, error='{reason}'")
 
+    
+    WORKFLOW_DL_GENERATION_ERROR = (
+        140061,
+        "workflow dl generation error, reason: {error_msg}")
+    WORKFLOW_INTENTION_DETECT_ERROR = (
+        140062,
+        "workflow intention detect error, reason: {error_msg}")
+    LLM_AGENT_STATE_ERROR = (
+        140063,
+        "llm agent state error, reason: {error_msg}")
+
     # =========================
     # ContextEngine 150000 - 154999
     # =========================
