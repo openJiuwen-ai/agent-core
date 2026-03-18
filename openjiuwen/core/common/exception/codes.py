@@ -586,6 +586,47 @@ class StatusCode(Enum):
     # Optimization Toolchain - End-to-end Performance Optimization 171000 - 171999
 
     # Optimization Toolchain - AgentRL 172000 - 172999
+    AGENT_RL_PROXY_NOT_INITIALIZED = (
+        172000, "agent_rl proxy has not been initialized, reason: {error_msg}")
+    AGENT_RL_PROXY_SERVER_START_FAILED = (
+        172001, "agent_rl proxy server failed to start, host='{host}', port='{port}'")
+
+    # AgentRL - Executor 172010 - 172019
+    AGENT_RL_EXECUTOR_NOT_INITIALIZED = (
+        172010, "agent_rl executor is not configured, reason: {error_msg}")
+
+    # AgentRL - Processor 172020 - 172029
+    AGENT_RL_PROCESSOR_NOT_FOUND = (
+        172020,
+        "agent_rl {processor_type} processor not found, name='{name}', available='{available}'")
+
+    # AgentRL - Dependency 172030 - 172039
+    AGENT_RL_DEPENDENCY_INIT_FAILED = (
+        172030, "agent_rl required dependency initialization failed, reason: {error_msg}")
+
+    # AgentRL - Rollout 172040 - 172049
+    AGENT_RL_ROLLOUT_BATCH_EXECUTION_ERROR = (
+        172040, "agent_rl rollout batch execution error, reason: {error_msg}")
+
+    # AgentRL - Trainer / Strategy 172050 - 172059
+    AGENT_RL_STRATEGY_NOT_SUPPORTED = (
+        172050, "agent_rl training strategy is not supported, strategy='{strategy}'")
+    AGENT_RL_TRAINER_NOT_INITIALIZED = (
+        172051, "agent_rl trainer not initialized, reason: {error_msg}")
+    AGENT_RL_TASK_RUNNER_NOT_INITIALIZED = (
+        172052, "agent_rl task runner not initialized, reason: {error_msg}")
+
+    # AgentRL - Dataset / Batch 172060 - 172069
+    AGENT_RL_VALIDATION_DATASET_INVALID = (
+        172060, "agent_rl validation dataset is invalid, reason: {error_msg}")
+    AGENT_RL_BATCH_DATA_TYPE_INVALID = (
+        172061, "agent_rl batch data type is invalid, data_type='{data_type}'")
+
+    # AgentRL - Reward 172070 - 172079
+    AGENT_RL_REWARD_NAME_INVALID = (
+        172070, "agent_rl reward name is invalid, reason: {error_msg}")
+    AGENT_RL_REWARD_NOT_FOUND = (
+        172071, "agent_rl reward function not found, name='{name}'")
 
     # Optimization Toolchain - Prompt Builder 173000 - 173999
     TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR = (
