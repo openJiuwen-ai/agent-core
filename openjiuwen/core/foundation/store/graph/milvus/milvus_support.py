@@ -38,13 +38,15 @@ class MilvusGraphStore(GraphStore):
     """
 
     def __init__(self, config: GraphConfig):
+        extras = config.extras.copy()
         self._config = config
         self._embedder = None
+        self.alias = extras.setdefault("alias", f"graph-store-{id(self)}")
         self.client = MilvusClient(
             uri=config.uri,
             token=config.token,
             timeout=config.timeout,
-            **config.extras,
+            **extras,
         )
         if config.name not in self.client.list_databases(timeout=config.timeout):
             self.client.create_database(config.name, timeout=config.timeout)
@@ -113,13 +115,12 @@ class MilvusGraphStore(GraphStore):
         return obj
 
     def attach_embedder(self, embedder: Embedding):
-        if isinstance(embedder, Embedding) and self.embedder is None:
+        if isinstance(embedder, Embedding):
+            if self._embedder is not None:
+                store_logger.warning(
+                    "%s.embedder has been redefined from %s to %s", type(self).__name__, self._embedder, embedder
+                )
             self._embedder = embedder
-        elif self._embedder is not None:
-            raise build_error(
-                StatusCode.STORE_GRAPH_PARAM_INVALID,
-                error_msg=f"Attempt to re-define {type(self).__name__}.embedder.",
-            )
         else:
             raise build_error(
                 StatusCode.STORE_GRAPH_PARAM_INVALID,
@@ -394,6 +395,12 @@ class MilvusGraphStore(GraphStore):
     def _build_indices(self):
         """Build indices & collections for database"""
         self.embed_dim = self.config.embed_dim
+        if self.embedder and (self.embed_dim != self.embedder.dimension):
+            raise build_error(
+                StatusCode.STORE_GRAPH_PARAM_INVALID,
+                error_msg="MilvusGraphStore has different config.embed_dim and embedder.dimension "
+                f"({self.embed_dim} != {self.embedder.dimension})",
+            )
 
         for col in [ENTITY_COLLECTION, RELATION_COLLECTION, EPISODE_COLLECTION]:
             if self.client.has_collection(col, timeout=self.config.timeout):

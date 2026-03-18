@@ -145,59 +145,14 @@ class GraphMemory:
                 SearchConfig(min_score=0.1),
             )
         )
-        self._last_gc: float = 0.0
+        self._last_gc: float = time.time()
+        concurrency_limit = self.db_backend.config.max_concurrent or 8
+        self._semaphore = asyncio.Semaphore(concurrency_limit)
 
     @property
     def embedder(self) -> Embedding:
         """Embedding used by the graph backend for entities, relations, and episodes."""
         return self.db_backend.embedder
-
-    @staticmethod
-    def _replace_one_side_of_relation(
-        side: str,
-        relation: Relation,
-        tgt_uuid: str,
-        entity_relation_updates: dict[str, dict[str, Relation]],
-        state: GraphMemState,
-    ):
-        """Update one side (lhs or rhs) of a relation to point to target entity, or mark as faulty if duplicate."""
-        if relation.uuid not in entity_relation_updates[tgt_uuid]:
-            state.relation_deferred_updates[tgt_uuid].append((relation, side, tgt_uuid))
-            entity_relation_updates[tgt_uuid][relation.uuid] = relation
-        else:
-            state.faulty_relations[relation.uuid] = relation
-            del entity_relation_updates[tgt_uuid][relation.uuid]
-            for task in [task for task in state.relation_deferred_updates[tgt_uuid] if task[0] == relation]:
-                state.relation_deferred_updates[tgt_uuid].remove(task)
-
-    @staticmethod
-    async def _parse_relation_filtering_result(relations: list[Relation], state: GraphMemState):
-        """Wait for relation-filter LLM tasks, apply kept relations to merge infos, and classify relations."""
-        if state.relation_filter_tasks:
-            await asyncio.wait(state.relation_filter_tasks)
-        for task in state.relation_filter_tasks:
-            tgt_entity, new_relation_list = state.relation_filter_tasks[task]
-            tgt_uuid = tgt_entity.uuid
-            try:
-                response = await task
-                dedupe_entity = parse_json(response.content, output_schema=state.prompting.schema_relation_filter) or {}
-                keep_ids = set(dedupe_entity.get("relevant_relations"))
-                relations_filtered = [new_relation_list[i - 1] for i in keep_ids]
-            except Exception:
-                relations_filtered = new_relation_list
-            state.merge_infos[tgt_uuid].new_relations = relations_filtered
-
-        for tgt_uuid, merge_info in state.merge_infos.items():
-            for relation, attr, val in state.relation_deferred_updates[tgt_uuid]:
-                if relation in merge_info.new_relations:
-                    setattr(relation, attr, val)
-                    if relation not in state.mem_update_skip_embed.updated_relation:
-                        state.mem_update_skip_embed.updated_relation.append(relation)
-                else:
-                    state.mem_update.removed_relation.add(relation.uuid)
-                    state.to_remove.append(relation)
-
-        classify_relations_extracted(relations, state)
 
     def attach_embedder(self, embedder: Embedding):
         """Set the embedding used by the graph backend for indexing and search."""
@@ -299,9 +254,9 @@ class GraphMemory:
                 error_msg="use the attach_embedder method to attach one",
             )
         with self.user_locks[user_id]:
-            state = self.init_state(reference_time)
+            state = self._init_state(reference_time)
 
-            content = await self.prepare_episodes(
+            content = await self._prepare_episodes(
                 src_type,
                 user_id,
                 content,
@@ -313,7 +268,7 @@ class GraphMemory:
 
             # Timezone Predictions
             tz_task = asyncio.create_task(
-                self.invoke_llm(
+                self._invoke_llm(
                     *extraction_prompts.extract_timezone(
                         content=content, history=state.history, language=state.prompting.language
                     ),
@@ -329,7 +284,7 @@ class GraphMemory:
             response = await tz_task
             state.tasks.append(
                 asyncio.create_task(
-                    self.invoke_llm(
+                    self._invoke_llm(
                         *extraction_prompts.extract_relation_declaration(
                             relation_types=None,
                             entities=extracted_declarations,
@@ -356,7 +311,7 @@ class GraphMemory:
             if existing_entities_list:
                 state.tasks.append(
                     asyncio.create_task(
-                        self.invoke_llm(
+                        self._invoke_llm(
                             *extraction_prompts.dedupe_entity_list(
                                 content,
                                 candidate_entities=extracted_declarations,
@@ -408,13 +363,129 @@ class GraphMemory:
         with self.thread_lock:
             if self.time_till_next_gc >= 0:
                 if time.time() - self._last_gc > self.time_till_next_gc:
-                    self._last_gc = time.time()
                     gc.collect()
+                    self._last_gc = time.time()
                     await self.db_backend.refresh(skip_compact=False)
 
         return state.mem_update | state.mem_update_skip_embed
 
-    async def invoke_llm(
+    async def search(
+        self,
+        query: str,
+        user_id: Union[str, list[str]],
+        search_strategy: str = "default",
+        *,
+        entity: bool = True,
+        relation: bool = True,
+        episode: bool = True,
+        query_embedding: Optional[list[float]] = None,
+    ) -> dict[str, list[tuple[float, BaseGraphObject]]]:
+        """Search the graph by query across entities, relations, and/or episodes.
+
+        Args:
+            query: Natural language or text query.
+            user_id: Single user id or list of user ids to restrict results.
+            search_strategy: Registered strategy name (e.g. "default").
+            entity: Whether to search entity collection. Defaults to True.
+            relation: Whether to search relation collection. Defaults to True.
+            episode: Whether to search episode collection. Defaults to True.
+            query_embedding: Optional precomputed query embedding; if None, embedder is used.
+
+        Returns:
+            Dict mapping collection name ("entity", "relation", "episode") to list of
+            (score, graph object) tuples.
+        """
+        if search_strategy not in self._search_strategies:
+            if not (isinstance(search_strategy, str) and search_strategy.strip()):
+                raise build_error(
+                    StatusCode.MEMORY_STORE_VALIDATION_INVALID,
+                    store_type=_STORE_TYPE,
+                    error_msg="strategy must be a non-empty string value",
+                )
+            raise build_error(
+                StatusCode.MEMORY_STORE_VALIDATION_INVALID,
+                store_type=_STORE_TYPE,
+                error_msg=f"Strategy [{search_strategy}] not found, please register with register_search_configs "
+                'method or use "default".',
+            )
+        user_id = validate_search_input(query, user_id, [entity, relation, episode])
+        if query_embedding is None:
+            if not self.embedder:
+                raise build_error(
+                    StatusCode.MEMORY_GRAPH_EMBED_MODEL_NOT_FOUND,
+                    error_msg="use the attach_embedder method to attach one",
+                )
+            query_embedding = await self.db_backend.embedder.embed_query(query)
+        elif not (isinstance(query_embedding, list) and all(isinstance(val, float) for val in query_embedding)):
+            raise build_error(
+                StatusCode.MEMORY_STORE_VALIDATION_INVALID,
+                store_type=_STORE_TYPE,
+                error_msg="query_embedding must be a list[float] or None",
+            )
+        tasks, result = [], {}
+
+        if entity:
+            self._perform_search(0, user_id, search_strategy, tasks, dict(query=query, query_embedding=query_embedding))
+        if relation:
+            self._perform_search(1, user_id, search_strategy, tasks, dict(query=query, query_embedding=query_embedding))
+        if episode:
+            self._perform_search(2, user_id, search_strategy, tasks, dict(query=query, query_embedding=query_embedding))
+        for task in asyncio.as_completed(tasks):
+            returned_list, col = await task
+            g_obj_cls = dict(ENTITY_COLLECTION=Entity, RELATION_COLLECTION=Relation, EPISODE_COLLECTION=Episode)[col]
+            result[col] = [
+                (returned_dict.pop("distance", 0.0), g_obj_cls(**returned_dict)) for returned_dict in returned_list
+            ]
+        return result
+
+    @staticmethod
+    def _replace_one_side_of_relation(
+        side: str,
+        relation: Relation,
+        tgt_uuid: str,
+        entity_relation_updates: dict[str, dict[str, Relation]],
+        state: GraphMemState,
+    ):
+        """Update one side (lhs or rhs) of a relation to point to target entity, or mark as faulty if duplicate."""
+        if relation.uuid not in entity_relation_updates[tgt_uuid]:
+            state.relation_deferred_updates[tgt_uuid].append((relation, side, tgt_uuid))
+            entity_relation_updates[tgt_uuid][relation.uuid] = relation
+        else:
+            state.faulty_relations[relation.uuid] = relation
+            del entity_relation_updates[tgt_uuid][relation.uuid]
+            for task in [task for task in state.relation_deferred_updates[tgt_uuid] if task[0] == relation]:
+                state.relation_deferred_updates[tgt_uuid].remove(task)
+
+    @staticmethod
+    async def _parse_relation_filtering_result(relations: list[Relation], state: GraphMemState):
+        """Wait for relation-filter LLM tasks, apply kept relations to merge infos, and classify relations."""
+        if state.relation_filter_tasks:
+            await asyncio.wait(state.relation_filter_tasks)
+        for task in state.relation_filter_tasks:
+            tgt_entity, new_relation_list = state.relation_filter_tasks[task]
+            tgt_uuid = tgt_entity.uuid
+            try:
+                response = await task
+                dedupe_entity = parse_json(response.content, output_schema=state.prompting.schema_relation_filter) or {}
+                keep_ids = set(dedupe_entity.get("relevant_relations"))
+                relations_filtered = [new_relation_list[i - 1] for i in keep_ids]
+            except Exception:
+                relations_filtered = new_relation_list
+            state.merge_infos[tgt_uuid].new_relations = relations_filtered
+
+        for tgt_uuid, merge_info in state.merge_infos.items():
+            for relation, attr, val in state.relation_deferred_updates[tgt_uuid]:
+                if relation in merge_info.new_relations:
+                    setattr(relation, attr, val)
+                    if relation not in state.mem_update_skip_embed.updated_relation:
+                        state.mem_update_skip_embed.updated_relation.append(relation)
+                else:
+                    state.mem_update.removed_relation.add(relation.uuid)
+                    state.to_remove.append(relation)
+
+        classify_relations_extracted(relations, state)
+
+    async def _invoke_llm(
         self, kwargs: dict, template: PromptTemplate, output_model: Optional[dict] = None, **extra
     ) -> AssistantMessage:
         """Helper method for graph memory to easily invoke LLM clients
@@ -433,7 +504,7 @@ class GraphMemory:
             params.update(self.llm_extra_kwargs)
         params.update(extra)
         should_raise_error = [False] * (self.config.request_max_retries - 1) + [True]  # only raise error on last retry
-        async with self.db_backend.semophore or asyncio.Semaphore(8):
+        async with self._semaphore:
             for raise_exception in should_raise_error:
                 try:
                     response = await self.llm_client.invoke(**params)
@@ -455,7 +526,7 @@ class GraphMemory:
                 memory_logger.debug("Graph Memory LLM Invoke: %s", debug_msg)
         return response
 
-    def init_state(self, reference_time: Optional[datetime.datetime] = None) -> GraphMemState:
+    def _init_state(self, reference_time: Optional[datetime.datetime] = None) -> GraphMemState:
         """Create a GraphMemState for the current add_memory request with prompting and strategy set."""
         strategy = self.default_extraction_strategy
 
@@ -483,7 +554,7 @@ class GraphMemory:
 
         return state
 
-    async def prepare_episodes(
+    async def _prepare_episodes(
         self,
         src_type: EpisodeType,
         user_id: str,
@@ -571,75 +642,6 @@ class GraphMemory:
         state.history = "\n---\n".join(format_timestamp(ep.created_at) + "\n" + ep.content for ep in result)
         return content
 
-    async def search(
-        self,
-        query: str,
-        user_id: Union[str, list[str]],
-        search_strategy: str = "default",
-        *,
-        entity: bool = True,
-        relation: bool = True,
-        episode: bool = True,
-        query_embedding: Optional[list[float]] = None,
-    ) -> dict[str, list[tuple[float, BaseGraphObject]]]:
-        """Search the graph by query across entities, relations, and/or episodes.
-
-        Args:
-            query: Natural language or text query.
-            user_id: Single user id or list of user ids to restrict results.
-            search_strategy: Registered strategy name (e.g. "default").
-            entity: Whether to search entity collection. Defaults to True.
-            relation: Whether to search relation collection. Defaults to True.
-            episode: Whether to search episode collection. Defaults to True.
-            query_embedding: Optional precomputed query embedding; if None, embedder is used.
-
-        Returns:
-            Dict mapping collection name ("entity", "relation", "episode") to list of
-            (score, graph object) tuples.
-        """
-        if search_strategy not in self._search_strategies:
-            if not (isinstance(search_strategy, str) and search_strategy.strip()):
-                raise build_error(
-                    StatusCode.MEMORY_STORE_VALIDATION_INVALID,
-                    store_type=_STORE_TYPE,
-                    error_msg="strategy must be a non-empty string value",
-                )
-            raise build_error(
-                StatusCode.MEMORY_STORE_VALIDATION_INVALID,
-                store_type=_STORE_TYPE,
-                error_msg=f"Strategy [{search_strategy}] not found, please register with register_search_configs "
-                'method or use "default".',
-            )
-        user_id = validate_search_input(query, user_id, [entity, relation, episode])
-        if query_embedding is None:
-            if not self.embedder:
-                raise build_error(
-                    StatusCode.MEMORY_GRAPH_EMBED_MODEL_NOT_FOUND,
-                    error_msg="use the attach_embedder method to attach one",
-                )
-            query_embedding = await self.db_backend.embedder.embed_query(query)
-        elif not (isinstance(query_embedding, list) and all(isinstance(val, float) for val in query_embedding)):
-            raise build_error(
-                StatusCode.MEMORY_STORE_VALIDATION_INVALID,
-                store_type=_STORE_TYPE,
-                error_msg="query_embedding must be a list[float] or None",
-            )
-        tasks, result = [], {}
-
-        if entity:
-            self._perform_search(0, user_id, search_strategy, tasks, dict(query=query, query_embedding=query_embedding))
-        if relation:
-            self._perform_search(1, user_id, search_strategy, tasks, dict(query=query, query_embedding=query_embedding))
-        if episode:
-            self._perform_search(2, user_id, search_strategy, tasks, dict(query=query, query_embedding=query_embedding))
-        for task in asyncio.as_completed(tasks):
-            returned_list, col = await task
-            g_obj_cls = dict(ENTITY_COLLECTION=Entity, RELATION_COLLECTION=Relation, EPISODE_COLLECTION=Episode)[col]
-            result[col] = [
-                (returned_dict.pop("distance", 0.0), g_obj_cls(**returned_dict)) for returned_dict in returned_list
-            ]
-        return result
-
     def _perform_search(self, col_idx: int, user_id: str, search_strategy: str, tasks: list, kwargs: dict):
         """Schedule a search task for one collection (entity/relation/episode) and append to tasks."""
         names = [ENTITY_COLLECTION, RELATION_COLLECTION, EPISODE_COLLECTION]
@@ -692,7 +694,7 @@ class GraphMemory:
         )
 
         entity_names = {"user", "assistant", "User", "Assistant", "USER", "ASSISTANT"}
-        response = await self.invoke_llm(*prompt_entity_extraction)
+        response = await self._invoke_llm(*prompt_entity_extraction)
         extracted_declarations = parse_json(response.content, output_schema=prompt_entity_extraction[-1]) or []
 
         if isinstance(extracted_declarations, dict):
@@ -857,7 +859,7 @@ class GraphMemory:
                 prompt_relation_filter = extraction_prompts.filter_relations_for_merge(
                     tgt_entity, relation_list, state.prompting.language, state.extras
                 )
-                task = asyncio.create_task(self.invoke_llm(*prompt_relation_filter))
+                task = asyncio.create_task(self._invoke_llm(*prompt_relation_filter))
                 state.relation_filter_tasks[task] = (tgt_entity, relation_list)
         # Finally, update the episodes
         if episodes_to_update:
@@ -942,7 +944,7 @@ class GraphMemory:
                 )
                 if tgt in extracted_declarations:
                     # Submit tasks that would block entity summary / attribute extraction
-                    task = asyncio.create_task(self.invoke_llm(*prompt_entity_merge))
+                    task = asyncio.create_task(self._invoke_llm(*prompt_entity_merge))
                     state.pending_merge[tgt.uuid] = task
                     state.merging_tasks.append(task)
                     state.merging_tasks_entities[task] = tgt
@@ -951,7 +953,7 @@ class GraphMemory:
                     non_blocking_tasks.append((tgt, prompt_entity_merge))
             # Then the non-blocking tasks
             for tgt, prompt_entity_merge in non_blocking_tasks:
-                task = asyncio.create_task(self.invoke_llm(*prompt_entity_merge))
+                task = asyncio.create_task(self._invoke_llm(*prompt_entity_merge))
                 state.merging_tasks.append(task)
                 state.merging_tasks_entities[task] = tgt
 
@@ -981,7 +983,7 @@ class GraphMemory:
                 language=state.prompting.language,
                 extras=state.extras,
             )
-            state.tasks.append(asyncio.create_task(self.invoke_llm(*prompt_entity_summary)))
+            state.tasks.append(asyncio.create_task(self._invoke_llm(*prompt_entity_summary)))
 
         # Blocking tasks needs to wait
         for entity in entities_blocking:
@@ -996,7 +998,7 @@ class GraphMemory:
                 language=state.prompting.language,
                 extras=state.extras,
             )
-            state.tasks.append(asyncio.create_task(self.invoke_llm(*prompt_entity_summary)))
+            state.tasks.append(asyncio.create_task(self._invoke_llm(*prompt_entity_summary)))
         if state.tasks:
             await asyncio.wait(state.tasks)
 
@@ -1074,7 +1076,7 @@ class GraphMemory:
                     history=state.history,
                     language=state.prompting.language,
                 )
-                state.tasks.append(asyncio.create_task(self.invoke_llm(*prompt_relation_dedupe)))
+                state.tasks.append(asyncio.create_task(self._invoke_llm(*prompt_relation_dedupe)))
                 dedupe_relation_tasks.append((relation, state.retrieved_relations, state.tasks[-1]))
         if state.tasks:
             await asyncio.wait(state.tasks)

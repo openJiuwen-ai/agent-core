@@ -166,14 +166,20 @@ class TestAttachEmbedder:
         assert getattr(store, "_embedder") is emb
 
     @staticmethod
-    def test_attach_embedder_redefine_raises(store):
-        """attach_embedder when already set raises ValueError."""
-        with pytest.raises(BaseError, match="Attempt to re-define"):
-            store.attach_embedder(store.embedder)
+    def test_attach_embedder_redefine(store):
+        """attach_embedder when already set raises."""
+        setattr(store, "_embedder", _StubEmbedding())
+        assert store.embedder.dimension == _StubEmbedding.dimension
+        emb = _StubEmbedding()
+        emb.dimension = -1
+        store.attach_embedder(emb)
+        assert getattr(store, "_embedder") is emb
+        assert store.embedder is emb
+        assert store.embedder.dimension == -1
 
     @staticmethod
     def test_attach_embedder_non_embedder_raises(store):
-        """attach_embedder with non-Embedding type raises ValueError."""
+        """attach_embedder with non-Embedding type raises."""
         setattr(store, "_embedder", None)
         with pytest.raises(BaseError, match="instance of Embedding"):
             store.attach_embedder(object())

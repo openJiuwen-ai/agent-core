@@ -66,7 +66,7 @@ class AddMemStrategy(BaseModel):
     recall_episode: EpisodeRetrievalStrategy = Field(default=EpisodeRetrievalStrategy())
     recall_entity: RetrievalStrategy = Field(
         default=RetrievalStrategy(
-            rank_config=WeightedRankConfig(dense_name=0.7, dense_content=0.1, sparse_content=0.2),
+            rank_config=WeightedRankConfig(name_dense=0.7, content_dense=0.1, content_sparse=0.2),
             min_score=0.1,
         )
     )
