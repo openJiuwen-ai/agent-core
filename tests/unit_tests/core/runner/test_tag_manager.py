@@ -85,7 +85,7 @@ class TestTagMgr:
 
     def test_remove_resource_tags(self):
         """测试删除指定标签"""
-        remaining_tags = self._tag_mgr.remove_resource_tags("res1", ["tag1", "tag3"])
+        remaining_tags = self._tag_mgr.remove_resource_tags("res1", ["tag1", "tag3"], skip_if_not_exists=True)
         assert "tag1" not in remaining_tags
         assert "tag2" in remaining_tags
 
