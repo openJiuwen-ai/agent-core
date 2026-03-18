@@ -65,7 +65,7 @@ class TestMemUpdateChecker:
         """Test check method when new and old memories have duplicate IDs."""
         new_memories = {"1": "I like reading", "2": "I enjoy books"}
         old_memories = {"1": "I like reading", "3": "I love novels"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock successful LLM response
         mock_response = Mock()
@@ -93,7 +93,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns redundant result."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I enjoy books"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock successful LLM response with redundant result
         mock_response = Mock()
@@ -121,7 +121,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns conflicting result."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I hate books"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock successful LLM response with conflicting result
         mock_response = Mock()
@@ -154,7 +154,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns none result (no conflict)."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I enjoy sports"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock successful LLM response with none result
         mock_response = Mock()
@@ -184,7 +184,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns malformed response."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I enjoy books"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock malformed LLM response
         mock_response = Mock()
@@ -208,7 +208,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns single object instead of list."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I enjoy books"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock LLM response with single object (not list)
         mock_response = Mock()
