@@ -562,6 +562,16 @@ class StatusCode(Enum):
     MEMORY_GRAPH_PROMPT_FILES_MISSING = (158204, "graph memory prompt files not found in directory {prompt_dir}")
 
     # =========================
+    # DevTools / AgentBuilder 140000 - 140099
+    # =========================
+
+    AGENT_BUILDER_RESOURCE_RETRIEVE_ERROR = (
+        140031, "agent builder resource retrieve failed, error='{reason}'")
+    AGENT_BUILDER_AGENT_TYPE_NOT_SUPPORTED = (
+        140032, "agent builder agent_type is not supported, agent_type='{agent_type}', "
+                "supported_types='{supported_types}'")
+
+    # =========================
     # Foundation Tool 160000–169999
     # =========================
 
