@@ -389,6 +389,24 @@ class StatusCode(Enum):
     AGENT_GROUP_AGENT_NOT_FOUND = (132003, "agent group agent not found error, reason: {error_msg}")
 
     # =========================
+    # DevTools / AgentBuilder 140000 - 140099
+    # =========================
+
+    # AgentBuilder - Clarifier 140000 - 140029
+    AGENT_BUILDER_RESOURCE_PARSE_ERROR = (
+        140000, "agent builder resource parse error, resource_type='{resource_type}', error='{reason}'")
+    AGENT_BUILDER_LLM_SERVICE_ERROR = (
+        140001, "agent builder llm service error, error='{reason}'")
+
+    # AgentBuilder - Generator 140030 - 140059
+    AGENT_BUILDER_GENERATOR_PARSE_ERROR = (
+        140030, "agent builder generator parse error, error='{reason}'")
+
+    # AgentBuilder - Transformer 140060 - 140099
+    AGENT_BUILDER_TRANSFORMER_ERROR = (
+        140060, "agent builder transformer error, error='{reason}'")
+
+    # =========================
     # ContextEngine 150000 - 154999
     # =========================
 
