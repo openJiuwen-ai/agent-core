@@ -289,6 +289,34 @@ class TestMultimodalDocument:
         assert "invalid_image_data_provided" in str(exc_info.value)
 
     @staticmethod
+    def test_add_image_field_from_url():
+        """Test adding image field from HTTP(S) URL"""
+        doc = MultimodalDocument()
+        url = "https://example.com/image.png"
+        doc.add_field("image", data=url)
+        assert len(doc.content) == 1
+        assert doc.content[0]["type"] == "image_url"
+        assert doc.content[0]["image_url"]["url"] == url
+
+    @staticmethod
+    def test_add_video_field_from_url():
+        """Test adding video field from HTTP(S) URL"""
+        doc = MultimodalDocument()
+        url = "https://example.com/video.mp4"
+        doc.add_field("video", data=url)
+        assert len(doc.content) == 1
+        assert doc.content[0]["type"] == "video_url"
+        assert doc.content[0]["video_url"]["url"] == url
+
+    @staticmethod
+    def test_add_audio_field_from_url_rejected():
+        """Test that audio does not accept HTTP URL (only base64 data URL)"""
+        doc = MultimodalDocument()
+        with pytest.raises(ValidationError) as exc_info:
+            doc.add_field("audio", data="https://example.com/audio.wav")
+        assert "invalid_audio_data_provided" in str(exc_info.value)
+
+    @staticmethod
     def test_invalid_file_path_type():
         """Test error when file_path is not a Path object"""
         doc = MultimodalDocument()
@@ -360,3 +388,120 @@ class TestMultimodalDocument:
 
         assert doc.content[0]["uuid"] == "a" * 32
         assert doc.content[1]["uuid"] == "b" * 32
+
+    # --- dashscope_input property ---
+
+    @staticmethod
+    def test_dashscope_input_empty_doc():
+        """Test dashscope_input on document with no fields"""
+        doc = MultimodalDocument()
+        assert doc.dashscope_input == {}
+
+    @staticmethod
+    def test_dashscope_input_text_only():
+        """Test dashscope_input with text only"""
+        doc = MultimodalDocument()
+        doc.add_field("text", "Hello world")
+        assert doc.dashscope_input == {"text": "Hello world"}
+
+    @staticmethod
+    def test_dashscope_input_single_image_base64():
+        """Test dashscope_input with single image (base64 data URL)"""
+        doc = MultimodalDocument()
+        image_data = tiny_png_base64()
+        doc.add_field("image", data=image_data)
+        assert doc.dashscope_input == {"image": image_data}
+
+    @staticmethod
+    def test_dashscope_input_single_image_url():
+        """Test dashscope_input with single image (HTTP URL)"""
+        doc = MultimodalDocument()
+        url = "https://example.com/photo.png"
+        doc.add_field("image", data=url)
+        assert doc.dashscope_input == {"image": url}
+
+    @staticmethod
+    def test_dashscope_input_multi_images():
+        """Test dashscope_input with multiple images uses multi_images key"""
+        doc = MultimodalDocument()
+        url1 = "https://example.com/a.png"
+        url2 = "https://example.com/b.png"
+        doc.add_field("image", data=url1)
+        doc.add_field("image", data=url2)
+        assert doc.dashscope_input == {"multi_images": [url1, url2]}
+
+    @staticmethod
+    def test_dashscope_input_video_url():
+        """Test dashscope_input with video URL"""
+        doc = MultimodalDocument()
+        url = "https://example.com/clip.mp4"
+        doc.add_field("video", data=url)
+        assert doc.dashscope_input == {"video": url}
+
+    @staticmethod
+    def test_dashscope_input_video_base64_raises():
+        """Test dashscope_input raises when video is base64 (Dashscope supports URL only)"""
+        doc = MultimodalDocument()
+        doc.add_field("video", data=fake_mp4_base64())
+        with pytest.raises(ValidationError) as exc_info:
+            _ = doc.dashscope_input
+        assert "unsupported_format" in str(exc_info.value)
+        assert "only support video in url format" in str(exc_info.value).lower()
+
+    @staticmethod
+    def test_dashscope_input_audio_raises():
+        """Test dashscope_input raises for audio (Dashscope does not support audio modality)"""
+        doc = MultimodalDocument()
+        doc.add_field("audio", data=tiny_wav_base64())
+        with pytest.raises(ValidationError) as exc_info:
+            _ = doc.dashscope_input
+        assert "unsupported_format" in str(exc_info.value)
+        assert "does not support modality" in str(exc_info.value).lower()
+
+    @staticmethod
+    def test_dashscope_input_text_and_image():
+        """Test dashscope_input with text and single image"""
+        doc = MultimodalDocument()
+        doc.add_field("text", "Caption")
+        url = "https://example.com/img.png"
+        doc.add_field("image", data=url)
+        assert doc.dashscope_input == {"text": "Caption", "image": url}
+
+    @staticmethod
+    def test_dashscope_input_text_and_video_url():
+        """Test dashscope_input with text and video URL"""
+        doc = MultimodalDocument()
+        doc.add_field("text", "Description")
+        doc.add_field("video", data="https://example.com/v.mp4")
+        assert doc.dashscope_input == {"text": "Description", "video": "https://example.com/v.mp4"}
+
+    @staticmethod
+    def test_dashscope_input_multiple_video_raises():
+        """Test dashscope_input raises when multiple video fields present"""
+        doc = MultimodalDocument()
+        doc.add_field("video", data="https://example.com/a.mp4")
+        doc.add_field("video", data="https://example.com/b.mp4")
+        with pytest.raises(ValidationError) as exc_info:
+            _ = doc.dashscope_input
+        assert "multiple_video_fields_present" in str(exc_info.value)
+
+    @staticmethod
+    def test_dashscope_input_multiple_text_raises():
+        """Test dashscope_input raises when multiple text fields present"""
+        doc = MultimodalDocument()
+        doc.add_field("text", "First")
+        doc.add_field("text", "Second")
+        with pytest.raises(ValidationError) as exc_info:
+            _ = doc.dashscope_input
+        assert "multiple_text_fields_present" in str(exc_info.value)
+
+    @staticmethod
+    def test_dashscope_input_returns_deepcopy():
+        """Test dashscope_input returns a copy so mutating result does not affect cache"""
+        doc = MultimodalDocument()
+        doc.add_field("text", "Hello")
+        out1 = doc.dashscope_input
+        out2 = doc.dashscope_input
+        assert out1 == out2
+        out1["text"] = "mutated"
+        assert doc.dashscope_input["text"] == "Hello"

@@ -11,8 +11,8 @@ from pathlib import Path
 import dotenv
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.common.config import EmbeddingConfig, RerankerConfig
 from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo, ModelConfig
+from openjiuwen.core.retrieval.common.config import EmbeddingConfig, RerankerConfig
 
 env_file = Path(__file__).parent / ".env"
 if not env_file.exists():
@@ -64,6 +64,8 @@ try:
 except Exception as e:
     logger.error("Multimodal embedding not configured: %r", e)
     MULTIMODAL_EMBEDDING_CONFIG = EMBEDDING_CONFIG
+
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 
 # Query Rewriter (LLM): used by showcase_query_rewriter.py; fallback to API_BASE/API_KEY/MODEL_NAME/MODEL_PROVIDER
 try:
