@@ -228,7 +228,7 @@ class RestfulApiCard(ToolCard)
 RESTful API 工具卡片数据类，继承于`ToolCard`。
 
 * **url**(str)：API 的路径，例如 `/api/v1/users`。必须是有效的 URL。
-* **method**(Literal["POST", "GET"])：HTTP 方法，仅支持 POST 或 GET。默认为 "POST"。
+* **method**(Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])：HTTP 方法。支持所有标准 HTTP 方法。默认为 "POST"。
 * **headers**(Dict[str, Any], 可选)：请求头。
 * **queries**(Dict[str, Any], 可选)：请求查询参数。
 * **paths**(Dict[str, Any], 可选)：URL 路径参数。

@@ -1,6 +1,7 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""ReActAgent Implementation
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+"""ReActAgent Implementation
 ReAct (Reasoning + Acting) paradigm Agent implementation
 
 Created on: 2025-11-25

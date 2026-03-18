@@ -106,3 +106,31 @@ def test_map_input_overrides_defaults():
     result = mapper.map({"id": 123, "name": "Actual Name"})
     assert result[APIParamLocation.PATH] == {"version": "v1", "id": 123}
     assert result[APIParamLocation.QUERY] == {"lang": "en", "name": "Actual Name"}
+
+
+def test_map_none_and_empty_string_preserve_defaults():
+    """Test that None and empty string values preserve default values instead of overwriting them."""
+    mapper = APIParamMapper(
+        schema=DEFAULT_SCHEMAS,
+        default_queries={"lang": "en", "format": "json"},
+        default_headers={"X-API-Key": "test-key", "X-User-ID": "default-user"},
+        default_paths={"version": "v1"}
+    )
+
+    # Inputs with None and empty string should not override defaults
+    inputs = {
+        "id": None,  # Should preserve default path param if existed, but id has no default
+        "name": "",  # Should preserve default (none in this case for name)
+        "age": 25,  # Normal value should be used
+        "auth_token": None,  # Should preserve default header
+    }
+
+    result = mapper.map(inputs)
+
+    # None for 'id' means no value is set (id not in result since it has no default)
+    assert result[APIParamLocation.PATH] == {"version": "v1"}
+    # Empty string for 'name' preserves defaults, age is set normally
+    assert result[APIParamLocation.QUERY] == {"lang": "en", "format": "json", "age": 25}
+    # None for 'auth_token' preserves default header
+    assert result[APIParamLocation.HEADER] == {"X-API-Key": "test-key", "X-User-ID": "default-user"}
+    assert result[APIParamLocation.BODY] == {}
