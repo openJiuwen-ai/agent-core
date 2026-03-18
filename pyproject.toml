@@ -36,6 +36,7 @@ dependencies = [
     "pymilvus>=2.6.2",
     # MCP server
     "fastmcp>=2.14.2,<3.0",
+    "mcp>=1.26.0",
     # Document processing
     "beautifulsoup4>=4.12.0",
     "docx2txt>=0.8",
@@ -50,6 +51,7 @@ dependencies = [
     "charset-normalizer>=3.4.4",
     "pysbd>=0.3.4",
     "oauthlib>=3.3.1",
+    "python-dotenv>=1.2.1",
     "json-repair>=0.55.0",
     "tenacity>=9.1.2",
     "alembic>=1.13.1",
