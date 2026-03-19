@@ -23,19 +23,21 @@ class FileSystemRail(DeepAgentRail):
 
     priority = 100
 
-    def __init__(self):
+    def __init__(self, language: str = "cn") -> None:
         super().__init__()
         self.tools = None
+        self.language = language
 
-    def init(self, agent):
-        read_tool = ReadFileTool(self.sys_operation)
-        write_tool = WriteFileTool(self.sys_operation)
-        edit_tool = EditFileTool(self.sys_operation)
-        glob_tool = GlobTool(self.sys_operation)
-        list_dir_tool = ListDirTool(self.sys_operation)
-        grep_tool = GrepTool(self.sys_operation)
-        bash_tool = BashTool(self.sys_operation)
-        code_tool = CodeTool(self.sys_operation)
+    def init(self, agent) -> None:
+        lang = self.language
+        read_tool = ReadFileTool(self.sys_operation, lang)
+        write_tool = WriteFileTool(self.sys_operation, lang)
+        edit_tool = EditFileTool(self.sys_operation, lang)
+        glob_tool = GlobTool(self.sys_operation, lang)
+        list_dir_tool = ListDirTool(self.sys_operation, lang)
+        grep_tool = GrepTool(self.sys_operation, lang)
+        bash_tool = BashTool(self.sys_operation, lang)
+        code_tool = CodeTool(self.sys_operation, lang)
 
         self.tools = [
             read_tool,

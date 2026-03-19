@@ -18,6 +18,7 @@ from openjiuwen.deepagents.rails import TaskPlanningRail, SkillRail
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
 from openjiuwen.deepagents.schema.workspace import Workspace
+from openjiuwen.deepagents.prompts import resolve_language
 
 
 def create_deep_agent(
@@ -35,6 +36,8 @@ def create_deep_agent(
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,
     sys_operation: Optional[SysOperation] = None,
+    language: Optional[str] = None,
+    prompt_mode: Optional[str] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -79,6 +82,8 @@ def create_deep_agent(
         else workspace
     )
 
+    resolved_language = resolve_language(language)
+
     if not isinstance(sys_operation, SysOperation):
         sysop_card = SysOperationCard(
                 id=f"{card.name}_{card.id}",
@@ -104,7 +109,9 @@ def create_deep_agent(
         workspace=workspace_obj,
         skills=skills,
         backend=backend,
-        sys_operation=sys_operation_obj
+        sys_operation=sys_operation_obj,
+        language=resolved_language,
+        prompt_mode=prompt_mode,
     )
 
     # Forward extra kwargs to config fields
@@ -134,13 +141,13 @@ def create_deep_agent(
             agent.add_rail(rail_inst)
 
     if enable_task_loop and not task_plan_flag:
-        task_plan_rail = TaskPlanningRail()
+        task_plan_rail = TaskPlanningRail(language=resolved_language)
         agent.add_rail(task_plan_rail)
     if skills and not skill_flag:
         skills_dir: List[str] = []
         for skill in skills:
             skill_dir = os.path.join(str(workspace_obj.root_path), skill)
             skills_dir.append(skill_dir)
-        skill_rail = SkillRail(skills_dir=skills_dir, skill_mode="all")
+        skill_rail = SkillRail(skills_dir=skills_dir, skill_mode="all", language=resolved_language)
         agent.add_rail(skill_rail)
     return agent

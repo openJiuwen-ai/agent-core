@@ -62,3 +62,5 @@ class DeepAgentConfig:
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     completion_timeout: float = 600.0
+    language: Optional[str] = None
+    prompt_mode: Optional[str] = None
