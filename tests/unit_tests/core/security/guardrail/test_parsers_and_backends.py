@@ -505,22 +505,37 @@ class TestLocalModelBackend:
     def test_cleanup():
         """Test cleanup method."""
         parser = BertBinaryParser()
-        backend = LocalModelBackend(
-            model_path="/path/to/model",
-            parser=parser
-        )
 
-        initial_info = backend.get_model_info()
-        assert initial_info["model_loaded"] is False
-        assert initial_info["has_model"] is False
-        assert initial_info["has_tokenizer"] is False
+        mock_model = MagicMock()
+        mock_tokenizer = MagicMock()
 
-        backend.cleanup()
+        with patch.object(LocalModelBackend, '_inference', return_value={"logits": [0.1, 0.9]}):
+            backend = LocalModelBackend(
+                model_path="/path/to/model",
+                parser=parser
+            )
 
-        final_info = backend.get_model_info()
-        assert final_info["model_loaded"] is False
-        assert final_info["has_model"] is False
-        assert final_info["has_tokenizer"] is False
+            with patch.object(backend, '_model', mock_model):
+                with patch.object(backend, '_tokenizer', mock_tokenizer):
+                    with patch.object(backend, '_load_model', return_value=None):
+                        ctx = GuardrailContext(
+                            content_type=GuardrailContentType.TEXT,
+                            content="test content",
+                            event="test"
+                        )
+                        asyncio.run(backend.analyze(ctx))
+
+                        info_before_cleanup = backend.get_model_info()
+                        assert info_before_cleanup["model_loaded"] is True
+                        assert info_before_cleanup["has_model"] is True
+                        assert info_before_cleanup["has_tokenizer"] is True
+
+                        backend.cleanup()
+
+                        final_info = backend.get_model_info()
+                        assert final_info["model_loaded"] is False
+                        assert final_info["has_model"] is False
+                        assert final_info["has_tokenizer"] is False
 
 
 # ========== GuardrailContext Tests ==========
