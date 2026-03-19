@@ -235,7 +235,7 @@ def dedupe_entity_list(
 def dedupe_relation_list(
     content: str,
     relation: Relation,
-    existing_relations: List[Dict],
+    existing_relations: List[Dict | Relation],
     existing_entities: List[Entity],
     history: str = "",
     *,
@@ -256,6 +256,7 @@ def dedupe_relation_list(
         content=content,
         language=language,
     )
+    existing_relations = [r if isinstance(r, dict) else r.model_dump() for r in existing_relations]
     kwargs["entities"] = format_existing_entities(existing_entities, 1, language)
     kwargs["existing_relations"] = format_existing_relations(existing_relations, 1)
     kwargs["new_relation"] = format_existing_relations([relation.model_dump()], 0).removeprefix("0. ")

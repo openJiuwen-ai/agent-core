@@ -1,0 +1,239 @@
+{
+  "event_id": 14,
+  "event_description": "事件 24：酒店预授权冻结金额过大 → 出差时担心可用额度不足",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "小艺，这 3000 多的押金会影响我刷卡吗？",
+      "iso_time": "2025-07-19T19:12",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "押金是酒店预授权的一部分，暂时冻结信用卡额度，但不实际扣款。建议你可以问一下银行客服当前的可用额度。我可以帮你跳转到银行客服哦。",
+      "iso_time": "2025-07-19T19:13",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，那麻烦你帮我跳转到银行客服吧。",
+      "iso_time": "2025-07-19T19:14",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "已为您打开A银行的智能客服界面，请稍等。",
+      "iso_time": "2025-07-19T19:15",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您好，这里是A银行的小鑫，请问有什么可以帮您？",
+      "iso_time": "2025-07-19T19:16",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我刚在酒店刷卡预授权了 3200 元，我想知道这会影响我的可用额度吗？",
+      "iso_time": "2025-07-19T19:17",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "预授权会暂时冻结您的额度，但不会实际扣款，影响您的可用额度。建议您查询一下当前的可用额度。",
+      "iso_time": "2025-07-19T19:18",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我现在的可用额度是多少？",
+      "iso_time": "2025-07-19T19:19",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请稍等，我帮您查询一下。您的信用卡尾号5678当前可用额度为 6000 元。",
+      "iso_time": "2025-07-19T19:20",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "如果不够用的话，我能申请临时额度提升吗？",
+      "iso_time": "2025-07-19T19:21",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您可以申请临时额度提升。我为您提供申请路径：请打开我们的手机银行App，进入‘信用卡管理’，选择‘额度管理’，然后点击‘申请临时额度’。",
+      "iso_time": "2025-07-19T19:22",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我试试看。",
+      "iso_time": "2025-07-19T19:23",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "还有个问题，押金一般多久会解冻？",
+      "iso_time": "2025-07-19T19:24",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "预授权冻结的额度通常在您退房后3-7个工作日内会自动解冻。",
+      "iso_time": "2025-07-19T19:25",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "如果我这几天消费多，额度不够怎么办？",
+      "iso_time": "2025-07-19T19:26",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "别担心，我们可以看看临时额度提升的申请结果，或者您也可以提前还款来增加可用额度。我会帮您监控进度。",
+      "iso_time": "2025-07-19T19:27",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我如果还需要更多额度，银行有什么推荐吗？",
+      "iso_time": "2025-07-19T19:28",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果方便，也可以顺便了解一下我们最近的‘大额消费返现’和‘临时额度提升’活动，或许对您有帮助。",
+      "iso_time": "2025-07-19T19:29",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "多谢提醒，我会考虑的。",
+      "iso_time": "2025-07-19T19:30",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我这次出差还要用好多次信用卡，希望不会出问题。",
+      "iso_time": "2025-07-19T19:31",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "理解您的担心。只要您及时关注额度，操作上有什么问题随时联系我们，我们会尽力帮您解决～",
+      "iso_time": "2025-07-19T19:32",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，如果额度问题解决不了，我会再联系你们。",
+      "iso_time": "2025-07-19T19:33",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "没问题，祝您出差一切顺利！",
+      "iso_time": "2025-07-19T19:34",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，你们的服务挺好的。",
+      "iso_time": "2025-07-19T19:35",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "感谢您的认可，我们会继续努力提供更好的服务！",
+      "iso_time": "2025-07-19T19:36",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "临时额度申请成功了，感谢帮助！",
+      "iso_time": "2025-07-19T19:37",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "太好了！有任何其他问题，随时找我们。",
+      "iso_time": "2025-07-19T19:38",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "会的，谢谢，再见。",
+      "iso_time": "2025-07-19T19:39",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "再见，祝您生活愉快！",
+      "iso_time": "2025-07-19T19:40",
+      "agent_id": "B",
+      "agent_name": "小优"
+    }
+  ]
+}

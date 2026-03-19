@@ -1,0 +1,183 @@
+{
+  "event_id": 3,
+  "event_description": "事件 3：工资卡变更 → 工资理财设置咨询",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "你好，我想咨询一下工资理财的设置问题。",
+      "iso_time": "2024-08-05T12:10",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您好，我是小赢。听说您对工资理财感兴趣，我可以为您介绍一下我们的智能存款和货币基金服务。",
+      "iso_time": "2024-08-05T12:11",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "公司刚宣布工资会发到A银行，我担心长期放活期会浪费，想了解自动转存的方法。",
+      "iso_time": "2024-08-05T12:12",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您可以设置工资到账后自动转入智能存款或货币基金，以获取更高的收益。具体步骤您可以在手机银行App中设置。",
+      "iso_time": "2024-08-05T12:13",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我想知道这些理财方式的风险和收益差异，能详细说说吗？",
+      "iso_time": "2024-08-05T12:14",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "智能存款一般是低风险，收益较为稳定；而货币基金虽然也属于低风险，但收益会因市场波动有所变化。您可以根据自己的风险承受能力选择合适的产品。",
+      "iso_time": "2024-08-05T12:15",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我怎么设置自动转存呢？",
+      "iso_time": "2024-08-05T12:16",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您按以下步骤操作：第一步，打开手机银行App；第二步，进入‘我的账户’；第三步，选择‘自动转存设置’；最后，按照提示完成设置。",
+      "iso_time": "2024-08-05T12:17",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "这样设置后每次工资到账都会自动转存吗？",
+      "iso_time": "2024-08-05T12:18",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "是的，设置成功后，您的工资会在到账后自动转入您选择的理财产品中，非常便捷。",
+      "iso_time": "2024-08-05T12:19",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "如果我对收益有疑问，可以随时调整吗？",
+      "iso_time": "2024-08-05T12:20",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "当然可以，您可以随时通过App调整您的转存设置或选择不同的理财产品。",
+      "iso_time": "2024-08-05T12:21",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "目前市场上智能存款和货币基金的收益率大概是多少？",
+      "iso_time": "2024-08-05T12:22",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "当前智能存款的年化收益率约在2.5%到3%之间，而货币基金的年化收益率可能在3%到4%左右，但根据市场情况会有所浮动。",
+      "iso_time": "2024-08-05T12:23",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "听起来不错，我会考虑一下。感谢你的帮助。",
+      "iso_time": "2024-08-05T12:24",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，如果您还有其他问题或需要更多建议，随时联系我哦！",
+      "iso_time": "2024-08-05T12:25",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我还想确认一下风险等级是否匹配我的情况。",
+      "iso_time": "2024-08-05T12:26",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您的风险等级可以通过我们App中的‘风险评测’功能进行自评估，确保所选产品与您的风险承受能力相匹配。",
+      "iso_time": "2024-08-05T12:27",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我需要定期检查这些投资吗？",
+      "iso_time": "2024-08-05T12:28",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "建议您定期查看投资收益和市场走势，这样可以更好地管理您的投资组合。",
+      "iso_time": "2024-08-05T12:29",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢你的建议，我会定期检查的。",
+      "iso_time": "2024-08-05T12:30",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "很高兴能帮助到您，祝您投资顺利！如有需要，随时联系我。",
+      "iso_time": "2024-08-05T12:31",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    }
+  ]
+}

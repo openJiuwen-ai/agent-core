@@ -88,7 +88,10 @@ def dict2relation(response: dict, entities: list[Entity], **kwargs) -> Optional[
 def parse_all_relations(
     relations: list[dict], entities: list[Union[EntityDeclaration, Entity]], entity_types: list[EntityDef], **kwargs
 ) -> tuple[list[Relation], list[Entity]]:
-    """Parse all LLM extracted relation dictionaries & convert entity declaration in input into entities"""
+    """
+    Parse all LLM extracted relation dictionaries & convert entity declaration in input into entities.
+    Relations are also deduplicated by content, keeping the longest version and discarding shorter ones.
+    """
     # Convert entity declaration into proper entities
     entities = declare_entities(entities, entity_types, **kwargs)
 

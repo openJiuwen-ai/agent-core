@@ -1,0 +1,151 @@
+{
+  "event_id": 9,
+  "event_description": "事件 9：出差前信用卡支付能力检查",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "小艺，明天我要出差去深圳，信用卡有问题吗？",
+      "iso_time": "2025-07-18T21:15",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "我帮你看看哈～你的是A银行信用卡，对吧？",
+      "iso_time": "2025-07-18T21:16",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "是的，尾号5678的那张，最近好像快用到上限了。",
+      "iso_time": "2025-07-18T21:17",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您的信用卡额度是3万元，目前已用约70%，还剩约9000元可用。考虑到酒店预授权可能会占用部分额度，您可能需要多留意一下。",
+      "iso_time": "2025-07-18T21:18",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "酒店预授权会占用多少额度？",
+      "iso_time": "2025-07-18T21:19",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "通常酒店预授权会占用几百到上千元不等，具体金额取决于酒店的政策。",
+      "iso_time": "2025-07-18T21:20",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "这样啊，那我可能得还点钱进去。",
+      "iso_time": "2025-07-18T21:21",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "别担心，我们可以一起看看怎么操作还款。",
+      "iso_time": "2025-07-18T21:22",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我现在需要怎么操作？",
+      "iso_time": "2025-07-18T21:23",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您打开A银行的手机银行App，然后按照以下步骤操作：第一步，登录后选择“信用卡管理”；第二步，点击“还款”；第三步，选择还款金额并确认。",
+      "iso_time": "2025-07-18T21:24",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "明白了，我去试试。",
+      "iso_time": "2025-07-18T21:25",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果还有问题，随时告诉我哦～",
+      "iso_time": "2025-07-18T21:26",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "还完了，那NFC绑卡的借记卡能正常用吧？",
+      "iso_time": "2025-07-18T21:27",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您绑定的借记卡（尾号1234）NFC功能正常，可以用来支付哦！",
+      "iso_time": "2025-07-18T21:28",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那就好，明天出差的时候我就放心了。",
+      "iso_time": "2025-07-18T21:29",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "祝您出差顺利，有任何问题都可以找我～",
+      "iso_time": "2025-07-18T21:30",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢小艺，今晚早点休息。",
+      "iso_time": "2025-07-18T21:31",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，晚安～",
+      "iso_time": "2025-07-18T21:32",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    }
+  ]
+}

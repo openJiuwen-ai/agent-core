@@ -38,7 +38,9 @@ from .utils import update_entity
 def validate_entities_episodes(entities: List[Entity], current_episode: Episode, state: GraphMemState):
     """Ensure entity-episode connections are in sync"""
 
-    current_episode.entities = list(set([e.uuid for e in current_episode.entities] + [e.uuid for e in entities]))
+    current_episode.entities = list(
+        set([e if isinstance(e, str) else e.uuid for e in current_episode.entities] + [e.uuid for e in entities])
+    )
     state.mem_update_skip_embed.updated_entity = [
         e for e in state.mem_update_skip_embed.updated_entity if e not in state.mem_update.updated_entity
     ]
@@ -69,7 +71,7 @@ def validate_entities_episodes(entities: List[Entity], current_episode: Episode,
             if ep2e and not e2ep:  # [Episode] -> [Entity], remove Entity from Episode
                 episode.entities.remove(entity.uuid)
             elif e2ep and not ep2e:  # [Episode] <- [Entity], add Entity to Episode
-                episode.entities.append(episode.uuid)
+                episode.entities.append(entity.uuid)
         episode.entities = list(set(episode.entities))
 
 
@@ -122,7 +124,7 @@ async def process_relations(
         unique_uuids = await ensure_unique_uuids(
             database, ids=to_resolve, collection=RELATION_COLLECTION, skip=state.strategy.skip_uuid_dedupe
         )
-        for relation, unique_uuid in zip(state.mem_update.added_entity, unique_uuids):
+        for relation, unique_uuid in zip(state.mem_update.added_relation, unique_uuids):
             relation.uuid = unique_uuid
 
 

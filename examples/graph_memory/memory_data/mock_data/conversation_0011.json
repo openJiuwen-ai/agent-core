@@ -1,0 +1,183 @@
+{
+  "event_id": 11,
+  "event_description": "事件 11：李晴生日提醒 → 太早了折扣没开始（预算焦虑）",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "小艺，今天是李晴的生日，我想给她买个礼物，但是双十一的折扣还没开始，怎么办？",
+      "iso_time": "2025-10-10T19:40",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "张伟，别着急，我帮你查一下现在有哪些平台有轻微折扣或者会员价。",
+      "iso_time": "2025-10-10T19:41",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我还想知道这些礼物能不能当天送到，最好是上海本地仓的。",
+      "iso_time": "2025-10-10T19:42",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "我查到目前只有少量满减活动，大牌包的价格集中在8k到18k之间。现在有几个平台支持上海本地仓，可以当天送达。",
+      "iso_time": "2025-10-10T19:43",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "这些包里GUCCI、MK、Coach的价格差距大吗？",
+      "iso_time": "2025-10-10T19:44",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "GUCCI的价格普遍偏高，相对来说MK和Coach的性价比更高一些。你可以根据预算选择哦。",
+      "iso_time": "2025-10-10T19:45",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我的信用卡额度还够吗？我记得这个月已经用了不少。",
+      "iso_time": "2025-10-10T19:46",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "你的信用卡（尾号5678）本月已用额度较高，目前可用额度在20%到30%之间。如果预算不足，可以考虑提升临时额度。",
+      "iso_time": "2025-10-10T19:47",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我需要提升临时额度吗？",
+      "iso_time": "2025-10-10T19:48",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果你计划购买价格较高的礼物，提升临时额度是个不错的选择。需要我帮你查一下提升额度的政策吗？",
+      "iso_time": "2025-10-10T19:49",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，帮我查一下。",
+      "iso_time": "2025-10-10T19:50",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请稍等，我帮你查询一下提升临时额度的政策。",
+      "iso_time": "2025-10-10T19:51",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "根据A银行的规定，您可以申请提升临时额度，最多不超过信用卡固定额度的50%。",
+      "iso_time": "2025-10-10T19:52",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我需要提供什么资料吗？",
+      "iso_time": "2025-10-10T19:53",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "通常情况下，只需要通过手机银行申请即可，无需额外资料。如果需要进一步确认，我可以帮您指引申请步骤。",
+      "iso_time": "2025-10-10T19:54",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，那我现在就申请一下。",
+      "iso_time": "2025-10-10T19:55",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您按以下步骤操作：第一步，打开手机银行App；第二步，进入信用卡管理；第三步，选择临时额度申请。",
+      "iso_time": "2025-10-10T19:56",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "申请好了，谢谢你们。我还是有点紧张，希望能买到合适的礼物。",
+      "iso_time": "2025-10-10T19:57",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "别担心，我们一起看看哈～我建议你可以看看MK的包包，性价比较高，而且他们的款式李晴应该会喜欢。",
+      "iso_time": "2025-10-10T19:58",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我去下单了。希望能在今天送到。",
+      "iso_time": "2025-10-10T19:59",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "祝你购物愉快！如果有任何问题，随时找我哦～",
+      "iso_time": "2025-10-10T20:00",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，有需要我会再联系。",
+      "iso_time": "2025-10-10T20:01",
+      "agent_id": null,
+      "agent_name": null
+    }
+  ]
+}

@@ -1,0 +1,183 @@
+{
+  "event_id": 6,
+  "event_description": "事件 6：备孕前财务规划 → 房贷提前还款试算",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "晚上好，我想了解一下提前还房贷的政策。",
+      "iso_time": "2025-04-02T21:00",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您稍等，我来为您查看房贷提前还款的相关政策。根据我们的规定，您可以选择提前还款，具体的违约金和预约要求需要根据您当前的贷款合同条款来确定。",
+      "iso_time": "2025-04-02T21:01",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "如果我想提前还5万、10万或者20万，月供会有什么变化？",
+      "iso_time": "2025-04-02T21:02",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "我可以帮您试算一下不同还款金额对月供的影响。通常提前还款可以降低您后续的月供压力。",
+      "iso_time": "2025-04-02T21:03",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我需要提前预约吗？如果是，在哪里可以预约？",
+      "iso_time": "2025-04-02T21:04",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "提前还款通常需要提前预约。您可以通过手机银行App进行预约，我可以指导您操作。",
+      "iso_time": "2025-04-02T21:05",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，那怎么在App上预约呢？",
+      "iso_time": "2025-04-02T21:06",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您打开手机银行App，进入【贷款管理】模块，然后选择【提前还款】选项，根据提示进行预约。",
+      "iso_time": "2025-04-02T21:07",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "明白了，谢谢。顺便问一下，如果我现在选择提前还20万，会有多少违约金？",
+      "iso_time": "2025-04-02T21:08",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "根据一般的违约金计算规则，提前还款的违约金通常是剩余本金的1%-3%。具体金额还需根据您的合同细则来确认。",
+      "iso_time": "2025-04-02T21:09",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "听起来还不错。我现在有点焦虑，想尽快处理好这些事情。能不能帮我看看哪个还款方案更合适？",
+      "iso_time": "2025-04-02T21:10",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "理解您的心情，我们可以一起看看不同还款方案的优缺点。提前还款有助于减轻未来的月供压力，不过需要考虑当下的现金流情况。别担心，我们一步步来。",
+      "iso_time": "2025-04-02T21:11",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，我会考虑一下现金流的情况。",
+      "iso_time": "2025-04-02T21:12",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，如果您有任何其他问题或需要进一步的帮助，随时可以联系我。希望这能帮助您做出更好的财务决策。",
+      "iso_time": "2025-04-02T21:13",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我会再看看我的财务状况再决定。",
+      "iso_time": "2025-04-02T21:14",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "听起来是个不错的计划。提前还款虽然能减轻未来的负担，但也要确保当前的生活质量不受影响。",
+      "iso_time": "2025-04-02T21:15",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那如果我想了解更多关于房贷利率的情况，还能找谁咨询？",
+      "iso_time": "2025-04-02T21:16",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您可以咨询我们银行的个人贷款专员或者继续通过我获取房贷利率的相关信息。",
+      "iso_time": "2025-04-02T21:17",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "太好了，那我先去预约提前还款。谢谢你的帮助！",
+      "iso_time": "2025-04-02T21:18",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，祝您一切顺利！如果有新的问题，随时联系我。",
+      "iso_time": "2025-04-02T21:19",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "晚安。",
+      "iso_time": "2025-04-02T21:20",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "晚安，保重。",
+      "iso_time": "2025-04-02T21:21",
+      "agent_id": "B",
+      "agent_name": "小优"
+    }
+  ]
+}

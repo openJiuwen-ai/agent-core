@@ -1,0 +1,255 @@
+{
+  "event_id": 13,
+  "event_description": "事件 16：冲动消费后悔 → 想退货 & 查询信用卡冻结额度",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我是不是冲动消费了…退款能马上到账吗？",
+      "iso_time": "2025-05-09T23:48",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "别担心，我帮你看看哈～",
+      "iso_time": "2025-05-09T23:49",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "我查了一下，这笔订单还在处理状态，退款会在“冻结额度”下等待处理。",
+      "iso_time": "2025-05-09T23:50",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果担心额度不足，我可以帮你打开银行 App 客服入口，让他们查看可用额度与预计恢复时间。",
+      "iso_time": "2025-05-09T23:51",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好，麻烦帮我连接一下客服。",
+      "iso_time": "2025-05-09T23:52",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您好，我是小鑫。关于信用卡退款的到账机制，退款会在电商平台处理完成后解除冻结额度。",
+      "iso_time": "2025-05-09T23:53",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那大概需要多久？",
+      "iso_time": "2025-05-09T23:54",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "通常情况下，退款处理时间会根据电商平台的政策有所不同，一般需要3到7个工作日。",
+      "iso_time": "2025-05-09T23:55",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "这段时间内，我的信用卡额度是不是就会一直被占用？",
+      "iso_time": "2025-05-09T23:56",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "是的，在退款处理完成前，相关金额会保持冻结状态。",
+      "iso_time": "2025-05-09T23:57",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那如果我现在需要用卡怎么办？",
+      "iso_time": "2025-05-09T23:58",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "理解您的担忧，我们可以查看是否有其他解决方案。",
+      "iso_time": "2025-05-09T23:59",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果急需使用额度，可以考虑申请临时额度或者查看其他账户的可用额度。",
+      "iso_time": "2025-05-10T00:00",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "临时额度怎么申请？",
+      "iso_time": "2025-05-10T00:01",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您按以下步骤操作：第一步，打开银行 App；第二步，进入“信用卡”页面；第三步，选择“申请临时额度”。",
+      "iso_time": "2025-05-10T00:02",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我试试。",
+      "iso_time": "2025-05-10T00:03",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果需要帮助，随时告诉我哦～",
+      "iso_time": "2025-05-10T00:04",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我还是有点担心额度问题。",
+      "iso_time": "2025-05-10T00:05",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "别担心，我们一起看看哈～您的信用卡当前可用额度为9000元，应该能满足大部分日常需求。",
+      "iso_time": "2025-05-10T00:06",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "刚刚试了临时额度申请，可以多出5000元。谢谢啦！",
+      "iso_time": "2025-05-10T00:07",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "太好了！如果有其他问题或需要了解更多信息，请随时联系我。",
+      "iso_time": "2025-05-10T00:08",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，那我再看看订单能不能取消。",
+      "iso_time": "2025-05-10T00:09",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "建议您尽快在电商平台上申请取消订单，这样有助于加快退款处理速度。",
+      "iso_time": "2025-05-10T00:10",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "嗯，我马上去操作，谢谢大家的帮助！",
+      "iso_time": "2025-05-10T00:11",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，有问题随时找我们哦，祝您一切顺利！",
+      "iso_time": "2025-05-10T00:12",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "刚刚申请取消订单了，希望能顺利退款。",
+      "iso_time": "2025-05-10T00:13",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "相信会顺利处理的，有任何进展请记得查看哦～",
+      "iso_time": "2025-05-10T00:14",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "嗯，好的。我会关注的。",
+      "iso_time": "2025-05-10T00:15",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果有任何不明白的地方，随时问我哦，晚安！",
+      "iso_time": "2025-05-10T00:16",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "晚安，感谢你们的帮助。",
+      "iso_time": "2025-05-10T00:17",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不用谢，祝您有个好梦！",
+      "iso_time": "2025-05-10T00:18",
+      "agent_id": "B",
+      "agent_name": "小优"
+    }
+  ]
+}

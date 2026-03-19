@@ -1,0 +1,199 @@
+{
+  "event_id": 7,
+  "event_description": "事件 7：备孕相关 → 保险与母婴优惠咨询",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "你好，我想了解一下孕期的保险产品，最近在考虑备孕。",
+      "iso_time": "2025-06-20T12:45",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您好，张伟！您可以看看我们最近推出的孕期保险产品，能为您备孕提供更多保障。如果方便，也可以顺便了解一下我们的一些母婴优惠活动哦。",
+      "iso_time": "2025-06-20T12:46",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那母婴类的消费有没有积分优惠？",
+      "iso_time": "2025-06-20T12:47",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "目前我们的信用卡在指定母婴用品商店消费可以享受双倍积分优惠。具体的商店名单可以在我们的App中查看哦。",
+      "iso_time": "2025-06-20T12:48",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "不错，那关于未来孩子的教育储备你有什么推荐吗？",
+      "iso_time": "2025-06-20T12:49",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "我们有一款教育储蓄计划，适合为将来的教育费用做准备。您可以根据自己的预算选择不同的存储期限和金额。",
+      "iso_time": "2025-06-20T12:50",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "听起来不错，这个教育储蓄有什么收益吗？",
+      "iso_time": "2025-06-20T12:51",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "这款产品的收益会根据市场的表现有所波动，但总体来说，是一个比较稳健的长期储蓄选择。",
+      "iso_time": "2025-06-20T12:52",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我再考虑一下。还有，我的伴侣最近体检报告还不错，年底我们打算开始备孕。",
+      "iso_time": "2025-06-20T12:53",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "那真是个好消息！备孕期间，合理的财务规划和保险保障可以让您更加安心。我随时可以为您提供相关支持哦。",
+      "iso_time": "2025-06-20T12:54",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "非常感谢你的建议，我会再多了解一下这些产品。",
+      "iso_time": "2025-06-20T12:55",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，如果您还有其他问题或者需要更多信息，随时可以联系我。祝您备孕顺利！",
+      "iso_time": "2025-06-20T12:56",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "对了，医院消费有积分优惠吗？",
+      "iso_time": "2025-06-20T12:57",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "目前在指定医院进行消费时可以享受积分累积，不过具体的优惠可能会根据医院的不同而有所变化。您可以查看我们的App来获取最新信息。",
+      "iso_time": "2025-06-20T12:58",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，那我之后再看看。感谢今天的帮助。",
+      "iso_time": "2025-06-20T12:59",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，祝您生活愉快！",
+      "iso_time": "2025-06-20T13:00",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我还想确认一下，保险产品是不是需要体检才能购买？",
+      "iso_time": "2025-06-20T13:01",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "通常情况下，购买孕期保险时需要提供一些基础的健康信息，具体是否需要体检会根据产品的不同而有所不同。建议您在购买前咨询一下我们的客服。",
+      "iso_time": "2025-06-20T13:02",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那如果我有其他问题的话，是不是直接在App里问就可以了？",
+      "iso_time": "2025-06-20T13:03",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "是的，您可以在我们的App中找到在线客服，他们会为您提供实时帮助。",
+      "iso_time": "2025-06-20T13:04",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我明白了。",
+      "iso_time": "2025-06-20T13:05",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果您有任何其他问题或者需要帮助，随时联系我们哦。",
+      "iso_time": "2025-06-20T13:06",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，再见。",
+      "iso_time": "2025-06-20T13:07",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "再见，祝您一切顺利！",
+      "iso_time": "2025-06-20T13:08",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    }
+  ]
+}

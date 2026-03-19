@@ -1,0 +1,183 @@
+{
+  "event_id": 2,
+  "event_description": "事件 2：购房前房贷利率与还款方式咨询",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "你好，我想了解一下目前的房贷利率是多少？",
+      "iso_time": "2024-06-01T10:30",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您好，请您稍等，我来为您查询最新的商业贷款利率。",
+      "iso_time": "2024-06-01T10:31",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "目前，我们的商业贷款利率为4.85%。如果您有其他需求，欢迎随时咨询。",
+      "iso_time": "2024-06-01T10:31",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，能帮我比较一下等额本息和等额本金的还款方式吗？",
+      "iso_time": "2024-06-01T10:32",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "当然。等额本息是每月偿还相同的金额，前期利息占比较高；等额本金是每月偿还相同的本金，但总还款额逐月递减。您更关注哪种呢？",
+      "iso_time": "2024-06-01T10:33",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我想估算一下120万、150万和180万贷款的月供分别是多少。",
+      "iso_time": "2024-06-01T10:34",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "好的，请稍等，我为您计算一下这几种贷款金额的月供。",
+      "iso_time": "2024-06-01T10:35",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "120万贷款：等额本息月供约为6340元，等额本金首月约为7500元；150万贷款：等额本息月供约为7925元，等额本金首月约为9375元；180万贷款：等额本息月供约为9510元，等额本金首月约为11250元。",
+      "iso_time": "2024-06-01T10:36",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢你，这样很清楚了。贷款过程中有什么需要注意的地方吗？",
+      "iso_time": "2024-06-01T10:37",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "在贷款过程中，确保您的征信记录良好，并准备好相关的收入证明材料，可以加快审批速度。",
+      "iso_time": "2024-06-01T10:38",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，明白了。最后一个问题，贷款申请是在银行App里进行吗？",
+      "iso_time": "2024-06-01T10:39",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "是的，您可以通过我们的银行App申请贷款。我可以为您提供详细的操作步骤。",
+      "iso_time": "2024-06-01T10:40",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，请告诉我怎么操作。",
+      "iso_time": "2024-06-01T10:41",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您打开银行App，登录后选择“贷款服务”栏目，然后点击“申请新贷款”，按照提示填写相关信息即可。",
+      "iso_time": "2024-06-01T10:42",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "操作很简单，谢谢！",
+      "iso_time": "2024-06-01T10:43",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，如有其他问题，随时可以联系我。祝您购房顺利！",
+      "iso_time": "2024-06-01T10:44",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "对了，我听说房贷还款方式可以提前还款，这个是怎么操作的？",
+      "iso_time": "2024-06-01T10:45",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您可以在我们的App中预约提前还款，操作步骤是：进入“贷款服务”栏目，选择“还款管理”，然后预约提前还款日期。",
+      "iso_time": "2024-06-01T10:46",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "提前还款有手续费吗？",
+      "iso_time": "2024-06-01T10:47",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "根据贷款合同，提前还款可能会收取一定的违约金，具体金额取决于您的贷款合同条款。建议您查看合同细节或咨询我们的客服。",
+      "iso_time": "2024-06-01T10:48",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "了解了，我会查看合同的。谢谢你的帮助！",
+      "iso_time": "2024-06-01T10:49",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不用客气，有任何问题随时联系我们。祝您一切顺利！",
+      "iso_time": "2024-06-01T10:50",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    }
+  ]
+}

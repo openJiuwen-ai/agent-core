@@ -1077,7 +1077,7 @@ class GraphMemory:
                     language=state.prompting.language,
                 )
                 state.tasks.append(asyncio.create_task(self._invoke_llm(*prompt_relation_dedupe)))
-                dedupe_relation_tasks.append((relation, state.retrieved_relations, state.tasks[-1]))
+                dedupe_relation_tasks.append((relation, current_relations, state.tasks[-1]))
         if state.tasks:
             await asyncio.wait(state.tasks)
             state.tasks.clear()

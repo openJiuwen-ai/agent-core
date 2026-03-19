@@ -1,0 +1,367 @@
+{
+  "event_id": 1,
+  "event_description": "事件 1：外卖平台支付失败（信用卡风控/额度）",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "怎么回事？我刚在地铁上用信用卡支付外卖失败了。",
+      "iso_time": "2024-03-15T21:22",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "别担心，我们一起看看哈～您是在什么平台支付失败的呢？",
+      "iso_time": "2024-03-15T21:23",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "是在饿了么上，提示银行交易失败。",
+      "iso_time": "2024-03-15T21:24",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "理解您的情况，可能是因为信用卡额度不足或者其他原因。我现在帮您查一下信用卡的可用额度好吗？",
+      "iso_time": "2024-03-15T21:25",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，麻烦你了。",
+      "iso_time": "2024-03-15T21:26",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您稍等，我来帮您查询信用卡可用额度。",
+      "iso_time": "2024-03-15T21:27",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您的信用卡尾号5678当前可用额度为9000元。",
+      "iso_time": "2024-03-15T21:28",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那为什么会支付失败呢？是不是被风控了？",
+      "iso_time": "2024-03-15T21:29",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您稍等，我来帮您检查一下是否有风控或冻结情况。",
+      "iso_time": "2024-03-15T21:30",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "经过查询，您的卡片没有风控或冻结记录。可能是由于网络波动或者平台问题导致的。",
+      "iso_time": "2024-03-15T21:31",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那有没有可能申请临时额度？",
+      "iso_time": "2024-03-15T21:32",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果需要，我可以帮您查询是否可以申请临时额度。请您稍等。",
+      "iso_time": "2024-03-15T21:33",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "根据您的账户情况，您目前有资格申请5000元的临时额度。",
+      "iso_time": "2024-03-15T21:34",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我需要怎么申请呢？",
+      "iso_time": "2024-03-15T21:35",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您在A银行的手机App上操作。具体步骤是：第一步，登录App；第二步，进入‘信用卡’页面；第三步，选择‘额度管理’；最后，点击‘申请临时额度’并填写相关信息。",
+      "iso_time": "2024-03-15T21:36",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我马上试试。",
+      "iso_time": "2024-03-15T21:37",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果在操作中遇到问题，随时可以找我哦～",
+      "iso_time": "2024-03-15T21:38",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "刚才申请临时额度成功了。谢谢你！",
+      "iso_time": "2024-03-15T21:40",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "太好了！祝您用餐愉快～如果需要其他帮助，记得随时联系我哦！",
+      "iso_time": "2024-03-15T21:41",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，希望以后不要再出现这种情况了。",
+      "iso_time": "2024-03-15T21:42",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "为了避免此类情况，建议您定期查看信用卡的使用情况和可用额度。",
+      "iso_time": "2024-03-15T21:43",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，会注意的。",
+      "iso_time": "2024-03-15T21:44",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "那就好！祝您生活愉快～",
+      "iso_time": "2024-03-15T21:45",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "有时候支付失败还可能是什么原因呢？",
+      "iso_time": "2024-03-15T21:46",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "支付失败可能的原因包括网络波动、支付平台问题、卡片额度不足、银行系统维护等。",
+      "iso_time": "2024-03-15T21:47",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "了解了，谢谢。",
+      "iso_time": "2024-03-15T21:48",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，有其他问题随时联系我哦！",
+      "iso_time": "2024-03-15T21:49",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "对了，我有个朋友也遇到类似情况，他的卡是被冻结了，那怎么办呢？",
+      "iso_time": "2024-03-15T21:50",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "如果卡片被冻结，通常需要联系银行客服核实原因，可能是由于异常交易等安全原因导致的。建议他拨打银行的客服热线进行详细咨询。",
+      "iso_time": "2024-03-15T21:51",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "明白了，我会告诉他的。",
+      "iso_time": "2024-03-15T21:52",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "好的，希望他的情况能尽快解决。如果有其他疑问，欢迎随时来找我！",
+      "iso_time": "2024-03-15T21:53",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好，谢谢你们的帮助。",
+      "iso_time": "2024-03-15T21:54",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，祝您有个美好的夜晚！",
+      "iso_time": "2024-03-15T21:55",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "再见。",
+      "iso_time": "2024-03-15T21:56",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "再见，有需要随时联系哦！",
+      "iso_time": "2024-03-15T21:57",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "最近外卖的开销有点多，有没有什么理财建议啊？",
+      "iso_time": "2024-03-15T22:00",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您可以考虑设置一个预算提醒，或者使用我们的智能存款功能进行短期储蓄规划。",
+      "iso_time": "2024-03-15T22:01",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "智能存款是什么？",
+      "iso_time": "2024-03-15T22:02",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "智能存款是一种灵活的储蓄产品，可以根据您的资金使用情况，自动调整存款期限和利率，帮助您获得更高收益。",
+      "iso_time": "2024-03-15T22:03",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "听起来不错，我考虑一下。",
+      "iso_time": "2024-03-15T22:04",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "好的，有兴趣时随时可以在我们的App上了解更多哦！",
+      "iso_time": "2024-03-15T22:05",
+      "agent_id": "C",
+      "agent_name": "小赢"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "如果想查看智能存款的具体收益怎么操作？",
+      "iso_time": "2024-03-15T22:06",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您可以在App的‘理财’页面中选择‘智能存款’，然后查看具体的产品信息和收益计算。",
+      "iso_time": "2024-03-15T22:07",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "太好了，谢谢你们的帮助。",
+      "iso_time": "2024-03-15T22:08",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，祝您理财顺利！",
+      "iso_time": "2024-03-15T22:09",
+      "agent_id": "B",
+      "agent_name": "小优"
+    }
+  ]
+}
