@@ -5,8 +5,22 @@
 Test script for the scoped events functionality
 """
 
-from openjiuwen.core.runner.callback import events
-from openjiuwen.core.runner.callback.events import EventBase, build_event_name, parse_event_name, DEFAULT_SCOPE
+import pytest
+
+from openjiuwen.core.runner.callback import AsyncCallbackFramework, events
+from openjiuwen.core.runner.callback.events import (
+    DEFAULT_SCOPE,
+    EventBase,
+    AgentEvents,
+    ContextEvents,
+    LLMCallEvents,
+    MemoryEvents,
+    TaskManagerEvents,
+    ToolCallEvents,
+    WorkflowEvents,
+    build_event_name,
+    parse_event_name,
+)
 
 
 def test_default_scope_events():
@@ -96,3 +110,174 @@ if __name__ == "__main__":
     test_custom_scope_events()
     test_scope_isolation()
     print("\n=== All Tests Passed! ===")
+
+
+@pytest.fixture
+def fw():
+    return AsyncCallbackFramework(enable_metrics=False, enable_logging=False)
+
+
+@pytest.mark.asyncio
+async def test_agent_events_callback(fw):
+    """Test that AgentEvents can trigger callbacks"""
+    triggered = []
+
+    @fw.on(AgentEvents.AGENT_STARTED)
+    async def handler(**kwargs):
+        triggered.append("agent_started")
+
+    @fw.emit_before(AgentEvents.AGENT_STARTED)
+    async def run_agent():
+        return "agent_result"
+
+    result = await run_agent()
+
+    assert result == "agent_result"
+    assert triggered == ["agent_started"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_events_callback(fw):
+    """Test that WorkflowEvents can trigger callbacks"""
+    triggered = []
+
+    @fw.on(WorkflowEvents.WORKFLOW_STARTED)
+    async def on_start(**kwargs):
+        triggered.append("start")
+
+    @fw.on(WorkflowEvents.WORKFLOW_FINISHED)
+    async def on_finish(result, **kwargs):
+        triggered.append(f"finish:{result}")
+
+    @fw.emit_before(WorkflowEvents.WORKFLOW_STARTED)
+    @fw.emit_after(WorkflowEvents.WORKFLOW_FINISHED)
+    async def run_workflow():
+        return "workflow_done"
+
+    result = await run_workflow()
+
+    assert result == "workflow_done"
+    assert "start" in triggered
+    assert "finish:workflow_done" in triggered
+
+
+@pytest.mark.asyncio
+async def test_llm_call_events_callback(fw):
+    """Test that LLMCallEvents can trigger callbacks"""
+    started = []
+    output = []
+
+    @fw.on(LLMCallEvents.LLM_CALL_STARTED)
+    async def on_start(**kwargs):
+        started.append("llm_called")
+
+    @fw.on(LLMCallEvents.LLM_OUTPUT)
+    async def on_output(result, **kwargs):
+        output.append(result)
+
+    @fw.emit_before(LLMCallEvents.LLM_CALL_STARTED)
+    @fw.emit_after(LLMCallEvents.LLM_OUTPUT, result_key="result")
+    async def call_llm():
+        return "llm_response"
+
+    result = await call_llm()
+
+    assert result == "llm_response"
+    assert started == ["llm_called"]
+    assert output == ["llm_response"]
+
+
+@pytest.mark.asyncio
+async def test_tool_call_events_callback(fw):
+    """Test that ToolCallEvents can trigger callbacks"""
+    started = []
+    finished = []
+
+    @fw.on(ToolCallEvents.TOOL_CALL_STARTED)
+    async def on_start(tool_name, **kwargs):
+        started.append(tool_name)
+
+    @fw.on(ToolCallEvents.TOOL_CALL_FINISHED)
+    async def on_finish(result, **kwargs):
+        finished.append(result)
+
+    @fw.emit_before(ToolCallEvents.TOOL_CALL_STARTED)
+    @fw.emit_after(ToolCallEvents.TOOL_CALL_FINISHED, result_key="result")
+    async def call_tool(tool_name):
+        return f"{tool_name}_result"
+
+    result = await call_tool("calculator")
+
+    assert started == ["calculator"]
+    assert finished == ["calculator_result"]
+
+
+@pytest.mark.asyncio
+async def test_context_events_callback(fw):
+    """Test that ContextEvents can trigger callbacks"""
+    updated = []
+
+    @fw.on(ContextEvents.CONTEXT_UPDATED)
+    async def on_update(messages, **kwargs):
+        updated.append(messages)
+
+    @fw.emit_after(ContextEvents.CONTEXT_UPDATED, result_key="messages")
+    async def update_context():
+        return ["msg1", "msg2"]
+
+    result = await update_context()
+
+    assert result == ["msg1", "msg2"]
+    assert updated == [["msg1", "msg2"]]
+
+
+@pytest.mark.asyncio
+async def test_memory_events_callback(fw):
+    """Test that MemoryEvents can trigger callbacks"""
+    search_started = []
+    search_finished = []
+
+    @fw.on(MemoryEvents.MEMORY_SEARCH_STARTED)
+    async def on_search_start(query, **kwargs):
+        search_started.append(query)
+
+    @fw.on(MemoryEvents.MEMORY_SEARCH_FINISHED)
+    async def on_search_finish(result, **kwargs):
+        search_finished.append(result)
+
+    @fw.emit_before(MemoryEvents.MEMORY_SEARCH_STARTED)
+    @fw.emit_after(MemoryEvents.MEMORY_SEARCH_FINISHED, result_key="result")
+    async def search_memory(query):
+        return [f"result_for_{query}"]
+
+    result = await search_memory("test query")
+
+    assert result == ["result_for_test query"]
+    assert search_started == ["test query"]
+    assert search_finished == [["result_for_test query"]]
+
+
+@pytest.mark.asyncio
+async def test_task_manager_events_callback(fw):
+    """Test that TaskManagerEvents can trigger callbacks"""
+    created = []
+    completed = []
+
+    @fw.on(TaskManagerEvents.TASK_CREATED)
+    async def on_created(task_id, **kwargs):
+        created.append(task_id)
+
+    @fw.on(TaskManagerEvents.TASK_COMPLETED)
+    async def on_completed(result, **kwargs):
+        completed.append(result)
+
+    @fw.emit_before(TaskManagerEvents.TASK_CREATED)
+    @fw.emit_after(TaskManagerEvents.TASK_COMPLETED, result_key="result")
+    async def run_task(task_id):
+        return f"{task_id}_done"
+
+    result = await run_task("task-001")
+
+    assert result == "task-001_done"
+    assert created == ["task-001"]
+    assert completed == ["task-001_done"]
