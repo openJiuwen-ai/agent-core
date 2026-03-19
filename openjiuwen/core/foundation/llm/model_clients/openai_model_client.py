@@ -211,6 +211,9 @@ class OpenAIModelClient(BaseModelClient):
             )
             assistant_message = await self._parse_response(response, output_parser)
 
+            if tracer_record_data:
+                await tracer_record_data(llm_response=assistant_message)
+
             await trigger(
                 LLMCallEvents.LLM_OUTPUT,
                 model_name=params.get("model"),
@@ -315,6 +318,7 @@ class OpenAIModelClient(BaseModelClient):
             # Call API with streaming
             response_stream = await async_client.chat.completions.create(**params)
 
+            final_message = None
             if output_parser:
                 # Use streaming parser
                 async for parsed_result in self._astream_with_parser(response_stream, output_parser):
@@ -322,6 +326,10 @@ class OpenAIModelClient(BaseModelClient):
                         LLMCallEvents.LLM_RESPONSE_RECEIVED,
                         model_name=params.get("model"),
                         model_provider=self.model_client_config.client_provider)
+                    if final_message:
+                        final_message = final_message + parsed_result
+                    else:
+                        final_message = parsed_result
                     yield parsed_result
             else:
                 async for chunk in response_stream:
@@ -331,7 +339,14 @@ class OpenAIModelClient(BaseModelClient):
                             LLMCallEvents.LLM_RESPONSE_RECEIVED,
                             model_name=params.get("model"),
                             model_provider=self.model_client_config.client_provider)
+                        if final_message:
+                            final_message = final_message + parsed_chunk
+                        else:
+                            final_message = parsed_chunk
                         yield parsed_chunk
+
+            if tracer_record_data:
+                await tracer_record_data(llm_response=final_message)
 
             await trigger(
                 LLMCallEvents.LLM_OUTPUT,
