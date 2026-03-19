@@ -19,11 +19,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.application.llm_agent import (
-    LLMAgent,
-    create_llm_agent,
-    create_llm_agent_config,
-)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseModelInfo,
@@ -46,6 +41,11 @@ from openjiuwen.core.workflow import (
     WorkflowCard,
 )
 
+from tests.unit_tests.agent.llm_agent.mock_llm_agent import (
+    MockLLMAgent as LLMAgent,
+    create_llm_agent,
+    create_llm_agent_config,
+)
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
     create_text_response,

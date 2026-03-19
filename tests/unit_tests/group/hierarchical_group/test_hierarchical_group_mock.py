@@ -372,8 +372,8 @@ class TestHierarchicalGroupMock(unittest.IsolatedAsyncioTestCase):
         ])
 
         with patch(
-            "openjiuwen.core.single_agent.agents."
-            "react_agent.Model"
+            "openjiuwen.core.application.llm_agent."
+            "llm_controller.Model"
         ) as mock_model_class:
             mock_model_class.return_value = mock_llm
 

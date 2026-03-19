@@ -26,8 +26,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.application.llm_agent.llm_agent_refactor import (
-    LLMAgentRefactor,
+from tests.unit_tests.agent.llm_agent.mock_llm_agent import (
+    MockLLMAgent as LLMAgent,
     create_llm_agent,
     create_llm_agent_config,
 )
@@ -189,7 +189,7 @@ class TestLLMAgentRefactorWorkflowInterrupt(unittest.IsolatedAsyncioTestCase):
              patch("openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config",
                    return_value=MagicMock()):
 
-            agent: LLMAgentRefactor = create_llm_agent(
+            agent: LLMAgent = create_llm_agent(
                 agent_config=agent_config, workflows=[flow], tools=[]
             )
             conv_id = "conv_s1_interrupt"
@@ -240,7 +240,7 @@ class TestLLMAgentRefactorMemory(unittest.IsolatedAsyncioTestCase):
         mock_search = AsyncMock(return_value=[])
         mock_add = AsyncMock(return_value=None)
 
-        agent: LLMAgentRefactor = create_llm_agent(
+        agent: LLMAgent = create_llm_agent(
             agent_config=agent_config, workflows=[], tools=[]
         )
 
@@ -297,7 +297,7 @@ class TestLLMAgentRefactorMemory(unittest.IsolatedAsyncioTestCase):
         )
         mock_add = AsyncMock(return_value=None)
 
-        agent: LLMAgentRefactor = create_llm_agent(
+        agent: LLMAgent = create_llm_agent(
             agent_config=agent_config, workflows=[flow], tools=[]
         )
 
@@ -392,7 +392,7 @@ class TestLLMAgentRefactorParallelInterrupt(unittest.IsolatedAsyncioTestCase):
              patch("openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config",
                    return_value=MagicMock()):
 
-            agent: LLMAgentRefactor = create_llm_agent(
+            agent: LLMAgent = create_llm_agent(
                 agent_config=agent_config, workflows=[flow], tools=[]
             )
             conv_id = "conv_s3_parallel"
@@ -467,7 +467,7 @@ class TestLLMAgentRefactorTwoWorkflowsInterrupt(unittest.IsolatedAsyncioTestCase
              patch("openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config",
                    return_value=MagicMock()):
 
-            agent: LLMAgentRefactor = create_llm_agent(
+            agent: LLMAgent = create_llm_agent(
                 agent_config=agent_config, workflows=[flow_a, flow_b], tools=[]
             )
             conv_id = "conv_s4_two_wf"
@@ -507,7 +507,7 @@ class TestLLMAgentRefactorSetPromptTemplate(unittest.IsolatedAsyncioTestCase):
         with patch("openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config",
                    return_value=MagicMock()):
             agent_config = _make_agent_config(agent_id="agent_s5")
-            agent = LLMAgentRefactor(agent_config)
+            agent = LLMAgent(agent_config)
 
             new_template = [{"role": "system", "content": "You are a new assistant."}]
             agent.set_prompt_template(new_template)
@@ -537,7 +537,7 @@ class TestLLMAgentRefactorAddTools(unittest.IsolatedAsyncioTestCase):
              patch("openjiuwen.core.runner.Runner.resource_mgr") as mock_resource_mgr:
             mock_resource_mgr.add_tool = MagicMock()
             agent_config = _make_agent_config(agent_id="agent_s6")
-            agent = LLMAgentRefactor(agent_config)
+            agent = LLMAgent(agent_config)
 
             mock_tool = MagicMock()
             mock_tool.card.name = "tool_alpha"
@@ -573,7 +573,7 @@ class TestLLMAgentRefactorWorkflowManagement(unittest.IsolatedAsyncioTestCase):
         with patch("openjiuwen.core.memory.long_term_memory.LongTermMemory.set_scope_config",
                    return_value=MagicMock()):
             agent_config = _make_agent_config(agent_id="agent_s7")
-            agent = LLMAgentRefactor(agent_config)
+            agent = LLMAgent(agent_config)
 
             flow = _make_single_questioner_workflow("wf_mgmt", "2.0")
 

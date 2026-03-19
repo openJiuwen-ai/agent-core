@@ -71,10 +71,10 @@ def _convert_legacy_config(legacy: ReActAgentConfig) -> _NewReActAgentConfig:
 
 
 # ---------------------------------------------------------------------------
-# LLMAgentRefactor
+# MockLLMAgent
 # ---------------------------------------------------------------------------
 
-class LLMAgentRefactor:
+class MockLLMAgent:
     """LLMAgent-compatible adapter backed by ReActAgentForStudio.
 
     Aligns with the full public interface of legacy.BaseAgent (and LLMAgent)
@@ -356,7 +356,7 @@ def create_llm_agent(
     workflows: List[Workflow] = None,
     tools: List[Tool] = None):
     """Create LLM Agent - same signature as llm_agent.create_llm_agent."""
-    agent = LLMAgentRefactor(agent_config)
+    agent = MockLLMAgent(agent_config)
     if workflows:
         agent.add_workflows(workflows)
     agent.add_tools(tools or [])
@@ -364,7 +364,7 @@ def create_llm_agent(
 
 
 __all__ = [
-    "LLMAgentRefactor",
+    "MockLLMAgent",
     "create_llm_agent_config",
     "create_llm_agent",
 ]
