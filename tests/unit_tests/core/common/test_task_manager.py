@@ -6,6 +6,7 @@ Unit tests for CoroutineTaskManager
 """
 
 import asyncio
+import logging
 
 import pytest
 import pytest_asyncio
@@ -43,6 +44,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_create_task_without_task_group(self, manager):
         """Test that creating task without task group raises AttributeError"""
+
         async def dummy_coro():
             return "result"
 
@@ -53,6 +55,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_create_task(self, manager):
         """Test basic task creation with task group"""
+
         async def dummy_coro():
             return "result"
 
@@ -69,6 +72,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_task_completes(self, manager):
         """Test task completes with result"""
+
         async def slow_task():
             await asyncio.sleep(0.1)
             return "completed"
@@ -83,6 +87,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_task_cancel(self, manager):
         """Test task cancellation via task group"""
+
         async def long_task():
             await asyncio.sleep(10)
             return "done"
@@ -102,6 +107,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_task_timeout(self, manager):
         """Test task timeout"""
+
         async def long_task():
             await asyncio.sleep(10)
             return "done"
@@ -173,6 +179,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_task_group(self, manager):
         """Test task grouping"""
+
         async def task1():
             return 1
 
@@ -191,6 +198,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_cancel_group(self, manager):
         """Test cancelling all tasks in a group"""
+
         async def long_task():
             await asyncio.sleep(10)
             return "done"
@@ -264,6 +272,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_task_with_metadata(self, manager):
         """Test task with metadata"""
+
         async def task_with_meta():
             return "done"
 
@@ -279,6 +288,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_task_priority(self, manager):
         """Test task creation without priority parameter (priority was removed)"""
+
         async def task_func():
             return "done"
 
@@ -292,6 +302,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_task_result_accessible_after_wait(self, manager):
         """Test that task result is accessible after task group exits"""
+
         async def task_with_result():
             return "test_result"
 
@@ -304,6 +315,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_task_error_on_failure(self, manager):
         """Test task error is captured on failure"""
+
         async def failing_task():
             raise ValueError("test error")
 
@@ -322,6 +334,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_catch_exceptions(self, manager):
         """Test catch_exceptions parameter"""
+
         async def failing_task():
             raise ValueError("test error")
 
@@ -330,7 +343,6 @@ class TestCoroutineTaskManager:
             return "done"
 
         async with manager.task_group() as tg:
-
             # Create failing task with catch_exceptions=True
             failed_task = await manager.create_task(
                 failing_task(),
@@ -348,6 +360,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_get_running_tasks(self, manager):
         """Test get running tasks"""
+
         async def long_task():
             await asyncio.sleep(1)
             return "done"
@@ -370,6 +383,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_get_all_tasks(self, manager):
         """Test get all tasks"""
+
         async def task1():
             return 1
 
@@ -387,6 +401,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_remove_task(self, manager):
         """Test remove task"""
+
         async def quick_task():
             return "done"
 
@@ -402,6 +417,7 @@ class TestCoroutineTaskManager:
     @pytest.mark.asyncio
     async def test_remove_completed(self, manager):
         """Test remove_completed method"""
+
         async def quick_task():
             return "done"
 
@@ -542,6 +558,7 @@ class TestCancelChainTracking:
     @pytest.mark.asyncio
     async def test_get_task_tree(self, manager):
         """Test get_task_tree method"""
+
         async def child1():
             await asyncio.sleep(0.05)
             return "c1"
@@ -578,6 +595,7 @@ class TestCancelChainTracking:
     @pytest.mark.asyncio
     async def test_task_tree_shows_status(self, manager):
         """Test that task tree shows correct status icons"""
+
         async def quick_task():
             return "done"
 
@@ -618,7 +636,6 @@ class TestCancelChainTracking:
         all_tasks = []
 
         async with manager.task_group() as tg:
-
             parent = await manager.create_task(parent_task(), name="parent")
             all_tasks.append(parent)
 
@@ -652,11 +669,11 @@ class TestCancelChainTracking:
     @pytest.mark.asyncio
     async def test_custom_cancel_reason(self, manager):
         """Test custom cancel reason tracking"""
+
         async def long_task():
             await asyncio.sleep(10)
 
         async with manager.task_group() as tg:
-
             task = await manager.create_task(long_task(), name="task1")
 
             await asyncio.sleep(0.1)
@@ -695,7 +712,6 @@ class TestCancelChainTracking:
         all_tasks = []
 
         async with manager.task_group() as tg:
-
             parent = await manager.create_task(parent_task(), name="parent")
             all_tasks.append(parent)
 
@@ -743,6 +759,7 @@ class TestExceptions:
     @pytest.mark.asyncio
     async def test_wait_reraises_exception(self, manager):
         """task.wait() re-raises the stored exception"""
+
         async def failing():
             raise RuntimeError("boom")
 
@@ -767,6 +784,7 @@ class TestWaitMethods:
     @pytest.mark.asyncio
     async def test_task_wait(self, manager):
         """Task.wait() returns the task result"""
+
         async def produce():
             return 42
 
@@ -817,6 +835,7 @@ class TestWaitMethods:
     @pytest.mark.asyncio
     async def test_wait_group_raise_on_failure(self, manager):
         """wait_group with return_exceptions=False (default) raises first exception"""
+
         async def ok():
             return "ok"
 
@@ -838,6 +857,7 @@ class TestWaitMethods:
     @pytest.mark.asyncio
     async def test_wait_all(self, manager):
         """wait_all returns results for every registered task"""
+
         async def produce(val):
             return val
 
@@ -851,6 +871,7 @@ class TestWaitMethods:
     @pytest.mark.asyncio
     async def test_wait_all_partial_failure(self, manager):
         """wait_all with return_exceptions=True returns Exception objects for failed tasks"""
+
         async def ok():
             return "ok"
 
@@ -872,6 +893,7 @@ class TestWaitMethods:
     @pytest.mark.asyncio
     async def test_wait_all_raise_on_failure(self, manager):
         """wait_all with return_exceptions=False (default) raises first exception"""
+
         async def ok():
             return "ok"
 
@@ -978,6 +1000,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_cancel_all(self, manager):
         """cancel_all() cancels every running task"""
+
         async def long_task():
             await asyncio.sleep(10)
 
@@ -996,6 +1019,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_cancel_group_direct(self, manager):
         """cancel_group() returns the number of tasks cancelled"""
+
         async def long_task():
             await asyncio.sleep(10)
 
@@ -1011,6 +1035,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_cancel_terminal_task_returns_false(self, manager):
         """task.cancel() on an already-COMPLETED task returns False"""
+
         async def quick():
             return "done"
 
@@ -1100,6 +1125,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_display_name_without_name(self, manager):
         """A task created without a name uses task_id[:8] as display_name"""
+
         async def quick():
             return "done"
 
@@ -1142,6 +1168,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_print_task_tree_no_args(self, manager):
         """print_task_tree() with no arguments does not raise"""
+
         async def quick():
             return "done"
 
@@ -1150,6 +1177,114 @@ class TestEdgeCases:
 
         # Should not raise
         print_task_tree()
+
+    @pytest.mark.positive
+    @pytest.mark.asyncio
+    async def test_task_manager_010(self):
+        TaskManager.reset_instance()
+        manager = TaskManager()
+
+        grandchild_ref = None
+        child_ref = None
+
+        async def manager_task1():
+            return "result"
+
+        async def grandchild_work():
+            await asyncio.sleep(10)
+            return "grandchild_done"
+
+        async def child_work():
+            nonlocal grandchild_ref
+            grandchild_ref = await manager.create_task(grandchild_work(), name="grandchild", group="group1")
+            await asyncio.sleep(10)
+            return "child_done"
+
+        async def parent_work():
+            nonlocal child_ref
+            child_ref = await manager.create_task(child_work(), name="child", group="group2")
+            await asyncio.sleep(10)
+            return "parent_done"
+
+        async with manager.task_group() as tg:
+            task1 = await manager.create_task(manager_task1(), name="test_task", group="group")
+
+            parent = await manager.create_task(parent_work(), name="parent", group="group1")
+            await asyncio.sleep(0.2)
+            await manager.cancel_group("group1")
+
+        assert task1.status == TaskStatus.COMPLETED
+        assert task1.result == "result"
+
+        # child is cancelled because it was created in parent's context
+        # when parent is cancelled, child is also cancelled regardless of its group
+        assert child_ref.status == TaskStatus.CANCELLED
+        assert child_ref.cancel_reason == "manual_cancel"
+
+        assert parent.status == TaskStatus.CANCELLED
+        assert parent.cancelled_by is None
+        assert parent.cancel_reason == "manual_cancel"
+
+        assert grandchild_ref.status == TaskStatus.CANCELLED
+        assert grandchild_ref.cancelled_by == child_ref.task_id
+        assert grandchild_ref.cancel_reason == "manual_cancel"
+
+        tree = manager.get_task_tree(parent.task_id)
+        logging.info(f"tree info => {tree}")
+        assert "parent [cancelled]" in tree
+        assert "child [cancelled] (cancelled by: parent" in tree
+        assert "grandchild [cancelled] (cancelled by: child" in tree
+
+    @pytest.mark.positive
+    @pytest.mark.asyncio
+    async def test_task_manager_005(self):
+        TaskManager.reset_instance()
+        manager = TaskManager()
+
+        grandchild_ref = None
+        child_ref = None
+
+        async def grandchild_work():
+            await asyncio.sleep(10)
+            return "grandchild_done"
+
+        async def child_work():
+            nonlocal grandchild_ref
+            grandchild_ref = await manager.create_task(grandchild_work(), name="grandchild")
+            await asyncio.sleep(10)
+            return "child_done"
+
+        async def parent_work():
+            nonlocal child_ref
+            child_ref = await manager.create_task(child_work(), name="child")
+            await asyncio.sleep(10)
+            return "parent_done"
+
+        async with manager.task_group() as tg:
+            parent = await manager.create_task(parent_work(), name="parent")
+            await asyncio.sleep(0.2)
+            tg.cancel_scope.cancel()
+
+        assert parent is not None
+        assert parent.status == TaskStatus.CANCELLED
+        assert parent.cancelled_by is None
+        assert parent.cancel_reason == "manual_cancel"
+
+        assert child_ref is not None
+        assert child_ref.status == TaskStatus.CANCELLED
+        assert child_ref.cancelled_by == parent.task_id
+        assert child_ref.cancel_reason == "manual_cancel"
+
+        assert grandchild_ref is not None
+        assert grandchild_ref.status == TaskStatus.CANCELLED
+        assert grandchild_ref.cancelled_by == child_ref.task_id
+        assert grandchild_ref.cancel_reason == "manual_cancel"
+
+        tree = manager.get_task_tree(parent.task_id)
+        logging.info(f"tree info => {tree}")
+        assert "parent [cancelled]" in tree
+        assert "child [cancelled] (cancelled by: parent" in tree
+        assert "grandchild [cancelled] (cancelled by: child" in tree
 
 
 if __name__ == "__main__":
