@@ -17,6 +17,7 @@ The core types of the memory engine are defined in the `openjiuwen.core.memory` 
   Defines engine-level common configuration:
   - `default_model_cfg: ModelRequestConfig`: Default LLM request parameters for generating memories (model name, temperature, etc.).
   - `default_model_client_cfg: ModelClientConfig`: Default LLM client configuration (`client_provider/api_base/api_key/verify_ssl`, etc.).
+  - `forbidden_variables: str`: Forbidden variables (e.g., "user_phone") that cannot be stored. Default: `""` (no forbidden variables).
   - `input_msg_max_len: int`: Maximum length of input messages (default: 8192).
   - `crypto_key: bytes`: AES key for encrypting sensitive fields in storage (must be 32 bytes in length; empty means no encryption).
 

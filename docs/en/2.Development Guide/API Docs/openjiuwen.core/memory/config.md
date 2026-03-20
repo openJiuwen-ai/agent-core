@@ -10,7 +10,7 @@
 ## class openjiuwen.core.memory.config.config.MemoryEngineConfig
 
 ```
-class openjiuwen.core.memory.config.config.MemoryEngineConfig(default_model_cfg: ModelRequestConfig | None = None, default_model_client_cfg: ModelClientConfig | None = None, input_msg_max_len: int = 8192, crypto_key: bytes = b'')
+class openjiuwen.core.memory.config.config.MemoryEngineConfig(default_model_cfg: ModelRequestConfig | None = None, default_model_client_cfg: ModelClientConfig | None = None, forbidden_variables: str = "", input_msg_max_len: int = 8192, crypto_key: bytes = b'')
 ```
 
 Global memory engine configuration, used to set engine-level common parameters.
@@ -19,6 +19,7 @@ Global memory engine configuration, used to set engine-level common parameters.
 
 * **default_model_cfg** (ModelRequestConfig | None, optional): Default LLM request parameters for memory generation (model name, temperature, max tokens, etc.); if `None`, memory generation is disabled (unless configured via `MemoryScopeConfig` for a specific scope). Default: `None`.
 * **default_model_client_cfg** (ModelClientConfig | None, optional): Default LLM client configuration (`client_id / client_provider / api_base / api_key / verify_ssl`, etc.); if `None`, memory generation is also disabled (unless configured via scope). Default: `None`.
+* **forbidden_variables** (str, optional): Forbidden variables (e.g., "user_phone") that cannot be stored. Default: `""` (no forbidden variables).
 * **input_msg_max_len** (int, optional): Maximum length of input messages (character count); when generating memory, message content exceeding this length will be truncated. Default: 8192.
 * **crypto_key** (bytes, optional): AES encryption key for encrypting sensitive parameters in storage (such as API key); must be 32 bytes in length; if empty bytes `b''`, encryption is disabled. Default: `b''` (no encryption).
 
@@ -48,6 +49,7 @@ The `crypto_key` parameter has a `field_validator`:
 >>>         api_key="sk-xxxx",
 >>>         api_base="https://api.openai.com/v1",
 >>>     ),
+>>>     forbidden_variables="user_id, phone_number, email",
 >>>     input_msg_max_len=8192,
 >>>     crypto_key=b"your-32-byte-aes-key-here!!",  # 32 bytes
 >>> )
@@ -175,6 +177,7 @@ Agent-level memory strategy configuration, describing what types of memories an 
 >>>         api_key="sk-xxxx",
 >>>         api_base="https://api.openai.com/v1",
 >>>     ),
+>>>     forbidden_variables="user_id, phone_number, email",
 >>>     input_msg_max_len=8192,
 >>>     crypto_key=b"your-32-byte-aes-key-here!!",  # 32 bytes
 >>> )

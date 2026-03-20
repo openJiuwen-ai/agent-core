@@ -130,6 +130,7 @@ Set global memory engine configuration and initialize internal managers.
 * **config** (MemoryEngineConfig): Global engine configuration, containing:
   * `default_model_cfg: ModelRequestConfig`: Default large model request parameters for generating memories;
   * `default_model_client_cfg: ModelClientConfig`: Default large model client configuration;
+  * `forbidden_variables: str`: Forbidden variables (e.g., "user_phone") that cannot be stored. Default: `""` (no forbidden variables).
   * `input_msg_max_len: int`: Maximum input message length (default 8192);
   * `crypto_key: bytes`: AES encryption key (must be 32 bytes long; empty means no encryption).
 
@@ -160,6 +161,7 @@ Set global memory engine configuration and initialize internal managers.
 >>>         api_key="sk-xxxx",
 >>>         api_base="https://api.openai.com/v1",
 >>>     ),
+>>>     forbidden_variables="user_id, phone_number, email",
 >>>     input_msg_max_len=8192,
 >>>     crypto_key=b"your-32-byte-aes-key-here!!",
 >>> )

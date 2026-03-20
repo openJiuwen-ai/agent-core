@@ -116,6 +116,7 @@ class TestMemoryQuality(unittest.IsolatedAsyncioTestCase):
         self.memory_engine_config = MemoryEngineConfig(
             default_model_cfg=default_model_cfg,
             default_model_client_cfg=default_model_client_cfg,
+            forbidden_variables="手机号,证件号",
             crypto_key=crypto_key
         )
 
@@ -255,7 +256,13 @@ class TestMemoryQuality(unittest.IsolatedAsyncioTestCase):
             scope_id=self.scope_id,
         )
         for name, expect_value in variable_checklist:
-            self.assertIn(name, variables, f"variable {name} not found")
+            try:
+                self.assertIn(name, variables, f"variable {name} not found")
+            except AssertionError as e:
+                if expect_value is None:
+                    continue
+                else:
+                    raise e
             actual_val = variables[name]
             self.assertIn(expect_value, actual_val,
                           f"variable {name} expected value: {expect_value}, actual value: {actual_val}")
@@ -275,6 +282,27 @@ class TestMemoryQuality(unittest.IsolatedAsyncioTestCase):
         variable_checklist = [
             ("姓名", "Tom"),
             ("职业", "数据分析师")
+        ]
+        await self._user_var_check(variable_defines, messages, variable_checklist)
+
+    async def test_variable_02(self):
+        messages = [
+            BaseMessage(role="user", content="我喜欢的书籍是《悬疑小说》"),
+            BaseMessage(role="assistant", content="《悬疑小说》是一本好的书籍"),
+            BaseMessage(role="user", content="我的老婆喜欢的书籍是《时间简史》"),
+            BaseMessage(role="assistant", content="《时间简史》是一本好的书籍"),
+            BaseMessage(role="user", content="我的身份证号是123456"),
+            BaseMessage(role="assistant", content="我无法记住您的隐私信息"),
+        ]
+        variable_defines = [
+            Param.string("用户老婆喜欢的书籍", "用户老婆喜欢的书籍", required=False),
+            Param.string("用户书籍", "用户喜欢的书籍", required=False),
+            Param.string("用户身份证号", "用户身份证号", required=False),
+        ]
+        variable_checklist = [
+            ("用户书籍", "悬疑小说"),
+            ("用户老婆喜欢的书籍", "时间简史"),
+            ("用户身份证号", None),
         ]
         await self._user_var_check(variable_defines, messages, variable_checklist)
 
