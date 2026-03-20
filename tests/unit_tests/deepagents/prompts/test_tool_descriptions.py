@@ -10,6 +10,10 @@ import pytest
 from openjiuwen.deepagents.tools.shell import BashTool
 from openjiuwen.deepagents.tools.code import CodeTool
 from openjiuwen.deepagents.tools.filesystem import ReadFileTool
+from openjiuwen.deepagents.tools.vision import (
+    ImageOCRTool,
+    VisualQuestionAnsweringTool,
+)
 
 from openjiuwen.deepagents.prompts.sections.tools import get_tool_description
 from openjiuwen.deepagents.prompts.sections.tools.bash import DESCRIPTION as BASH_DESCRIPTION
@@ -27,6 +31,10 @@ from openjiuwen.deepagents.prompts.sections.tools.todo import (
     TODO_CREATE_DESCRIPTION,
     TODO_LIST_DESCRIPTION,
     TODO_MODIFY_DESCRIPTION,
+)
+from openjiuwen.deepagents.prompts.sections.tools.vision import (
+    IMAGE_OCR_DESCRIPTION,
+    VISUAL_QUESTION_ANSWERING_DESCRIPTION,
 )
 
 
@@ -67,6 +75,15 @@ class TestBilingualDescriptions:
             assert desc["cn"].strip()
             assert desc["en"].strip()
 
+    @staticmethod
+    def test_vision_descriptions():
+        for desc in (
+            IMAGE_OCR_DESCRIPTION,
+            VISUAL_QUESTION_ANSWERING_DESCRIPTION,
+        ):
+            assert desc["cn"].strip()
+            assert desc["en"].strip()
+
 
 class TestGetToolDescription:
     @staticmethod
@@ -88,6 +105,7 @@ class TestGetToolDescription:
             "bash", "code", "read_file", "write_file", "edit_file",
             "glob", "list_files", "grep", "list_skill",
             "todo_write", "todo_read", "todo_modify",
+            "image_ocr", "visual_question_answering",
         ]
         for name in names:
             assert get_tool_description(name, "cn"), f"Missing cn for {name}"
@@ -125,3 +143,14 @@ class TestToolClassesUseBilingualDescriptions:
     def test_default_language_is_cn():
         tool = BashTool(MagicMock())
         assert tool.card.description == BASH_DESCRIPTION["cn"]
+
+    @staticmethod
+    def test_vision_tools_en():
+        image_ocr_tool = ImageOCRTool(language="en")
+        vqa_tool = VisualQuestionAnsweringTool(language="en")
+
+        assert image_ocr_tool.card.description == IMAGE_OCR_DESCRIPTION["en"]
+        assert (
+            vqa_tool.card.description
+            == VISUAL_QUESTION_ANSWERING_DESCRIPTION["en"]
+        )

@@ -16,6 +16,10 @@ from openjiuwen.deepagents.tools.filesystem import (
     WriteFileTool,
 )
 from openjiuwen.deepagents.tools.shell import BashTool
+from openjiuwen.deepagents.tools.vision import (
+    ImageOCRTool,
+    VisualQuestionAnsweringTool,
+)
 
 
 class FileSystemRail(DeepAgentRail):
@@ -30,6 +34,13 @@ class FileSystemRail(DeepAgentRail):
 
     def init(self, agent) -> None:
         lang = self.language
+        vision_model_config = None
+        if hasattr(agent, "deep_config") and agent.deep_config is not None:
+            vision_model_config = getattr(
+                agent.deep_config,
+                "vision_model_config",
+                None,
+            )
         read_tool = ReadFileTool(self.sys_operation, lang)
         write_tool = WriteFileTool(self.sys_operation, lang)
         edit_tool = EditFileTool(self.sys_operation, lang)
@@ -38,6 +49,11 @@ class FileSystemRail(DeepAgentRail):
         grep_tool = GrepTool(self.sys_operation, lang)
         bash_tool = BashTool(self.sys_operation, lang)
         code_tool = CodeTool(self.sys_operation, lang)
+        image_ocr_tool = ImageOCRTool(lang, vision_model_config)
+        visual_question_answering_tool = VisualQuestionAnsweringTool(
+            lang,
+            vision_model_config,
+        )
 
         self.tools = [
             read_tool,
@@ -48,6 +64,8 @@ class FileSystemRail(DeepAgentRail):
             grep_tool,
             bash_tool,
             code_tool,
+            image_ocr_tool,
+            visual_question_answering_tool,
         ]
 
         Runner.resource_mgr.add_tool(self.tools)

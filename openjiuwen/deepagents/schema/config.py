@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+
 from typing import Any, List, Optional, Union
 
 from openjiuwen.core.foundation.llm.model import Model
@@ -20,6 +22,49 @@ from openjiuwen.deepagents.schema.stop_condition import (
 from openjiuwen.deepagents.schema.workspace import (
     Workspace,
 )
+
+DEFAULT_OPENAI_VISION_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-2.5-pro"
+DEFAULT_OPENAI_VISION_MODEL = "gpt-4.1-mini"
+
+
+@dataclass
+class VisionModelConfig:
+    """Shared runtime configuration for all DeepAgent vision tools."""
+
+    api_key: str = ""
+    base_url: str = DEFAULT_OPENAI_VISION_BASE_URL
+    model: str = DEFAULT_OPENAI_VISION_MODEL
+    max_retries: int = 3
+
+    @classmethod
+    def from_env(cls) -> "VisionModelConfig":
+        """Build a vision config from environment variables."""
+        api_key = (
+            os.getenv("VISION_API_KEY")
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        )
+        base_url = (
+            os.getenv("VISION_BASE_URL")
+            or os.getenv("OPENROUTER_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or DEFAULT_OPENAI_VISION_BASE_URL
+        )
+        model = os.getenv("VISION_MODEL")
+
+        if not model:
+            if "openrouter.ai" in base_url:
+                model = DEFAULT_OPENROUTER_VISION_MODEL
+            else:
+                model = DEFAULT_OPENAI_VISION_MODEL
+
+        return cls(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
 
 
 @dataclass
@@ -67,6 +112,7 @@ class DeepAgentConfig:
     completion_timeout: float = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
+    vision_model_config: Optional[VisionModelConfig] = None
 
 
 @dataclass

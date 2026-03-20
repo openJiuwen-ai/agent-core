@@ -39,6 +39,10 @@ from openjiuwen.deepagents.prompts.sections.tools.todo import (
     TodoListMetadataProvider,
     TodoModifyMetadataProvider,
 )
+from openjiuwen.deepagents.prompts.sections.tools.vision import (
+    ImageOCRMetadataProvider,
+    VisualQuestionAnsweringMetadataProvider,
+)
 from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
     TaskMetadataProvider,
 )
@@ -59,6 +63,8 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     TodoCreateMetadataProvider(),
     TodoListMetadataProvider(),
     TodoModifyMetadataProvider(),
+    ImageOCRMetadataProvider(),
+    VisualQuestionAnsweringMetadataProvider(),
     TaskMetadataProvider(),
 ]
 

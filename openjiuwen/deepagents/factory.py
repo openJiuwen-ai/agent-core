@@ -16,7 +16,11 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.deepagents.deep_agent import DeepAgent
 from openjiuwen.deepagents.rails import TaskPlanningRail, SkillRail, SubagentRail
-from openjiuwen.deepagents.schema.config import DeepAgentConfig, SubAgentConfig
+from openjiuwen.deepagents.schema.config import (
+    DeepAgentConfig,
+    VisionModelConfig,
+    SubAgentConfig
+)
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
 from openjiuwen.deepagents.schema.workspace import Workspace
 from openjiuwen.deepagents.prompts import resolve_language
@@ -39,6 +43,7 @@ def create_deep_agent(
     sys_operation: Optional[SysOperation] = None,
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
+    vision_model_config: Optional[VisionModelConfig] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -65,6 +70,9 @@ def create_deep_agent(
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).
         sys_operation: System operation.
+        vision_model_config: Shared vision-model
+            configuration injected into all vision
+            tools registered by DeepAgent rails.
         **config_kwargs: Extra fields forwarded to
             DeepAgentConfig.
 
@@ -110,6 +118,7 @@ def create_deep_agent(
         sys_operation=sys_operation_obj,
         language=resolved_language,
         prompt_mode=prompt_mode,
+        vision_model_config=vision_model_config,
     )
 
     # Forward extra kwargs to config fields

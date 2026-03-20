@@ -14,6 +14,10 @@ from openjiuwen.deepagents.tools.filesystem import (
     GlobTool, ListDirTool, GrepTool,
 )
 from openjiuwen.deepagents.tools.list_skill import ListSkillTool
+from openjiuwen.deepagents.tools.vision import (
+    ImageOCRTool,
+    VisualQuestionAnsweringTool,
+)
 
 from openjiuwen.deepagents.prompts.sections.tools import get_tool_input_params
 from openjiuwen.deepagents.prompts.sections.tools.bash import get_bash_input_params
@@ -31,6 +35,10 @@ from openjiuwen.deepagents.prompts.sections.tools.todo import (
     get_todo_create_input_params,
     get_todo_list_input_params,
     get_todo_modify_input_params,
+)
+from openjiuwen.deepagents.prompts.sections.tools.vision import (
+    get_image_ocr_input_params,
+    get_visual_question_answering_input_params,
 )
 
 
@@ -201,6 +209,30 @@ class TestTodoInputParams:
         assert cn_nested["content"]["description"] != en_nested["content"]["description"]
 
 
+class TestVisionInputParams:
+    @staticmethod
+    def test_image_ocr():
+        schema = get_image_ocr_input_params("cn")
+        _assert_valid_schema(schema)
+        assert "image_path_or_url" in schema["properties"]
+        assert "prompt" in schema["properties"]
+        assert schema["required"] == ["image_path_or_url"]
+        _assert_bilingual_descriptions_differ(get_image_ocr_input_params)
+
+    @staticmethod
+    def test_visual_question_answering():
+        schema = get_visual_question_answering_input_params("cn")
+        _assert_valid_schema(schema)
+        assert "image_path_or_url" in schema["properties"]
+        assert "question" in schema["properties"]
+        assert "include_ocr" in schema["properties"]
+        assert "ocr_prompt" in schema["properties"]
+        assert schema["required"] == ["image_path_or_url", "question"]
+        _assert_bilingual_descriptions_differ(
+            get_visual_question_answering_input_params
+        )
+
+
 # ---------------------------------------------------------------------------
 # Registry tests
 # ---------------------------------------------------------------------------
@@ -211,6 +243,7 @@ class TestGetToolInputParams:
             "bash", "code", "read_file", "write_file", "edit_file",
             "glob", "list_files", "grep", "list_skill",
             "todo_write", "todo_read", "todo_modify",
+            "image_ocr", "visual_question_answering",
         ]
         for name in names:
             schema = get_tool_input_params(name, "cn")
@@ -226,6 +259,7 @@ class TestGetToolInputParams:
         assert get_tool_input_params("bash", "cn") == get_bash_input_params("cn")
         assert get_tool_input_params("bash", "en") == get_bash_input_params("en")
         assert get_tool_input_params("todo_modify", "cn") == get_todo_modify_input_params("cn")
+        assert get_tool_input_params("image_ocr", "en") == get_image_ocr_input_params("en")
 
 
 # ---------------------------------------------------------------------------
@@ -281,3 +315,17 @@ class TestToolClassInputParams:
                 tool = factory_fn(MagicMock(), language=lang)
                 assert tool.card.input_params == builder_fn(lang), \
                     f"{factory_fn.__name__} lang={lang} mismatch"
+
+    @staticmethod
+    def test_vision_tools_use_builders():
+        builders = [
+            (ImageOCRTool, get_image_ocr_input_params),
+            (
+                VisualQuestionAnsweringTool,
+                get_visual_question_answering_input_params,
+            ),
+        ]
+        for tool_cls, builder_fn in builders:
+            for lang in ("cn", "en"):
+                tool = tool_cls(language=lang)
+                assert tool.card.input_params == builder_fn(lang)
