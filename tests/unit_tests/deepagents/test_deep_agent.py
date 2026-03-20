@@ -21,9 +21,12 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.deep_agent import DeepAgent
+from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
+from openjiuwen.deepagents.subagents import create_code_agent
 from openjiuwen.deepagents.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.deepagents.task_loop.loop_coordinator import LoopCoordinator
+from openjiuwen.deepagents.tools.task_tool import create_task_tool
 
 
 def _create_dummy_model() -> Model:
@@ -447,3 +450,28 @@ def test_create_deep_agent_no_duplicate_skill_rail() -> None:
     pending_rails = agent._pending_rails
     skill_rail_count = sum(1 for rail in pending_rails if isinstance(rail, SkillRail))
     assert skill_rail_count == 1, f"Expected 1 SkillRail, but found {skill_rail_count}"
+
+
+def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
+    agent = create_code_agent(model=_create_dummy_model())
+
+    assert isinstance(agent, DeepAgent)
+    assert agent.card.name == "code_agent"
+    assert agent.ability_manager.get("code") is not None
+    assert any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
+
+
+def test_create_code_agent_explicit_tools_and_rails_override_defaults() -> None:
+    custom_tool = _build_tool_card("custom_tool")
+    custom_rail = CountingRail()
+
+    agent = create_code_agent(
+        model=_create_dummy_model(),
+        tools=[custom_tool],
+        rails=[custom_rail],
+    )
+
+    assert agent.ability_manager.get("custom_tool") is custom_tool
+    assert agent.ability_manager.get("code") is None
+    assert any(isinstance(rail, CountingRail) for rail in agent._pending_rails)
+    assert not any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)

@@ -7,6 +7,7 @@ Centralizes all bilingual tool descriptions and provides the
 
 All built-in tools register via ``ToolMetadataProvider`` implementations.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -38,6 +39,9 @@ from openjiuwen.deepagents.prompts.sections.tools.todo import (
     TodoListMetadataProvider,
     TodoModifyMetadataProvider,
 )
+from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
+    TaskMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -55,6 +59,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     TodoCreateMetadataProvider(),
     TodoListMetadataProvider(),
     TodoModifyMetadataProvider(),
+    TaskMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {
@@ -93,12 +98,29 @@ def build_tool_card(
     name: str,
     tool_id: str,
     language: str = "cn",
+    format_args: Optional[Dict[str, str]] = None,
 ) -> ToolCard:
-    """统一建卡函数。工具类不再自己拼 ToolCard。"""
+    """统一建卡函数。工具类不再自己拼 ToolCard。
+
+    Args:
+        name: 工具名称。
+        tool_id: 工具 ID。
+        language: 语言（'cn' 或 'en'）。
+        format_args: 可选的格式化参数字典，用于填充描述中的占位符。
+
+    Returns:
+        配置好的 ToolCard 实例。
+    """
+    description = get_tool_description(name, language)
+
+    # 如果提供了格式化参数，填充描述中的占位符
+    if format_args:
+        description = description.format(**format_args)
+
     return ToolCard(
         id=tool_id,
         name=name,
-        description=get_tool_description(name, language),
+        description=description,
         input_params=get_tool_input_params(name, language),
     )
 

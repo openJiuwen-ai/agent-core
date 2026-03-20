@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """DeepAgent schema definitions."""
 
-from openjiuwen.deepagents.schema.config import DeepAgentConfig
+from openjiuwen.deepagents.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.deepagents.schema.loop_event import (
     DeepLoopEvent,
     DeepLoopEventType,
@@ -24,6 +24,7 @@ from openjiuwen.deepagents.schema.task import (
 
 __all__ = [
     "DeepAgentConfig",
+    "SubAgentConfig",
     "StopCondition",
     "DeepLoopEvent",
     "DeepLoopEventType",

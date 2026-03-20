@@ -1,9 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """DeepAgent configuration dataclass."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
 
 from openjiuwen.core.foundation.llm.model import Model
@@ -11,6 +12,7 @@ from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
+from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents.schema.stop_condition import (
     StopCondition,
@@ -38,7 +40,7 @@ class DeepAgentConfig:
             loop.
         max_iterations: Maximum ReAct iterations per
             single invoke.
-        subagents: Sub-agent cards (P1).
+        subagents: Sub-agent specifications or Sub-agent instance.
         tools: Tool cards mounted on the agent.
         workspace: Workspace path for file operations.
         skills: Skill definitions (P1).
@@ -48,6 +50,7 @@ class DeepAgentConfig:
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
     """
+
     model: Optional[Model] = None
     card: Optional[AgentCard] = None
     system_prompt: Optional[str] = None
@@ -55,7 +58,7 @@ class DeepAgentConfig:
     enable_task_loop: bool = False
     stop_condition: Optional[StopCondition] = None
     max_iterations: int = 15
-    subagents: Optional[List[AgentCard]] = None
+    subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None
     tools: Optional[List[ToolCard]] = None
     workspace: Optional[Workspace] = None
     skills: Optional[Union[str, List[str]]] = None
@@ -64,3 +67,15 @@ class DeepAgentConfig:
     completion_timeout: float = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
+
+
+@dataclass
+class SubAgentConfig:
+    """Subagent 完整配置，支持自定义 system_prompt、tools、model。"""
+
+    agent_card: AgentCard
+    system_prompt: str
+    tools: List[ToolCard] = field(default_factory=list)
+    model: Optional[Model] = None
+    rails: Optional[List[AgentRail]] = None
+    skills: Optional[List[str]] = None

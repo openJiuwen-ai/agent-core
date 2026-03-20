@@ -826,6 +826,7 @@ class StatusCode(Enum):
     TOOL_TODOS_CLEAR_FAILED = (182502, "todo tool clears failed, error='{reason}'")
     TOOL_TODOS_VALIDATION_INVALID = (182503, "todo tool validation invalid, error='{reason}'")
     TOOL_TODOS_INVOKE_FAILED = (182504, "todo tool invoke failed, error='{reason}'")
+    TOOL_TASK_TOOL_INVOKED = (182505, "task tool invoked, error='{reason}'")
 
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")

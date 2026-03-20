@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Factory function for creating DeepAgent instances."""
+
 from __future__ import annotations
 
 import os
@@ -14,8 +15,8 @@ from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.deepagents.deep_agent import DeepAgent
-from openjiuwen.deepagents.rails import TaskPlanningRail, SkillRail
-from openjiuwen.deepagents.schema.config import DeepAgentConfig
+from openjiuwen.deepagents.rails import TaskPlanningRail, SkillRail, SubagentRail
+from openjiuwen.deepagents.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
 from openjiuwen.deepagents.schema.workspace import Workspace
 from openjiuwen.deepagents.prompts import resolve_language
@@ -27,7 +28,7 @@ def create_deep_agent(
     card: Optional[AgentCard] = None,
     system_prompt: Optional[str] = None,
     tools: Optional[List[ToolCard]] = None,
-    subagents: Optional[List[AgentCard]] = None,
+    subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
     stop_condition: Optional[StopCondition] = None,
     enable_task_loop: bool = False,
@@ -53,7 +54,8 @@ def create_deep_agent(
         system_prompt: System prompt for the inner
             ReActAgent.
         tools: Tool cards to register on the agent.
-        subagents: Sub-agent cards (P1).
+        subagents: Sub-agent specification or sub-agent instance,
+            supports subagent using different model, tools and prompt.
         rails: AgentRail instances to register.
         stop_condition: Task-loop stop conditions.
         enable_task_loop: Enable outer task loop (P1).
@@ -76,11 +78,7 @@ def create_deep_agent(
             description="DeepAgent instance",
         )
 
-    workspace_obj = (
-        Workspace(root_path=workspace or "./")
-        if not workspace or isinstance(workspace, str)
-        else workspace
-    )
+    workspace_obj = Workspace(root_path=workspace or "./") if not workspace or isinstance(workspace, str) else workspace
 
     resolved_language = resolve_language(language)
 
@@ -132,12 +130,15 @@ def create_deep_agent(
     # Queue rails for lazy async registration
     task_plan_flag: bool = False
     skill_flag: bool = False
+    subagent_flag: bool = False
     if rails:
         for rail_inst in rails:
             if isinstance(rail_inst, TaskPlanningRail):
                 task_plan_flag = True
             if isinstance(rail_inst, SkillRail):
                 skill_flag = True
+            if isinstance(rail_inst, SubagentRail):
+                subagent_flag = True
             agent.add_rail(rail_inst)
 
     if enable_task_loop and not task_plan_flag:
@@ -150,4 +151,7 @@ def create_deep_agent(
             skills_dir.append(skill_dir)
         skill_rail = SkillRail(skills_dir=skills_dir, skill_mode="all", language=resolved_language)
         agent.add_rail(skill_rail)
+    if subagents and not subagent_flag:
+        subagent_rail = SubagentRail(language=resolved_language)
+        agent.add_rail(subagent_rail)
     return agent

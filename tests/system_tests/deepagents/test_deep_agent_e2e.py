@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
 )
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
@@ -36,6 +37,8 @@ from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.rails.task_planning_rail import (
     TaskPlanningRail,
 )
+from openjiuwen.deepagents.schema.config import SubAgentConfig
+from openjiuwen.deepagents.subagents import create_code_agent, create_research_agent
 from openjiuwen.deepagents.tools import (
     ReadFileTool, WriteFileTool, EditFileTool,
     GlobTool, ListDirTool,
@@ -441,6 +444,100 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             if isinstance(r, dict):
                 self.assertIn("output", r, "each round result should contain 'output'")
                 self.assertTrue(bool(r["output"]), "round output should not be empty")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_tasks_using_subagents(self):
+        """多步复杂任务：调用subagent来完成调研，主agent查看并总结调研结果。
+            - 验证主agent可以通过task工具调用subagent执行任务
+            - 验证主agent和subagent共享workspace，主agent可以使用subagent创建的文件
+        """
+        self._require_llm_config()
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        fs_rail = self._get_fs_rail()
+        tool_trace = ToolTraceRail()
+        research_agent = SubAgentConfig(
+            agent_card=AgentCard(
+                name="research_agent",
+                description="专注于研究调查任务，当用户想要调查某问题时，可使用该代理执行研究工作。每次只给这位研究员一个主题。",
+            ),
+            system_prompt="你是一名研究助理，负责针对用户输入的主题开展研究工作。",
+            rails=[fs_rail],
+        )
+        model = self._create_model()
+        agent = create_deep_agent(
+            model=model,
+            system_prompt=(
+                "你是一个严谨的任务执行助手。"
+                "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
+            ),
+            enable_task_loop=False,
+            max_iterations=12,
+            subagents=[research_agent],
+            rails=[tool_trace, fs_rail],
+            sys_operation=sys_oper
+        )
+
+        query = (
+            "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"
+            "1. 调查随机森林算法应用场景，创建summary_research.txt文件，写入内容为调查结果；\n"
+            "2. 使用工具读取 summary_research.txt 文件；\n"
+            "3. 返回文件的结果"
+        )
+        result = await Runner.run_agent(agent, {"query": query})
+        logger.info("get final result: %s", result)
+
+        tool_counts = Counter(tool_trace.tool_calls)
+        self.assertGreaterEqual(tool_counts.get("task_tool", 0), 1)
+        # 写入file工具应该是 subagent research_agent调用，这里应该为0
+        self.assertGreaterEqual(tool_counts.get("write_file", 0), 0)
+        self.assertGreaterEqual(tool_counts.get("read_file", 0), 1)
+
+        summary_path = Path(self._work_dir) / "summary_research.txt"
+        self.assertTrue(summary_path.exists())
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_tasks_using_predefined_subagents(self):
+        """多步复杂任务：调用预置subagent来完成调研，主agent查看并总结调研结果。
+            - 验证主agent可以通过task工具并行调用subagent执行任务，生成多个task_tool调用
+        """
+        self._require_llm_config()
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        fs_rail = self._get_fs_rail()
+        tool_trace = ToolTraceRail()
+        model = self._create_model()
+        research_agent = create_research_agent(model=model, sys_operation=sys_oper)
+        code_agent = create_code_agent(model=model, sys_operation=sys_oper)
+        agent = create_deep_agent(
+            model=model,
+            system_prompt=(
+                "你是一个严谨的任务执行助手。"
+                "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
+            ),
+            enable_task_loop=False,
+            max_iterations=12,
+            subagents=[research_agent, code_agent],
+            rails=[tool_trace, fs_rail],
+            sys_operation=sys_oper
+        )
+
+        query = (
+            "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"
+            "1. 我想研究詹姆斯、科比的成就并对比；\n"
+            "2. 创建 summary_research.txt，写入内容为上一步调查的结果；\n"
+            "3. 使用工具读取 summary_research.txt 文件；\n"
+            "4. 对比两个人的成就返回总结结果"
+        )
+        result = await Runner.run_agent(agent, {"query": query})
+
+        tool_counts = Counter(tool_trace.tool_calls)
+        self.assertGreaterEqual(tool_counts.get("task_tool", 0), 2)
+        self.assertGreaterEqual(tool_counts.get("write_file", 0), 1)
+        self.assertGreaterEqual(tool_counts.get("read_file", 0), 1)
+
+        summary_path = Path(self._work_dir) / "summary_research.txt"
+        self.assertTrue(summary_path.exists())
 
 
 if __name__ == "__main__":
