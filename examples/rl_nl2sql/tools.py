@@ -14,7 +14,7 @@ import tempfile
 from openjiuwen.core.common.logging import tool_logger
 from openjiuwen.core.foundation.tool import tool
 
-SPIDER_DATA_DIR = os.environ.get("SPIDER_DATA_DIR", "/home/data/spider_data")
+SPIDER_DATA_DIR = os.environ.get("SPIDER_DATA_DIR")
 
 _MAX_DISPLAY_ROWS = 50
 _MAX_CELL_WIDTH = 80
@@ -30,6 +30,8 @@ def _resolve_db_path(database: str) -> str:
     else:
         db_source = parts[0]
         db_id = parts[-1]
+    if not SPIDER_DATA_DIR:
+        return ""
     return os.path.join(SPIDER_DATA_DIR, db_source, db_id, f"{db_id}.sqlite")
 
 
@@ -133,6 +135,12 @@ def execute_sql(database: str, sql: str) -> str:
     """
     Execute *sql* on the SQLite database return a formatted result table or a detailed error with hints.
     """
+    if not SPIDER_DATA_DIR:
+        return (
+            "Error: SPIDER_DATA_DIR environment variable is not set. "
+            "Set it to the root directory of your Spider dataset (containing database/, etc.)."
+        )
+
     db_path = _resolve_db_path(database)
 
     if not os.path.exists(db_path):

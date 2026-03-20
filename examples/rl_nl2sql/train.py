@@ -7,10 +7,25 @@ using an ``execute_sql`` tool for validation and iterative correction.
 The agent must output the final SQL in ``### ANSWER: <sql> ###`` format.
 
 Environment variables:
-    SPIDER_DATA_DIR  Path to the spider_data directory that contains
+    SPIDER_DATA_DIR  Required. Path to the spider_data directory that contains
                      ``database/`` and ``test_database/`` sub-folders.
-                     Defaults to ``/home/data/spider_data``.
+
+Before training, edit this file to match your machine:
+    Parquet: set ``DATA_DIR`` (or ``TrainingConfig.train_files`` /
+    ``val_files``) to the ``prepare_data.py`` output directory containing
+    ``train.parquet`` and ``dev.parquet``.
+    Model: set ``TrainingConfig.model_path`` to your local Hugging Face model.
+    Optional: ``save_path``, ``n_gpus_per_node``, ``visible_device``, etc.
+
+Run:
+    cd examples/rl_nl2sql
+    python train.py
 """
+
+from sample_processing import task_data_fn
+from prompts import NL2SQL_SYSTEM_PROMPT
+from reward import nl2sql_reward
+from tools import execute_sql
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.dev_tools.agentrl import RLConfig, RLOptimizer
@@ -21,13 +36,9 @@ from openjiuwen.dev_tools.agentrl.config.schemas import (
     TrainingConfig,
 )
 
-from .sample_processing import task_data_fn
-from .prompts import NL2SQL_SYSTEM_PROMPT
-from .reward import nl2sql_reward
-from .tools import execute_sql
-
 # ======================== Configuration ========================
 
+# Directory that contains train.parquet / dev.parquet (prepare_data.py --output_dir).
 DATA_DIR = "/home/data"
 
 system_prompt = NL2SQL_SYSTEM_PROMPT.format(
@@ -40,14 +51,13 @@ system_prompt = NL2SQL_SYSTEM_PROMPT.format(
 
 config = RLConfig(
     training=TrainingConfig(
-        model_path="~/model/Qwen2.5-1.5B-Instruct",
+        model_path="~/model/Qwen2.5-1.5B-Instruct",  # local HF model dir
         train_files=f"{DATA_DIR}/train.parquet",
         val_files=f"{DATA_DIR}/dev.parquet",
         train_batch_size=32,
-        gen_batch_size=32,
         total_epochs=2,
         max_prompt_length=4096,
-        max_response_length=2048,
+        max_response_length=4096,
         n_gpus_per_node=4,
         visible_device="0,1,2,3",
         save_freq=200,
@@ -55,15 +65,17 @@ config = RLConfig(
         project_name="NL2SQL",
         experiment_name="nl2sql_grpo",
         algorithm_adv_estimator="grpo",
-        whole_trajectory=True,
+        whole_trajectory=False,
         logger=["tensorboard"],
         val_before_train=False,
         save_path="~/checkpoint/nl2sql",
+        micro_batch_size_per_gpu=2,
     ),
     rollout=RolloutConfig(
         rollout_n=4,
-        rollout_max_round=1,
-        actor_optimizer_lr=1e-6,
+        actor_kl_loss_coef=0.02,
+        actor_use_kl_loss=True,
+        actor_optimizer_lr=5e-7,
         actor_clip_ratio_low=0.2,
         actor_clip_ratio_high=0.3,
     ),

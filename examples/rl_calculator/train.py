@@ -4,7 +4,29 @@ Calculator RL training script.
 
 Trains an agent to solve math problems using a calculator tool.
 The agent must output the answer in ``### ANSWER: <answer> ###`` format.
+
+Dataset (same idea as ``rl_nl2sql`` README: fetch from Google Drive, then point
+``DATA_DIR`` at the unpacked folder):
+
+    Download ``calc-x-data.zip`` from
+    https://drive.google.com/file/d/1FQMyKLLd6hP9dw9rfZn1EZOWNvKaDsqw/view
+    Unzip; the folder should contain ``train.parquet`` and ``test.parquet``.
+
+Before training, edit this file to match your machine:
+    Parquet: set ``DATA_DIR`` (or ``TrainingConfig.train_files`` /
+    ``val_files``) to that directory.
+    Model: set ``TrainingConfig.model_path`` to your local Hugging Face model.
+    Optional: ``save_path``, ``n_gpus_per_node``, ``visible_device``, etc.
+
+Run:
+    cd examples/rl_calculator
+    python train.py
 """
+
+from sample_processing import task_data_fn
+from prompts import CALCULATOR_SYSTEM_PROMPT
+from reward import calc_reward
+from tools import calculator
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.dev_tools.agentrl import RLConfig, RLOptimizer
@@ -15,13 +37,9 @@ from openjiuwen.dev_tools.agentrl.config.schemas import (
     TrainingConfig,
 )
 
-from .sample_processing import task_data_fn
-from .prompts import CALCULATOR_SYSTEM_PROMPT
-from .reward import calc_reward
-from .tools import calculator
-
 # ======================== Configuration ========================
 
+# Directory that contains train.parquet / test.parquet (see README).
 DATA_DIR = "/home/data"
 
 system_prompt = CALCULATOR_SYSTEM_PROMPT.format(
@@ -35,11 +53,10 @@ system_prompt = CALCULATOR_SYSTEM_PROMPT.format(
 
 config = RLConfig(
     training=TrainingConfig(
-        model_path="~/model/Qwen2.5-1.5B-Instruct",
+        model_path="~/model/Qwen2.5-1.5B-Instruct",  # local HF model dir
         train_files=f"{DATA_DIR}/train.parquet",
         val_files=f"{DATA_DIR}/test.parquet",
         train_batch_size=32,
-        gen_batch_size=32,
         total_epochs=2,
         max_prompt_length=3072,
         max_response_length=3072,
@@ -50,15 +67,17 @@ config = RLConfig(
         project_name="CalcX",
         experiment_name="calc_x_grpo",
         algorithm_adv_estimator="grpo",
-        whole_trajectory=True,
+        whole_trajectory=False,
         logger=["tensorboard"],
         val_before_train=False,
-        save_path="~/checkpoint/calx"
+        save_path="~/checkpoint/calx",
+        micro_batch_size_per_gpu=4,
     ),
     rollout=RolloutConfig(
         rollout_n=4,
-        rollout_max_round=1,
-        actor_optimizer_lr=1e-6,
+        actor_kl_loss_coef=0.02,
+        actor_use_kl_loss=True,
+        actor_optimizer_lr=5e-7,
         actor_clip_ratio_low=0.2,
         actor_clip_ratio_high=0.3,
     ),

@@ -8,13 +8,14 @@ from typing import Any, Dict
 
 
 def task_data_fn(task_sample: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert a dataset row to agent inputs.
+    """Map one Parquet row to ``query`` and ``ground_truth``.
 
-    Dataset columns (from prepare_data.py):
-        question, gold_sql, db_id, db_source, schema_text
+    Expected columns (see ``prepare_data.py``):
+        ``question``, ``gold_sql``, ``db_id``, ``db_source``, ``schema_text``
 
-    Returns ``query`` (user message to the agent) and ``ground_truth``
-    (JSON string consumed by the reward function).
+    ``query`` concatenates database id, schema text, and the natural-language
+    question. ``ground_truth`` is a JSON string with ``gold_sql`` and DB
+    identifiers for the reward function.
     """
     db_source = task_sample.get("db_source", "database")
     db_id = task_sample.get("db_id", "")
