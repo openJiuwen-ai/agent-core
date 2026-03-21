@@ -1166,6 +1166,67 @@ class TestEdgeCases:
             tg.cancel_scope.cancel()
 
     @pytest.mark.asyncio
+    async def test_cancel_child_does_not_cancel_parent(self, manager):
+        """Cancelling a child task directly must not cancel its parent"""
+        child_ref = None
+        child_started = asyncio.Event()
+
+        async def child_work():
+            child_started.set()
+            await asyncio.sleep(10)
+            return "child_done"
+
+        async def parent_work():
+            nonlocal child_ref
+            child_ref = await manager.create_task(child_work(), name="child")
+            await child_started.wait()
+            await asyncio.sleep(0.2)
+            return "parent_done"
+
+        async with manager.task_group() as tg:
+            parent = await manager.create_task(parent_work(), name="parent")
+
+            await child_started.wait()
+            await asyncio.sleep(0.05)
+            await child_ref.cancel(cascade=False)
+
+        assert child_ref.status == TaskStatus.CANCELLED
+        assert child_ref.cancel_reason == "manual_cancel"
+        assert parent.status == TaskStatus.COMPLETED
+        assert parent.result == "parent_done"
+
+    @pytest.mark.asyncio
+    async def test_cancel_group_child_does_not_cancel_parent(self, manager):
+        """Cancelling child group tasks must not cancel parent task"""
+        child_ref = None
+        child_started = asyncio.Event()
+
+        async def child_work():
+            child_started.set()
+            await asyncio.sleep(10)
+            return "child_done"
+
+        async def parent_work():
+            nonlocal child_ref
+            child_ref = await manager.create_task(child_work(), name="child", group="child_group")
+            await child_started.wait()
+            await asyncio.sleep(0.2)
+            return "parent_done"
+
+        async with manager.task_group() as tg:
+            parent = await manager.create_task(parent_work(), name="parent", group="parent_group")
+
+            await child_started.wait()
+            await asyncio.sleep(0.05)
+            cancelled_count = await manager.cancel_group("child_group")
+            assert cancelled_count == 1
+
+        assert child_ref.status == TaskStatus.CANCELLED
+        assert child_ref.cancel_reason == "manual_cancel"
+        assert parent.status == TaskStatus.COMPLETED
+        assert parent.result == "parent_done"
+
+    @pytest.mark.asyncio
     async def test_print_task_tree_no_args(self, manager):
         """print_task_tree() with no arguments does not raise"""
 
@@ -1209,31 +1270,31 @@ class TestEdgeCases:
         async with manager.task_group() as tg:
             task1 = await manager.create_task(manager_task1(), name="test_task", group="group")
 
-            parent = await manager.create_task(parent_work(), name="parent", group="group1")
+            parent = await manager.create_task(parent_work(), name="parent", group="group2")
             await asyncio.sleep(0.2)
-            await manager.cancel_group("group1")
+            cancelled_count = await manager.cancel_group("group1")
+            assert cancelled_count == 1
 
         assert task1.status == TaskStatus.COMPLETED
         assert task1.result == "result"
 
-        # child is cancelled because it was created in parent's context
-        # when parent is cancelled, child is also cancelled regardless of its group
-        assert child_ref.status == TaskStatus.CANCELLED
-        assert child_ref.cancel_reason == "manual_cancel"
+        assert child_ref.status == TaskStatus.COMPLETED
+        assert child_ref.cancel_reason is None
 
-        assert parent.status == TaskStatus.CANCELLED
+        assert parent.status == TaskStatus.COMPLETED
         assert parent.cancelled_by is None
-        assert parent.cancel_reason == "manual_cancel"
+        assert parent.cancel_reason is None
 
         assert grandchild_ref.status == TaskStatus.CANCELLED
-        assert grandchild_ref.cancelled_by == child_ref.task_id
+        assert grandchild_ref.cancelled_by is None
         assert grandchild_ref.cancel_reason == "manual_cancel"
 
         tree = manager.get_task_tree(parent.task_id)
         logging.info(f"tree info => {tree}")
-        assert "parent [cancelled]" in tree
-        assert "child [cancelled] (cancelled by: parent" in tree
-        assert "grandchild [cancelled] (cancelled by: child" in tree
+        assert "parent [completed]" in tree
+        assert "child [completed]" in tree
+        assert "grandchild [cancelled] (reason: manual_cancel)" in tree
+
 
     @pytest.mark.positive
     @pytest.mark.asyncio
@@ -1285,6 +1346,57 @@ class TestEdgeCases:
         assert "parent [cancelled]" in tree
         assert "child [cancelled] (cancelled by: parent" in tree
         assert "grandchild [cancelled] (cancelled by: child" in tree
+
+    @pytest.mark.positive
+    @pytest.mark.asyncio
+    async def test_task_manager_008(self):
+        TaskManager.reset_instance()
+        manager = TaskManager()
+
+        grandchild_ref = None
+        child_ref = None
+
+        async def grandchild_work():
+            await asyncio.sleep(10)
+            return "grandchild_done"
+
+        async def child_work():
+            nonlocal grandchild_ref
+            grandchild_ref = await manager.create_task(grandchild_work(), name="grandchild")
+            await asyncio.sleep(10)
+            return "child_done"
+
+        async def parent_work():
+            nonlocal child_ref
+            child_ref = await manager.create_task(child_work(), name="child")
+            await asyncio.sleep(10)
+            return "parent_done"
+
+        async with manager.task_group() as tg:
+            parent = await manager.create_task(parent_work(), name="parent")
+            await asyncio.sleep(0.2)
+            await child_ref.cancel(cascade=True)
+
+        assert parent is not None
+        assert parent.status == TaskStatus.COMPLETED
+        assert parent.cancelled_by is None
+        assert parent.cancel_reason is None
+
+        assert child_ref is not None
+        assert child_ref.status == TaskStatus.CANCELLED
+        assert child_ref.cancelled_by is None
+        assert child_ref.cancel_reason == "manual_cancel"
+
+        assert grandchild_ref is not None
+        assert grandchild_ref.status == TaskStatus.CANCELLED
+        assert grandchild_ref.cancelled_by == child_ref.task_id
+        assert grandchild_ref.cancel_reason == "parent_cancelled"
+
+        tree = manager.get_task_tree(parent.task_id)
+        logging.info(f"tree info => {tree}")
+        assert "parent [completed]" in tree
+        assert "child [cancelled] (reason: manual_cancel)" in tree
+        assert "grandchild [cancelled] (cancelled by: child, reason: parent_cancelled)" in tree
 
 
 if __name__ == "__main__":

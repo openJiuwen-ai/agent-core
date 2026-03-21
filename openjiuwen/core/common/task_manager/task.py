@@ -164,7 +164,12 @@ class Task:
                         current_task_id = _current_task_id.get()
                         if current_task_id and current_task_id != self.task_id:
                             self.cancelled_by = current_task_id
-                    raise asyncio.CancelledError()
+
+                    self.status = TaskStatus.CANCELLED
+                    self.finished_at = datetime.now(timezone.utc)
+                    if callback_trigger:
+                        await callback_trigger(self, "cancelled")
+                    return None
                 self.result = result
                 self.status = TaskStatus.COMPLETED
                 self.finished_at = datetime.now(timezone.utc)
