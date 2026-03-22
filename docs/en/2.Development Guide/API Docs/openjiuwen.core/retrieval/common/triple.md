@@ -9,7 +9,6 @@ Triple data model, representing a triple (subject-predicate-object) in a knowled
 * **subject**(str): Subject.
 * **predicate**(str): Predicate.
 * **object**(str): Object.
-* **confidence**(float, optional): Confidence. Default: None.
 * **metadata**(Dict[str, Any]): Metadata (e.g., `{"doc_id": "doc1", "source": "kb1"}`). Default: {}.
 
 **Example**:
@@ -22,7 +21,6 @@ Triple data model, representing a triple (subject-predicate-object) in a knowled
 ...     subject="Beijing",
 ...     predicate="is",
 ...     object="the capital of China",
-...     confidence=0.95,
 ...     metadata={"doc_id": "doc1"}
 ... )
 >>> print(f"Triple: {triple.subject} {triple.predicate} {triple.object}")

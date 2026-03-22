@@ -23,19 +23,7 @@ class TestTriple:
         assert triple.subject == "Alice"
         assert triple.predicate == "knows"
         assert triple.object == "Bob"
-        assert triple.confidence is None
         assert triple.metadata == {}
-
-    @staticmethod
-    def test_create_triple_with_confidence():
-        """Test creating triple with confidence"""
-        triple = Triple(
-            subject="Alice",
-            predicate="knows",
-            object="Bob",
-            confidence=0.95,
-        )
-        assert triple.confidence == 0.95
 
     @staticmethod
     def test_create_triple_with_metadata():
@@ -57,13 +45,11 @@ class TestTriple:
             subject="Alice",
             predicate="knows",
             object="Bob",
-            confidence=0.95,
             metadata=metadata,
         )
         assert triple.subject == "Alice"
         assert triple.predicate == "knows"
         assert triple.object == "Bob"
-        assert triple.confidence == 0.95
         assert triple.metadata == metadata
 
     @staticmethod
