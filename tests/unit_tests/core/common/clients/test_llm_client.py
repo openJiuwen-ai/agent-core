@@ -261,7 +261,9 @@ class TestCreateHttpxClient:
 
             # Verify client was created with transport - now this will be a MagicMock, not a coroutine
             mock_httpx_client.assert_called_once_with(
-                transport=mock_pool.conn.return_value
+                transport=mock_pool.conn.return_value,
+                verify=False,
+                proxy="http://proxy:8080"
             )
             assert client == mock_client_instance
 
@@ -291,7 +293,9 @@ class TestCreateHttpxClient:
 
             # Verify async client was created - now this will be a MagicMock, not a coroutine
             mock_async_client.assert_called_once_with(
-                transport=mock_pool.conn.return_value
+                transport=mock_pool.conn.return_value,
+                verify=False,
+                proxy="http://proxy:8080"
             )
             assert client == mock_client_instance
 
@@ -431,7 +435,7 @@ class TestCreateOpenAIClients:
         # Check if factories are registered
         registered_clients = get_client_registry().list_clients()
         factory_names = [name for name in registered_clients]
-        assert any('async_open_ai' in name for name in factory_names)
+        assert any('async_openai' in name for name in factory_names)
         assert any('openai' in name for name in factory_names)
 
 
@@ -442,7 +446,7 @@ class TestIntegration:
     async def test_get_httpx_client_via_registry(self):
         """Test getting httpx client through the client registry."""
         # This test verifies that the factory works when called through the registry
-        config = HttpXConnectorPoolConfig(proxy="http://proxy:8080")
+        config = HttpXConnectorPoolConfig(proxy="http://proxy:8080", ssl_verify=False)
 
         # Mock the connector pool manager to avoid actual connection creation
         with (patch('openjiuwen.core.common.clients.llm_client.get_connector_pool_manager') as mock_get_pool_manager):
@@ -452,7 +456,7 @@ class TestIntegration:
             mock_pool = MagicMock()  # Changed from AsyncMock to MagicMock
             mock_transport = MagicMock()
             mock_pool.conn.return_value = mock_transport
-            pool_manager.get_connector_pool = AsyncMock(return_value = mock_pool)
+            pool_manager.get_connector_pool = AsyncMock(return_value=mock_pool)
 
             with patch('httpx.Client') as mock_httpx_client:
                 mock_client_instance = MagicMock()
@@ -469,7 +473,9 @@ class TestIntegration:
                 # Verify the factory was called correctly
                 mock_get_pool_manager.assert_called_once()
                 mock_httpx_client.assert_called_once_with(
-                    transport=mock_transport  # Use the stored transport mock
+                    transport=mock_transport,  # Use the stored transport mock
+                    verify=False,
+                    proxy='http://proxy:8080'
                 )
 
     @pytest.mark.asyncio
@@ -480,16 +486,16 @@ class TestIntegration:
             "api_key": "test-key",
             "api_base": "https://api.openai.com/v1",
             "proxy": "http://proxy:8080",
-            "client_provider": "openai"
+            "client_provider": "openai",
+            "verify_ssl": False
         }
 
         with patch('openjiuwen.core.common.clients.llm_client.get_connector_pool_manager') as get_mock_manager, \
                 patch('openjiuwen.core.common.clients.llm_client.UrlUtils.get_global_proxy_url') as mock_url, \
                 patch('httpx.Client') as mock_httpx_client, \
                 patch('openai.OpenAI') as mock_openai:
-
             mock_manager = MagicMock()
-            get_mock_manager.return_value=mock_manager
+            get_mock_manager.return_value = mock_manager
             mock_url.return_value = "http://proxy:8080"
 
             # Create a regular MagicMock for the pool
@@ -514,7 +520,9 @@ class TestIntegration:
 
             # Verify httpx client was created with the transport from mock_pool.conn.return_value
             mock_httpx_client.assert_called_once_with(
-                transport=mock_transport  # Use the stored transport mock
+                transport=mock_transport,  # Use the stored transport mock
+                verify=False,
+                proxy='http://proxy:8080'
             )
 
             # Verify OpenAI client was created

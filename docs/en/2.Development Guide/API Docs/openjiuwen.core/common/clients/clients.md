@@ -1422,7 +1422,7 @@ client = await create_httpx_client(config, need_async=True)
 python
 
 ```
-@get_client_registry().register_client("async_open_ai")
+@get_client_registry().register_client("async_openai")
 async def create_async_openai_client(config: Union["ModelClientConfig", Dict[str, Any]],
                                      **kwargs) -> 'AsyncOpenAI'
 ```
@@ -1469,7 +1469,7 @@ config = {
 }
 
 async_openai = await get_client_registry().get_client(
-    'async_open_ai',
+    'async_openai',
     config=config
 )
 
@@ -1488,7 +1488,7 @@ config_with_proxy = {
 }
 
 async_openai_proxy = await get_client_registry().get_client(
-    'async_open_ai',
+    'async_openai',
     config=config_with_proxy,
     proxy="http://proxy.company.com:8080",  # Pass proxy via kwargs
     ssl_verify=True
@@ -1506,7 +1506,7 @@ model_config = ModelClientConfig(
 )
 
 async_openai_custom = await get_client_registry().get_client(
-    'async_open_ai',
+    'async_openai',
     config=model_config,
     max_keepalive_connections=50  # Connection pool configuration
 )

@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from typing import Dict
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, AsyncMock, PropertyMock, patch
 import pytest
 
 import aiohttp
@@ -320,10 +320,10 @@ class TestHttpClient:
             mock_session_manager.release = AsyncMock()
 
             client = MockHttpClient(config, reuse_session=False)
+            type(mock_http_session).config = PropertyMock(return_value=config)
             session = await client.acquire_session()
             await client.release_session(session)
-
-            mock_session_manager.release.assert_called_once_with(session)
+            mock_session_manager.release.assert_called_once_with(config)
 
     @pytest.mark.asyncio
     async def test_close(self, config, mock_session_manager, mock_http_session):
@@ -698,6 +698,8 @@ class TestHttpClientIntegration:
             mock_manager.acquire = AsyncMock(return_value=(mock_http_session, True))
             mock_get_manager.return_value = mock_manager
             mock_release = AsyncMock()
+            config = Mock()
+            type(mock_http_session).config = PropertyMock(return_value=config)
             mock_manager.release = mock_release
             client = HttpClient(reuse_session=False)
 
@@ -705,7 +707,7 @@ class TestHttpClientIntegration:
                 await client.get("http://example.com")
 
             # 验证release被调用
-            mock_release.assert_called_once_with(mock_http_session)
+            mock_release.assert_called_once_with(config)
 
     async def test_concurrent_requests(self):
         """测试并发请求"""
