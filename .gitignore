@@ -231,3 +231,12 @@ openjiuwen/integrations/retriever/service.yaml
 openjiuwen/integrations/retriever/upload/
 
 .cursor/
+
+# browser_move local runtime artifacts
+openjiuwen/deepagents/tools/browser_move/screenshots/
+openjiuwen/deepagents/tools/browser_move/.browser/
+openjiuwen/deepagents/tools/browser_move/.browser-profiles/
+
+# Git worktrees
+.worktrees/
+

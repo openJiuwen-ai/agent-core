@@ -191,9 +191,10 @@ async def _do_trigger(
     *,
     pass_args: bool = True,
     extra: Optional[dict[str, Any]] = None,
+    extra_kwargs: Optional[dict[str, Any]] = None,
 ) -> None:
     """Unified trigger helper to eliminate repetitive patterns."""
-    merged = {**kwargs, **(extra or {})}
+    merged = {**kwargs, **(extra or {}), **(extra_kwargs or {})}
     if pass_args:
         await framework.trigger(event, *args, **merged)
     else:
@@ -205,6 +206,7 @@ def create_emit_before_decorator(
     event: str,
     *,
     pass_args: bool = True,
+    extra_kwargs: Optional[dict[str, Any]] = None,
 ) -> Callable[[Callable[..., Any]], Callable]:
     """Create decorator that triggers event BEFORE the decorated function is called.
 
@@ -215,6 +217,7 @@ def create_emit_before_decorator(
         framework: AsyncCallbackFramework instance (has trigger).
         event: Event name to trigger.
         pass_args: Whether to pass function arguments to callbacks.
+        extra_kwargs: Additional keyword arguments merged into every trigger call.
 
     Returns:
         A decorator that triggers the event then runs the wrapped function.
@@ -224,7 +227,8 @@ def create_emit_before_decorator(
         if inspect.isasyncgenfunction(func):
             @wraps(func)
             async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
-                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args)
+                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
+                                  extra_kwargs=extra_kwargs)
                 async for item in func(*args, **kwargs):
                     yield item
 
@@ -233,7 +237,8 @@ def create_emit_before_decorator(
         if inspect.iscoroutinefunction(func):
             @wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args)
+                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
+                                  extra_kwargs=extra_kwargs)
                 return await func(*args, **kwargs)
 
             return async_wrapper
@@ -241,7 +246,8 @@ def create_emit_before_decorator(
         if inspect.isgeneratorfunction(func):
             @wraps(func)
             async def sync_gen_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
-                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args)
+                await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
+                                  extra_kwargs=extra_kwargs)
                 for item in func(*args, **kwargs):
                     yield item
 
@@ -249,7 +255,8 @@ def create_emit_before_decorator(
 
         @wraps(func)
         async def sync_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
-            await _do_trigger(framework, event, args, kwargs, pass_args=pass_args)
+            await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
+                              extra_kwargs=extra_kwargs)
             return func(*args, **kwargs)
 
         return sync_promoted_wrapper
@@ -265,6 +272,7 @@ def create_emit_after_decorator(
     item_key: str = "item",
     pass_args: bool = False,
     stream_mode: Literal["per_item", "once"] = "per_item",
+    extra_kwargs: Optional[dict[str, Any]] = None,
 ) -> Callable[[Callable[..., Any]], Callable]:
     """Create decorator that triggers event AFTER the decorated function completes.
 
@@ -283,6 +291,7 @@ def create_emit_after_decorator(
         pass_args: Whether to include original args in event.
         stream_mode: For generators - "per_item" triggers per item, "once" triggers
             after all items are yielded with collected results.
+        extra_kwargs: Additional keyword arguments merged into every trigger call.
 
     Returns:
         A decorator that runs the function then triggers the event with result.
@@ -302,6 +311,7 @@ def create_emit_after_decorator(
                         framework, event, args, kwargs,
                         pass_args=pass_args,
                         extra={result_key: collected},
+                        extra_kwargs=extra_kwargs,
                     )
 
                 return async_gen_once_wrapper
@@ -313,6 +323,7 @@ def create_emit_after_decorator(
                         framework, event, (), {},
                         pass_args=False,
                         extra={item_key: item},
+                        extra_kwargs=extra_kwargs,
                     )
                     yield item
 
@@ -326,6 +337,7 @@ def create_emit_after_decorator(
                     framework, event, args, kwargs,
                     pass_args=pass_args,
                     extra={result_key: result},
+                    extra_kwargs=extra_kwargs,
                 )
                 return result
 
@@ -344,6 +356,7 @@ def create_emit_after_decorator(
                         framework, event, args, kwargs,
                         pass_args=pass_args,
                         extra={result_key: collected},
+                        extra_kwargs=extra_kwargs,
                     )
 
                 return sync_gen_once_wrapper
@@ -355,6 +368,7 @@ def create_emit_after_decorator(
                         framework, event, (), {},
                         pass_args=False,
                         extra={item_key: item},
+                        extra_kwargs=extra_kwargs,
                     )
                     yield item
 
@@ -367,6 +381,7 @@ def create_emit_after_decorator(
                 framework, event, args, kwargs,
                 pass_args=pass_args,
                 extra={result_key: result},
+                extra_kwargs=extra_kwargs,
             )
             return result
 

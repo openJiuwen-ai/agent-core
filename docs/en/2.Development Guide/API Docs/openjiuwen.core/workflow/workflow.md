@@ -790,27 +790,6 @@ The core runtime session for workflow execution. This class provides session man
 >>> 
 ```
 
-### get_callback_manager
-
-```python
-get_callback_manager(self) -> CallbackManager
-```
-
-Returns the callback manager for the current workflow execution.
-
-**Returns:**
-
-**CallbackManager**: The callback manager associated with the current workflow execution.
-
-**Example:**
-
-```python
->>> from openjiuwen.core.workflow import Session
->>> 
->>> session = Session()
->>> 
->>> callback_manager = session.get_callback_manager()
-```
 
 ### get_session_id
 

@@ -11,7 +11,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
 from openjiuwen.core.foundation.llm.schema.generation_response import (
     ImageGenerationResponse,
     AudioGenerationResponse,
@@ -40,6 +40,7 @@ class DashScopeModelClient(OpenAIModelClient):
     For chat completions, it inherits all functionality from OpenAIModelClient since DashScope
     provides OpenAI-compatible chat API endpoints.
     """
+    __client_name__ = ProviderType.DashScope.name
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)

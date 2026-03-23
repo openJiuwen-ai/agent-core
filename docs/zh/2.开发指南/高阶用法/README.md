@@ -1,6 +1,7 @@
 # 高阶用法
 
 - [执行期（Session）](Session/README.md)
+- [ReactAgent强化学习](ReactAgent强化学习.md)
 - [开发自定义组件](开发自定义组件.md)
 - [上下文引擎](上下文引擎.md)
 - [记忆引擎](记忆引擎.md)

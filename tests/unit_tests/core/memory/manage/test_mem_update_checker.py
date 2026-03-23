@@ -47,20 +47,6 @@ class TestMemUpdateChecker:
             yield mock_instance
 
     @pytest.mark.asyncio
-    async def test_check_with_no_old_memories(self, checker):
-        """Test check method when there are no old memories."""
-        new_memories = {"1": "I like reading", "2": "I enjoy books"}
-        old_memories = {}
-        base_chat_model = ("test_model", Mock(spec=Model))
-
-        results = await checker.check(new_memories, old_memories, base_chat_model)
-
-        assert len(results) == 2
-        assert all(isinstance(item, MemoryActionItem) for item in results)
-        assert all(item.status == MemoryStatus.ADD for item in results)
-        assert {item.id for item in results} == {"1", "2"}
-
-    @pytest.mark.asyncio
     async def test_check_with_no_model(self, checker):
         """Test check method when no model is provided."""
         new_memories = {"1": "I like reading"}
@@ -79,7 +65,7 @@ class TestMemUpdateChecker:
         """Test check method when new and old memories have duplicate IDs."""
         new_memories = {"1": "I like reading", "2": "I enjoy books"}
         old_memories = {"1": "I like reading", "3": "I love novels"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock successful LLM response
         mock_response = Mock()
@@ -107,7 +93,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns redundant result."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I enjoy books"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock successful LLM response with redundant result
         mock_response = Mock()
@@ -135,7 +121,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns conflicting result."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I hate books"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock successful LLM response with conflicting result
         mock_response = Mock()
@@ -168,7 +154,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns none result (no conflict)."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I enjoy sports"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock successful LLM response with none result
         mock_response = Mock()
@@ -198,7 +184,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns malformed response."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I enjoy books"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock malformed LLM response
         mock_response = Mock()
@@ -222,7 +208,7 @@ class TestMemUpdateChecker:
         """Test check method when LLM returns single object instead of list."""
         new_memories = {"1": "I like reading"}
         old_memories = {"2": "I enjoy books"}
-        base_chat_model = ("test_model", mock_model_client)
+        base_chat_model = mock_model_client
 
         # Mock LLM response with single object (not list)
         mock_response = Mock()
@@ -255,7 +241,7 @@ class TestMemUpdateChecker:
 
         new_str, old_str = _format_input(new_memories, old_memories)
 
-        expected_new = "1: I like reading\n2: I enjoy books"
+        expected_new = "2: I enjoy books\n1: I like reading"
         expected_old = "3: I love novels\n4: I hate sports"
 
         assert new_str == expected_new

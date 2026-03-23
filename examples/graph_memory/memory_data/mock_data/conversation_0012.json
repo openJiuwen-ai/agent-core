@@ -1,0 +1,111 @@
+{
+  "event_id": 12,
+  "event_description": "事件 12：深夜收到扣款短信 → 误以为盗刷",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "有人刷了我的卡吗？我刚收到一条198元的扣款短信。",
+      "iso_time": "2025-03-28T01:08",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "张伟，不用担心，我帮你看看哈～可能是自动扣费或者晚间对账的扣款。我建议你先别着急，我可以帮你跳转到银行的智能客服确认。",
+      "iso_time": "2025-03-28T01:09",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，那麻烦帮我查一下具体的扣款来源。",
+      "iso_time": "2025-03-28T01:10",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您好，我是小鑫，这里是A银行智能客服。我来为您查询一下这笔扣款的详细信息，请稍等。",
+      "iso_time": "2025-03-28T01:11",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "查询结果显示，这笔198元的扣款是您订阅的某App自动续费。扣款时间为2025-03-27 23:59。请问您还有其他需要帮助的吗？",
+      "iso_time": "2025-03-28T01:12",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "哦，原来是这样。不过还是觉得有点不安，是不是有其他扣款也没注意到？",
+      "iso_time": "2025-03-28T01:13",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "理解您的担心。别担心，我们可以再详细核对一下最近的交易记录，以确保没有其他异常扣款。",
+      "iso_time": "2025-03-28T01:14",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请稍等，我为您核对最近一周的交易明细。",
+      "iso_time": "2025-03-28T01:15",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "核对结果显示，除了这笔198元的扣款，其他交易均为您近期正常的消费记录，没有发现异常。",
+      "iso_time": "2025-03-28T01:16",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "这样就放心多了，谢谢你。",
+      "iso_time": "2025-03-28T01:17",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，张伟。为了确保账户安全，建议您定期检查账单和设置自动扣费提醒哦。",
+      "iso_time": "2025-03-28T01:18",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我会注意的。那我就不打扰了，晚安。",
+      "iso_time": "2025-03-28T01:19",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "祝您晚安，有任何问题随时联系我哦～",
+      "iso_time": "2025-03-28T01:20",
+      "agent_id": "B",
+      "agent_name": "小优"
+    }
+  ]
+}

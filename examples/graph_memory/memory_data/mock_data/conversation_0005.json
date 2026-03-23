@@ -1,0 +1,167 @@
+{
+  "event_id": 5,
+  "event_description": "事件 5：情人节餐厅刷卡超额 → 临时额度申请",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我在餐厅刷卡超额了，怎么办？",
+      "iso_time": "2025-02-14T20:31",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "别担心，我们先看看问题出在哪儿。您这边是用哪张卡支付的呢？",
+      "iso_time": "2025-02-14T20:31",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "是A银行的信用卡，尾号5678。",
+      "iso_time": "2025-02-14T20:32",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "好的，我帮您查一下。这张卡的额度可能已经用尽，您是否考虑申请临时额度？",
+      "iso_time": "2025-02-14T20:32",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "是的，能帮我申请吗？",
+      "iso_time": "2025-02-14T20:33",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您稍等，我来为您确认申请流程。",
+      "iso_time": "2025-02-14T20:33",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "根据我们的政策，可以通过手机银行申请临时额度。具体步骤我来帮您查一下。",
+      "iso_time": "2025-02-14T20:34",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您可以通过登录A银行App，依次点击“信用卡管理”→“临时额度申请”，按照提示操作即可。",
+      "iso_time": "2025-02-14T20:35",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "申请后多久能审批下来？",
+      "iso_time": "2025-02-14T20:36",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "通常情况下，临时额度申请会在几分钟内完成审批。请您耐心等待一下。",
+      "iso_time": "2025-02-14T20:36",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "这个临时额度会对我的征信有影响吗？",
+      "iso_time": "2025-02-14T20:37",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "临时额度的申请不会对您的征信产生负面影响，您可以放心使用。",
+      "iso_time": "2025-02-14T20:37",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，谢谢！不过我现在还在餐厅，真有点尴尬。",
+      "iso_time": "2025-02-14T20:38",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "理解您的情况，别担心，额度调整成功后您就可以顺利支付了。",
+      "iso_time": "2025-02-14T20:38",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "希望能快点通过，餐厅人很多。",
+      "iso_time": "2025-02-14T20:39",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "我理解您的着急，系统会尽快处理的。",
+      "iso_time": "2025-02-14T20:39",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，我等一下。",
+      "iso_time": "2025-02-14T20:40",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，若有其他问题随时联系我。",
+      "iso_time": "2025-02-14T20:40",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我会的。",
+      "iso_time": "2025-02-14T20:41",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "希望您能顺利支付，祝您有个愉快的晚上！",
+      "iso_time": "2025-02-14T20:41",
+      "agent_id": "B",
+      "agent_name": "小优"
+    }
+  ]
+}

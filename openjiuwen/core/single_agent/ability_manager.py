@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict
 from pydantic import BaseModel
 
@@ -28,6 +29,14 @@ from openjiuwen.core.workflow import WorkflowCard
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
+
+
+@dataclass
+class AddAbilityResult:
+    """Ability add result."""
+    name: str
+    added: bool
+    reason: str = ""
 
 
 class AbilityExecutionError(AgentError):
@@ -103,32 +112,120 @@ class AbilityManager:
             ),
         )
 
-    def add(self, ability: Union[Ability, List[Ability]]) -> None:
+    def add(
+            self,
+            ability: Union[Ability, List[Ability]]
+    ) -> Union[AddAbilityResult, List[AddAbilityResult]]:
         """Add an ability
 
         Args:
             ability: Ability Card to add
+
+        Returns:
+            AddAbilityResult for single ability input,
+            or List[AddAbilityResult] for list input
         """
 
-        def add_single_ability(_ability: Ability):
+        def add_single_ability(_ability: Ability) -> AddAbilityResult:
             if isinstance(_ability, ToolCard):
+                existing = self._tools.get(_ability.name)
+                if existing is not None:
+                    logger.warning(
+                        f"Duplicate tool ability detected: "
+                        f"name='{_ability.name}', "
+                        f"existing_id='{existing.id}', "
+                        f"new_id='{_ability.id}'. "
+                        f"Keep existing ability and skip new one."
+                    )
+                    return AddAbilityResult(
+                        name=_ability.name,
+                        added=False,
+                        reason="duplicate_tool",
+                    )
                 self._tools[_ability.name] = _ability
-            elif isinstance(_ability, WorkflowCard):
-                self._workflows[_ability.name] = _ability
-            elif isinstance(_ability, AgentCard):
-                self._agents[_ability.name] = _ability
-            elif isinstance(_ability, McpServerConfig):
-                self._mcp_servers[_ability.server_name] = _ability
-            else:
-                logger.warning(f"Unknown ability type: {type(_ability)}")
+                return AddAbilityResult(
+                    name=_ability.name,
+                    added=True,
+                    reason="added_tool",
+                )
 
-        if isinstance(ability, Ability):
-            add_single_ability(ability)
-        elif isinstance(ability, List):
-            for item in ability:
-                add_single_ability(item)
-        else:
-            logger.warning(f"Unknown ability type: {type(ability)}")
+            elif isinstance(_ability, WorkflowCard):
+                existing = self._workflows.get(_ability.name)
+                if existing is not None:
+                    logger.warning(
+                        f"Duplicate workflow ability detected: "
+                        f"name='{_ability.name}', "
+                        f"existing_id='{existing.id}', "
+                        f"new_id='{_ability.id}'. "
+                        f"Keep existing ability and skip new one."
+                    )
+                    return AddAbilityResult(
+                        name=_ability.name,
+                        added=False,
+                        reason="duplicate_workflow",
+                    )
+                self._workflows[_ability.name] = _ability
+                return AddAbilityResult(
+                    name=_ability.name,
+                    added=True,
+                    reason="added_workflow",
+                )
+
+            elif isinstance(_ability, AgentCard):
+                existing = self._agents.get(_ability.name)
+                if existing is not None:
+                    logger.warning(
+                        f"Duplicate agent ability detected: "
+                        f"name='{_ability.name}', "
+                        f"existing_id='{existing.id}', "
+                        f"new_id='{_ability.id}'. "
+                        f"Keep existing ability and skip new one."
+                    )
+                    return AddAbilityResult(
+                        name=_ability.name,
+                        added=False,
+                        reason="duplicate_agent",
+                    )
+                self._agents[_ability.name] = _ability
+                return AddAbilityResult(
+                    name=_ability.name,
+                    added=True,
+                    reason="added_agent",
+                )
+
+            elif isinstance(_ability, McpServerConfig):
+                existing = self._mcp_servers.get(_ability.server_name)
+                if existing is not None:
+                    logger.warning(
+                        f"Duplicate MCP server ability detected: "
+                        f"name='{_ability.server_name}', "
+                        f"existing_id='{existing.server_id}', "
+                        f"new_id='{_ability.server_id}'. "
+                        f"Keep existing ability and skip new one."
+                    )
+                    return AddAbilityResult(
+                        name=_ability.server_name,
+                        added=False,
+                        reason="duplicate_mcp_server",
+                    )
+                self._mcp_servers[_ability.server_name] = _ability
+                return AddAbilityResult(
+                    name=_ability.server_name,
+                    added=True,
+                    reason="added_mcp_server",
+                )
+
+            logger.warning(f"Unknown ability type: {type(_ability)}")
+            return AddAbilityResult(
+                name=getattr(_ability, "name", str(type(_ability))),
+                added=False,
+                reason="unknown_ability_type",
+            )
+
+        if isinstance(ability, list):
+            return [add_single_ability(item) for item in ability]
+
+        return add_single_ability(ability)
 
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name
@@ -396,6 +493,13 @@ class AbilityManager:
                 continue
 
             final_results.append(result)
+
+        # Propagate force_finish signal from any tool_ctx back to the parent ctx.
+        for tool_ctx in tool_contexts:
+            ff = tool_ctx.consume_force_finish()
+            if ff is not None:
+                ctx.request_force_finish(ff.result)
+                break
 
         return final_results
 

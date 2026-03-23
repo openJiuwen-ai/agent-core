@@ -125,12 +125,7 @@ class TestNewReActAgentCreation(unittest.IsolatedAsyncioTestCase):
             description="测试用 Agent"
         )
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=card)
+        agent = ReActAgent(card=card)
 
         self.assertEqual(agent.card.name, "test_agent")
         self.assertEqual(agent.card.description, "测试用 Agent")
@@ -150,13 +145,8 @@ class TestNewReActAgentCreation(unittest.IsolatedAsyncioTestCase):
             .configure_max_iterations(10)
         )
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=card)
-            result = agent.configure(config)
+        agent = ReActAgent(card=card)
+        result = agent.configure(config)
 
         # 验证 configure 返回 self（支持链式调用）
         self.assertIs(result, agent)
@@ -207,15 +197,10 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
 
     def test_add_ability_single(self):
         """测试添加单个能力"""
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            tool_card = self._create_add_tool_card()
+        agent = ReActAgent(card=self.card)
+        tool_card = self._create_add_tool_card()
 
-            agent.ability_manager.add(tool_card)
+        agent.ability_manager.add(tool_card)
 
         abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 1)
@@ -223,16 +208,11 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
 
     def test_add_ability_list(self):
         """测试添加多个能力"""
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            add_card = self._create_add_tool_card()
-            multiply_card = self._create_multiply_tool_card()
+        agent = ReActAgent(card=self.card)
+        add_card = self._create_add_tool_card()
+        multiply_card = self._create_multiply_tool_card()
 
-            agent.ability_manager.add([add_card, multiply_card])
+        agent.ability_manager.add([add_card, multiply_card])
 
         abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 2)
@@ -242,16 +222,11 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
 
     def test_remove_ability(self):
         """测试移除能力"""
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.ability_manager.add(self._create_add_tool_card())
-            agent.ability_manager.add(self._create_multiply_tool_card())
+        agent = ReActAgent(card=self.card)
+        agent.ability_manager.add(self._create_add_tool_card())
+        agent.ability_manager.add(self._create_multiply_tool_card())
 
-            result = agent.ability_manager.remove("add")
+        result = agent.ability_manager.remove("add")
 
         abilities = agent.ability_manager.list()
         self.assertEqual(len(abilities), 1)
@@ -259,13 +234,8 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
 
     def test_get_ability(self):
         """测试获取能力"""
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.ability_manager.add(self._create_add_tool_card())
+        agent = ReActAgent(card=self.card)
+        agent.ability_manager.add(self._create_add_tool_card())
 
         ability = agent.ability_manager.get("add")
         self.assertIsNotNone(ability)
@@ -276,14 +246,9 @@ class TestNewReActAgentAbility(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_tool_info(self):
         """测试获取 ToolInfo 列表"""
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.ability_manager.add(self._create_add_tool_card())
-            agent.ability_manager.add(self._create_multiply_tool_card())
+        agent = ReActAgent(card=self.card)
+        agent.ability_manager.add(self._create_add_tool_card())
+        agent.ability_manager.add(self._create_multiply_tool_card())
 
         tool_infos = await agent.ability_manager.list_tool_info()
         self.assertEqual(len(tool_infos), 2)
@@ -378,15 +343,10 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         # 创建 mock session
         mock_session = self._create_mock_session()
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.configure(self.config)
-            agent.ability_manager.add(self._create_add_tool_card())
-            agent.context_engine = mock_context_engine
+        agent = ReActAgent(card=self.card)
+        agent.configure(self.config)
+        agent.ability_manager.add(self._create_add_tool_card())
+        agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke(
@@ -428,15 +388,10 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         mock_tool = MagicMock()
         mock_tool.invoke = AsyncMock(return_value=3)
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.configure(self.config)
-            agent.ability_manager.add(self._create_add_tool_card())
-            agent.context_engine = mock_context_engine
+        agent = ReActAgent(card=self.card)
+        agent.configure(self.config)
+        agent.ability_manager.add(self._create_add_tool_card())
+        agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke(
@@ -488,16 +443,11 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
 
         mock_get_tool.return_value = MagicMock(side_effect=get_tool_side_effect)
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.configure(self.config)
-            agent.ability_manager.add(self._create_add_tool_card())
-            agent.ability_manager.add(self._create_multiply_tool_card())
-            agent.context_engine = mock_context_engine
+        agent = ReActAgent(card=self.card)
+        agent.configure(self.config)
+        agent.ability_manager.add(self._create_add_tool_card())
+        agent.ability_manager.add(self._create_multiply_tool_card())
+        agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke(
@@ -550,15 +500,10 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
             .configure_max_iterations(2)
         )
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.configure(config)
-            agent.ability_manager.add(self._create_add_tool_card())
-            agent.context_engine = mock_context_engine
+        agent = ReActAgent(card=self.card)
+        agent.configure(config)
+        agent.ability_manager.add(self._create_add_tool_card())
+        agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke(
@@ -594,14 +539,9 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         # 创建 mock session
         mock_session = self._create_mock_session()
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.configure(self.config)
-            agent.context_engine = mock_context_engine
+        agent = ReActAgent(card=self.card)
+        agent.configure(self.config)
+        agent.context_engine = mock_context_engine
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke(
@@ -615,12 +555,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
     @pytest.mark.asyncio
     async def test_invoke_missing_query_raises_error(self):
         """测试缺少 query 字段抛出异常"""
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
+        agent = ReActAgent(card=self.card)
 
         with pytest.raises(ValueError) as exc_info:
             await agent.invoke({"conversation_id": "test"})
@@ -630,12 +565,7 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
     @pytest.mark.asyncio
     async def test_invoke_invalid_input_raises_error(self):
         """测试无效输入类型抛出异常"""
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
+        agent = ReActAgent(card=self.card)
 
         with pytest.raises(ValueError) as exc_info:
             await agent.invoke(12345)
@@ -710,14 +640,9 @@ class TestNewReActAgentStream(unittest.IsolatedAsyncioTestCase):
         # 创建 mock session
         mock_session = self._create_mock_session()
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            agent.configure(self.config)
-            agent.context_engine = mock_context_engine
+        agent = ReActAgent(card=self.card)
+        agent.configure(self.config)
+        agent.context_engine = mock_context_engine
 
         results = []
         with patch.object(agent, "_get_llm", return_value=mock_llm):
@@ -761,12 +686,7 @@ class TestNewReActAgentGetToolInfo(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=card)
+        agent = ReActAgent(card=card)
 
         tool_info = agent.card.tool_info()
 
@@ -789,10 +709,6 @@ class TestNewReActAgentConfigUpdate(unittest.IsolatedAsyncioTestCase):
     def test_configure_resets_llm_on_provider_change(self):
         """测试更改 provider 时重置 LLM"""
         with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ), patch.object(
             ReActAgent,
             '_get_llm',
             wraps=lambda self: MagicMock()
@@ -820,17 +736,12 @@ class TestNewReActAgentConfigUpdate(unittest.IsolatedAsyncioTestCase):
 
     def test_configure_updates_context_engine_on_limit_change(self):
         """测试更改 上下文窗口对话轮次 时更新 context_engine"""
-        with patch.object(
-            ReActAgent,
-            '_init_memory_scope',
-            return_value=None
-        ):
-            agent = ReActAgent(card=self.card)
-            old_context_engine = agent.context_engine
+        agent = ReActAgent(card=self.card)
+        old_context_engine = agent.context_engine
 
-            # 更改 上下文窗口对话轮次
-            new_config = ReActAgentConfig().configure_context_engine(default_window_round_num=20)
-            agent.configure(new_config)
+        # 更改 上下文窗口对话轮次
+        new_config = ReActAgentConfig().configure_context_engine(default_window_round_num=20)
+        agent.configure(new_config)
 
         # context_engine 应该被更新
         self.assertIsNot(agent.context_engine, old_context_engine)

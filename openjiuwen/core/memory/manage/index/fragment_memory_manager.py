@@ -90,7 +90,7 @@ class FragmentMemoryManager(BaseMemoryManager):
         return process_conflict_info
 
     async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
-                      llm: Tuple[str, Model] | None = None, **kwargs):
+                      llm: Model | None = None, **kwargs):
         semantic_store = self._get_semantic_store("add", **kwargs)
         # Step 1: Prepare new memories dictionary for checker
         new_mem_content: dict[str, str] = {}
@@ -113,6 +113,14 @@ class FragmentMemoryManager(BaseMemoryManager):
                 if mem_content:
                     new_mem_content[mem_id] = mem_content
                     new_mem_units[mem_id] = mem_unit
+        if not new_mem_units:
+            memory_logger.warning(
+                "No new memory units to add",
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return
 
         # Step 2: Query existing memories for context using search
         old_memories: dict[str, str] = {}
@@ -368,7 +376,7 @@ class FragmentMemoryManager(BaseMemoryManager):
             )
         )
         if not vector_success:
-            await self.delete(user_id=user_id, scope_id=scope_id, mem_id=mem_id)
+            await self.delete(user_id=user_id, scope_id=scope_id, mem_id=mem_id, semantic_store=semantic_store)
             raise build_error(
                 StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR,
                 memory_type=memory.mem_type,

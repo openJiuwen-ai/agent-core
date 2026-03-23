@@ -22,7 +22,9 @@ Index Structure:
 """
 
 import asyncio
-from typing import Dict, Any, List, Union, Set, Optional
+from typing import (
+    Callable, Dict, List, Union, Set, Optional,
+)
 from collections import defaultdict
 from pydantic import BaseModel, model_validator
 from typing_extensions import Literal
@@ -141,6 +143,42 @@ class TaskManager:
         # Async lock for thread-safe operations in parallel scenarios
         self._lock: asyncio.Lock = asyncio.Lock()
 
+        # Synchronous callback invoked (outside lock)
+        # when a task enters SUBMITTED status.
+        self._on_task_submitted: Optional[
+            Callable[[], None]
+        ] = None
+
+    def set_on_task_submitted(
+        self, callback: Optional[Callable[[], None]]
+    ) -> None:
+        """Register callback for task-submitted events.
+
+        Args:
+            callback: Callable to invoke when a task
+                enters SUBMITTED status, or None to
+                clear.
+        """
+        self._on_task_submitted = callback
+
+    def _notify_if_submitted(
+        self, tasks: List[Task],
+    ) -> None:
+        """Fire callback if any task is SUBMITTED.
+
+        Called outside the lock after add_task or
+        update_task_status modifies task state.
+
+        Args:
+            tasks: Tasks that were just added/updated.
+        """
+        if self._on_task_submitted is None:
+            return
+        for t in tasks:
+            if t.status == TaskStatus.SUBMITTED:
+                self._on_task_submitted()
+                return
+
     @property
     def config(self):
         """Get configuration"""
@@ -223,6 +261,9 @@ class TaskManager:
                 else:
                     # No parent task, add to root task set
                     self._root_tasks.add(t.task_id)
+
+        # Notify outside lock
+        self._notify_if_submitted(tasks)
 
     async def get_task(
             self,
@@ -785,6 +826,11 @@ class TaskManager:
                     # Set error_message when status is FAILED
                     if new_status == TaskStatus.FAILED:
                         self.tasks[tid].error_message = error_message or "Task execution failed"
+
+        # Notify outside lock
+        if new_status == TaskStatus.SUBMITTED:
+            if self._on_task_submitted is not None:
+                self._on_task_submitted()
 
     # ==================== Task Priority Management ====================
     async def set_priority(

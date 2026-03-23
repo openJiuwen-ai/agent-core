@@ -31,10 +31,11 @@ class MemoryAnalyzer:
     async def analyze(
             messages: List[BaseMessage],
             history_messages: List[BaseMessage],
-            base_chat_model: Tuple[str, Model],
+            base_chat_model: Model,
             memory_config: AgentMemoryConfig,
             summary_max_token: int,
             *,
+            forbidden_variables: str = "",
             retries: int = 3
     ) -> MemoryAnalyzerResult | None:
         if len(messages) == 0:
@@ -67,7 +68,7 @@ class MemoryAnalyzer:
         variables_description_json = json.dumps(variables_description, ensure_ascii=False)
         variables_output_format_json = json.dumps(variables_output_format, ensure_ascii=False)
         has_variable = (len(memory_config.mem_variables) > 0)
-
+        forbidden_variables = "None" if forbidden_variables == "" else forbidden_variables
         prompt_content = PromptApplier().apply(
             "memory_analysis_prompt",
             {
@@ -76,18 +77,15 @@ class MemoryAnalyzer:
                 "has_variable": has_variable,
                 "variables_define_template": variables_description_json,
                 "variables_output_template": variables_output_format_json,
+                "forbidden_variables": forbidden_variables,
                 "max_message_token": summary_max_token,
             },
         )
         model_input = [{"role": "user", "content": prompt_content}]
-        model_name, model_client = base_chat_model
         parser = JsonOutputParser()
         for attempt in range(retries):
             try:
-                response = await model_client.invoke(
-                    model=model_name,
-                    messages=model_input
-                )
+                response = await base_chat_model.invoke(messages=model_input)
                 res = await parser.parse(response.content)
                 analyze_result = MemoryAnalyzerResult.model_validate(res)
                 if not memory_config.enable_long_term_mem or not memory_config.enable_summary_memory:

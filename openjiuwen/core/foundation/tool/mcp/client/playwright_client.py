@@ -6,16 +6,17 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
 
 class PlaywrightClient(McpClient):
     """Playwright browser session based MCP client"""
+    __client_name__ = "playwright"
 
-    def __init__(self, server_path: str, name: str):
-        super().__init__(server_path)
-        self._name = name
+    def __init__(self, config: McpServerConfig):
+        super().__init__(config)
+        self._name = config.server_name
         self._client = None
         self._session = None
         self._read = None
@@ -28,7 +29,7 @@ class PlaywrightClient(McpClient):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.sse import sse_client
         from mcp.client.stdio import stdio_client
-        
+
         try:
             # Determine client type based on server_path type
             if isinstance(self._server_path, StdioServerParameters):

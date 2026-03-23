@@ -5,13 +5,19 @@
 WeChat official account article parser. Fetches and parses WeChat article pages from URLs (e.g. https://mp.weixin.qq.com/s/...) into Documents using BeautifulSoup. Can be used with [AutoParser](./auto_parser.md) or [AutoLinkParser](./auto_link_parser.md) for URL-based dispatch.
 
 ```python
-WeChatArticleParser(timeout: float = 30.0, user_agent: str = DEFAULT_USER_AGENT, **kwargs)
+WeChatArticleParser(
+    timeout: float = 30.0,
+    user_agent: str = DEFAULT_USER_AGENT,
+    verify: bool | str | ssl.SSLContext = True,
+    **kwargs,
+)
 ```
 
 **Parameters**:
 
 * **timeout**(float, optional): Request timeout in seconds. Default: 30.0.
 * **user_agent**(str, optional): HTTP User-Agent header. Default: built-in browser UA.
+* **verify**(bool | str | ssl.SSLContext, optional): SSL verification for httpx (same as :class:`httpx.AsyncClient`): ``True`` for default CAs, ``False`` to disable (e.g. corporate proxies), a path to a CA bundle, or a custom ``ssl.SSLContext``. Default: True.
 * **kwargs**(Any): Variable arguments passed to the base class.
 
 ### async parse
@@ -26,7 +32,7 @@ Parse a WeChat article URL: fetch the page and extract content (js_content area)
 
 * **doc**(str): WeChat article URL (e.g. https://mp.weixin.qq.com/s/...).
 * **doc_id**(str, optional): Optional document ID; defaults to URL or generated UUID. Default: "".
-* **kwargs**(Any): Variable arguments. May include `timeout`, `user_agent`, `session`(aiohttp.ClientSession) to override constructor settings.
+* **kwargs**(Any): Variable arguments. May include `timeout`, `user_agent`, `verify`, `client` (:class:`httpx.AsyncClient`) to override constructor settings.
 
 **Returns**:
 
@@ -59,7 +65,8 @@ async parse_wechat_article_url(
     *,
     timeout: float = 30.0,
     user_agent: str = DEFAULT_USER_AGENT,
-    session: Optional[aiohttp.ClientSession] = None,
+    verify: bool | str | ssl.SSLContext = True,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> List[Document]
 ```
 
@@ -69,9 +76,10 @@ Fetch a WeChat article URL and parse it into a list of Documents (typically one)
 
 * **url**(str): WeChat article URL (e.g. https://mp.weixin.qq.com/s/...).
 * **doc_id**(str, optional): Optional document ID; defaults to URL or generated UUID. Default: "".
-* **timeout**(float, optional): Request timeout in seconds. Default: 30.0.
+* **timeout**(float, optional): Request timeout in seconds (only when ``client`` is not provided). Default: 30.0.
 * **user_agent**(str, optional): HTTP User-Agent. Default: built-in UA.
-* **session**(Optional[aiohttp.ClientSession], optional): Reusable aiohttp session; if not provided, one is created and closed after use. Default: None.
+* **verify**(bool | str | ssl.SSLContext, optional): SSL verification for the internal httpx client; ignored when ``client`` is provided. Default: True.
+* **client**(Optional[httpx.AsyncClient], optional): Reusable async httpx client; if not provided, one is created (with ``verify`` / ``timeout`` / User-Agent) and closed after the request. Default: None.
 
 **Returns**:
 

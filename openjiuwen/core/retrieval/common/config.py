@@ -22,6 +22,7 @@ from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
+from openjiuwen.core.foundation.store.base_reranker import RerankerConfig
 
 
 class KnowledgeBaseConfig(BaseModel):
@@ -69,16 +70,3 @@ class VectorStoreConfig(BaseModel):
     database_name: str = Field(default="", pattern=r"^[A-Za-z0-9_]*$", description="Database name")
     collection_name: str = Field(..., description="Collection name")
     distance_metric: Literal["cosine", "euclidean", "dot"] = Field(default="cosine", description="Distance metric")
-
-
-class RerankerConfig(BaseModel):
-    """Reranker model configuration"""
-
-    api_key: str = Field(default="")
-    api_base: str = Field(min_length=1)
-    model_name: str = Field(default="", alias="model")
-    timeout: float = Field(default=10, gt=0)
-    temperature: float = Field(default=0.95)
-    top_p: float = Field(default=0.1)
-    yes_no_ids: tuple[int, int] = Field(default=None, description='Token ids for "yes" and "no"')
-    extra_body: dict = Field(default_factory=dict, description="special keyword arguments to pass in")

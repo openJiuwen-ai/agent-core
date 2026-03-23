@@ -3,6 +3,8 @@
 """DeepAgent 端到端系统测试（真实 LLM + sys_operation 文件工具）。"""
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import tempfile
 import unittest
@@ -10,6 +12,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 from typing import List
+from unittest.mock import patch
 
 import pytest
 
@@ -19,7 +22,7 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
 )
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.single_agent import create_agent_session
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
@@ -31,13 +34,31 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
 )
 from openjiuwen.deepagents import create_deep_agent
-from openjiuwen.deepagents.tools import ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
+from openjiuwen.deepagents.rails.task_planning_rail import (
+    TaskPlanningRail,
+)
+from openjiuwen.deepagents.schema.config import SubAgentConfig
+from openjiuwen.deepagents.subagents import create_code_agent, create_research_agent
+from openjiuwen.deepagents.tools import (
+    ReadFileTool, WriteFileTool, EditFileTool,
+    GlobTool, ListDirTool,
+)
+from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
+from tests.unit_tests.fixtures.mock_llm import (
+    MockLLMModel,
+    create_text_response,
+    create_tool_call_response,
+)
 
-API_BASE = os.getenv("API_BASE", "")
-API_KEY = os.getenv("API_KEY", "")
-MODEL_NAME = os.getenv("MODEL_NAME", "")
-MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "")
+API_BASE = os.getenv("API_BASE", "your api url")
+API_KEY = os.getenv("API_KEY", "your api key")
+MODEL_NAME = os.getenv("MODEL_NAME", "model name")
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "SiliconFlow")
+MODEL_TIMEOUT = int(os.getenv("MODEL_TIMEOUT", "120"))
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
+os.environ.setdefault("IS_SENSITIVE", "false")
+
+logger = logging.getLogger(__name__)
 
 
 class ToolTraceRail(AgentRail):
@@ -50,6 +71,41 @@ class ToolTraceRail(AgentRail):
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         if isinstance(ctx.inputs, ToolCallInputs) and ctx.inputs.tool_name:
             self.tool_calls.append(ctx.inputs.tool_name)
+
+
+class LoopObserveRail(AgentRail):
+    """观测外循环轮次，并检查 steer 文本是否进入模型消息。"""
+
+    def __init__(self, steer_text: str):
+        super().__init__()
+        self.iteration_count: int = 0
+        self.steer_text = steer_text
+        self.steer_seen_in_model_messages: bool = False
+        self._iteration_events: dict[int, asyncio.Event] = {}
+
+    def iteration_event(self, idx: int) -> asyncio.Event:
+        if idx not in self._iteration_events:
+            self._iteration_events[idx] = asyncio.Event()
+        return self._iteration_events[idx]
+
+    async def before_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        _ = ctx
+        self.iteration_count += 1
+        self.iteration_event(self.iteration_count).set()
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        messages = getattr(ctx.inputs, "messages", None)
+        if not isinstance(messages, list):
+            return
+        for msg in messages:
+            if isinstance(msg, dict):
+                content = msg.get("content")
+            else:
+                content = getattr(msg, "content", None)
+            text = str(content) if content else ""
+            if self.steer_text in text:
+                self.steer_seen_in_model_messages = True
+                return
 
 
 class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
@@ -82,6 +138,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             client_provider=MODEL_PROVIDER,
             api_key=API_KEY,
             api_base=API_BASE,
+            timeout=MODEL_TIMEOUT,
             verify_ssl=False,
         )
         model_request_config = ModelRequestConfig(
@@ -101,20 +158,8 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
                 "Set them before running tests."
             )
 
-    def _get_fs_tool_cards(self):
-        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
-
-        read_tool = ReadFileTool(sys_oper)
-        write_tool = WriteFileTool(sys_oper)
-        edit_tool = EditFileTool(sys_oper)
-        glob_tool = GlobTool(sys_oper)
-        list_dir_tool = ListDirTool(sys_oper)
-        grep_tool = GrepTool(sys_oper)
-
-        tools = [read_tool, write_tool, edit_tool, glob_tool, list_dir_tool, grep_tool]
-        Runner.resource_mgr.add_tool(tools)
-
-        return [tool.card for tool in tools]
+    def _get_fs_rail(self):
+        return FileSystemRail()
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -130,12 +175,8 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             max_iterations=5,
         )
 
-        session = create_agent_session(
-            session_id=f"deepagent_e2e_{uuid.uuid4().hex}"
-        )
-        result = await agent.invoke(
-            {"query": "请用一句话介绍你自己"},
-            session=session,
+        result = await Runner.run_agent(
+            agent, {"query": "请用一句话介绍你自己"},
         )
 
         self.assertIsInstance(result, dict)
@@ -150,6 +191,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         self._require_llm_config()
 
         tool_trace = ToolTraceRail()
+        fs_rail = self._get_fs_rail()
         model = self._create_model()
         agent = create_deep_agent(
             model=model,
@@ -157,13 +199,9 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
                 "你是一个严谨的任务执行助手。"
                 "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
             ),
-            tools=self._get_fs_tool_cards(),
-            rails=[tool_trace],
+            rails=[tool_trace, fs_rail],
             enable_task_loop=False,
             max_iterations=12,
-        )
-        session = create_agent_session(
-            session_id=f"deepagent_complex_e2e_{uuid.uuid4().hex}"
         )
 
         query = (
@@ -174,7 +212,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             "4. 使用工具读取这两个文件；\n"
             "5. 最后输出一句中文总结。"
         )
-        result = await agent.invoke({"query": query}, session=session)
+        result = await Runner.run_agent(agent, {"query": query})
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
         self.assertIn("output", result)
@@ -192,6 +230,314 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(beta_path.exists())
         self.assertTrue(alpha_path.read_text(encoding="utf-8").strip())
         self.assertTrue(beta_path.read_text(encoding="utf-8").strip())
+
+    @pytest.mark.asyncio
+    async def test_deep_agent_task_planning(self):
+        """复杂任务：agent的规划能力"""
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        task_planning = TaskPlanningRail()
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response(
+                "todo_write",
+                '{"tasks": "设计打卡系统数据库表结构;实现用户打卡功能接口;开发前端打卡页面;添加打卡统计功能"}'
+            ),
+            create_tool_call_response(
+                "todo_read",
+                '{}'
+            ),
+            create_tool_call_response(
+                "todo_modify",
+                '{"action": "update", "todos": [{"id": "mock_task_id_1", "status": "completed"}]}'
+            ),
+            create_text_response("我已经帮你完成了打卡系统的任务规划，并完成了第一个任务的设计工作。")
+        ])
+
+        agent = create_deep_agent(
+            model=self._create_model(),
+            rails=[task_planning],
+            enable_task_loop=False,
+            max_iterations=20,
+            sys_operation=sys_oper
+        )
+
+        query = "我想测试任务规划能力，帮我构建一个打卡系统，调用规划工具帮我模拟规划吧"
+
+        with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
+            result = await Runner.run_agent(agent, {"query": query})
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("result_type"), "answer")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_task_loop_real_multistep_steer_follow_up(self):
+        """真实 LLM 外循环：LLM 生成多步任务规划 + steer + follow_up。"""
+        self._require_llm_config()
+
+        steer_text = "输出请使用简洁中文要点"
+        follow_up_text = "在结尾追加一条风险提示"
+        observe_rail = LoopObserveRail(steer_text=steer_text)
+
+        model = self._create_model()
+        sys_oper = Runner.resource_mgr.get_sys_operation(
+            self._sys_operation_id
+        )
+        planning_rail = TaskPlanningRail(sys_oper)
+        agent = create_deep_agent(
+            model=model,
+            system_prompt=(
+                "你是一个严谨的任务执行助手。"
+                "根据当前任务逐步输出结果。"
+            ),
+            rails=[planning_rail, observe_rail],
+            enable_task_loop=True,
+            max_iterations=12,
+        )
+
+        query = (
+            "请制定一个简短的项目启动计划，包含以下方面："
+            "1. 需求分析；2. 技术选型；3. 实施方案。"
+            "每个方面给出简要说明。"
+        )
+        # steer/follow_up 需要在 invoke 执行中途注入，
+        # 必须用 asyncio.create_task + Runner.run_agent 配合。
+        invoke_task = asyncio.create_task(
+            Runner.run_agent(agent, {"query": query})
+        )
+
+        # 等第一轮进入后注入 steer，让下一轮携带约束。
+        await asyncio.wait_for(
+            observe_rail.iteration_event(1).wait(),
+            timeout=180.0,
+        )
+        await agent.steer(steer_text)
+
+        # 等第二轮进入后注入 follow_up，请求额外追加一轮。
+        await asyncio.wait_for(
+            observe_rail.iteration_event(2).wait(),
+            timeout=300.0,
+        )
+        await agent.follow_up(follow_up_text)
+
+        result = await asyncio.wait_for(
+            invoke_task, timeout=600.0
+        )
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(
+            result.get("result_type"), "answer"
+        )
+        self.assertIn("output", result)
+        self.assertTrue(bool(result["output"]))
+
+        # LLM 生成的任务 + follow_up 触发的额外轮次
+        self.assertGreaterEqual(
+            observe_rail.iteration_count, 2
+        )
+        self.assertTrue(
+            observe_rail.steer_seen_in_model_messages
+        )
+
+    @pytest.mark.asyncio
+    async def test_deep_agent_auto_rails_creation_e2e(self):
+        """Test automatic creation of TaskPlanningRail and SkillRail."""
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+
+        skills = ["name", "test_skill", "description", "test"]
+        agent = create_deep_agent(
+            model=self._create_model(),
+            enable_task_loop=True,
+            skills=skills,
+            sys_operation=sys_oper,
+            max_iterations=10,
+        )
+
+        pending_rails = agent._pending_rails
+
+        rail_types = [type(rail).__name__ for rail in pending_rails if rail is not None]
+
+        self.assertIn("TaskPlanningRail", rail_types,
+                      "TaskPlanningRail should be auto-created when enable_task_loop=True")
+        self.assertIn("SkillRail", rail_types,
+                      "SkillRail should be auto-created when skills parameter is provided")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_stream_e2e_require_api_key_base(self):
+        """验证 DeepAgent.stream 在真实模型下可流式输出 chunk 并包含最终 answer。"""
+        self._require_llm_config()
+
+        model = self._create_model()
+        agent = create_deep_agent(
+            model=model,
+            system_prompt="你是一个智能助手，请简洁回答。",
+            enable_task_loop=False,
+            max_iterations=5,
+        )
+
+        chunks = []
+        async for chunk in Runner.run_agent_streaming(
+            agent, {"query": "请用一句话介绍你自己"},
+        ):
+            logger.info("[stream chunk] type=%s, index=%s, payload=%s",
+                        getattr(chunk, 'type', '?'),
+                        getattr(chunk, 'index', '?'),
+                        getattr(chunk, 'payload', chunk))
+            chunks.append(chunk)
+
+        self.assertGreater(len(chunks), 0, "stream should yield at least one chunk")
+
+        has_llm_output = any(
+            getattr(c, "type", None) == "llm_output" for c in chunks
+        )
+        self.assertTrue(has_llm_output, "stream chunks should contain llm_output type data")
+
+        combined = "".join(
+            c.payload.get("content", "") for c in chunks
+            if getattr(c, "type", None) == "llm_output" and isinstance(c.payload, dict)
+        )
+        self.assertGreater(len(combined), 0, "combined stream content should not be empty")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_task_loop_stream_e2e(self):
+        """验证 enable_task_loop=True 时 stream 逐轮流式输出。"""
+        self._require_llm_config()
+
+        tool_trace = ToolTraceRail()
+        model = self._create_model()
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        planning_rail = TaskPlanningRail(sys_oper)
+
+        agent = create_deep_agent(
+            model=model,
+            system_prompt=(
+                "你是一个严谨的任务执行助手。"
+                "根据当前任务逐步输出结果。"
+            ),
+            rails=[planning_rail, tool_trace],
+            enable_task_loop=True,
+            max_iterations=12,
+        )
+
+        query = (
+            "请制定一个简短的项目启动计划，包含以下方面："
+            "1. 需求分析；2. 技术选型。"
+            "每个方面给出简要说明。"
+        )
+
+        round_results = []
+        async for result in Runner.run_agent_streaming(
+            agent, {"query": query},
+        ):
+            round_idx = len(round_results) + 1
+            result_type = result.get("result_type", "?") if isinstance(result, dict) else getattr(result, "type", "?")
+            output_preview = str(result.get("output", ""))[:200] if isinstance(result, dict) else str(result)[:200]
+            logger.info("[task loop stream] round=%d, result_type=%s, output=%s",
+                        round_idx, result_type, output_preview)
+            round_results.append(result)
+
+        self.assertGreater(len(round_results), 0, "task loop stream should yield at least one round result")
+
+        for r in round_results:
+            if isinstance(r, dict):
+                self.assertIn("output", r, "each round result should contain 'output'")
+                self.assertTrue(bool(r["output"]), "round output should not be empty")
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_tasks_using_subagents(self):
+        """多步复杂任务：调用subagent来完成调研，主agent查看并总结调研结果。
+            - 验证主agent可以通过task工具调用subagent执行任务
+            - 验证主agent和subagent共享workspace，主agent可以使用subagent创建的文件
+        """
+        self._require_llm_config()
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        fs_rail = self._get_fs_rail()
+        tool_trace = ToolTraceRail()
+        research_agent = SubAgentConfig(
+            agent_card=AgentCard(
+                name="research_agent",
+                description="专注于研究调查任务，当用户想要调查某问题时，可使用该代理执行研究工作。每次只给这位研究员一个主题。",
+            ),
+            system_prompt="你是一名研究助理，负责针对用户输入的主题开展研究工作。",
+            rails=[fs_rail],
+        )
+        model = self._create_model()
+        agent = create_deep_agent(
+            model=model,
+            system_prompt=(
+                "你是一个严谨的任务执行助手。"
+                "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
+            ),
+            enable_task_loop=False,
+            max_iterations=12,
+            subagents=[research_agent],
+            rails=[tool_trace, fs_rail],
+            sys_operation=sys_oper
+        )
+
+        query = (
+            "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"
+            "1. 调查随机森林算法应用场景，创建summary_research.txt文件，写入内容为调查结果；\n"
+            "2. 使用工具读取 summary_research.txt 文件；\n"
+            "3. 返回文件的结果"
+        )
+        result = await Runner.run_agent(agent, {"query": query})
+        logger.info("get final result: %s", result)
+
+        tool_counts = Counter(tool_trace.tool_calls)
+        self.assertGreaterEqual(tool_counts.get("task_tool", 0), 1)
+        # 写入file工具应该是 subagent research_agent调用，这里应该为0
+        self.assertGreaterEqual(tool_counts.get("write_file", 0), 0)
+        self.assertGreaterEqual(tool_counts.get("read_file", 0), 1)
+
+        summary_path = Path(self._work_dir) / "summary_research.txt"
+        self.assertTrue(summary_path.exists())
+
+    @pytest.mark.asyncio
+    @unittest.skip("skip system test")
+    async def test_deep_agent_tasks_using_predefined_subagents(self):
+        """多步复杂任务：调用预置subagent来完成调研，主agent查看并总结调研结果。
+            - 验证主agent可以通过task工具并行调用subagent执行任务，生成多个task_tool调用
+        """
+        self._require_llm_config()
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        fs_rail = self._get_fs_rail()
+        tool_trace = ToolTraceRail()
+        model = self._create_model()
+        research_agent = create_research_agent(model=model, sys_operation=sys_oper)
+        code_agent = create_code_agent(model=model, sys_operation=sys_oper)
+        agent = create_deep_agent(
+            model=model,
+            system_prompt=(
+                "你是一个严谨的任务执行助手。"
+                "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
+            ),
+            enable_task_loop=False,
+            max_iterations=12,
+            subagents=[research_agent, code_agent],
+            rails=[tool_trace, fs_rail],
+            sys_operation=sys_oper
+        )
+
+        query = (
+            "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"
+            "1. 我想研究詹姆斯、科比的成就并对比；\n"
+            "2. 创建 summary_research.txt，写入内容为上一步调查的结果；\n"
+            "3. 使用工具读取 summary_research.txt 文件；\n"
+            "4. 对比两个人的成就返回总结结果"
+        )
+        result = await Runner.run_agent(agent, {"query": query})
+
+        tool_counts = Counter(tool_trace.tool_calls)
+        self.assertGreaterEqual(tool_counts.get("task_tool", 0), 2)
+        self.assertGreaterEqual(tool_counts.get("write_file", 0), 1)
+        self.assertGreaterEqual(tool_counts.get("read_file", 0), 1)
+
+        summary_path = Path(self._work_dir) / "summary_research.txt"
+        self.assertTrue(summary_path.exists())
 
 
 if __name__ == "__main__":

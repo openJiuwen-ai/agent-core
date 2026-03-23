@@ -226,6 +226,7 @@ class TestControllerAgentClearSession(unittest.IsolatedAsyncioTestCase):
         """Setup test fixtures"""
         self.config = AgentConfig()
         self.context_engine = MagicMock()
+        self.context_engine.clear_context = AsyncMock()
         self.controller = MagicMock(spec=BaseController)
         self.controller.controller_type = "test"
         self.controller.event_source = MagicMock()

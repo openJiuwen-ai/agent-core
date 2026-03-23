@@ -20,6 +20,7 @@ from openjiuwen.core.retrieval.common.config import IndexConfig, VectorStoreConf
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.embedding.base import Embedding
 from openjiuwen.core.retrieval.indexing.indexer.base import Indexer
+from openjiuwen.core.retrieval.utils.common import create_milvus_alias
 from openjiuwen.core.retrieval.vector_store.milvus_store import MilvusVectorStore
 
 
@@ -37,6 +38,7 @@ class MilvusIndexer(Indexer):
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
         doc_index_callback: type[BaseCallback] = TqdmCallback,
+        milvus_alias: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -51,6 +53,7 @@ class MilvusIndexer(Indexer):
             sparse_vector_field: Sparse vector field name
             metadata_field: Metadata field name
             doc_index_callback: class of callback object to use, must be subclass of BaseCallback
+            milvus_alias: Optional connection alias
         """
         self.milvus_uri = milvus_uri
         self.milvus_token = milvus_token
@@ -85,10 +88,12 @@ class MilvusIndexer(Indexer):
                 ),
             )
 
+        self.milvus_alias = create_milvus_alias(milvus_alias, uri=milvus_uri, token=milvus_token)
         self._client = MilvusVectorStore.create_client(
             database_name=self.database_name,
             path_or_uri=self.milvus_uri,
             token=self.milvus_token,
+            alias=self.milvus_alias,
         )
 
     @property
@@ -149,10 +154,12 @@ class MilvusIndexer(Indexer):
                 store_provider="milvus", collection_name=collection_name, database_name=kwargs.pop("database_name", "")
             )
 
+            vs_alias = f"{self.milvus_alias}_{collection_name}" if self.milvus_alias else None
             vector_store = MilvusVectorStore(
                 config=vector_store_config,
                 milvus_uri=self.milvus_uri,
                 milvus_token=self.milvus_token,
+                milvus_alias=vs_alias,
             )
 
             # Convert TextChunk to Milvus required fields, avoiding writing id_ field not defined in schema
@@ -197,6 +204,9 @@ class MilvusIndexer(Indexer):
         try:
             # Delete old data first
             await self.delete_index(doc_id, config.index_name)
+
+            # Flush to make delete visible before rebuild (Milvus eventual consistency)
+            self._client.flush(collection_name=config.index_name)
 
             # Rebuild
             return await self.build_index(chunks, config, embed_model, **kwargs)

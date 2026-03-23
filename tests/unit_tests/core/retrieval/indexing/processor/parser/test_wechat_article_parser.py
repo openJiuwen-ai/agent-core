@@ -3,7 +3,7 @@
 WeChat article parser test cases
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -45,17 +45,27 @@ class TestWeChatArticleParser:
         <title>Fallback Title</title>
         </head><body><div id="js_content"><p>Article body text here.</p></div></body></html>"""
         url = "https://mp.weixin.qq.com/s/abc123"
-        mock_session = MagicMock()
-        mock_response = MagicMock()
-        mock_response.raise_for_status = MagicMock()
-        mock_response.text = AsyncMock(return_value=html)
-        mock_session.get.return_value.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_session.get.return_value.__aexit__ = AsyncMock(return_value=None)
-        mock_session.close = AsyncMock(return_value=None)
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url_arg, headers=None, **kwargs):
+                assert url_arg == url
+                response = MagicMock()
+                response.raise_for_status = MagicMock()
+                response.text = html
+                return response
 
         with patch(
-            "openjiuwen.core.retrieval.indexing.processor.parser.wechat_article_parser.aiohttp.ClientSession",
-            return_value=mock_session,
+            "openjiuwen.core.retrieval.indexing.processor.parser.wechat_article_parser.httpx.AsyncClient",
+            FakeAsyncClient,
         ):
             parser = WeChatArticleParser()
             docs = await parser.parse(url, doc_id="doc_1")

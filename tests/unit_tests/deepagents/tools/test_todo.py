@@ -14,9 +14,9 @@ from openjiuwen.deepagents.tools.todo import (
     TodoStatus,
     TodoItem,
     TodoTool,
-    create_todo_create_tool,
-    create_todo_list_tool,
-    create_todo_modify_tool,
+    TodoCreateTool,
+    TodoListTool,
+    TodoModifyTool,
     STATUS_ICONS
 )
 
@@ -188,7 +188,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
 
         # Create tool with mock operation
-        self.tool = create_todo_create_tool(operation=self.mock_operation)
+        self.tool = TodoCreateTool(operation=self.mock_operation)
 
         # Mock persistence methods
         self.tool.load_todos = AsyncMock(return_value=[])
@@ -227,10 +227,28 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved_todos[1].status, TodoStatus.PENDING)
         self.assertEqual(saved_todos[2].status, TodoStatus.PENDING)
 
+    async def test_invoke_create_not_split_by_enumeration_comma(self):
+        """Do not split a single task sentence by Chinese enumeration comma."""
+        inputs = {
+            "tasks": (
+                "需求分析：明确项目目标、用户需求及功能边界；"
+                "技术选型：评估并选择合适的技术栈和开发工具；"
+                "实施方案：制定开发计划、分配任务并启动执行"
+            )
+        }
+
+        result = await self.tool.invoke(inputs)
+
+        self.assertIn("Successfully created 3 task(s)", result["message"])
+        saved_todos = self.tool.save_todos.call_args[0][0]
+        self.assertEqual(len(saved_todos), 3)
+        self.assertIn("目标、用户需求及功能边界", saved_todos[0].content)
+        self.assertIn("开发计划、分配任务并启动执行", saved_todos[2].content)
+
     async def test_invoke_create_empty_tasks(self):
         """Test error handling for empty task string"""
         # Construct empty input
-        inputs = {"tasks": "；\n、  "}
+        inputs = {"tasks": "；\n  "}
 
         # Execute and verify exception
         with self.assertRaises(Exception) as cm:
@@ -260,13 +278,14 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
 
         # Create tool with mock operation
-        self.tool = create_todo_list_tool(operation=self.mock_operation)
+        self.tool = TodoListTool(operation=self.mock_operation)
 
         # Construct test data
         self.test_todos = [
             TodoItem.create(content="In Progress Task", status=TodoStatus.IN_PROGRESS),
             TodoItem.create(content="Pending Task", status=TodoStatus.PENDING),
-            TodoItem.create(content="Completed Task", status=TodoStatus.COMPLETED)
+            TodoItem.create(content="Completed Task", status=TodoStatus.COMPLETED),
+            TodoItem.create(content="Cancelled Task", status=TodoStatus.CANCELLED)
         ]
 
         # Mock persistence methods
@@ -289,10 +308,11 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
         result = await self.tool.invoke({})
 
         # Verify result
-        self.assertIn("Todo List (Total: 3 items)", result["message"])
+        self.assertIn("Todo List (Total: 4 items)", result["message"])
         self.assertIn(f"{STATUS_ICONS[TodoStatus.IN_PROGRESS]} In Progress Task", result["message"])
         self.assertIn(f"{STATUS_ICONS[TodoStatus.PENDING]} Pending Tasks", result["message"])
         self.assertIn(f"{STATUS_ICONS[TodoStatus.COMPLETED]} Completed Tasks", result["message"])
+        self.assertIn(f"{STATUS_ICONS[TodoStatus.CANCELLED]} Cancelled Tasks", result["message"])
 
 
 class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
@@ -307,7 +327,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
 
         # Create tool with mock operation
-        self.tool = create_todo_modify_tool(operation=self.mock_operation)
+        self.tool = TodoModifyTool(operation=self.mock_operation)
 
         # Construct test data
         self.test_todos = [
@@ -390,6 +410,27 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated_todo.content, "Updated Task 1")
         self.assertEqual(updated_todo.status, TodoStatus.COMPLETED)
 
+    async def test_invoke_update_partial_fields_success(self):
+        """Test partial update (id + status only) keeps existing fields."""
+        inputs = {
+            "action": "update",
+            "todos": [{
+                "id": self.test_todo_ids[0],
+                "status": TodoStatus.COMPLETED.value,
+            }],
+        }
+
+        result = await self.tool.invoke(inputs)
+
+        self.assertIn("Successfully updated 1 task(s)", result["message"])
+        saved_todos = self.tool.save_todos.call_args[0][0]
+        updated_todo = next(
+            t for t in saved_todos if t.id == self.test_todo_ids[0]
+        )
+        self.assertEqual(updated_todo.status, TodoStatus.COMPLETED)
+        self.assertEqual(updated_todo.content, "Task 1")
+        self.assertEqual(updated_todo.activeForm, "Executing Task 1")
+
     async def test_invoke_append_success(self):
         """Test successful appending of new todo items"""
         # Construct append data
@@ -463,6 +504,39 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         saved_todos = self.tool.save_todos.call_args[0][0]
         self.assertEqual(len(saved_todos), 4)
         self.assertEqual(saved_todos[1].id, new_todo_id)  # Verify insertion position
+
+    async def test_invoke_cancel_success(self):
+        """Test successful cancellation of todo items"""
+        # Construct input
+        inputs = {
+            "action": "cancel",
+            "ids": [self.test_todo_ids[1]]  # Cancel Task 2
+        }
+
+        # Execute call
+        result = await self.tool.invoke(inputs)
+
+        # Verify
+        self.assertIn(f"Successfully cancelled 1 task(s) (IDs: {self.test_todo_ids[1]})", result["message"])
+        # Verify Task 2 status changed to CANCELLED
+        saved_todos = self.tool.save_todos.call_args[0][0]
+        self.assertEqual(len(saved_todos), 3)  # Tasks still in list, just status changed
+        cancelled_todo = next(t for t in saved_todos if t.id == self.test_todo_ids[1])
+        self.assertEqual(cancelled_todo.status, TodoStatus.CANCELLED)
+
+    async def test_invoke_cancel_nonexistent(self):
+        """Test cancellation of nonexistent todo items"""
+        # Construct input
+        inputs = {
+            "action": "cancel",
+            "ids": ["nonexistent_id"]
+        }
+
+        # Execute call
+        result = await self.tool.invoke(inputs)
+
+        # Verify
+        self.assertIn("No tasks cancelled: None of the provided IDs (nonexistent_id) were found", result["message"])
 
 
 if __name__ == "__main__":

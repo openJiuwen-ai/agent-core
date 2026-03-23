@@ -1,0 +1,127 @@
+{
+  "event_id": 8,
+  "event_description": "事件 8：医院自助机重复扣款 → 退款流程咨询",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "晚上好，我在医院自助机上缴费时，发现540元的账单扣了两次，怎么办？",
+      "iso_time": "2025-09-08T23:10",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "别担心，我们先来确认一下情况哈～请问您能否提供一下扣款的具体时间和账户尾号？",
+      "iso_time": "2025-09-08T23:11",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "时间是今天晚上，账户尾号是1234。",
+      "iso_time": "2025-09-08T23:11",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "感谢您的信息，我会帮您查一下。稍等哦～",
+      "iso_time": "2025-09-08T23:12",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "经过确认，您的账户确实在23:07和23:08各扣款540元。",
+      "iso_time": "2025-09-08T23:13",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那我该怎么申请退款呢？需要上传医院票据吗？",
+      "iso_time": "2025-09-08T23:14",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "根据我们银行的退款流程，您需要提供扣款凭证和医院票据的截图。接下来，我指导您如何上传这些资料。",
+      "iso_time": "2025-09-08T23:15",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，谢谢！怎么上传呢？",
+      "iso_time": "2025-09-08T23:16",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "请您打开手机银行App，选择‘我的账户’，然后进入‘账务纠纷/退款申请’。在这里您可以上传截图。",
+      "iso_time": "2025-09-08T23:17",
+      "agent_id": "D",
+      "agent_name": "小智"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "找到了，上传成功后多久能拿到退款呢？",
+      "iso_time": "2025-09-08T23:18",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "一般情况下，退款会在3-5个工作日内处理完成，到账后会有短信通知您。",
+      "iso_time": "2025-09-08T23:19",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "如果五天后还没到账，我该怎么办？",
+      "iso_time": "2025-09-08T23:20",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您可以随时通过手机银行查询退款进度，或者再次联系我们进行确认，我们会尽力协助您处理。",
+      "iso_time": "2025-09-08T23:21",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "了解了，谢谢你们的帮助。",
+      "iso_time": "2025-09-08T23:22",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气！如果有其他问题，也欢迎随时联系哦～",
+      "iso_time": "2025-09-08T23:23",
+      "agent_id": "B",
+      "agent_name": "小优"
+    }
+  ]
+}

@@ -3,7 +3,6 @@
 
 from typing import Any
 
-from openjiuwen.core.session.callback.callback_manager import CallbackManager
 from openjiuwen.core.session.checkpointer import (
     Checkpointer,
     CheckpointerFactory,
@@ -28,14 +27,18 @@ class AgentSession(BaseSession):
             session_id: str,
             config: Config = None,
             checkpointer: Checkpointer | None = None,
-            card=None):
+            card=None,
+            stream_writer_manager: StreamWriterManager | None = None):
         self._session_id = session_id
         self._config = config
         self._state = StateCollection()
-        self._stream_writer_manager = StreamWriterManager(StreamEmitter())
-        self._callback_manager = CallbackManager()
+        self._stream_writer_manager = (
+            stream_writer_manager
+            if stream_writer_manager is not None
+            else StreamWriterManager(StreamEmitter())
+        )
         tracer = Tracer()
-        tracer.init(self._stream_writer_manager, self._callback_manager)
+        tracer.init(self._stream_writer_manager)
         self._tracer = tracer
         self._checkpointer = CheckpointerFactory.get_checkpointer() if checkpointer is None else checkpointer
         self._agent_span = self._tracer.tracer_agent_span_manager.create_agent_span() if self._tracer else None
@@ -55,9 +58,6 @@ class AgentSession(BaseSession):
 
     def stream_writer_manager(self) -> StreamWriterManager:
         return self._stream_writer_manager
-
-    def callback_manager(self) -> CallbackManager:
-        return self._callback_manager
 
     def session_id(self) -> str:
         return self._session_id

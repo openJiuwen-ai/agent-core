@@ -228,7 +228,7 @@ class RestfulApiCard(ToolCard)
 RESTful API tool card data class, inheriting from `ToolCard`.
 
 * **url** (str): API path, e.g., `/api/v1/users`. Must be a valid URL.
-* **method** (Literal["POST", "GET"]): HTTP method, only supports POST or GET. Default is "POST".
+* **method** (Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]): HTTP method. Supports all standard HTTP methods. Default is "POST".
 * **headers** (Dict[str, Any], optional): Request headers.
 * **queries** (Dict[str, Any], optional): Request query parameters.
 * **paths** (Dict[str, Any], optional): URL path parameters.

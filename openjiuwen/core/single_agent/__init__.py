@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.single_agent.base import BaseAgent  # Base class import must come first
 
-from .ability_manager import AbilityManager
+from .ability_manager import AbilityManager, AddAbilityResult
 from .agents.react_agent import ReActAgent, ReActAgentConfig
 from .agents.react_agent_evolve import ReActAgentEvolve
 from .schema.agent_card import AgentCard
@@ -41,6 +41,7 @@ __all__ = [
     "AbilityManager",
     # For compatibility
     "LegacyBaseAgent",
+    "AddAbilityResult"
 ]
 
 

@@ -1,2 +1,0 @@
-# Hierarchical Group tests
-

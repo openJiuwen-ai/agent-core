@@ -14,7 +14,7 @@ class InvokeType(Enum):
     WORKFLOW = "workflow"
     CHAIN = "chain"
     RETRIEVER = "retriever"
-    EVALUATOR = "evalutor"
+    EVALUATOR = "evaluator"
 
 
 class NodeStatus(Enum):

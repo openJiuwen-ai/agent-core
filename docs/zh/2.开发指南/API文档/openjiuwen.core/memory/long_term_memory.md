@@ -130,6 +130,7 @@ def set_config(self, config: MemoryEngineConfig) -> None
 * **config**(MemoryEngineConfig)：全局引擎配置，包含：
   * `default_model_cfg: ModelRequestConfig`：默认用于生成记忆的大模型请求参数；
   * `default_model_client_cfg: ModelClientConfig`：默认大模型客户端配置；
+  * `forbidden_variables: str`：禁止记忆的变量（逗号分隔的变量名）。默认值：`""`（不禁止任何变量）。
   * `input_msg_max_len: int`：输入消息最大长度（默认 8192）；
   * `crypto_key: bytes`：AES 加密密钥（长度必须为 32 字节；为空则不加密）。
 
@@ -160,6 +161,7 @@ def set_config(self, config: MemoryEngineConfig) -> None
 >>>         api_key="sk-xxxx",
 >>>         api_base="https://api.openai.com/v1",
 >>>     ),
+>>>     forbidden_variables="user_id, phone_number, email",
 >>>     input_msg_max_len=8192,
 >>>     crypto_key=b"your-32-byte-aes-key-here!!",
 >>> )

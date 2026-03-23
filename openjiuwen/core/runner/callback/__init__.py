@@ -10,6 +10,8 @@ featuring filtering, chaining, metrics, hooks, and circuit breakers.
 
 # Chain
 from openjiuwen.core.runner.callback.chain import CallbackChain
+# Errors
+from openjiuwen.core.runner.callback.errors import AbortError
 # Enumerations
 from openjiuwen.core.runner.callback.enums import (
     ChainAction,
@@ -21,6 +23,7 @@ from openjiuwen.core.runner.callback.events import (
     AgentEvents,
     ContextEvents,
     LLMCallEvents,
+    MemoryEvents,
     RetrievalEvents,
     SessionEvents,
     ToolCallEvents,
@@ -39,6 +42,12 @@ from openjiuwen.core.runner.callback.filters import (
 )
 # Main Framework
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
+# Utility functions
+from openjiuwen.core.runner.callback.utils import (
+    trigger,
+    get_callback_framework,
+    lazy_callback_framework,
+)
 # Data Models
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
@@ -57,6 +66,7 @@ __all__ = [
     "AgentEvents",
     "ContextEvents",
     "LLMCallEvents",
+    "MemoryEvents",
     "RetrievalEvents",
     "SessionEvents",
     "ToolCallEvents",
@@ -78,6 +88,13 @@ __all__ = [
     "ConditionalFilter",
     # Chain
     "CallbackChain",
+    # Errors
+    "AbortError",
     # Framework
     "AsyncCallbackFramework",
+    # Utility functions
+    "trigger",
+    "get_callback_framework",
+    "lazy_callback_framework",
 ]
+

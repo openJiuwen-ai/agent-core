@@ -30,6 +30,7 @@ from typing import (
 )
 
 from openjiuwen.core.context_engine import ModelContext
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.agent import Session
 
 if TYPE_CHECKING:
@@ -51,7 +52,7 @@ class InvokeInputs:
         conversation_id: Optional conversation/session ID
         result: Agent invoke result (filled after invoke)
     """
-    query: str
+    query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
 
@@ -112,6 +113,13 @@ class RetryRequest:
     """Retry directive produced by on_exception rails."""
 
     delay_seconds: float = 0.0
+
+
+@dataclass
+class ForceFinishRequest:
+    """Signal to terminate the agent loop and return a result immediately."""
+
+    result: Dict[str, Any]
 
 
 #: Union type for all typed event inputs
@@ -189,6 +197,9 @@ class AgentCallbackContext:
     _retry_request: Optional[RetryRequest] = field(
         default=None, init=False, repr=False
     )
+    _force_finish_request: Optional[ForceFinishRequest] = field(
+        default=None, init=False, repr=False
+    )
 
     async def fire(
         self, event: AgentCallbackEvent
@@ -223,6 +234,26 @@ class AgentCallbackContext:
         request = self._retry_request
         self._retry_request = None
         return request
+
+    def request_force_finish(self, result: Dict[str, Any]) -> None:
+        """Request the agent loop to terminate and return *result* immediately.
+
+        Can be called in any hook (e.g. before_model_call, after_tool_call).
+        The agent loop checks this signal after every railed operation.
+        If called in a ``before`` hook, the decorated method body is skipped.
+        """
+        self._force_finish_request = ForceFinishRequest(result=result)
+
+    def consume_force_finish(self) -> Optional[ForceFinishRequest]:
+        """Read and clear a pending force-finish request."""
+        request = self._force_finish_request
+        self._force_finish_request = None
+        return request
+
+    @property
+    def has_force_finish_request(self) -> bool:
+        """Check whether a force-finish request is pending."""
+        return self._force_finish_request is not None
 
     @asynccontextmanager
     async def lifecycle(
@@ -274,6 +305,8 @@ EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.BEFORE_TOOL_CALL: "before_tool_call",
     AgentCallbackEvent.AFTER_TOOL_CALL: "after_tool_call",
     AgentCallbackEvent.ON_TOOL_EXCEPTION: "on_tool_exception",
+    AgentCallbackEvent.BEFORE_TASK_ITERATION: "before_task_iteration",
+    AgentCallbackEvent.AFTER_TASK_ITERATION: "after_task_iteration",
 }
 
 
@@ -361,6 +394,18 @@ class AgentRail(ABC):
         """Called when tool execution raises."""
         pass
 
+    async def before_task_iteration(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Called before each task-loop iteration."""
+        pass
+
+    async def after_task_iteration(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Called after each task-loop iteration."""
+        pass
+
     def get_callbacks(
         self,
     ) -> Dict[AgentCallbackEvent, AgentCallback]:
@@ -430,6 +475,9 @@ def rail(
                 try:
                     if before:
                         await ctx.fire(before)
+                    # If a before hook requested force_finish, skip the method body.
+                    if ctx.has_force_finish_request:
+                        return None
                     return await fn(self, ctx, *args, **kwargs)
                 except Exception as e:
                     ctx.exception = e

@@ -9,6 +9,7 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import IndexConfig, MilvusIndexer, TextChunk, VectorStoreConfig
+from openjiuwen.core.retrieval.utils.common import create_milvus_alias
 
 
 @pytest.fixture
@@ -37,6 +38,7 @@ class TestMilvusIndexer:
             database_name="name",
             path_or_uri="http://localhost:19530",
             token=None,
+            alias=create_milvus_alias(None, uri="http://localhost:19530", token=None),
         )
 
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
@@ -57,6 +59,23 @@ class TestMilvusIndexer:
             database_name="name",
             path_or_uri="http://localhost:19530",
             token="test_token",
+            alias=create_milvus_alias(None, uri="http://localhost:19530", token="test_token"),
+        )
+
+    @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")
+    def test_init_with_milvus_alias(self, mock_client_class):
+        """Test initialization with milvus_alias for connection isolation"""
+        mock_client = MagicMock()
+        mock_client_class.return_value = mock_client
+
+        config = VectorStoreConfig(store_provider="milvus", collection_name="test", database_name="db")
+        indexer = MilvusIndexer(config=config, milvus_uri="http://localhost:19530", milvus_alias="idx_1_2")
+        assert indexer.milvus_alias == "idx_1_2"
+        mock_client_class.assert_called_once_with(
+            database_name="db",
+            path_or_uri="http://localhost:19530",
+            token=None,
+            alias="idx_1_2",
         )
 
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")

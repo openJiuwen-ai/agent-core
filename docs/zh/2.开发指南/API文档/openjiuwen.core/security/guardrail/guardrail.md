@@ -1,5 +1,94 @@
 # openjiuwen.core.security.guardrail
 
+## class openjiuwen.core.security.guardrail.PromptInjectionGuardrailConfig
+
+```
+@dataclass
+class openjiuwen.core.security.guardrail.PromptInjectionGuardrailConfig:
+    mode: str = "rules"
+    model_type: Optional[str] = None
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    timeout: float = 30.0
+    model_path: Optional[str] = None
+    device: str = "auto"
+    custom_patterns: Optional[List[str]] = None
+    risk_level: RiskLevel = RiskLevel.HIGH
+    bert_thresholds: Optional[Dict[str, float]] = None
+    attack_class_id: int = 1
+    qwen_risk_type: str = "content_risk"
+    parser: Optional[ModelOutputParser] = None
+```
+
+PromptInjectionGuardrail 的配置数据类，用于减少构造函数参数数量。
+
+**参数**：
+
+* **mode**(str, 可选)：检测模式，可选值为 "rules"、"api"、"local"。默认值：`"rules"`。
+* **model_type**(str, 可选)：模型类型，可选值为 "bert"、"qwen"。默认值：`None`。
+* **api_url**(str, 可选)：API 地址（api 模式）。默认值：`None`。
+* **api_key**(str, 可选)：API 密钥。 默认值：`None`。
+* **timeout**(float, 可选)：请求超时时间（秒）。默认值：`30.0`。
+* **model_path**(str, 可选)：本地模型路径（local 模式）。默认值：`None`。
+* **device**(str, 可选)：设备选择，可选值为 "auto"、"cpu"、"cuda"。默认值：`"auto"`。
+* **custom_patterns**(List[str], 可选)：自定义正则规则。默认值：`None`。
+* **risk_level**(RiskLevel, 可选)：检测到风险时的等级。默认值：`RiskLevel.HIGH`。
+* **bert_thresholds**(Dict[str, float], 可选)：BERT 置信度阈值。默认值：`None`。
+* **attack_class_id**(int, 可选)：BERT 攻击类别 ID。默认值：`1`。
+* **qwen_risk_type**(str, 可选)：Qwen 风险类型。默认值：`"content_risk"`。
+* **parser**(ModelOutputParser, 可选)：自定义解析器。默认值：`None`。
+
+---
+
+## class openjiuwen.core.security.guardrail.PromptInjectionGuardrail
+
+```
+class openjiuwen.core.security.guardrail.PromptInjectionGuardrail(
+    config: Optional[PromptInjectionGuardrailConfig] = None,
+    backend: Optional[GuardrailBackend] = None,
+    events: Optional[List[str]] = None,
+    priority: Optional[int] = None,
+    enable_logging: bool = True
+)
+```
+
+Prompt 注入检测护栏，用于检测提示词注入攻击。
+
+**参数**：
+
+* **config**(PromptInjectionGuardrailConfig, 可选)：配置数据类。如果提供 backend，则 config 被忽略。默认值：`None`。
+* **backend**(GuardrailBackend, 可选)：自定义检测后端。优先级高于 config。默认值：`None`。
+* **events**(List[str], 可选)：要监听的事件名称列表。默认值：`["llm_invoke_input", "tool_invoke_output"]`。
+* **priority**(int, 可选)：回调优先级。默认值：`None`。
+* **enable_logging**(bool, 可选)：是否启用日志输出。默认值：`True`。
+
+**示例**：
+
+```python
+from openjiuwen.core.security.guardrail import (
+    PromptInjectionGuardrail,
+    PromptInjectionGuardrailConfig,
+    RiskLevel
+)
+
+# 使用配置类
+config = PromptInjectionGuardrailConfig(
+    custom_patterns=[r"ignore.*instructions"],
+    risk_level=RiskLevel.HIGH
+)
+guardrail = PromptInjectionGuardrail(config=config)
+
+# 使用自定义后端
+class MyBackend(GuardrailBackend):
+    async def analyze(self, ctx) -> RiskAssessment:
+        # 实现检测逻辑
+        pass
+
+guardrail = PromptInjectionGuardrail(backend=MyBackend())
+```
+
+---
+
 ## class openjiuwen.core.security.guardrail.BaseGuardrail
 
 ```
@@ -217,6 +306,18 @@ class openjiuwen.core.security.guardrail.RiskLevel
 * **MEDIUM**：中风险
 * **HIGH**：高风险
 * **CRITICAL**：严重风险
+
+**处理机制**：
+
+| 风险等级 | 处理方式 |
+|---------|---------|
+| SAFE | 正常通过 |
+| LOW | 抛出 `GuardrailError` |
+| MEDIUM | 抛出 `GuardrailError` |
+| HIGH | 抛出 `GuardrailError` |
+| CRITICAL | 抛出 `AbortError`，阻断执行 |
+
+> **说明**：`CRITICAL` 等级会抛出 `AbortError` 终止回调执行，其他危险等级抛出 `GuardrailError`。
 
 ---
 

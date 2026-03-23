@@ -1,0 +1,127 @@
+{
+  "event_id": 10,
+  "event_description": "事件 10：出差失眠 → 与小艺长聊缓解焦虑",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "唉，真是睡不着啊。",
+      "iso_time": "2025-07-19T00:53",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "张伟，需要我帮你播放一些助眠的白噪音吗？",
+      "iso_time": "2025-07-19T00:54",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好啊，白噪音也许能让我放松一下。",
+      "iso_time": "2025-07-19T00:55",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "好的，我会为你播放白噪音。你要不要顺便聊聊工作上的事情？我在这里听着。",
+      "iso_time": "2025-07-19T00:56",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "明天有个大客户的会议，压力挺大的。",
+      "iso_time": "2025-07-19T00:57",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "我理解，重要的会议总是让人紧张。但你已经准备得很充分了，相信一切都会顺利的。",
+      "iso_time": "2025-07-19T00:58",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "希望如此。最近事情太多，感觉有点累。",
+      "iso_time": "2025-07-19T00:59",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "没关系，工作压力大时适当放松一下是很重要的。我可以为你设置一个7:30的闹钟，这样你可以好好休息一会儿。",
+      "iso_time": "2025-07-19T01:00",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，麻烦你了。还有，明天的天气怎么样？",
+      "iso_time": "2025-07-19T01:01",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "明天深圳的天气是晴天，气温在30度左右，适合出行哦。",
+      "iso_time": "2025-07-19T01:02",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那就好，顺便帮我查一下从酒店到客户公司需要多长时间？",
+      "iso_time": "2025-07-19T01:03",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "从你所在的酒店到客户公司大约需要30分钟车程。建议你提前出发，以防交通拥堵。",
+      "iso_time": "2025-07-19T01:04",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，那我再听会儿白噪音，希望能早点睡着。",
+      "iso_time": "2025-07-19T01:05",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "好的，放松心情，早点休息。祝你有个好梦！",
+      "iso_time": "2025-07-19T01:06",
+      "agent_id": "E",
+      "agent_name": "小艺"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "嗯，谢谢你。",
+      "iso_time": "2025-07-19T01:07",
+      "agent_id": null,
+      "agent_name": null
+    }
+  ]
+}

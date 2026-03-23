@@ -8,6 +8,8 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
 def support_args_param(arg_param_name: str, parameters, func: Callable) -> Callable:
@@ -62,10 +64,18 @@ class LocalFunction(Tool):
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         if self.card.input_params is not None:
+            await trigger(
+                ToolCallEvents.TOOL_PARSE_STARTED,
+                tool_name=self.card.name, tool_id=self.card.id,
+                raw_inputs=inputs, schema=self._card.input_params)
             inputs = SchemaUtils.format_with_schema(inputs,
                                                     self._card.input_params,
                                                     skip_none_value=kwargs.get("skip_none_value", False),
                                                     skip_validate=kwargs.get("skip_inputs_validate", False))
+            await trigger(
+                ToolCallEvents.TOOL_PARSE_FINISHED,
+                tool_name=self.card.name, tool_id=self.card.id,
+                formatted_inputs=inputs)
         if inspect.isgeneratorfunction(self._func) or inspect.isasyncgenfunction(self._func):
             raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_EXECUTION_ERROR, method="invoke",
                               reason="func can not be generator", card=self._card)
@@ -77,9 +87,17 @@ class LocalFunction(Tool):
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         if self.card.input_params is not None:
+            await trigger(
+                ToolCallEvents.TOOL_PARSE_STARTED,
+                tool_name=self.card.name, tool_id=self.card.id,
+                raw_inputs=inputs, schema=self._card.input_params)
             inputs = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                     skip_none_value=kwargs.get("skip_none_value", False),
                                                     skip_validate=kwargs.get("skip_inputs_validate"))
+            await trigger(
+                ToolCallEvents.TOOL_PARSE_FINISHED,
+                tool_name=self.card.name, tool_id=self.card.id,
+                formatted_inputs=inputs)
         if inspect.isasyncgenfunction(self._func):
             async for item in self._func(**inputs):
                 yield item

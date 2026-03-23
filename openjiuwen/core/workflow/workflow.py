@@ -64,13 +64,14 @@ from openjiuwen.core.workflow.base import (
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.workflow.components.component import ComponentComposable
 from openjiuwen.core.workflow.workflow_config import WorkflowConfig
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 
 class _WorkflowMeta(ABCMeta):
     def __call__(cls, *args, **kwargs):
         instance = super().__call__(*args, **kwargs)
         from openjiuwen.core.runner import Runner
-        from openjiuwen.core.runner.callback.events import WorkflowEvents
         _fw = Runner.callback_framework
         fn = instance.invoke
         fn = _fw.emit_before(WorkflowEvents.WORKFLOW_INVOKE_INPUT)(fn)
@@ -470,6 +471,11 @@ class Workflow(metaclass=_WorkflowMeta):
 
         # workflow start tracer info
         await TracerWorkflowUtils.trace_workflow_start(session, inputs)
+        await trigger(
+            WorkflowEvents.WORKFLOW_STARTED,
+            workflow_id=self._card.id,
+            workflow_name=self._card.name,
+            inputs=inputs)
         # calculate timeout and frame_timeout
         timeout = session.config().get_env(WORKFLOW_EXECUTE_TIMEOUT)
         frame_timeout = session.config().get_env(WORKFLOW_STREAM_FRAME_TIMEOUT)
@@ -506,6 +512,11 @@ class Workflow(metaclass=_WorkflowMeta):
             try:
                 await task
                 results = session.state().get_outputs(self._end_comp_id)
+                await trigger(
+                    WorkflowEvents.WORKFLOW_FINISHED,
+                    workflow_id=self._card.id,
+                    workflow_name=self._card.name,
+                    outputs=results)
                 if results:
                     yield OutputSchema(type="workflow_final", index=0, payload=results)
             except asyncio.CancelledError:
@@ -517,6 +528,10 @@ class Workflow(metaclass=_WorkflowMeta):
                 )
                 raise
         except asyncio.CancelledError:
+            await trigger(
+                WorkflowEvents.WORKFLOW_CANCELLED,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name)
             logger.warning(
                 "Canecel stream output task",
                 event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
@@ -530,11 +545,13 @@ class Workflow(metaclass=_WorkflowMeta):
                 except asyncio.CancelledError:
                     pass
             raise
-        except BaseError:
+        except BaseError as e:
+            await trigger(
+                WorkflowEvents.WORKFLOW_ERROR,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name,
+                error=e)
             raise
-        except Exception as e:
-            raise build_error(
-                StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=str(e) if e else e, card=self._card)
         finally:
             if not task.done() and task.cancelled():
                 task.cancel()
@@ -637,12 +654,17 @@ class Workflow(metaclass=_WorkflowMeta):
                 exception=e
             )
             raise build_error(StatusCode.WORKFLOW_EXECUTION_TIMEOUT, cause=e, timeout=timeout, card=self._card)
+        except RecursionError as e:
+            logger.error(
+                "Workflow execution recursion limit reached",
+                event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name,
+                exception=e
+            )
+            raise build_error(StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=e, workflow=self._card.str()) from e
         except BaseError as e:
             raise e
-        except Exception as e:
-            error = task.exception() if task.done() and not task.cancelled() else e
-            raise build_error(StatusCode.WORKFLOW_EXECUTION_ERROR, cause=error, reason=str(error) if error else error,
-                              card=self._card)
         finally:
             if not task.done():
                 task.cancel()
@@ -657,8 +679,7 @@ class Workflow(metaclass=_WorkflowMeta):
             parent = session.get_parent()
             workflow_session = WorkflowSession(workflow_id=self._card.id,
                                                parent=parent if parent is not None else None,
-                                               session_id=session.get_session_id(),
-                                               callback_manager=session.get_callback_manager())
+                                               session_id=session.get_session_id())
             workflow_session.config().set_envs(session.get_envs())
             self._internal.auto_complete_abilities()
             workflow_session.config().add_workflow_config(workflow_id=self._card.id,
@@ -670,7 +691,7 @@ class Workflow(metaclass=_WorkflowMeta):
                 StreamWriterManager(stream_emitter=StreamEmitter(), modes=stream_modes))
             if workflow_session.tracer() is None and (stream_modes is None or BaseStreamMode.TRACE in stream_modes):
                 tracer = Tracer()
-                tracer.init(workflow_session.stream_writer_manager(), workflow_session.callback_manager())
+                tracer.init(workflow_session.stream_writer_manager())
                 workflow_session.set_tracer(tracer)
             return workflow_session
         else:

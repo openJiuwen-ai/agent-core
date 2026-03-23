@@ -6,32 +6,29 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import McpToolCard
+from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 
 
 class StreamableHttpClient(McpClient):
     """Streamable HTTP transport based MCP client."""
+    __client_name__ = "streamable-http"
 
     def __init__(
-        self,
-        server_path: str,
-        name: str,
-        auth_headers: Optional[Dict[str, str]] = None,
-        auth_query_params: Optional[Dict[str, str]] = None,
+        self, config: McpServerConfig,
     ):
-        super().__init__(server_path)
-        self._name = name
+        super().__init__(config)
+        self._name = config.server_name
         self._client = None
         self._session = None
         self._read = None
         self._write = None
         self._exit_stack = AsyncExitStack()
-        if auth_headers is not None or auth_query_params is not None:
+        if config.auth_headers is not None or config.auth_query_params is not None:
             self._auth_provider = AuthHeaderAndQueryProvider(
-                auth_headers=auth_headers or {},
-                auth_query_params=auth_query_params or {},
+                auth_headers=config.auth_headers or {},
+                auth_query_params=config.auth_query_params or {},
             )
             logger.info("Using custom header and query authorization for streamable-http client")
         else:

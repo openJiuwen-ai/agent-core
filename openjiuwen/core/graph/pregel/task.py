@@ -12,6 +12,8 @@ from openjiuwen.core.graph.pregel.base import Message, PregelNode, GraphInterrup
 from openjiuwen.core.graph.pregel.config import PregelConfig, InnerPregelConfig, \
     create_inner_config
 from openjiuwen.core.graph.pregel.constants import TASK_STATUS_INTERRUPT, TASK_STATUS_ERROR, PARENT_NS, NS
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 
 class TaskExecutorPool:
@@ -101,7 +103,10 @@ class TaskExecutorPool:
         results = await asyncio.gather(*to_cancel, return_exceptions=True)
         for result in results:
             if isinstance(result, Exception):
-                logger.warning(f"running task with exception {result}")
+                graph_logger.warning(f"running task with exception",
+                                     event_type=LogEventType.GRAPH_VERTEX_CALL_ERROR,
+                                     metadata={"error": str(result)}
+                                     )
         for t in to_cancel:
             if t in self.running_tasks:
                 node = self.running_tasks.pop(t)
@@ -110,6 +115,7 @@ class TaskExecutorPool:
 
 
 class NodeTask:
+
     def __init__(self, node: PregelNode, config: PregelConfig, version: int):
         self.node = node
         self.config = config
@@ -152,6 +158,14 @@ class NodeTask:
             for r in self.node.routers:
                 msgs = await r.dispatch(source_node=self.node.name)
                 self.messages.extend(msgs)
+
+            if self.messages:
+                for msg in self.messages:
+                    await trigger(
+                        WorkflowEvents.EDGE_TRAVERSED,
+                        source_node=msg.sender,
+                        target_node=msg.target,
+                        graph_id=self.config.get(NS))
 
             return self.messages
 

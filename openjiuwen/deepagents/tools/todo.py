@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-
+import asyncio
 import json
 import re
 import uuid
@@ -16,9 +16,7 @@ from openjiuwen.core.common.logging import tool_logger, LogEventType
 from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.deepagents.prompts.todo import (
-    TODO_CREATE_DESCRIPTION_ZH, TODO_LIST_DESCRIPTION_ZH, TODO_MODIFY_DESCRIPTION_ZH
-)
+from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 
 
 class TodoStatus(str, Enum):
@@ -27,10 +25,12 @@ class TodoStatus(str, Enum):
     PENDING: Tasks that have not been started
     IN_PROGRESS: Tasks currently being worked on
     COMPLETED: Tasks that have been finished
+    CANCELLED: Tasks that have been cancelled
     """
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
     @classmethod
     def all_values(cls) -> List[str]:
@@ -40,7 +40,8 @@ class TodoStatus(str, Enum):
 STATUS_ICONS = {
     TodoStatus.PENDING: "[ ]",
     TodoStatus.IN_PROGRESS: "[>]",
-    TodoStatus.COMPLETED: "[√]"
+    TodoStatus.COMPLETED: "[√]",
+    TodoStatus.CANCELLED: "[×]",
 }
 
 
@@ -50,7 +51,8 @@ class TodoItem(BaseModel):
                     description="Unique identifier for the todo item (UUID)")
     content: str = Field(default="", description="Detailed description of todo task")
     activeForm: str = Field(default="", description="Present-tense description of current task execution state")
-    status: TodoStatus = Field(..., description="Current status of the todo task (pending/in_progress/completed)")
+    status: TodoStatus = Field(...,
+                        description="Current status of the todo task (pending/in_progress/completed/cancelled)")
     createdAt: str = Field(..., pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(.\d+)?([+-]\d{2}:\d{2})?$',
                            description="Task creation timestamp (ISO 8601 format)")
     updatedAt: str = Field(..., pattern=r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(.\d+)?([+-]\d{2}:\d{2})?$',
@@ -101,6 +103,45 @@ class TodoItem(BaseModel):
         )
 
 
+class FileLockManager:
+    """Thread-safe file lock manager for concurrent todo operations
+
+    Uses asyncio.Lock to provide file-level locking across threads.
+    Each session file has its own lock to prevent race conditions.
+    """
+
+    def __init__(self):
+        self._locks = {}
+        self._global_lock = asyncio.Lock()
+
+    async def acquire_lock(self, file_path: str):
+        """Acquire lock for a specific file
+
+        Args:
+            file_path: Path to file to lock
+        """
+        async with self._global_lock:
+            if file_path not in self._locks:
+                self._locks[file_path] = asyncio.Lock()
+        lock = self._locks[file_path]
+        await lock.acquire()
+
+    async def release_lock(self, file_path: str):
+        """Release lock for a specific file
+
+        Args:
+            file_path: Path to file to unlock
+        """
+        async with self._global_lock:
+            if file_path in self._locks:
+                lock = self._locks[file_path]
+                lock.release()
+                del self._locks[file_path]
+
+
+_global_lock_manager = FileLockManager()
+
+
 class TodoTool(Tool):
     """Base class for Todo tools with common persistence operations"""
 
@@ -121,7 +162,7 @@ class TodoTool(Tool):
         super().__init__(card)
         self.workspace = workspace if workspace else "./"
         self.fs = operation.fs()
-        self.file = f"{str(uuid.uuid4())}.json"
+        self._file = f"./todos/{str(uuid.uuid4())}.json"
 
     async def load_todos(self) -> List[TodoItem]:
         """Load todo items from session-specific JSON file
@@ -132,8 +173,9 @@ class TodoTool(Tool):
         Raises:
             ToolError: If file loading/parsing fails
         """
+        await _global_lock_manager.acquire_lock(self._file)
         try:
-            read_res = await self.fs.read_file(self.file, mode="text")
+            read_res = await self.fs.read_file(self._file, mode="text")
             if read_res.code == 0:
                 data = json.loads(read_res.data.content)
                 todos = [TodoItem.from_dict(item) for item in data]
@@ -161,6 +203,8 @@ class TodoTool(Tool):
                 StatusCode.TOOL_TODOS_LOAD_FAILED,
                 reason=f"Failed to load todo list: {str(e)}"
             ) from e
+        finally:
+            await _global_lock_manager.release_lock(self._file)
 
     async def save_todos(self, todos: List[TodoItem]):
         """Save todo items to session-specific JSON file
@@ -171,10 +215,11 @@ class TodoTool(Tool):
         Raises:
             ToolError: If file writing fails
         """
+        await _global_lock_manager.acquire_lock(self._file)
         try:
             data = [todo.to_dict() for todo in todos]
             json_content = json.dumps(data, ensure_ascii=False, indent=2)
-            write_res = await self.fs.write_file(self.file, json_content, mode="text")
+            write_res = await self.fs.write_file(self._file, json_content, mode="text")
             if write_res.code == 0:
                 tool_logger.info(
                     "Successfully saved todo items",
@@ -199,23 +244,38 @@ class TodoTool(Tool):
                 StatusCode.TOOL_TODOS_SAVE_FAILED,
                 reason=f"Failed to save todo list: {str(e)}"
             ) from e
+        finally:
+            await _global_lock_manager.release_lock(self._file)
+
+    def set_file(self, session_id: str):
+        """Set file to session-specific JSON file
+
+        Args:
+            session_id: Unique identifier of the session id, used as the JSON file name
+        """
+        if session_id:
+            self._file = f"./todos/{session_id}.json"
 
 
 class TodoCreateTool(TodoTool):
-    """Todo Write Tool - Create new todo items with session"""
+    """Todo Create Tool - Create new todo items with session"""
 
-    def __init__(self, card: ToolCard, operation: SysOperation, workspace: Optional[str] = None):
-        """Initialize TodoWrite tool
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
+        """Initialize TodoCreate tool
 
         Args:
-            card: Tool metadata card with description and parameter schema
             operation: System operation for file system access
             workspace: Path for file system operations
+            language: Prompt language ("cn" or "en")
         """
-        super().__init__(card, operation, workspace)
+        super().__init__(
+            build_tool_card("todo_create", "TodoCreateTool", language),
+            operation,
+            workspace
+        )
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
-        """Asynchronous invocation handler for for TodoWrite tool operations
+        """Asynchronous invocation handler for TodoCreate tool operations
 
         Args:
             inputs: Input parameters dictionary containing task creation data
@@ -228,8 +288,8 @@ class TodoCreateTool(TodoTool):
             ToolError: If invalid parameters or operation fails
         """
         session = kwargs.get("session", None)
-        if session and isinstance(session, Session) and session.get_session_id() not in self.file:
-            self.file = f"{session.get_session_id()}.json"
+        if session and isinstance(session, Session) and session.get_session_id() not in self._file:
+            self.set_file(session.get_session_id())
 
         results = dict()
         try:
@@ -240,8 +300,7 @@ class TodoCreateTool(TodoTool):
 
             raise build_error(
                 StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason=(f"Invalid task data: either 'tasks' (simplified) or 'todos' (complete) parameter "
-                        f"is required for create action")
+                reason=f"Invalid task data: 'tasks' parameter is required for create action"
             )
 
         except Exception as e:
@@ -256,7 +315,7 @@ class TodoCreateTool(TodoTool):
             ) from e
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
-        """Stream response handler (not supported for TodoWrite tool)"""
+        """Stream response handler (not supported for TodoCreate tool)"""
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
 
     def _format_create_result(self, todos: List[TodoItem]) -> str:
@@ -278,9 +337,11 @@ class TodoCreateTool(TodoTool):
         return result.strip()
 
     def _parse_task_string(self, tasks_str: str) -> List[str]:
-        """Parse delimited task string into individual task list
+        """Parse delimited task string into individual task list.
 
-        Supported delimiters: newline, semicolon, Chinese semicolon, Chinese enumeration comma
+        Supported delimiters: newline, semicolon, Chinese semicolon.
+        Note: do not split on Chinese enumeration comma ``、`` because
+        it is commonly used inside a single task sentence.
 
         Args:
             tasks_str: Delimited string of task descriptions
@@ -288,7 +349,7 @@ class TodoCreateTool(TodoTool):
         Returns:
             List of trimmed non-empty task descriptions
         """
-        parsed_tasks = re.split(r'[\n;；、]', tasks_str)
+        parsed_tasks = re.split(r'[\n;；]', tasks_str)
         parsed_tasks = [t.strip() for t in parsed_tasks if t.strip()]
         tool_logger.info(
             "Parsed single task string",
@@ -297,7 +358,7 @@ class TodoCreateTool(TodoTool):
         return parsed_tasks
 
     async def _create_from_string(self, tasks_str: str) -> str:
-        """Create todo items from simplified delimited string
+        """Create todo items from string of task descriptions
 
         Args:
             tasks_str: Delimited string of task descriptions
@@ -339,25 +400,29 @@ class TodoCreateTool(TodoTool):
 
 
 class TodoListTool(TodoTool):
-    """Todo Read Tool - Retrieve and display todo items with session
+    """Todo List Tool - Retrieve and display todo items with session
 
     Core functionality for listing todo items organized by status:
-    1. Group tasks by IN_PROGRESS/PENDING/COMPLETED status
+    1. Group tasks by IN_PROGRESS/PENDING/COMPLETED/CANCELLED status
     2. Format output for human-readable display
     """
 
-    def __init__(self, card: ToolCard, operation: SysOperation, workspace: Optional[str] = None):
-        """Initialize TodoRead tool with persistence layer
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
+        """Initialize TodoList tool with persistence layer
 
         Args:
-            card: Tool metadata card with description and parameter schema
             operation: System operation for file system access
             workspace: Path for file system operations
+            language: Prompt language ("cn" or "en")
         """
-        super().__init__(card, operation, workspace)
+        super().__init__(
+            build_tool_card("todo_list", "TodoListTool", language),
+            operation,
+            workspace
+        )
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
-        """Asynchronous invocation handler for TodoRead tool operations
+        """Asynchronous invocation handler for TodoCreate tool operations
 
         Args:
             inputs: Input parameters dictionary (no additional params required)
@@ -370,8 +435,8 @@ class TodoListTool(TodoTool):
             ToolError: If no todos exist or operation fails
         """
         session = kwargs.get("session", None)
-        if session and isinstance(session, Session) and session.get_session_id() not in self.file:
-            self.file = f"{session.get_session_id()}.json"
+        if session and isinstance(session, Session) and session.get_session_id() not in self._file:
+            self.set_file(session.get_session_id())
 
         results = dict()
 
@@ -382,7 +447,7 @@ class TodoListTool(TodoTool):
 
         except Exception as e:
             tool_logger.error(
-                "Todo read tool invocation failed",
+                "Todo list tool invocation failed",
                 event_type=LogEventType.TOOL_CALL_ERROR,
                 exception=str(e)
             )
@@ -392,7 +457,7 @@ class TodoListTool(TodoTool):
             ) from e
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
-        """Stream response handler (not supported for TodoRead tool)"""
+        """Stream response handler (not supported for TodoList tool)"""
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
 
     async def _list_todos(self, todos: List[TodoItem]) -> str:
@@ -417,7 +482,8 @@ class TodoListTool(TodoTool):
         grouped = {
             TodoStatus.IN_PROGRESS: [],
             TodoStatus.PENDING: [],
-            TodoStatus.COMPLETED: []
+            TodoStatus.COMPLETED: [],
+            TodoStatus.CANCELLED: [],
         }
 
         for todo in todos:
@@ -431,6 +497,8 @@ class TodoListTool(TodoTool):
             (TodoStatus.PENDING, f"{STATUS_ICONS[TodoStatus.PENDING]} Pending Tasks",
              lambda t: f" [{t.id}] {t.content}"),
             (TodoStatus.COMPLETED, f"{STATUS_ICONS[TodoStatus.COMPLETED]} Completed Tasks",
+             lambda t: f" [{t.id}] {t.content}"),
+            (TodoStatus.CANCELLED, f"{STATUS_ICONS[TodoStatus.CANCELLED]} Cancelled Tasks",
              lambda t: f" [{t.id}] {t.content}")
         ]
 
@@ -455,18 +523,22 @@ class TodoModifyTool(TodoTool):
     """
     Todo Modify Tool
 
-    update/delete/append/insert_after/insert_before action operations todo items with session
+    update/delete/cancel/append/insert_after/insert_before action operations todo items with session
     """
 
-    def __init__(self, card: ToolCard, operation: SysOperation, workspace: Optional[str] = None):
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
         """Initialize TodoModify tool with persistence layer
 
         Args:
-            card: Tool metadata card with description and parameter schema
             operation: System operation for file system access
             workspace: Path for file system operations
+            language: Prompt language ("cn" or "en")
         """
-        super().__init__(card, operation, workspace)
+        super().__init__(
+            build_tool_card("todo_modify", "TodoModifyTool", language),
+            operation,
+            workspace
+        )
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         """Asynchronous invocation handler for TodoModify tool operations
@@ -482,8 +554,8 @@ class TodoModifyTool(TodoTool):
             ToolError: If invalid parameters or operation fails
         """
         session = kwargs.get("session", None)
-        if session and isinstance(session, Session) and session.get_session_id() not in self.file:
-            self.file = f"{session.get_session_id()}.json"
+        if session and isinstance(session, Session) and session.get_session_id() not in self._file:
+            self.set_file(session.get_session_id())
 
         results = dict()
         try:
@@ -504,6 +576,15 @@ class TodoModifyTool(TodoTool):
                         reason="Invalid input for delete action: 'ids' must be a non-empty list of task IDs (strings)"
                     )
                 results["message"] = await self._delete_todos(ids, current_todos)
+
+            elif action == "cancel":
+                ids = inputs.get("ids")
+                if not ids or not isinstance(ids, list) or not all(isinstance(id_str, str) for id_str in ids):
+                    raise build_error(
+                        StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                        reason="Invalid input for cancel action: 'ids' must be a non-empty list of task IDs (strings)"
+                    )
+                results["message"] = await self._cancel_todos(ids, current_todos)
 
             elif action == "update":
                 todos_data = inputs.get("todos")
@@ -724,11 +805,53 @@ class TodoModifyTool(TodoTool):
         )
         return result_msg
 
-    async def _update_todos(self, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
-        """Batch update todo items from complete JSON array data
+    async def _cancel_todos(self, ids: List[str], current_todos: List[TodoItem]) -> str:
+        """Batch cancel todo items by ID
 
         Args:
-            todos_data: List of updated todo item dictionaries
+            ids: List of task IDs to cancel
+            current_todos: Current list of todo items
+
+        Returns:
+            Cancel success message
+
+        Raises:
+            ToolError: If no tasks found to cancel
+        """
+        cancelled_count = 0
+        cancelled_ids = []
+        now = datetime.now(timezone.utc).isoformat()
+
+        for todo in current_todos:
+            if todo.id in ids:
+                todo.status = TodoStatus.CANCELLED
+                todo.updatedAt = now
+                cancelled_count += 1
+                cancelled_ids.append(todo.id)
+
+        if cancelled_count == 0:
+            tool_logger.warning(
+                "No tasks found for cancellation",
+                event_type=LogEventType.TOOL_CALL_END
+            )
+            return f"No tasks cancelled: None of the provided IDs ({', '.join(ids)}) were found"
+
+        await self.save_todos(current_todos)
+
+        result_msg = f"Successfully cancelled {cancelled_count} task(s) (IDs: {', '.join(cancelled_ids)})"
+        tool_logger.info(
+            f"Batch cancelled {cancelled_count} todo items",
+            event_type=LogEventType.TOOL_CALL_END
+        )
+        return result_msg
+
+    async def _update_todos(self, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
+        """Batch update todo items.
+
+        Args:
+            todos_data: List of updated todo item dictionaries.
+                Supports partial update; missing fields
+                fall back to current values.
             current_todos: Current list of todo items
 
         Returns:
@@ -742,8 +865,12 @@ class TodoModifyTool(TodoTool):
         now = datetime.now(timezone.utc).isoformat()
 
         for todo_data in todos_data:
-            self._validate_single_todo_item(todo_data)
             todo_id = todo_data.get("id")
+            if not todo_id:
+                raise build_error(
+                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                    reason="Batch update failed: Missing required field: 'id'"
+                )
 
             if todo_id not in todo_map:
                 raise build_error(
@@ -752,10 +879,28 @@ class TodoModifyTool(TodoTool):
                 )
 
             current_todo = todo_map[todo_id]
+            normalized_todo_data = {
+                "id": todo_id,
+                "content": todo_data.get(
+                    "content", current_todo.content
+                ),
+                "activeForm": todo_data.get(
+                    "activeForm", current_todo.activeForm
+                ),
+                "status": todo_data.get(
+                    "status", current_todo.status.value
+                ),
+            }
+            self._validate_single_todo_item(normalized_todo_data)
+
             # Update all fields
-            current_todo.content = todo_data["content"]
-            current_todo.activeForm = todo_data["activeForm"]
-            current_todo.status = TodoStatus(todo_data["status"])
+            current_todo.content = normalized_todo_data["content"]
+            current_todo.activeForm = normalized_todo_data[
+                "activeForm"
+            ]
+            current_todo.status = TodoStatus(
+                normalized_todo_data["status"]
+            )
             current_todo.updatedAt = now
             updated_count += 1
 
@@ -924,142 +1069,10 @@ class TodoModifyTool(TodoTool):
         return result_msg
 
 
-def create_todo_create_tool(operation: SysOperation, workspace: Optional[str] = None) -> TodoCreateTool:
-    """Create a configured instance of the TodoWriteTool
-
-    Args:
-        operation: Implement persistence for the todo list
-        workspace: Path for file system operations
-
-    Returns:
-        Configured TodoWriteTool instance
-    """
-    card = ToolCard(
-        name=f"todo_write",
-        description=TODO_CREATE_DESCRIPTION_ZH,
-        input_params={
-            "type": "object",
-            "properties": {
-                "tasks": {
-                    "type": "string",
-                    "description": ("Simplified task list (delimited by newlines/semicolons). "
-                                    "Example: 'Create login form;Implement form validation;Add error handling'"
-                                    )
-                }
-            },
-            "required": ["tasks"]
-        }
-    )
-
-    return TodoCreateTool(card, operation, workspace)
-
-
-def create_todo_list_tool(operation: SysOperation, workspace: Optional[str] = None) -> TodoListTool:
-    """Create a configured instance of the TodoReadTool
-
-    Args:
-        operation: Implement persistence for the todo list
-        workspace: Path for file system operations
-
-    Returns:
-        Configured TodoReadTool instance
-    """
-    card = ToolCard(
-        name=f"todo_read",
-        description=TODO_LIST_DESCRIPTION_ZH,
-        input_params={
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    )
-    return TodoListTool(card, operation, workspace)
-
-
-def create_todo_modify_tool(operation: SysOperation, workspace: Optional[str] = None) -> TodoModifyTool:
-    """Create a configured instance of the TodoModifyTool
-
-    Args:
-        operation: Implement persistence for the todo list
-        workspace: Path for file system operations
-
-    Returns:
-        Configured TodoModifyTool instance
-    """
-    card = ToolCard(
-        name=f"todo_modify",
-        description=TODO_MODIFY_DESCRIPTION_ZH,
-        input_params={
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "description": "Operation type to perform",
-                    "enum": ["update", "delete", "append", "insert_after", "insert_before"]
-                },
-                "ids": {
-                    "type": "array",
-                    "description": "List of task IDs to delete",
-                    "items": {
-                        "type": "string",
-                        "description": "Unique task identifier"
-                    }
-                },
-                "todos": {
-                    "type": "array",
-                    "description": "Array of todo items to process based on the action field",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string", "description": "Unique task identifier"},
-                            "content": {"type": "string", "description": "detailed task description"},
-                            "activeForm": {"type": "string", "description": "present-tense task description"},
-                            "status": {
-                                "type": "string",
-                                "description": "task status",
-                                "enum": ["pending", "in_progress", "completed"]
-                            }
-                        },
-                        "required": ["id", "content", "activeForm", "status"]
-                    }
-                },
-                "todo_data": {
-                    "type": "array",
-                    "description": "Array for insert_after/insert_before actions",
-                    "items": [
-                        {
-                            "type": "string",
-                            "description": "Target task ID"
-                        },
-                        {
-                            "type": "array",
-                            "description": "List of todo objects to insert",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": {"type": "string", "description": "Unique task identifier"},
-                                    "content": {"type": "string", "description": "detailed task description"},
-                                    "activeForm": {"type": "string", "description": "present-tense task description"},
-                                    "status": {
-                                        "type": "string",
-                                        "description": "task status",
-                                        "enum": ["pending", "in_progress", "completed"]
-                                    }
-                                },
-                                "required": ["id", "content", "activeForm", "status"]
-                            }
-                        }
-                    ],
-                }
-            },
-            "required": ["action"]
-        }
-    )
-
-    return TodoModifyTool(card, operation, workspace)
-
-
-def create_todos_tool(operation: SysOperation, workspace: Optional[str] = None) -> List[TodoTool]:
-    return [create_todo_create_tool(operation, workspace),
-            create_todo_list_tool(operation, workspace),
-            create_todo_modify_tool(operation, workspace)]
+def create_todos_tool(operation: SysOperation, workspace: Optional[str] = None,
+                      language: str = "cn") -> List[TodoTool]:
+    return [
+        TodoCreateTool(operation, workspace, language),
+        TodoListTool(operation, workspace, language),
+        TodoModifyTool(operation, workspace, language)
+    ]

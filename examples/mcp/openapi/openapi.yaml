@@ -1,0 +1,182 @@
+openapi: "3.0.3"
+info:
+  title: Task API
+  description: A simple Task list REST API used as an OpenAPI MCP example.
+  version: "1.0.0"
+servers:
+  - url: http://127.0.0.1:3004
+    description: Local development server
+
+paths:
+  /tasks:
+    get:
+      operationId: list_tasks
+      summary: List all tasks
+      description: Return the full list of task items.
+      responses:
+        "200":
+          description: A list of task items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+
+    post:
+      operationId: create_task
+      summary: Create a new task
+      description: Add a new task item to the list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskCreate"
+      responses:
+        "201":
+          description: Task created successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+
+  /tasks/{task_id}:
+    get:
+      operationId: get_task
+      summary: Get a task by ID
+      description: Retrieve a single task item by its integer ID.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The unique ID of the task item
+      responses:
+        "200":
+          description: The requested task item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    put:
+      operationId: update_task
+      summary: Update a task
+      description: Update the title and/or completion status of a task item.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The unique ID of the task item to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskUpdate"
+      responses:
+        "200":
+          description: Updated task item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+    delete:
+      operationId: delete_task
+      summary: Delete a task
+      description: Permanently remove a task item by its ID.
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: The unique ID of the task item to delete
+      responses:
+        "200":
+          description: Deletion confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "404":
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+  schemas:
+    Task:
+      type: object
+      required: [id, title, completed]
+      properties:
+        id:
+          type: integer
+          description: Unique identifier for the task
+          example: 1
+        title:
+          type: string
+          description: Short description of the task
+          example: "Buy groceries"
+        completed:
+          type: boolean
+          description: Whether the task has been completed
+          example: false
+
+    TaskCreate:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          description: Short description of the task to create
+          example: "Buy groceries"
+        completed:
+          type: boolean
+          description: Initial completion status (defaults to false)
+          default: false
+
+    TaskUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+          description: Updated task description
+          example: "Buy organic groceries"
+        completed:
+          type: boolean
+          description: Updated completion status
+          example: true
+
+    Message:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Task deleted successfully"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Task not found"

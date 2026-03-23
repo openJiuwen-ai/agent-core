@@ -4,10 +4,10 @@
 """Unit tests for MilvusVectorStore."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
-from pymilvus import DataType as MilvusDataType
+from pymilvus import DataType as MilvusDataType, AsyncMilvusClient
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.store.base_vector_store import (
@@ -21,131 +21,138 @@ from openjiuwen.core.foundation.store.vector.milvus_vector_store import MilvusVe
 class TestMilvusVectorStoreInit:
     """Tests for MilvusVectorStore initialization."""
 
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    def test_init_with_default_database(self, mock_milvus_client):
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_init_with_default_database(self, mock_milvus_cli):
         """Test initialization with default database."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         # Access client property to trigger lazy initialization
-        _ = store.client
+        _ = await store.client()
 
-        mock_milvus_client.assert_called_once_with(uri="http://testhost:testport", token="", timeout=3)
-        assert store.milvus_uri == "http://testhost:testport"
+        mock_milvus_cli.assert_called_once_with(uri="http://vector-host:19530", token="", timeout=3)
+        assert store.milvus_uri == "http://vector-host:19530"
         assert store.milvus_token is None
         assert store.database_name == "default"
 
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    def test_init_with_token(self, mock_milvus_client):
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_init_with_token(self, mock_milvus_cli):
         """Test initialization with authentication token."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
 
         store = MilvusVectorStore(
-            milvus_uri="http://testhost:testport",
+            milvus_uri="http://vector-host:19530",
             milvus_token="test_token",
         )
 
         # Access client property to trigger lazy initialization
-        _ = store.client
+        _ = await store.client()
 
-        mock_milvus_client.assert_called_once_with(uri="http://testhost:testport", token="test_token", timeout=3)
+        mock_milvus_cli.assert_called_once_with(uri="http://vector-host:19530", token="test_token", timeout=3)
         assert store.milvus_token == "test_token"
 
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    def test_init_with_custom_database(self, mock_milvus_client):
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_init_with_custom_database(self, mock_milvus_cli):
         """Test initialization with custom database name."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default", "custom_db"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default", "custom_db"]
+        mock_milvus_cli.return_value = mock_cli
 
         store = MilvusVectorStore(
-            milvus_uri="http://testhost:testport",
+            milvus_uri="http://vector-host:19530",
             database_name="custom_db",
         )
 
         # Access client property to trigger lazy initialization
-        _ = store.client
+        _ = await store.client()
 
         # Database already exists, so create_database should NOT be called
-        mock_client.create_database.assert_not_called()
-        mock_client.use_database.assert_called_once_with("custom_db")
+        mock_cli.create_database.assert_not_called()
+        mock_cli.use_database.assert_called_once_with("custom_db")
         assert store.database_name == "custom_db"
 
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    def test_init_with_new_database(self, mock_milvus_client):
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_init_with_new_database(self, mock_milvus_cli):
         """Test initialization creates new database if it doesn't exist."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
 
         store = MilvusVectorStore(
-            milvus_uri="http://testhost:testport",
+            milvus_uri="http://vector-host:19530",
             database_name="new_db",
         )
 
         # Access client property to trigger lazy initialization
-        _ = store.client
+        _ = await store.client()
 
-        mock_client.create_database.assert_called_once_with("new_db")
-        mock_client.use_database.assert_called_once_with("new_db")
+        mock_cli.create_database.assert_called_once_with("new_db")
+        mock_cli.use_database.assert_called_once_with("new_db")
 
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    def test_lazy_init_no_connection_on_init(self, mock_milvus_client):
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_lazy_init_no_connection_on_init(self, mock_milvus_cli):
         """Test that client is NOT created during __init__ with lazy initialization."""
-        mock_milvus_client.return_value = MagicMock()
+        mock_milvus_cli.return_value = AsyncMock()
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         # Client should be created when accessed
-        _ = store.client
-        mock_milvus_client.assert_called_once()
+        _ = await store.client()
+        mock_milvus_cli.assert_called_once()
 
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    def test_client_reuse(self, mock_milvus_client):
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_client_reuse(self, mock_milvus_cli):
         """Test that the same client instance is reused for multiple accesses."""
-        mock_client_instance = MagicMock()
+        mock_client_instance = AsyncMock()
         mock_client_instance.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client_instance
+        mock_milvus_cli.return_value = mock_client_instance
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         # Access client multiple times
-        client1 = store.client
-        client2 = store.client
+        client1 = await store.client()
+        client2 = await store.client()
 
         # Should return the same instance
         assert client1 is client2
-        # MilvusClient should only be created once
-        mock_milvus_client.assert_called_once()
+        # AsyncMilvusClient should only be created once
+        mock_milvus_cli.assert_called_once()
 
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    def test_close_and_reconnect(self, mock_milvus_client):
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_close_and_reconnect(self, mock_milvus_cli):
         """Test that close() releases the client and it can be recreated."""
         # Return different instances for each call
-        mock_client_instance1 = MagicMock()
+        mock_client_instance1 = AsyncMock()
         mock_client_instance1.list_databases.return_value = ["default"]
-        mock_client_instance2 = MagicMock()
+        mock_client_instance2 = AsyncMock()
         mock_client_instance2.list_databases.return_value = ["default"]
-        mock_milvus_client.side_effect = [mock_client_instance1, mock_client_instance2]
+        mock_milvus_cli.side_effect = [mock_client_instance1, mock_client_instance2]
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         # First access creates the client
-        client1 = store.client
-        assert mock_milvus_client.call_count == 1
+        client1 = await store.client()
+        assert mock_milvus_cli.call_count == 1
         assert client1 is mock_client_instance1
 
         # Close releases the client
         store.close()
 
         # Next access creates a new client
-        client2 = store.client
-        assert mock_milvus_client.call_count == 2
+        client2 = await store.client()
+        assert mock_milvus_cli.call_count == 2
         assert client2 is mock_client_instance2
         assert client1 is not client2
 
@@ -154,17 +161,12 @@ class TestMilvusVectorStoreCreateCollection:
     """Tests for create_collection method."""
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_create_collection_with_schema_object(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_create_collection_with_schema_object(self, mock_milvus_cli):
         """Test creating a collection with a CollectionSchema object."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = None
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
-
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = False
         schema = CollectionSchema(
             description="Test collection",
             enable_dynamic_field=False,
@@ -174,24 +176,27 @@ class TestMilvusVectorStoreCreateCollection:
         )
         schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
         schema.add_field(FieldSchema(name="text", dtype=VectorDataType.VARCHAR, max_length=65535))
+        mock_schema_obj = MagicMock()
+        mock_cli.create_schema = MagicMock(return_value=mock_schema_obj)
+        mock_cli.prepare_index_params = MagicMock(return_value=MagicMock())
+        mock_milvus_cli.return_value = mock_cli
 
-        await store.create_collection("test_collection", schema)
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        # Calls to_thread twice: once for has_collection check, once for create
-        assert mock_to_thread.call_count == 2
+        await store.create_collection("milvus_vs_test_collection", schema)
+
+        # Verify client methods were called
+        mock_cli.has_collection.assert_called_once_with("milvus_vs_test_collection")
+        mock_cli.create_schema.assert_called_once()
+        mock_cli.create_collection.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_create_collection_with_dict_schema(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_create_collection_with_dict_schema(self, mock_milvus_cli):
         """Test creating a collection with a schema dictionary."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = None
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
-
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = False
         schema_dict = {
             "fields": [
                 {
@@ -214,80 +219,84 @@ class TestMilvusVectorStoreCreateCollection:
             "description": "Test collection",
             "enable_dynamic_field": False,
         }
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
+        mock_schema_obj = MagicMock()
+        mock_cli.create_schema = MagicMock(return_value=mock_schema_obj)
+        mock_cli.prepare_index_params = MagicMock(return_value=MagicMock())
+        mock_milvus_cli.return_value = mock_cli
 
-        await store.create_collection("test_collection", schema_dict)
 
-        # Calls to_thread twice: once for has_collection check, once for create
-        assert mock_to_thread.call_count == 2
+        await store.create_collection("milvus_vs_test_collection", schema_dict)
+
+        # Verify client methods were called
+        mock_cli.has_collection.assert_called_once_with("milvus_vs_test_collection")
+        mock_cli.create_schema.assert_called_once()
+        mock_cli.create_collection.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_create_collection_with_custom_metric(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_create_collection_with_custom_metric(self, mock_milvus_cli):
         """Test creating a collection with custom distance metric."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = None
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
-
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = False
         schema = CollectionSchema()
         schema.add_field(
             FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
         )
         schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+        mock_schema_obj = MagicMock()
+        mock_cli.create_schema = MagicMock(return_value=mock_schema_obj)
+        mock_cli.prepare_index_params = MagicMock(return_value=MagicMock())
+        mock_milvus_cli.return_value = mock_cli
 
-        await store.create_collection("test_collection", schema, distance_metric="L2")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        # Calls to_thread twice: once for has_collection check, once for create
-        assert mock_to_thread.call_count == 2
+
+        await store.create_collection("milvus_vs_test_collection", schema, distance_metric="L2")
+
+        # Verify client methods were called
+        mock_cli.has_collection.assert_called_once_with("milvus_vs_test_collection")
+        mock_cli.create_schema.assert_called_once()
+        mock_cli.create_collection.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_create_collection_with_custom_index_type(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_create_collection_with_custom_index_type(self, mock_milvus_cli):
         """Test creating a collection with custom index type."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = None
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
-
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = False
         schema = CollectionSchema()
         schema.add_field(
             FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
         )
         schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+        mock_schema_obj = MagicMock()
+        mock_cli.create_schema = MagicMock(return_value=mock_schema_obj)
+        mock_cli.prepare_index_params = MagicMock(return_value=MagicMock())
+        mock_milvus_cli.return_value = mock_cli
+        
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        await store.create_collection("test_collection", schema, index_type="HNSW")
 
-        # Calls to_thread twice: once for has_collection check, once for create
-        assert mock_to_thread.call_count == 2
+        await store.create_collection("milvus_vs_test_collection", schema, index_type="HNSW")
+
+        # Verify client methods were called
+        mock_cli.has_collection.assert_called_once_with("milvus_vs_test_collection")
+        mock_cli.create_schema.assert_called_once()
+        mock_cli.create_collection.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_create_collection_already_exists(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_create_collection_already_exists(self, mock_milvus_cli):
         """Test creating a collection that already exists does nothing."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = True
+        mock_milvus_cli.return_value = mock_cli
 
-        # First call to has_collection returns True (collection exists)
-        call_count = [0]
-
-        def _side_effect(func, *args, **kwargs):
-            call_count[0] += 1
-            # First call is has_collection check
-            if call_count[0] == 1:
-                return True  # Collection exists
-            return None
-
-        mock_to_thread.side_effect = _side_effect
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         schema = CollectionSchema()
         schema.add_field(
@@ -295,170 +304,142 @@ class TestMilvusVectorStoreCreateCollection:
         )
         schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
 
-        await store.create_collection("test_collection", schema)
+        await store.create_collection("milvus_vs_test_collection", schema)
 
-        # Should only call to_thread once for has_collection check, not for create_collection
-        assert call_count[0] == 1
+        # Verify client methods were called
+        mock_cli.has_collection.assert_called_once_with("milvus_vs_test_collection")
         # create_collection should not be called
-        mock_client.create_collection.assert_not_called()
+        mock_cli.create_collection.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_create_collection_missing_vector_dim(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_create_collection_missing_vector_dim(self, mock_milvus_cli):
         """Test creating a collection with FLOAT_VECTOR field missing dim raises BaseError."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_client.has_collection.return_value = False  # Collection doesn't exist
-        mock_milvus_client.return_value = mock_client
-
-        call_count = [0]
-
-        def _side_effect(func, *args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:  # First call is has_collection
-                return False
-            return func()  # Execute the actual function to trigger validation
-
-        mock_to_thread.side_effect = _side_effect
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
-
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = False  # Collection doesn't exist
         schema = CollectionSchema()
         schema.add_field(
             FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
         )
+        mock_schema_obj = MagicMock()
+        mock_cli.create_schema = MagicMock(return_value=mock_schema_obj)
+        mock_milvus_cli.return_value = mock_cli
+
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
+        
         schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR))  # Missing dim
 
         with pytest.raises(BaseError):
-            await store.create_collection("test_collection", schema)
+            await store.create_collection("milvus_vs_test_collection", schema)
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_create_collection_missing_vector_field(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_create_collection_missing_vector_field(self, mock_milvus_cli):
         """Test creating a collection without FLOAT_VECTOR field raises BaseError."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_client.has_collection.return_value = False  # Collection doesn't exist
-        mock_milvus_client.return_value = mock_client
-
-        call_count = [0]
-
-        def _side_effect(func, *args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:  # First call is has_collection
-                return False
-            return func()  # Execute the actual function to trigger validation
-
-        mock_to_thread.side_effect = _side_effect
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
-
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = False  # Collection doesn't exist
         schema = CollectionSchema()
         schema.add_field(
             FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
         )
+        mock_schema_obj = MagicMock()
+        mock_cli.create_schema = MagicMock(return_value=mock_schema_obj)
+        mock_milvus_cli.return_value = mock_cli
+
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
+
+        
 
         with pytest.raises(BaseError):
-            await store.create_collection("test_collection", schema)
+            await store.create_collection("milvus_vs_test_collection", schema)
 
 
 class TestMilvusVectorStoreDeleteCollection:
     """Tests for delete_collection method."""
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_delete_collection_success(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_delete_collection_success(self, mock_milvus_cli):
         """Test successful deletion of a collection."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = None
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = True
+        mock_milvus_cli.return_value = mock_cli
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        await store.delete_collection("test_collection")
+        await store.delete_collection("milvus_vs_test_collection")
 
-        assert mock_to_thread.call_count == 1
+        # Verify client methods were called
+        mock_cli.has_collection.assert_called_once_with(collection_name="milvus_vs_test_collection")
+        mock_cli.drop_collection.assert_called_once_with(collection_name="milvus_vs_test_collection")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_delete_collection_not_exists(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_delete_collection_not_exists(self, mock_milvus_cli):
         """Test deleting a collection that doesn't exist."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = False
+        mock_milvus_cli.return_value = mock_cli
 
-        from pymilvus import MilvusException
-
-        # Mock drop_collection to raise MilvusException for non-existent collection
-        mock_client.drop_collection.side_effect = MilvusException("collection not exist")
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         # Should not raise for non-existent collection (logs warning instead)
-        await store.delete_collection("test_collection")
+        await store.delete_collection("milvus_vs_test_collection")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_delete_collection_other_error(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_delete_collection_other_error(self, mock_milvus_cli):
         """Test deletion with other error raises exception."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = True
+        mock_milvus_cli.return_value = mock_cli
 
         from pymilvus import MilvusException
 
         # Mock drop_collection to raise MilvusException for other errors
-        def _side_effect(func):
-            if callable(func):
-                raise MilvusException("some other error")
-            return None
+        mock_cli.drop_collection.side_effect = MilvusException("some other error")
 
-        mock_to_thread.side_effect = _side_effect
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         with pytest.raises(MilvusException, match="some other error"):
-            await store.delete_collection("test_collection")
+            await store.delete_collection("milvus_vs_test_collection")
 
 
 class TestMilvusVectorStoreCollectionExists:
     """Tests for collection_exists method."""
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_collection_exists_true(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_collection_exists_true(self, mock_milvus_cli):
         """Test collection_exists returns True when collection exists."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = True
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = True
+        mock_milvus_cli.return_value = mock_cli
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        result = await store.collection_exists("test_collection")
+        result = await store.collection_exists("milvus_vs_test_collection")
 
         assert result is True
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_collection_exists_false(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_collection_exists_false(self, mock_milvus_cli):
         """Test collection_exists returns False when collection does not exist."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = False
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_cli.has_collection.return_value = False
+        mock_milvus_cli.return_value = mock_cli
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        result = await store.collection_exists("test_collection")
+        result = await store.collection_exists("milvus_vs_test_collection")
 
         assert result is False
 
@@ -467,16 +448,16 @@ class TestMilvusVectorStoreGetSchema:
     """Tests for get_schema method."""
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    async def test_get_schema_success(self, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_get_schema_success(self, mock_milvus_cli):
         """Test getting schema successfully."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.has_collection.return_value = True
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.has_collection.return_value = True
 
         # Mock describe_collection to return schema info
-        mock_client.describe_collection.return_value = {
+        mock_cli.describe_collection.return_value = {
             "description": "Test collection",
             "enable_dynamic_field": False,
             "fields": [
@@ -500,9 +481,9 @@ class TestMilvusVectorStoreGetSchema:
             ],
         }
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        schema = await store.get_schema("test_collection")
+        schema = await store.get_schema("milvus_vs_test_collection")
 
         assert len(schema.fields) == 3
         assert schema.fields[0].name == "id"
@@ -513,30 +494,30 @@ class TestMilvusVectorStoreGetSchema:
         assert schema.fields[1].dim == 768
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    async def test_get_schema_collection_not_exists(self, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_get_schema_collection_not_exists(self, mock_milvus_cli):
         """Test getting schema for non-existent collection raises BaseError."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.has_collection.return_value = False
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.has_collection.return_value = False
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         with pytest.raises(BaseError):
             await store.get_schema("non_existent_collection")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    async def test_get_schema_with_string_types(self, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_get_schema_with_string_types(self, mock_milvus_cli):
         """Test getting schema when field types are strings."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.has_collection.return_value = True
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.has_collection.return_value = True
 
         # Mock describe_collection with string types (some Milvus versions return strings)
-        mock_client.describe_collection.return_value = {
+        mock_cli.describe_collection.return_value = {
             "description": "Test collection",
             "enable_dynamic_field": True,
             "fields": [
@@ -554,9 +535,9 @@ class TestMilvusVectorStoreGetSchema:
             ],
         }
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        schema = await store.get_schema("test_collection")
+        schema = await store.get_schema("milvus_vs_test_collection")
 
         assert len(schema.fields) == 2
         assert schema.fields[0].dtype == VectorDataType.VARCHAR
@@ -567,23 +548,21 @@ class TestMilvusVectorStoreAddDocs:
     """Tests for add_docs method."""
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_add_docs_success(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_add_docs_success(self, mock_milvus_cli):
         """Test adding documents successfully."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
                 {"name": "text", "type": "VARCHAR"},
             ]
         }
-        mock_to_thread.return_value = None
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         docs = [
             {
@@ -598,29 +577,29 @@ class TestMilvusVectorStoreAddDocs:
             },
         ]
 
-        await store.add_docs("test_collection", docs)
+        await store.add_docs("milvus_vs_test_collection", docs)
 
-        # Should call describe_collection + insert + flush
-        assert mock_to_thread.call_count == 3
+        # Verify client methods were called
+        mock_cli.describe_collection.assert_called_once_with(collection_name="milvus_vs_test_collection")
+        mock_cli.insert.assert_called_once()
+        mock_cli.flush.assert_called_once_with(collection_name="milvus_vs_test_collection")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_add_docs_with_batch_size(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_add_docs_with_batch_size(self, mock_milvus_cli):
         """Test adding documents with custom batch size."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
                 {"name": "text", "type": "VARCHAR"},
             ]
         }
-        mock_to_thread.return_value = None
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         docs = [
             {
@@ -631,29 +610,28 @@ class TestMilvusVectorStoreAddDocs:
             for i in range(10)
         ]
 
-        await store.add_docs("test_collection", docs, batch_size=3)
+        await store.add_docs("milvus_vs_test_collection", docs, batch_size=3)
 
-        # Should call describe_collection + 4 batch inserts + flush = 6 calls
-        assert mock_to_thread.call_count == 6
+        # Should call insert 4 times for batches and 1 time for flush
+        assert mock_cli.insert.call_count == 4
+        mock_cli.flush.assert_called_once_with(collection_name="milvus_vs_test_collection")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_add_docs_zero_batch_size(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_add_docs_zero_batch_size(self, mock_milvus_cli):
         """Test adding documents with zero batch size uses default."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
                 {"name": "text", "type": "VARCHAR"},
             ]
         }
-        mock_to_thread.return_value = None
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         docs = [
             {
@@ -663,24 +641,24 @@ class TestMilvusVectorStoreAddDocs:
             },
         ]
 
-        await store.add_docs("test_collection", docs, batch_size=0)
+        await store.add_docs("milvus_vs_test_collection", docs, batch_size=0)
 
-        # Should call describe_collection + insert + flush = 3 calls
-        assert mock_to_thread.call_count == 3
+        # Verify client methods were called
+        mock_cli.insert.assert_called_once()
+        mock_cli.flush.assert_called_once_with(collection_name="milvus_vs_test_collection")
 
 
 class TestMilvusVectorStoreSearch:
     """Tests for search method."""
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_search_success(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_search_success(self, mock_milvus_cli):
         """Test successful vector search."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
@@ -705,19 +683,12 @@ class TestMilvusVectorStoreSearch:
             ]
         ]
 
-        # Side effect that returns mock_results for search, executes describe_collection
-        def _side_effect(func, *args, **kwargs):
-            if callable(func):
-                return func(*args, **kwargs)
-            return mock_results
+        mock_cli.search.return_value = mock_results
 
-        mock_to_thread.side_effect = _side_effect
-        mock_client.search.return_value = mock_results
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            "milvus_vs_test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
         )
 
         assert len(results) == 2
@@ -726,14 +697,13 @@ class TestMilvusVectorStoreSearch:
         assert results[0].score == 0.95
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_search_with_filters(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_search_with_filters(self, mock_milvus_cli):
         """Test search with filters."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
@@ -751,18 +721,12 @@ class TestMilvusVectorStoreSearch:
             ]
         ]
 
-        def _side_effect(func, *args, **kwargs):
-            if callable(func):
-                return func(*args, **kwargs)
-            return mock_results
+        mock_cli.search.return_value = mock_results
 
-        mock_to_thread.side_effect = _side_effect
-        mock_client.search.return_value = mock_results
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         results = await store.search(
-            "test_collection",
+            "milvus_vs_test_collection",
             [0.1, 0.2, 0.3],
             "embedding",
             top_k=5,
@@ -772,14 +736,13 @@ class TestMilvusVectorStoreSearch:
         assert len(results) == 1
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_search_with_pk_field(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_search_with_pk_field(self, mock_milvus_cli):
         """Test search results with pk field instead of id."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
@@ -790,31 +753,24 @@ class TestMilvusVectorStoreSearch:
             [{"pk": "123", "distance": 0.1, "entity": {"text": "Text 1"}}]
         ]
 
-        def _side_effect(func, *args, **kwargs):
-            if callable(func):
-                return func(*args, **kwargs)
-            return mock_results
+        mock_cli.search.return_value = mock_results
 
-        mock_to_thread.side_effect = _side_effect
-        mock_client.search.return_value = mock_results
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            "milvus_vs_test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
         )
 
         assert results[0].fields["id"] == "123"
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_search_with_json_metadata(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_search_with_json_metadata(self, mock_milvus_cli):
         """Test search with JSON strings in entity are parsed."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
@@ -825,31 +781,24 @@ class TestMilvusVectorStoreSearch:
             [{"id": "doc1", "distance": 0.1, "entity": {"tags": json.dumps(["tag1", "tag2"])}}]
         ]
 
-        def _side_effect(func, *args, **kwargs):
-            if callable(func):
-                return func(*args, **kwargs)
-            return mock_results
+        mock_cli.search.return_value = mock_results
 
-        mock_to_thread.side_effect = _side_effect
-        mock_client.search.return_value = mock_results
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            "milvus_vs_test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
         )
 
         assert results[0].fields["tags"] == ["tag1", "tag2"]
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_search_with_output_fields(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_search_with_output_fields(self, mock_milvus_cli):
         """Test search with custom output fields."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
@@ -860,18 +809,12 @@ class TestMilvusVectorStoreSearch:
 
         mock_results = [[{"id": "doc1", "distance": 0.1, "entity": {"text": "Text 1"}}]]
 
-        def _side_effect(func, *args, **kwargs):
-            if callable(func):
-                return func(*args, **kwargs)
-            return mock_results
+        mock_cli.search.return_value = mock_results
 
-        mock_to_thread.side_effect = _side_effect
-        mock_client.search.return_value = mock_results
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         results = await store.search(
-            "test_collection",
+            "milvus_vs_test_collection",
             [0.1, 0.2, 0.3],
             "embedding",
             top_k=5,
@@ -881,14 +824,13 @@ class TestMilvusVectorStoreSearch:
         assert len(results) == 1
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_search_ip_distance_conversion(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_search_ip_distance_conversion(self, mock_milvus_cli):
         """Test IP distance conversion (Milvus returns similarity in [-1,1])."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
@@ -907,18 +849,12 @@ class TestMilvusVectorStoreSearch:
             ]
         ]
 
-        def _side_effect(func, *args, **kwargs):
-            if callable(func):
-                return func(*args, **kwargs)
-            return mock_results
+        mock_cli.search.return_value = mock_results
 
-        mock_to_thread.side_effect = _side_effect
-        mock_client.search.return_value = mock_results
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5, metric_type="IP"
+            "milvus_vs_test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5, metric_type="IP"
         )
 
         assert len(results) == 3
@@ -927,14 +863,13 @@ class TestMilvusVectorStoreSearch:
         assert results[2].score == 0.0
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_search_cosine_distance_conversion(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_search_cosine_distance_conversion(self, mock_milvus_cli):
         """Test COSINE distance conversion (Milvus returns similarity in [-1,1])."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_client.describe_collection.return_value = {
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
+        mock_cli.describe_collection.return_value = {
             "fields": [
                 {"name": "id", "type": "VARCHAR"},
                 {"name": "embedding", "type": "FLOAT_VECTOR"},
@@ -953,18 +888,12 @@ class TestMilvusVectorStoreSearch:
             ]
         ]
 
-        def _side_effect(func, *args, **kwargs):
-            if callable(func):
-                return func(*args, **kwargs)
-            return mock_results
+        mock_cli.search.return_value = mock_results
 
-        mock_to_thread.side_effect = _side_effect
-        mock_client.search.return_value = mock_results
-
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            "milvus_vs_test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
         )
 
         assert len(results) == 3
@@ -977,63 +906,65 @@ class TestMilvusVectorStoreDeleteDocsByIds:
     """Tests for delete_docs_by_ids method."""
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_delete_docs_by_ids_success(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_delete_docs_by_ids_success(self, mock_milvus_cli):
         """Test deleting documents by ids successfully."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = None
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        await store.delete_docs_by_ids("test_collection", ["doc1", "doc2"])
+        await store.delete_docs_by_ids("milvus_vs_test_collection", ["doc1", "doc2"])
 
-        assert mock_to_thread.call_count == 1
+        mock_cli.delete.assert_called_once_with(
+            collection_name="milvus_vs_test_collection",
+            ids=["doc1", "doc2"],
+        )
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    async def test_delete_docs_by_ids_empty_list(self, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_delete_docs_by_ids_empty_list(self, mock_milvus_cli):
         """Test deleting with empty id list returns early."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         # Should not raise, just return
-        await store.delete_docs_by_ids("test_collection", [])
+        await store.delete_docs_by_ids("milvus_vs_test_collection", [])
 
 
 class TestMilvusVectorStoreDeleteDocsByFilters:
     """Tests for delete_docs_by_filters method."""
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.asyncio.to_thread")
-    async def test_delete_docs_by_filters_success(self, mock_to_thread, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_delete_docs_by_filters_success(self, mock_milvus_cli):
         """Test deleting documents by filters successfully."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
-        mock_to_thread.return_value = None
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
-        await store.delete_docs_by_filters("test_collection", {"source": "test"})
+        await store.delete_docs_by_filters("milvus_vs_test_collection", {"source": "test"})
 
-        assert mock_to_thread.call_count == 1
+        mock_cli.delete.assert_called_once_with(
+            collection_name="milvus_vs_test_collection",
+            filter='source == "test"',
+        )
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.MilvusClient")
-    async def test_delete_docs_by_filters_empty(self, mock_milvus_client):
+    @patch("openjiuwen.core.foundation.store.vector.milvus_vector_store.AsyncMilvusClient")
+    async def test_delete_docs_by_filters_empty(self, mock_milvus_cli):
         """Test deleting with empty filters returns early."""
-        mock_client = MagicMock()
-        mock_client.list_databases.return_value = ["default"]
-        mock_milvus_client.return_value = mock_client
+        mock_cli = AsyncMock()
+        mock_cli.list_databases.return_value = ["default"]
+        mock_milvus_cli.return_value = mock_cli
 
-        store = MilvusVectorStore(milvus_uri="http://testhost:testport")
+        store = MilvusVectorStore(milvus_uri="http://vector-host:19530")
 
         # Should not raise, just return
-        await store.delete_docs_by_filters("test_collection", {})
+        await store.delete_docs_by_filters("milvus_vs_test_collection", {})

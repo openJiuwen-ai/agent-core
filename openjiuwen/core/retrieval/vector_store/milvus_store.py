@@ -9,7 +9,7 @@ Supports vector search, sparse search (BM25), and hybrid search.
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker, WeightedRanker
+from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
 from pymilvus.client.types import LoadState
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -23,13 +23,10 @@ from openjiuwen.core.foundation.store.vector.utils import (
 )
 from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
-from openjiuwen.core.retrieval.common.result_ranking import register_result_ranker_cls
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.retrieval.utils.common import create_milvus_alias
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
-
-# Register ranker support
-register_result_ranker_cls(name="milvus", weighted=WeightedRanker, rrf=RRFRanker)
 
 
 class MilvusVectorStore(VectorStore):
@@ -45,6 +42,7 @@ class MilvusVectorStore(VectorStore):
         sparse_vector_field: str = "sparse_vector",
         metadata_field: str = "metadata",
         doc_id_field: str = "document_id",
+        milvus_alias: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -58,6 +56,7 @@ class MilvusVectorStore(VectorStore):
             vector_field: Vector field name (str) or definition (MilvusVectorField)
             sparse_vector_field: Sparse vector field name
             metadata_field: Metadata field name
+            milvus_alias: Optional connection alias
         """
         self.config = config
         self.collection_name = config.collection_name
@@ -91,6 +90,7 @@ class MilvusVectorStore(VectorStore):
             database_name=self.config.database_name,
             path_or_uri=self.milvus_uri,
             token=self.milvus_token,
+            alias=create_milvus_alias(milvus_alias, uri=milvus_uri, token=milvus_token),
         )
         self._collection_loaded = False
 
@@ -107,7 +107,7 @@ class MilvusVectorStore(VectorStore):
     @staticmethod
     def create_client(database_name: str, path_or_uri: str, token: str = "", **kwargs) -> MilvusClient:
         """Create Milvus client and ensure database exists"""
-        client = MilvusClient(uri=path_or_uri, token=token)
+        client = MilvusClient(uri=path_or_uri, token=token, **kwargs)
         if database_name and database_name != "default":
             if database_name not in client.list_databases():
                 client.create_database(database_name)

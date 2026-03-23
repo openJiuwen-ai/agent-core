@@ -171,6 +171,12 @@ class EventQueue:
             subscriptions[EventType.TASK_FAILED] = sub
             topics[EventType.TASK_FAILED] = topic
 
+            # Subscribe to follow-up event
+            topic = self._build_topic(agent_id, session_id, EventType.FOLLOW_UP)
+            sub = self._subscribe_event(topic, self._event_handler.handle_follow_up)
+            subscriptions[EventType.FOLLOW_UP] = sub
+            topics[EventType.FOLLOW_UP] = topic
+
             return subscriptions, topics
 
         except Exception as e:
@@ -228,6 +234,10 @@ class EventQueue:
         topic = self._build_topic(agent_id, session_id, EventType.TASK_FAILED)
         await self._unsubscribe_event(topic)
 
+        # Unsubscribe from follow-up event
+        topic = self._build_topic(agent_id, session_id, EventType.FOLLOW_UP)
+        await self._unsubscribe_event(topic)
+
         return topics
 
     async def publish_event(
@@ -273,6 +283,37 @@ class EventQueue:
                 error_msg=str(e),
                 cause=e
             ) from e
+
+    async def publish_event_async(
+            self,
+            agent_id: str,
+            session: "Session",
+            event: Event,
+    ) -> None:
+        """Fire-and-forget event publish.
+
+        Enqueues the event and returns immediately without
+        waiting for the handler to finish processing.
+
+        Args:
+            agent_id: Agent ID
+            session: Session object
+            event: Event to be published
+        """
+        session_id = session.get_session_id()
+        topic = self._build_topic(
+            agent_id, session_id, event.event_type
+        )
+        from openjiuwen.core.runner.message_queue_base import (
+            QueueMessage,
+        )
+        queue_message = QueueMessage()
+        queue_message.payload = {
+            "event": event, "session": session
+        }
+        await self._queue.produce_message(
+            topic, queue_message
+        )
 
     async def unsubscribe_all(self) -> None:
         """Unsubscribe from all topics"""

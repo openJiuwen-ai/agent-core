@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from abc import (
     ABC,
-    ABCMeta,
     abstractmethod,
 )
 from typing import (
@@ -14,6 +13,7 @@ from typing import (
     Union,
 )
 
+from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import (
@@ -41,37 +41,32 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
-class _BaseModelClientMeta(ABCMeta):
-    def __call__(cls, *args, **kwargs):
-        instance = super().__call__(*args, **kwargs)
-        from openjiuwen.core.runner import Runner
-        from openjiuwen.core.runner.callback.events import LLMCallEvents
-        _fw = Runner.callback_framework
-        fn = instance.invoke
-        fn = _fw.emit_before(LLMCallEvents.LLM_INVOKE_INPUT)(fn)
-        fn = _fw.transform_io(
-            input_event=LLMCallEvents.LLM_INVOKE_INPUT,
-            output_event=LLMCallEvents.LLM_INVOKE_OUTPUT,
-        )(fn)
-        fn = _fw.emit_after(LLMCallEvents.LLM_INVOKE_OUTPUT)(fn)
-        instance.invoke = fn
-
-        fn = instance.stream
-        fn = _fw.emit_before(LLMCallEvents.LLM_STREAM_INPUT)(fn)
-        fn = _fw.transform_io(
-            input_event=LLMCallEvents.LLM_STREAM_INPUT,
-            output_event=LLMCallEvents.LLM_STREAM_OUTPUT,
-        )(fn)
-        fn = _fw.emit_after(LLMCallEvents.LLM_STREAM_OUTPUT, item_key="result")(fn)
-        instance.stream = fn
-        return instance
-
-
-class BaseModelClient(ABC, metaclass=_BaseModelClientMeta):
+class BaseModelClient(ABC):
     """LLM Model Client Abstract Base Class
 
     All Model Client implementations must inherit from this class and implement the abstract methods.
     """
+    __client_name__: str = None
+    __client_type__: str = "llm"
+
+    def __init_subclass__(cls, **kwargs):
+        """Initialize subclass and register it if it's a client class.
+
+        This method is called whenever a class inherits from BaseClient.
+        It automatically registers any class that defines __client_name__
+        and __client_type__ attributes with the global client registry.
+
+        Args:
+            **kwargs: Additional keyword arguments passed to the subclass.
+        """
+        super().__init_subclass__(**kwargs)
+
+        # Skip registration for BaseClient itself (though this method won't be called for BaseClient)
+        # Check if client name and type are defined
+        if hasattr(cls, '__client_name__') and hasattr(cls, '__client_type__'):
+            # Automatically register with the global registry
+            if cls.__client_name__ is not None:  # Ensure it's actually set
+                get_client_registry().register_class(cls)
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         """Initialize Model Client
@@ -86,7 +81,7 @@ class BaseModelClient(ABC, metaclass=_BaseModelClientMeta):
 
     def _get_client_name(self) -> str:
         """Get client name for error messages (subclasses can override)
-        
+
         Returns:
             Client name string
         """
@@ -95,7 +90,7 @@ class BaseModelClient(ABC, metaclass=_BaseModelClientMeta):
     def _validate_config(self):
         """Validate configuration parameters (subclasses can optionally override)"""
         client_name = self._get_client_name()
-        
+
         if not self.model_client_config.api_key:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg=f"model client config api_key is required for {client_name}.")
@@ -270,14 +265,14 @@ class BaseModelClient(ABC, metaclass=_BaseModelClientMeta):
         # Add other parameters (filter out internal parameters)
         # parser and output_parser are for internal use and should not be passed to model API
         internal_params = {"parser", "output_parser"}
-        
+
         # Get all fields from model_config (including extra fields)
         extra_params = self.model_config.model_dump(
             exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
             exclude_none=True
         )
         params.update(extra_params)
-        
+
         # Then add kwargs parameters (will override model_config params with same key)
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in internal_params}
         params.update(filtered_kwargs)
@@ -479,4 +474,3 @@ class BaseModelClient(ABC, metaclass=_BaseModelClientMeta):
             VideoGenerationResponse: Generated video response
         """
         pass
-

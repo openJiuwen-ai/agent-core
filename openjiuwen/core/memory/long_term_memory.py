@@ -35,6 +35,8 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import memory_logger
 from openjiuwen.core.common.logging.events import LogEventType
 from openjiuwen.core.memory.migration.run_migrations import run_kv_migrations, run_vector_migrations, run_sql_migrations
+from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
+from openjiuwen.core.runner.callback.events import MemoryEvents
 
 
 class MemInfo(BaseModel):
@@ -84,7 +86,7 @@ class LongTermMemory(metaclass=Singleton):
         self.generator = None
         self.fragment_type = None
         # llm
-        self._base_llm: Tuple[str, Model] | None = None
+        self._base_llm: Model | None = None
         # embedding
         self._base_embed: Embedding | None = None
         # embedding model cache
@@ -213,7 +215,7 @@ class LongTermMemory(metaclass=Singleton):
         if config.default_model_cfg and config.default_model_client_cfg:
             llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
                                                     model_client_config=config.default_model_client_cfg)
-            self._base_llm = (config.default_model_cfg.model_name, llm)
+            self._base_llm = llm
 
     async def set_scope_config(self, scope_id: str, memory_scope_config: MemoryScopeConfig) -> bool:
         """
@@ -383,6 +385,7 @@ class LongTermMemory(metaclass=Singleton):
         )
         return True
 
+    @_fw.emit_before(MemoryEvents.MEMORY_ADDED)
     async def add_messages(
             self,
             messages: list[BaseMessage],
@@ -403,6 +406,7 @@ class LongTermMemory(metaclass=Singleton):
                 user_id=user_id
             )
             return
+
         msg_id = "-1"
         llm = await self._get_scope_llm(scope_id)
         semantic_store = await self._create_semantic_store_with_embedding(scope_id)
@@ -466,6 +470,7 @@ class LongTermMemory(metaclass=Singleton):
                 base_chat_model=llm,
                 message_mem_id=msg_id,
                 timestamp=timestamp_str,
+                forbidden_variables=self._sys_mem_config.forbidden_variables,
                 summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token
             )
             try:
@@ -499,7 +504,7 @@ class LongTermMemory(metaclass=Singleton):
                     error_msg=f"{str(e)}",
                     cause=e
                 ) from e
-            return
+        return
 
     async def get_recent_messages(
             self,
@@ -577,6 +582,7 @@ class LongTermMemory(metaclass=Singleton):
             scope_id=scope_id
         )
 
+    @_fw.emit_before(MemoryEvents.MEMORY_DELETED)
     async def delete_mem_by_id(self,
                                mem_id: str,
                                user_id: str = DEFAULT_VALUE,
@@ -614,6 +620,7 @@ class LongTermMemory(metaclass=Singleton):
                 semantic_store=semantic_store
             )
 
+    @_fw.emit_before(MemoryEvents.MEMORY_DELETED)
     async def delete_mem_by_user_id(self,
                                     user_id: str = DEFAULT_VALUE,
                                     scope_id: str = DEFAULT_VALUE):
@@ -649,6 +656,7 @@ class LongTermMemory(metaclass=Singleton):
                 semantic_store=semantic_store
             )
 
+    @_fw.emit_before(MemoryEvents.MEMORY_UPDATED)
     async def update_mem_by_id(self,
                                mem_id: str,
                                memory: str,
@@ -735,6 +743,7 @@ class LongTermMemory(metaclass=Singleton):
             error_msg=f"names must be str | list[str] | None",
         )
 
+    @_fw.emit_before(MemoryEvents.MEMORY_SEARCH_STARTED)
     async def search_user_mem(self,
                               query: str,
                               num: int,
@@ -742,7 +751,6 @@ class LongTermMemory(metaclass=Singleton):
                               scope_id: str = DEFAULT_VALUE,
                               threshold: float = 0.3
                               ) -> list[MemResult]:
-
         if not self._validate_id(event_type=LogEventType.MEMORY_RETRIEVE, scope_id=scope_id):
             memory_logger.error(
                 "Invalid scope_id format.",
@@ -784,6 +792,9 @@ class LongTermMemory(metaclass=Singleton):
                 )
                 for item in search_data
             ]
+            await trigger(MemoryEvents.MEMORY_SEARCH_FINISHED,
+                       scope_id=scope_id, user_id=user_id, query=query,
+                       result_count=len(mem_results), search_type="user_mem")
             return mem_results
         except AttributeError as e:
             memory_logger.debug(
@@ -816,6 +827,7 @@ class LongTermMemory(metaclass=Singleton):
             )
             return []
 
+    @_fw.emit_before(MemoryEvents.MEMORY_SEARCH_STARTED)
     async def search_user_history_summary(
             self,
             query: str,
@@ -875,6 +887,9 @@ class LongTermMemory(metaclass=Singleton):
                 )
                 for item in search_data
             ]
+            await trigger(MemoryEvents.MEMORY_SEARCH_FINISHED,
+                       scope_id=scope_id, user_id=user_id, query=query,
+                       result_count=len(mem_results), search_type="history_summary")
             return mem_results
         except AttributeError as e:
             memory_logger.debug(
@@ -1138,25 +1153,21 @@ class LongTermMemory(metaclass=Singleton):
         )
         return None
 
-    async def _get_scope_llm(self, scope_id: str) -> Tuple[str, Model]:
+    async def _get_scope_llm(self, scope_id: str) -> Model:
         """
-        Get both LLM and embedding model for the scope with a single kv_store access.
-        Note: Embedding model is now set through _set_semantic_store_embedding_model method,
-        so this method only returns LLM for backward compatibility.
+        Get LLM for the scope.
 
         Args:
             scope_id: scope/scope identifier
 
         Returns:
-            Tuple[str, Model]: LLM model name and instance
+            Model: LLM instance
         """
         try:
             config = await self._get_scope_config(scope_id)
 
             if config and config.model_cfg and config.model_client_cfg:
-                llm = (config.model_cfg.model_name,
-                       LongTermMemory._get_llm_from_config(config.model_cfg, config.model_client_cfg))
-                return llm
+                return LongTermMemory._get_llm_from_config(config.model_cfg, config.model_client_cfg)
 
             # If the LLM fails to be obtained, try to use the system default configuration.
             elif not self._sys_mem_config:
@@ -1174,10 +1185,8 @@ class LongTermMemory(metaclass=Singleton):
                     scope_id=scope_id
                 )
             else:
-                llm = (self._sys_mem_config.default_model_cfg.model_name,
-                       LongTermMemory._get_llm_from_config(self._sys_mem_config.default_model_cfg,
-                                                           self._sys_mem_config.default_model_client_cfg))
-                return llm
+                return LongTermMemory._get_llm_from_config(self._sys_mem_config.default_model_cfg,
+                                                         self._sys_mem_config.default_model_client_cfg)
             return self._base_llm
 
         except Exception as e:

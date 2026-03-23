@@ -10,6 +10,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
+from openjiuwen.core.foundation.llm.schema.config import ProviderType
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
     AudioGenerationResponse
 from openjiuwen.core.foundation.llm.schema.message import (
@@ -24,10 +25,13 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
 class SiliconFlowModelClient(BaseModelClient):
     """SiliconFlow API client supporting GPT models and OpenAI-compatible services."""
+    __client_name__ = ProviderType.SiliconFlow.name
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
@@ -171,6 +175,16 @@ class SiliconFlowModelClient(BaseModelClient):
         )
 
         try:
+            await trigger(
+                LLMCallEvents.LLM_INPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"))
+
             async with self._apost(params, timeout=timeout) as response:
                 data = await response.json()
                 llm_logger.info(
@@ -198,9 +212,26 @@ class SiliconFlowModelClient(BaseModelClient):
                 )
                 assistant_message = await self._parse_response(data, output_parser)
 
+                if tracer_record_data:
+                    await tracer_record_data(llm_response=assistant_message)
+
+                await trigger(
+                    LLMCallEvents.LLM_OUTPUT,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    response=assistant_message.content,
+                    usage=assistant_message.usage_metadata,
+                    tool_calls=assistant_message.tool_calls)
+
                 return assistant_message
 
         except Exception as e:
+            await trigger(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=False,
+                error=e)
             llm_logger.error(
                 "SiliconFlow API async invoke error.",
                 event_type=LogEventType.LLM_CALL_ERROR,
@@ -268,10 +299,32 @@ class SiliconFlowModelClient(BaseModelClient):
             await tracer_record_data(llm_params=params)
 
         try:
+            await trigger(
+                LLMCallEvents.LLM_INPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=True)
+
+            final_message = None
             async with self._apost(params, timeout=timeout) as response:
                 if output_parser:
                     # Use streaming parser
                     async for parsed_result in self._astream_with_parser(response, output_parser):
+                        await trigger(
+                            LLMCallEvents.LLM_OUTPUT,
+                            model_name=params.get("model"),
+                            model_provider=self.model_client_config.client_provider,
+                            result=parsed_result,
+                            is_stream=True)
+                        if final_message:
+                            final_message = final_message + parsed_result
+                        else:
+                            final_message = parsed_result
                         yield parsed_result
                 else:
                     # Direct return without parser
@@ -279,9 +332,27 @@ class SiliconFlowModelClient(BaseModelClient):
                         if line:
                             parsed_chunk = self._parse_stream_chunk(line)
                             if parsed_chunk:
+                                await trigger(
+                                    LLMCallEvents.LLM_OUTPUT,
+                                    model_name=params.get("model"),
+                                    model_provider=self.model_client_config.client_provider,
+                                    result=parsed_chunk,
+                                    is_stream=True)
+                                if final_message:
+                                    final_message = final_message + parsed_chunk
+                                else:
+                                    final_message = parsed_chunk
                                 yield parsed_chunk
+            if tracer_record_data:
+                await tracer_record_data(llm_response=final_message)
 
         except Exception as e:
+            await trigger(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                error=e)
             llm_logger.error(
                 "SiliconFlow API async stream error.",
                 event_type=LogEventType.LLM_CALL_ERROR,

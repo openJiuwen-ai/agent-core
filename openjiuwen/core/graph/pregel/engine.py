@@ -16,6 +16,8 @@ from openjiuwen.core.graph.pregel.constants import END, TASK_STATUS_INTERRUPT, S
     PARENT_NS, NS, SESSION_ID, RECURSION_LIMIT
 from openjiuwen.core.graph.pregel.task import TaskExecutorPool
 from openjiuwen.core.graph.store import GraphState, PendingNode, Store, create_state
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 
 class PregelLoop:
@@ -124,7 +126,7 @@ class PregelLoop:
 
         if self.step > self.max_step:
             raise RecursionError(
-                f"Recursion limit of {self.max_step} reached at step {self.step} ns: {self.config[NS]}."
+                f"Recursion limit of {self.max_step} reached at step {self.step}"
             )
 
         for name in self.active_nodes:
@@ -195,6 +197,7 @@ class PregelLoop:
 
 
 class Pregel:
+
     def __init__(
             self,
             nodes: Dict[str, PregelNode],
@@ -236,8 +239,15 @@ class Pregel:
         loop = PregelLoop(self, inner_config)
         try:
             await loop.init()
+            await trigger(
+                WorkflowEvents.LOOP_STARTED,
+                graph_id=inner_config.get(NS))
             while await loop.run_step():
                 pass
+            await trigger(
+                WorkflowEvents.LOOP_FINISHED,
+                graph_id=inner_config.get(NS),
+                total_steps=loop.step)
             # Add GRAPH_END log
             graph_logger.info(
                 "Pregel graph engine execution completed",
@@ -248,6 +258,10 @@ class Pregel:
             )
             return {}
         except GraphInterrupt as e:
+            await trigger(
+                WorkflowEvents.LOOP_FINISHED,
+                graph_id=inner_config.get(NS),
+                total_steps=loop.step)
             # Add GRAPH_END log (interrupted case)
             graph_logger.info(
                 "Pregel graph engine execution interrupted",

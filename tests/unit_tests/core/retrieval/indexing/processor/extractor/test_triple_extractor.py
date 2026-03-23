@@ -14,6 +14,11 @@ from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.indexing.processor.extractor.triple_extractor import TripleExtractor
 
 
+class _TestableTripleExtractor(TripleExtractor):
+    def parse_triples_for_test(self, content, doc_id, chunk_id):
+        return self._parse_triples(content, doc_id, chunk_id)
+
+
 @pytest.fixture
 def mock_llm_client():
     """Create mock LLM client"""
@@ -122,4 +127,59 @@ class TestTripleExtractor:
         )
         triples = await extractor.extract([])
         assert len(triples) == 0
-        mock_llm_client.ainvoke.assert_not_called()
+        mock_llm_client.invoke.assert_not_called()
+
+    @staticmethod
+    def test_parse_triples_json_array(mock_llm_client):
+        ex = _TestableTripleExtractor(llm_client=mock_llm_client, model_name="m")
+        triples, ok = ex.parse_triples_for_test('[["a", "b", "c"]]', "d1", "c1")
+        assert ok and len(triples) == 1
+        assert triples[0].subject == "a" and triples[0].predicate == "b" and triples[0].object == "c"
+
+    @staticmethod
+    def test_parse_triples_extra_fields_ignored(mock_llm_client):
+        ex = _TestableTripleExtractor(llm_client=mock_llm_client, model_name="m")
+        triples, ok = ex.parse_triples_for_test('[["a", "b", "c", "ignored", 99]]', "d1", "c1")
+        assert ok and triples[0].object == "c"
+
+    @staticmethod
+    def test_parse_triples_wrapped_dict(mock_llm_client):
+        ex = _TestableTripleExtractor(llm_client=mock_llm_client, model_name="m")
+        triples, ok = ex.parse_triples_for_test(
+            '{"triples": [["x", "y", "z"]]}', "d1", "c1"
+        )
+        assert ok and len(triples) == 1 and triples[0].subject == "x"
+
+    @staticmethod
+    def test_parse_triples_prompt_shape(mock_llm_client):
+        ex = _TestableTripleExtractor(llm_client=mock_llm_client, model_name="m")
+        triples, ok = ex.parse_triples_for_test(
+            '{"named_entities": ["Alice", "Bob"], "triples": [["Alice", "knows", "Bob"]]}',
+            "d1",
+            "c1",
+        )
+        assert ok and len(triples) == 1
+        assert triples[0].subject == "Alice"
+
+    @staticmethod
+    def test_parse_triples_missing_triples_key_fails(mock_llm_client):
+        ex = _TestableTripleExtractor(llm_client=mock_llm_client, model_name="m")
+        triples, ok = ex.parse_triples_for_test('{"named_entities": ["Alice", "Bob"]}', "d1", "c1")
+        assert not ok and triples == []
+
+    @staticmethod
+    def test_parse_triples_invalid_items_ignored(mock_llm_client):
+        ex = _TestableTripleExtractor(llm_client=mock_llm_client, model_name="m")
+        triples, ok = ex.parse_triples_for_test(
+            '{"triples": [["a", "b", "c"], ["x"], {"bad": 1}, ["y", ["nested"], "z"]]}',
+            "d1",
+            "c1",
+        )
+        assert ok and len(triples) == 1
+        assert triples[0].subject == "a"
+
+    @staticmethod
+    def test_parse_triples_all_invalid_fails(mock_llm_client):
+        ex = _TestableTripleExtractor(llm_client=mock_llm_client, model_name="m")
+        triples, ok = ex.parse_triples_for_test('{"triples": [["x"], {"bad": 1}]}', "d1", "c1")
+        assert not ok and triples == []

@@ -70,6 +70,7 @@ Multimodal document data model, inherits from Document, supports handling docume
 
 > **Reference Examples**: For more usage examples, please refer to the example code in the [openJiuwen/agent-core](https://gitcode.com/openJiuwen/agent-core/) repository under the `examples/retrieval/` directory, including:
 > - `showcase_multimodal_embedding.py` - Multimodal embedding examples
+> - `showcase_dashscope_multimodal_embedding.py` - Alibaba Cloud DashScope multimodal embedding examples
 
 ```python
 MultimodalDocument(id_: str = "", text: str = "", metadata: Dict[str, Any] = {})
@@ -89,11 +90,34 @@ Initialize multimodal document.
 content -> list[dict[str, Any]]
 ```
 
-Get the content field, returns a formatted content list for embedding.
+Build a generic embedding-ready content list in field order (cached internally; invalidated when `add_field` runs).
 
 **Returns**:
 
-**list[dict[str, Any]]**, returns a formatted content list, each element contains type and corresponding data.
+**list[dict[str, Any]]**, each item is roughly:
+* **text**: `{"type": "text", "text": ...}`;
+* **image** / **video**: `{"type": "image_url" | "video_url", "image_url" | "video_url": {"url": ...}}` (typical when `data` is a public URL);
+* **audio**: `{"type": "input_audio", "input_audio": {"data": ..., "format": ...}}` parsed from `data:audio/...;base64,...`.
+
+If a non-empty `data_id` was set on the field, the item includes a `"uuid"` key.
+
+### property dashscope_input
+
+```python
+dashscope_input -> dict[str, Any]
+```
+
+Build a **single** input dict for Alibaba Cloud DashScope multimodal embedding APIs (cached internally; invalidated when `add_field` runs).
+
+**Returns**:
+
+**dict[str, Any]**, commonly including: `text` (string), `image` (single image string), `multi_images` (list when multiple images), `video` (video URL string). One image uses `image`; several images use `multi_images`.
+
+**Notes**:
+
+* Each modality usually appears at most once in the DashScope payload; **multiple images** are merged into `image` or `multi_images`. Duplicate entries for other modalities fail validation.
+* **audio** is not supported in this DashScope-shaped payload and will error when building.
+* **video** must be a URL; `data:video/...;base64,...` inline payloads are rejected for `dashscope_input`.
 
 ### add_field
 
@@ -101,26 +125,40 @@ Get the content field, returns a formatted content list for embedding.
 add_field(kind: Literal["text", "image", "audio", "video"], data: str = NOT_SET, file_path: Path = NOT_SET, data_id: str = "") -> Self
 ```
 
-Add a data field to current multimodal document, supports method chaining.
+Add a multimodal field; chainable. For `kind="text"`, pass the text as `data`. Other modalities may use `file_path` for local files, or `data` as an `http`/`https` URL (except as restricted for audio) or a `data:{kind}/...;base64,...` data URL.
 
 **Parameters**:
 
-* **kind**(Literal["text", "image", "audio", "video"]): Type of the new field.
-* **data**(str, optional): Base64-encoded data string.
-* **file_path**(Path, optional): Valid file path to a multimodal file.
-* **data_id**(str, optional): UUID for multimodal caching, leave blank if unsure. Default: "".
+* **kind**(Literal["text", "image", "audio", "video"]): Modality of the new field.
+* **data**(str, optional): Plain text, resource URL, or a `data:{kind}/...;base64,...` string. Mutually exclusive with `file_path`. Default: module sentinel meaning “not provided”.
+* **file_path**(Path, optional): Local file path; MIME is inferred, non-text fields are read and encoded as a prefixed Base64 string. Mutually exclusive with `data`. Default: module sentinel meaning “not provided”.
+* **data_id**(str, optional): Optional id for non-text fields; if provided, must be a string of length at most 32. If omitted, non-`text` fields get an auto-generated UUID (32 hex chars). `text` fields keep an empty id. Default: "".
 
 **Returns**:
 
-**Self**, returns the current MultimodalDocument instance.
+**Self**, the current MultimodalDocument instance.
 
 **Description**:
 
 Supported modality types:
-* **text**: Plain text content
-* **image**: Image files (supports common formats like jpg, png, etc.)
-* **audio**: Audio files (supports various audio formats)
-* **video**: Video files (supports various video formats)
+* **text**: Plain text; may also be loaded from a UTF-8 file via `file_path`.
+* **image**: Common image formats; local path, URL, or Base64 data URL.
+* **audio**: Audio file or `data:audio/...;base64,...`.
+* **video**: Video file or URL; for `dashscope_input` it must be a URL, not `data:video/` Base64.
+
+`file_path` must be an existing `Path`; exactly one of `data` and `file_path` must be supplied (enforced by validation).
+
+### strip
+
+```python
+strip() -> Self | None
+```
+
+Str-like compatibility helper: returns `None` if no fields were added via `add_field` (internal `_data` empty), otherwise returns `self`.
+
+**Returns**:
+
+**Self | None**, `None` when there is no multimodal field data, otherwise this document instance.
 
 **Example**:
 
@@ -128,19 +166,22 @@ Supported modality types:
 >>> from pathlib import Path
 >>> from openjiuwen.core.retrieval.common.document import MultimodalDocument
 >>> 
->>> # Create multimodal document with text and image
+>>> # Text + local file + URL (two images -> multi_images in dashscope_input)
 >>> doc = MultimodalDocument()
 >>> doc.add_field("text", "This is a description")
 >>> doc.add_field("image", file_path=Path("image.jpg"))
+>>> doc.add_field("image", data="https://example.com/image.png")
+>>> content = doc.content
+>>> dash_payload = doc.dashscope_input  # single DashScope `input`; do not mix with audio on the same doc
 >>> 
->>> # Or using method chaining
->>> doc = (MultimodalDocument()
-...        .add_field("text", "Hello world")
-...        .add_field("image", file_path=Path("photo.png")))
+>>> # Chained calls
+>>> doc2 = (
+...     MultimodalDocument()
+...     .add_field("text", "Hello world")
+...     .add_field("image", file_path=Path("photo.png"))
+... )
 >>> 
->>> # Add base64-encoded data directly
->>> doc.add_field("audio", data="data:audio/wav;base64,...")
->>> 
->>> # Access structured content for embedding
->>> content = doc.content  # Returns formatted content list for embedding
+>>> # Audio only for generic content embedding (do not read dashscope_input after adding audio)
+>>> doc2.add_field("audio", data="data:audio/wav;base64,...")
+>>> _ = doc2.content
 ```

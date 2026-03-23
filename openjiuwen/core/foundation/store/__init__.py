@@ -33,6 +33,10 @@ def create_vector_store(store_type: str, **kwargs) -> BaseVectorStore | None:
         from openjiuwen.core.foundation.store.vector.milvus_vector_store import MilvusVectorStore
 
         return MilvusVectorStore(**kwargs)
+    elif store_type == "gaussvector":
+        from openjiuwen.core.foundation.store.vector.gauss_vector_store import GaussVectorStore
+
+        return GaussVectorStore(**kwargs)
     else:
         return None
 

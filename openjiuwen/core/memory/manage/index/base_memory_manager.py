@@ -22,8 +22,8 @@ class BaseMemoryManager(ABC):
     TAG_HEX_LENGTH = TAG_LENGTH * 2  # hex_length = bytes_length * 2
 
     @abstractmethod
-    async def add_memories(self, user_id: str, scope_id: str, memories: List[BaseMemoryUnit],
-                           llm: Tuple[str, Model] | None = None, **kwargs):
+    async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
+                           llm: Model | None = None, **kwargs):
         """add memories in batch."""
         pass
 

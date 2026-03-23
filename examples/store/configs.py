@@ -25,4 +25,24 @@ OBS_ACCESS_KEY_ID = os.getenv("OBS_ACCESS_KEY_ID")
 OBS_SECRET_ACCESS_KEY = os.getenv("OBS_SECRET_ACCESS_KEY")
 OBS_REGION = os.getenv("OBS_REGION")
 
-__all__ = ["BUCKET_NAME", "OBS_SERVER", "OBS_ACCESS_KEY_ID", "OBS_SECRET_ACCESS_KEY", "OBS_REGION"]
+# Milvus graph store configuration
+MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
+MILVUS_DB_NAME = os.getenv("MILVUS_DB_NAME", "demo_graph_db")
+
+# Embedding configuration (for graph store and retrieval examples)
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_API_BASE") or os.getenv("EMBEDDING_BASE_URL")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
+
+__all__ = [
+    "BUCKET_NAME",
+    "OBS_SERVER",
+    "OBS_ACCESS_KEY_ID",
+    "OBS_SECRET_ACCESS_KEY",
+    "OBS_REGION",
+    "MILVUS_URI",
+    "MILVUS_DB_NAME",
+    "EMBEDDING_BASE_URL",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_API_KEY",
+]

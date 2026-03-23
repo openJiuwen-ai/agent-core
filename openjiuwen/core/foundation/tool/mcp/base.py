@@ -10,6 +10,8 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
 from openjiuwen.core.foundation.tool.schema import McpToolInfo
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 NO_TIMEOUT = -1
 
@@ -58,9 +60,17 @@ class MCPTool(Tool):
             # Prepare arguments for MCP tool call
             arguments = inputs if isinstance(inputs, dict) else {}
             if self._card.input_params is not None:
+                await trigger(
+                    ToolCallEvents.TOOL_PARSE_STARTED,
+                    tool_name=self.card.name, tool_id=self.card.id,
+                    raw_inputs=inputs, schema=self._card.input_params)
                 arguments = SchemaUtils.format_with_schema(inputs, self._card.input_params,
                                                            skip_none_value=kwargs.get("skip_none_value", False),
                                                            skip_validate=kwargs.get("skip_inputs_validate", False))
+                await trigger(
+                    ToolCallEvents.TOOL_PARSE_FINISHED,
+                    tool_name=self.card.name, tool_id=self.card.id,
+                    formatted_inputs=arguments)
 
             result = await self._mcp_client.call_tool(tool_name=self._card.name, arguments=arguments)
             return {"result": result}

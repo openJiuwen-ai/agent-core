@@ -82,9 +82,6 @@ class Session:
         if writer:
             await writer.write(data)
 
-    def get_callback_manager(self):
-        return self._inner.callback_manager()
-
     def get_env(self, key) -> Optional[Any]:
         return self._inner.config().get_env(key)
 

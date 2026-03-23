@@ -204,6 +204,8 @@ else:
                 super().__init__(origin, end, shape, head_left, head_right, message)
                 self.id_ = id_
                 self.properties = properties
+                if self.message.startswith("|") and self.message.endswith("|"):
+                    self.message = message
 
             def __str__(self) -> str:
                 tag = "" if not self.id_ else "".join([self.id_, "@"])
@@ -218,7 +220,7 @@ else:
                     self.head_left,
                     self.shape,
                     self.head_right,
-                    self.message,
+                    f'|"{self.message}"|' if self.message else "",
                     " ",
                     self.end.id_,
                     properties_str
@@ -328,7 +330,7 @@ else:
                         link_extend_args["id_"] = self._link_id_generator.next()
                         link_extend_args["properties"] = {"animate": "true"}
                 if edge.conditional and edge.data:
-                    message = f"\"{edge.data}\""
+                    message = edge.data
                 if edge.source in mermaid_nodes and edge.target in mermaid_nodes:
                     links.append(link_cls(mermaid_nodes[edge.source], mermaid_nodes[edge.target], shape=shape,
                                           message=message, **link_extend_args))

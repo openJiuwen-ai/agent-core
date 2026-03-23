@@ -1,10 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Unit tests for ReActAgent streaming (_railed_model_call default streaming).
+"""Unit tests for ReActAgent streaming (_railed_model_call streaming path).
 
 Covers:
-- session present  -> llm.stream() called, llm_output chunks written
-- session is None  -> fallback to llm.invoke(), no stream writes
+- _streaming=True  -> llm.stream() called, llm_output chunks written
+- _streaming=False -> fallback to llm.invoke(), no stream writes
 """
 import os
 import unittest
@@ -37,7 +37,7 @@ def _make_agent(agent_id: str = "test_stream_agent") -> ReActAgent:
 
 
 class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
-    """Verify that _railed_model_call uses llm.stream() when session is present."""
+    """Verify that _railed_model_call uses llm.stream() when _streaming=True."""
 
     async def asyncSetUp(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")
@@ -48,7 +48,7 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.asyncio
     async def test_streaming_writes_llm_output_chunks_to_session(self):
-        """When session is present, llm.stream() is called and llm_output frames are written."""
+        """When _streaming=True, llm.stream() is called and llm_output frames are written."""
         mock_llm = MockLLMModel()
         mock_llm.set_responses([create_text_response("Hello from streaming!")])
 
@@ -75,7 +75,7 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
                 return await original_write(frame)
 
             session.write_stream = capture
-            result = await agent.invoke({"query": "hi"}, session=session)
+            result = await agent.invoke({"query": "hi"}, session=session, _streaming=True)
 
         self.assertEqual(result.get("result_type"), "answer")
         self.assertIn("Hello from streaming!", result.get("output", ""))
@@ -87,7 +87,7 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.asyncio
     async def test_no_session_falls_back_to_invoke(self):
-        """When session is None, llm.invoke() is used instead of stream()."""
+        """When _streaming is False (default), llm.invoke() is used instead of stream()."""
         mock_llm = MockLLMModel()
         mock_llm.set_responses([create_text_response("Fallback answer.")])
 

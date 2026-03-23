@@ -1,12 +1,14 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Unit tests for DeepAgent public APIs."""
+# pylint: disable=protected-access
 from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import pytest
 
+from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.rail.base import (
@@ -14,18 +16,30 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentRail,
 )
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.deep_agent import DeepAgent
+from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
+from openjiuwen.deepagents.subagents import create_code_agent
+from openjiuwen.deepagents.task_loop.task_loop_event_handler import TaskLoopEventHandler
+from openjiuwen.deepagents.task_loop.loop_coordinator import LoopCoordinator
+from openjiuwen.deepagents.tools.task_tool import create_task_tool
 
 
-class DummyModel:
-    """Minimal model stub for create_deep_agent unit tests."""
+def _create_dummy_model() -> Model:
+    """Create a dummy Model instance for testing."""
+    model_client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="test-key",
+        api_base="http://test-base",
+        verify_ssl=False,
+    )
+    model_config = ModelRequestConfig(model="test-model")
+    return Model(model_client_config=model_client_config, model_config=model_config)
 
-    def __init__(self) -> None:
-        self.model_client_config = None
-        self.model_config = None
 
 
 class FakeInnerCallbackManager:
@@ -55,6 +69,7 @@ class FakeReactAgent:
         self,
         inputs: Dict[str, Any],
         session: Optional[Any] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         self.invoke_calls.append({"inputs": inputs, "session": session})
         return {
@@ -124,7 +139,7 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert set_result is agent
     assert agent.is_initialized is True
 
-    assert agent.drain_pending_external_events() == []
+    assert agent.loop_coordinator is None
 
 
 @pytest.mark.asyncio
@@ -206,7 +221,7 @@ async def test_invoke_invalid_input_type_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invoke_task_loop_not_implemented() -> None:
+async def test_invoke_task_loop_requires_session() -> None:
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     ).configure(
@@ -214,8 +229,28 @@ async def test_invoke_task_loop_not_implemented() -> None:
     )
     agent.set_react_agent(FakeReactAgent(), initialized=True)
 
-    with pytest.raises(Exception, match="Task-loop invoke path is reserved"):
-        await agent.invoke("loop_input")
+    with pytest.raises(
+        Exception, match="session is required"
+    ):
+        await agent.invoke("no_session")
+
+
+@pytest.mark.asyncio
+async def test_invoke_task_loop_delegates_to_event_queue() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=True)
+    )
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=True)
+
+    session = Session(session_id="s1")
+    result = await agent.invoke("loop_input", session=session)
+
+    assert result["output"] == "echo:loop_input"
+    # _loop_ctx is cleaned up after invoke completes
+    assert agent.loop_coordinator is None
 
 
 @pytest.mark.asyncio
@@ -235,32 +270,87 @@ async def test_stream_single_round_branch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_task_loop_not_implemented() -> None:
-    agent = DeepAgent(
-        AgentCard(name="deep", description="test")
-    ).configure(
-        DeepAgentConfig(enable_task_loop=True)
-    )
-    agent.set_react_agent(FakeReactAgent(), initialized=True)
+async def test_stream_task_loop_yields_result() -> None:
+    await Runner.start()
+    try:
+        agent = DeepAgent(
+            AgentCard(name="deep", description="test")
+        ).configure(
+            DeepAgentConfig(enable_task_loop=True)
+        )
+        fake_react = FakeReactAgent()
+        agent.set_react_agent(fake_react, initialized=True)
 
-    with pytest.raises(Exception, match="Task-loop stream path is reserved"):
-        _ = [chunk async for chunk in agent.stream("loop_input")]
+        chunks = []
+        async for chunk in Runner.run_agent_streaming(
+            agent, {"query": "loop_input"}
+        ):
+            chunks.append(chunk)
+
+        from openjiuwen.core.session.stream.base import OutputSchema
+        assert len(chunks) >= 1
+        # Chunks should be OutputSchema instances (token-level streaming)
+        assert isinstance(chunks[-1], OutputSchema)
+        # Last chunk should be an answer with the round result
+        answer_chunks = [c for c in chunks if c.type == "answer"]
+        assert len(answer_chunks) >= 1
+        assert answer_chunks[0].payload["output"] == "echo:loop_input"
+    finally:
+        await Runner.stop()
 
 
 @pytest.mark.asyncio
-async def test_follow_up_steer_abort_and_drain_are_noop() -> None:
+async def test_follow_up_steer_noop_without_queue() -> None:
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     ).configure(
         DeepAgentConfig(enable_task_loop=False)
     )
 
+    # No event_queue → these are safe no-ops
     await agent.follow_up("continue", task_id="task_1")
     await agent.steer("change strategy")
-    await agent.abort()
+    assert agent.loop_coordinator is None
 
-    assert agent.drain_pending_external_events() == []
-    assert agent.drain_pending_external_events() == []
+
+@pytest.mark.asyncio
+async def test_abort_sets_coordinator_flag() -> None:
+    agent = DeepAgent(
+        AgentCard(name="deep", description="test")
+    ).configure(
+        DeepAgentConfig(enable_task_loop=True)
+    )
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=True)
+
+    # Manually set up loop state to simulate mid-loop
+    coordinator = LoopCoordinator()
+    coordinator.reset()
+    handler = TaskLoopEventHandler(agent)
+
+    class FakeController:
+        """Minimal Controller stub."""
+        def __init__(self) -> None:
+            self.event_handler = handler
+            self.event_queue = None
+
+        async def stop(self) -> None:
+            pass
+
+    agent._loop_coordinator = coordinator
+    agent._loop_controller = FakeController()
+    agent._loop_session = None
+
+    handler.prepare_round()
+
+    await agent.abort()
+    assert coordinator.is_aborted is True
+
+    # Future should be resolved with abort error
+    fut_result = await handler.wait_completion(
+        timeout=1.0
+    )
+    assert fut_result == {"error": "aborted"}
 
 
 @pytest.mark.asyncio
@@ -270,7 +360,7 @@ async def test_create_deep_agent_factory_public_api() -> None:
     subagent = AgentCard(name="subagent_a", description="sub")
 
     agent = create_deep_agent(
-        model=DummyModel(),
+        model=_create_dummy_model(),
         system_prompt="factory prompt",
         tools=[tool],
         subagents=[subagent],
@@ -294,7 +384,94 @@ async def test_create_deep_agent_factory_public_api() -> None:
 
 def test_create_deep_agent_with_custom_card() -> None:
     custom_card = AgentCard(name="custom_deep", description="custom")
-    agent = create_deep_agent(model=DummyModel(), card=custom_card)
+    agent = create_deep_agent(model=_create_dummy_model(), card=custom_card)
 
     assert isinstance(agent, DeepAgent)
     assert agent.card is custom_card
+
+
+def test_create_deep_agent_auto_add_task_planning_rail() -> None:
+    """Test that TaskPlanningRail is auto-added when enable_task_loop=True."""
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        enable_task_loop=True,
+    )
+
+    pending_rails = agent._pending_rails
+    assert len(pending_rails) > 0
+
+    rail_types = [type(rail).__name__ for rail in pending_rails if rail is not None]
+    assert "TaskPlanningRail" in rail_types
+
+
+def test_create_deep_agent_auto_add_skill_rail() -> None:
+    """Test that SkillRail is auto-added when skills parameter is provided."""
+    skills = ["name", "test_skill", "description", "test"]
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        skills=skills,
+    )
+
+    pending_rails = agent._pending_rails
+    assert len(pending_rails) > 0
+
+    rail_types = [type(rail).__name__ for rail in [r for r in pending_rails if r is not None]]
+    assert "SkillRail" in rail_types
+
+
+def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
+    """Test that TaskPlanningRail is not duplicated when manually provided."""
+    from openjiuwen.deepagents.rails import TaskPlanningRail
+
+    manual_rail = TaskPlanningRail()
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        enable_task_loop=True,
+        rails=[manual_rail],
+    )
+
+    pending_rails = agent._pending_rails
+    task_planning_count = sum(1 for rail in pending_rails if isinstance(rail, TaskPlanningRail))
+    assert task_planning_count == 1, f"Expected 1 TaskPlanningRail, but found {task_planning_count}"
+
+
+def test_create_deep_agent_no_duplicate_skill_rail() -> None:
+    """Test that SkillRail is not duplicated when manually provided."""
+    from openjiuwen.deepagents.rails import SkillRail
+
+    manual_rail = SkillRail(skills_dir="./", skill_mode="all")
+    skills = [{"name": "test_skill", "description": "test"}]
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        skills=skills,
+        rails=[manual_rail],
+    )
+
+    pending_rails = agent._pending_rails
+    skill_rail_count = sum(1 for rail in pending_rails if isinstance(rail, SkillRail))
+    assert skill_rail_count == 1, f"Expected 1 SkillRail, but found {skill_rail_count}"
+
+
+def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
+    agent = create_code_agent(model=_create_dummy_model())
+
+    assert isinstance(agent, DeepAgent)
+    assert agent.card.name == "code_agent"
+    assert agent.ability_manager.get("code") is not None
+    assert any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
+
+
+def test_create_code_agent_explicit_tools_and_rails_override_defaults() -> None:
+    custom_tool = _build_tool_card("custom_tool")
+    custom_rail = CountingRail()
+
+    agent = create_code_agent(
+        model=_create_dummy_model(),
+        tools=[custom_tool],
+        rails=[custom_rail],
+    )
+
+    assert agent.ability_manager.get("custom_tool") is custom_tool
+    assert agent.ability_manager.get("code") is None
+    assert any(isinstance(rail, CountingRail) for rail in agent._pending_rails)
+    assert not any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)

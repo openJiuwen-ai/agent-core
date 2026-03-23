@@ -270,6 +270,9 @@ class TaskScheduler:
         # Lock used for synchronized access
         self._lock = asyncio.Lock()
 
+        # Event-driven wakeup for new SUBMITTED tasks
+        self._submit_event = asyncio.Event()
+
     @property
     def config(self) -> ControllerConfig:
         """Get configuration"""
@@ -294,6 +297,21 @@ class TaskScheduler:
     def task_executor_registry(self):
         """Get task executor registry"""
         return self._task_executor_registry
+
+    @property
+    def card(self):
+        """Get card """
+        return self._card
+
+    def notify_task_submitted(self) -> None:
+        """Wake up the schedule loop.
+
+        Called synchronously by TaskManager when a task
+        enters SUBMITTED status. Sets the internal
+        asyncio.Event so the scheduler picks it up
+        without waiting for the poll interval.
+        """
+        self._submit_event.set()
 
     async def _handle_task_execution_failure(self, task_id: str, session: Session, error_message: str):
         """Handle task failure by updating status and publishing failure event
@@ -477,6 +495,14 @@ class TaskScheduler:
             logger.error(f"Error checking task completion status: {e}", exc_info=True)
             return False
 
+    async def ensure_session_completion_signal(self, session_id: str):
+        """Public wrapper for _ensure_session_completion_signal.
+
+        Called by Controller.stream() after publish_event returns,
+        so that rounds with no new tasks can emit the completion signal.
+        """
+        await self._ensure_session_completion_signal(session_id)
+
     async def _ensure_session_completion_signal(self, session_id: str):
         """Ensure completion signal is sent if all tasks are done
 
@@ -488,6 +514,9 @@ class TaskScheduler:
         Args:
             session_id: Session ID
         """
+        if self._config.suppress_completion_signal:
+            return
+
         try:
             # Check if all tasks are done
             if not await self._are_all_tasks_completed(session_id):
@@ -546,22 +575,44 @@ class TaskScheduler:
         task = tasks[0]
         payload_type = chunk.payload.type
         payload_data = chunk.payload.data if chunk.payload else []
+        payload_metadata = chunk.payload.metadata
 
         # Automatically construct event based on payload type
         if payload_type == EventType.TASK_COMPLETION:
-            event = TaskCompletionEvent(task_result=payload_data, task=task)
+            event = TaskCompletionEvent(
+                task_result=payload_data,
+                task=task,
+                metadata=payload_metadata,
+            )
         elif payload_type == EventType.TASK_INTERACTION:
-            event = TaskInteractionEvent(interaction=payload_data, task=task)
+            event = TaskInteractionEvent(
+                interaction=payload_data,
+                task=task,
+                metadata=payload_metadata,
+            )
         elif payload_type == EventType.TASK_FAILED:
             error_msg = payload_data[0].text if payload_data else "Unknown error"
             if task:
                 task.error_message = error_msg
-            event = TaskFailedEvent(error_message=error_msg, task=task)
+            event = TaskFailedEvent(
+                error_message=error_msg,
+                task=task,
+                metadata=payload_metadata,
+            )
         else:
             logger.error(f"Unsupported payload type: {payload_type}")
             return
 
-        await self._event_queue.publish_event(self._card.id, session, event)
+        # Merge task.metadata into event.metadata so
+        # that _handler_round_id propagates correctly.
+        if task.metadata:
+            if event.metadata is None:
+                event.metadata = {}
+            event.metadata.update(task.metadata)
+
+        await self._event_queue.publish_event(
+            self._card.id, session, event
+        )
         logger.info(f"Published {payload_type} for task {task_id}")
 
     async def pause_task(self, task_id: str) -> bool:
@@ -766,8 +817,17 @@ class TaskScheduler:
 
                     logger.info(f"Task {task.task_id} ({task.task_type}) started")
 
-                # 3. Sleep briefly (loop remains non-blocking)
-                await asyncio.sleep(self._config.schedule_interval)
+                # 3. Wait for new SUBMITTED task or timeout
+                self._submit_event.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._submit_event.wait(),
+                        timeout=(
+                            self._config.schedule_interval
+                        ),
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
             except asyncio.CancelledError:
                 logger.info("TaskScheduler schedule loop cancelled")

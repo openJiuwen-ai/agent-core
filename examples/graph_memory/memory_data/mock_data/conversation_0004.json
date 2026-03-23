@@ -1,0 +1,167 @@
+{
+  "event_id": 4,
+  "event_description": "事件 4：电商大额消费 → 分期失败咨询",
+  "event_metadata": {},
+  "conversation": [
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "你好，我刚刚在网上买了一台笔记本电脑，想要申请分期付款，但提示不支持这笔交易。",
+      "iso_time": "2024-10-10T22:02",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您好，我是小鑫。请问您使用的是哪张信用卡？",
+      "iso_time": "2024-10-10T22:03",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "我用的是A银行的信用卡，卡号尾号是5678。",
+      "iso_time": "2024-10-10T22:04",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "根据我们的记录，您的信用卡目前已使用额度的70%。此次交易为何无法分期，我需要进一步核实一下。请稍等。",
+      "iso_time": "2024-10-10T22:05",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，我想做6期或者12期分期。",
+      "iso_time": "2024-10-10T22:06",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "您好，经过查询，该笔消费不支持即时分期可能是由于商户限制，或者是因为此类交易不符合即时分期条件。不过，您可以在账单日后选择账单分期。",
+      "iso_time": "2024-10-10T22:08",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那账单分期和即时分期有什么区别呢？",
+      "iso_time": "2024-10-10T22:09",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "账单分期是在账单日后对整期账单进行分期，而即时分期是在消费时立即将该笔交易分期。两者的手续费可能不同。",
+      "iso_time": "2024-10-10T22:11",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "那6期和12期的分期手续费分别是多少？",
+      "iso_time": "2024-10-10T22:12",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "6期分期的手续费是0.6%每月；12期分期的手续费是0.55%每月。具体费用会根据您的交易金额计算。",
+      "iso_time": "2024-10-10T22:14",
+      "agent_id": "A",
+      "agent_name": "小鑫"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "可我还是不太明白为什么不能直接分期，有点急了。",
+      "iso_time": "2024-10-10T22:15",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "理解您的着急，我是小优。可能是由于商户的限制或银行的即时分期规则导致的。不用担心，我们可以在账单日后再试账单分期。",
+      "iso_time": "2024-10-10T22:17",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "希望到时可以顺利分期。谢谢你的解释。",
+      "iso_time": "2024-10-10T22:18",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "不客气，如果您需要，我可以稍后提醒您账单日到了就尝试账单分期。",
+      "iso_time": "2024-10-10T22:19",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "可以的，麻烦你了。",
+      "iso_time": "2024-10-10T22:20",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "好的，到时我会提醒您。如果您有其他需要了解的信息，随时可以联系我。",
+      "iso_time": "2024-10-10T22:21",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "谢谢，希望下次不要再碰到这样的麻烦。",
+      "iso_time": "2024-10-10T22:22",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "希望如此！遇到任何问题都可以随时联系我们。祝您购物愉快！",
+      "iso_time": "2024-10-10T22:23",
+      "agent_id": "B",
+      "agent_name": "小优"
+    },
+    {
+      "role": "user",
+      "name": "张伟",
+      "content": "好的，再见。",
+      "iso_time": "2024-10-10T22:24",
+      "agent_id": null,
+      "agent_name": null
+    },
+    {
+      "role": "assistant",
+      "name": null,
+      "content": "再见，祝您晚安！",
+      "iso_time": "2024-10-10T22:25",
+      "agent_id": "B",
+      "agent_name": "小优"
+    }
+  ]
+}

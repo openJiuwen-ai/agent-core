@@ -218,6 +218,18 @@ Risk level enumeration.
 * **HIGH**: High risk
 * **CRITICAL**: Critical risk
 
+**Handling Mechanism**:
+
+| Risk Level | Action |
+|---------|---------|
+| SAFE | Pass through |
+| LOW | Raise `GuardrailError` |
+| MEDIUM | Raise `GuardrailError` |
+| HIGH | Raise `GuardrailError` |
+| CRITICAL | Raise `AbortError`, block execution |
+
+> **Note**: `CRITICAL` level raises `AbortError` to terminate callback execution, other risk levels raise `GuardrailError`.
+
 ---
 
 ## class openjiuwen.core.security.guardrail.GuardrailError

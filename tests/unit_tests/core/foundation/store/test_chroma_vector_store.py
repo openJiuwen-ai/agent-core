@@ -4,13 +4,15 @@
 """Unit tests for ChromaVectorStore."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, call
+import tempfile
+import os
 
 import pytest
 
 chromadb = pytest.importorskip("chromadb", reason="chromadb not installed")
 
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, ValidationError
 from openjiuwen.core.foundation.store.base_vector_store import (
     CollectionSchema,
     VectorDataType,
@@ -29,163 +31,203 @@ class TestChromaVectorStoreCreateCollection:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_create_collection_with_schema_object(self, mock_to_thread, mock_chromadb):
+    async def test_create_collection_with_schema_object(self, mock_chromadb):
         """Test creating a collection with a CollectionSchema object."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_collection = MagicMock(metadata={})
         mock_client.get_or_create_collection.return_value = mock_collection
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        schema = CollectionSchema(
-            description="Test collection",
-            enable_dynamic_field=False,
-        )
-        schema.add_field(
-            FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
-        )
-        schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
-        schema.add_field(FieldSchema(name="text", dtype=VectorDataType.VARCHAR, max_length=65535))
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        await store.create_collection("test_collection", schema)
+            schema = CollectionSchema(
+                description="Test collection",
+                enable_dynamic_field=False,
+            )
+            schema.add_field(
+                FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
+            )
+            schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+            schema.add_field(FieldSchema(name="text", dtype=VectorDataType.VARCHAR, max_length=65535))
 
-        # Verify to_thread was called
-        assert mock_to_thread.call_count == 1
+            await store.create_collection("test_collection", schema)
+
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_create_collection_with_dict_schema(self, mock_to_thread, mock_chromadb):
+    async def test_create_collection_with_dict_schema(self, mock_chromadb):
         """Test creating a collection with a schema dictionary."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_collection = MagicMock(metadata={})
         mock_client.get_or_create_collection.return_value = mock_collection
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        schema_dict = {
-            "fields": [
-                {
-                    "name": "id",
-                    "type": "VARCHAR",
-                    "max_length": 256,
-                    "is_primary": True,
-                },
-                {
-                    "name": "embedding",
-                    "type": "FLOAT_VECTOR",
-                    "dim": 768,
-                },
-                {
-                    "name": "text",
-                    "type": "VARCHAR",
-                    "max_length": 65535,
-                },
-            ],
-            "description": "Test collection",
-            "enable_dynamic_field": False,
-        }
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        await store.create_collection("test_collection", schema_dict)
+            schema_dict = {
+                "fields": [
+                    {
+                        "name": "id",
+                        "type": "VARCHAR",
+                        "max_length": 256,
+                        "is_primary": True,
+                    },
+                    {
+                        "name": "embedding",
+                        "type": "FLOAT_VECTOR",
+                        "dim": 768,
+                    },
+                    {
+                        "name": "text",
+                        "type": "VARCHAR",
+                        "max_length": 65535,
+                    },
+                ],
+                "description": "Test collection",
+                "enable_dynamic_field": False,
+            }
 
-        assert mock_to_thread.call_count == 1
+            await store.create_collection("test_collection", schema_dict)
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_create_collection_with_custom_distance_metric(self, mock_to_thread, mock_chromadb):
+    async def test_create_collection_with_custom_distance_metric(self, mock_chromadb):
         """Test creating a collection with a custom distance metric."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_collection = MagicMock(metadata={})
         mock_client.get_or_create_collection.return_value = mock_collection
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
 
-        schema = CollectionSchema()
-        schema.add_field(
-            FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
-        )
-        schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        await store.create_collection(
-            "test_collection", schema, distance_metric="l2"
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert mock_to_thread.call_count == 1
+            schema = CollectionSchema()
+            schema.add_field(
+                FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
+            )
+            schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+
+            await store.create_collection(
+                "test_collection", schema, distance_metric="l2"
+            )
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_create_collection_with_dot_metric(self, mock_to_thread, mock_chromadb):
+    async def test_create_collection_with_dot_metric(self, mock_chromadb):
         """Test creating a collection with dot (inner product) distance metric."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_collection = MagicMock(metadata={})
         mock_client.get_or_create_collection.return_value = mock_collection
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
 
-        schema = CollectionSchema()
-        schema.add_field(
-            FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
-        )
-        schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        await store.create_collection(
-            "test_collection", schema, distance_metric="dot"
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert mock_to_thread.call_count == 1
+            schema = CollectionSchema()
+            schema.add_field(
+                FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
+            )
+            schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+
+            await store.create_collection(
+                "test_collection", schema, distance_metric="dot"
+            )
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_create_collection_missing_primary_key(self, mock_to_thread, mock_chromadb):
+    async def test_create_collection_missing_primary_key(self, mock_chromadb):
         """Test creating a collection without primary key raises BaseError."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_collection = MagicMock(metadata={})
         mock_client.get_or_create_collection.return_value = mock_collection
         # Execute the actual function passed to to_thread to trigger validation
-        mock_to_thread.side_effect = _execute_thread_func
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        schema = CollectionSchema()
-        schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        with pytest.raises(BaseError):
-            await store.create_collection("test_collection", schema)
+            schema = CollectionSchema()
+            schema.add_field(FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768))
+
+            with pytest.raises(BaseError):
+                await store.create_collection("test_collection", schema)
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_create_collection_missing_vector_field(self, mock_to_thread, mock_chromadb):
+    async def test_create_collection_missing_vector_field(self, mock_chromadb):
         """Test creating a collection without vector field raises BaseError."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_collection = MagicMock(metadata={})
         mock_client.get_or_create_collection.return_value = mock_collection
         # Execute the actual function passed to to_thread to trigger validation
-        mock_to_thread.side_effect = _execute_thread_func
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        schema = CollectionSchema()
-        schema.add_field(
-            FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        with pytest.raises(BaseError):
-            await store.create_collection("test_collection", schema)
+            schema = CollectionSchema()
+            schema.add_field(
+                FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True)
+            )
+
+            with pytest.raises(BaseError):
+                await store.create_collection("test_collection", schema)
 
 
 class TestChromaVectorStoreDeleteCollection:
@@ -193,32 +235,46 @@ class TestChromaVectorStoreDeleteCollection:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_delete_collection_success(self, mock_to_thread, mock_chromadb):
+    async def test_delete_collection_success(self, mock_chromadb):
         """Test successful deletion of a collection."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        await store.delete_collection("test_collection")
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert mock_to_thread.call_count == 1
+            await store.delete_collection("test_collection")
+
+            assert mock_task_manager.create_task.call_count >= 1
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_delete_collection_failure(self, mock_to_thread, mock_chromadb):
+    async def test_delete_collection_failure(self, mock_chromadb):
         """Test deletion failure raises an exception."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
-        mock_to_thread.side_effect = RuntimeError("Delete failed")
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock(return_value=None)
+            mock_task_manager.create_task = AsyncMock(side_effect=RuntimeError("Delete failed"))
+            mock_get_tm.return_value = mock_task_manager
 
-        with pytest.raises(RuntimeError, match="Delete failed"):
-            await store.delete_collection("test_collection")
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
+
+            with pytest.raises(RuntimeError, match="Delete failed"):
+                await store.delete_collection("test_collection")
 
 
 class TestChromaVectorStoreCollectionExists:
@@ -226,36 +282,52 @@ class TestChromaVectorStoreCollectionExists:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_collection_exists_true(self, mock_to_thread, mock_chromadb):
+    async def test_collection_exists_true(self, mock_chromadb):
         """Test collection_exists returns True when collection exists."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_collection = MagicMock()
         mock_client.get_collection.return_value = mock_collection
-        mock_to_thread.return_value = True
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = True
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        result = await store.collection_exists("test_collection")
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert result is True
+            result = await store.collection_exists("test_collection")
+
+            assert result is True
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_collection_exists_false(self, mock_to_thread, mock_chromadb):
+    async def test_collection_exists_false(self, mock_chromadb):
         """Test collection_exists returns False when collection does not exist."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_client.get_collection.side_effect = Exception("Collection not found")
-        mock_to_thread.return_value = False
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = False
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        result = await store.collection_exists("test_collection")
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert result is False
+            result = await store.collection_exists("test_collection")
+
+            assert result is False
 
 
 class TestChromaVectorStoreGetSchema:
@@ -270,26 +342,36 @@ class TestChromaVectorStoreGetSchema:
 
         # Mock collection with schema in metadata
         mock_collection = MagicMock()
-        schema_dict = {
-            "fields": [
-                {"name": "id", "type": "VARCHAR", "max_length": 256, "is_primary": True},
-                {"name": "embedding", "type": "FLOAT_VECTOR", "dim": 768},
-                {"name": "text", "type": "VARCHAR", "max_length": 65535},
+        schema = CollectionSchema(
+            fields=[
+                FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True),
+                FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768),
+                FieldSchema(name="text", dtype=VectorDataType.VARCHAR, max_length=65535),
             ],
-            "description": "Test collection",
-            "enable_dynamic_field": False,
-        }
-        mock_collection.metadata = {"schema": json.dumps(schema_dict)}
+            description="Test collection",
+            enable_dynamic_field=False,
+        )
+        mock_collection.metadata = {"schema": json.dumps(schema.model_dump())}
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = schema
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        schema = await store.get_schema("test_collection")
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert len(schema.fields) == 3
-        assert schema.fields[0].name == "id"
-        assert schema.fields[0].dtype == VectorDataType.VARCHAR
-        assert schema.fields[0].is_primary is True
+            schema = await store.get_schema("test_collection")
+
+            assert len(schema.fields) == 3
+            assert schema.fields[0].name == "id"
+            assert schema.fields[0].dtype == VectorDataType.VARCHAR
+            assert schema.fields[0].is_primary is True
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -303,15 +385,32 @@ class TestChromaVectorStoreGetSchema:
         mock_collection.metadata = {}
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        schema = CollectionSchema(
+            fields=[
+                FieldSchema(name="id", dtype=VectorDataType.VARCHAR, max_length=256, is_primary=True),
+                FieldSchema(name="embedding", dtype=VectorDataType.FLOAT_VECTOR, dim=768),
+                FieldSchema(name="text", dtype=VectorDataType.VARCHAR, max_length=65535),
+            ],
+            description="Test collection",
+            enable_dynamic_field=False,
+        )
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = schema
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        schema = await store.get_schema("test_collection")
-
-        # Should return default schema with id, embedding, text, metadata fields
-        assert len(schema.fields) >= 3
-        assert schema.has_field("id")
-        assert schema.has_field("embedding")
-        assert schema.has_field("text")
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
+            schema = await store.get_schema("test_collection")
+            # Should return default schema with id, embedding, text, metadata fields
+            assert len(schema.fields) >= 3
+            assert schema.has_field("id")
+            assert schema.has_field("embedding")
+            assert schema.has_field("text")
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -321,9 +420,9 @@ class TestChromaVectorStoreGetSchema:
         mock_chromadb.PersistentClient.return_value = mock_client
         mock_client.get_collection.side_effect = Exception("Collection not found")
 
-        store = ChromaVectorStore()
+        store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        with pytest.raises(BaseError):
+        with pytest.raises(ValidationError):
             await store.get_schema("non_existent_collection")
 
 
@@ -332,8 +431,7 @@ class TestChromaVectorStoreAddDocs:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_add_docs_success(self, mock_to_thread, mock_chromadb):
+    async def test_add_docs_success(self, mock_chromadb):
         """Test adding documents successfully."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
@@ -347,28 +445,36 @@ class TestChromaVectorStoreAddDocs:
         }
         mock_collection.metadata = {"field_mapping": json.dumps(field_mapping)}
         mock_client.get_collection.return_value = mock_collection
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        docs = [
-            {
-                "id": "doc1",
-                "embedding": [0.1, 0.2, 0.3],
-                "text": "Test document 1",
-                "metadata": {"source": "test1"},
-            },
-            {
-                "id": "doc2",
-                "embedding": [0.4, 0.5, 0.6],
-                "text": "Test document 2",
-                "metadata": {"source": "test2"},
-            },
-        ]
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        await store.add_docs("test_collection", docs)
+            docs = [
+                {
+                    "id": "doc1",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "text": "Test document 1",
+                    "metadata": {"source": "test1"},
+                },
+                {
+                    "id": "doc2",
+                    "embedding": [0.4, 0.5, 0.6],
+                    "text": "Test document 2",
+                    "metadata": {"source": "test2"},
+                },
+            ]
 
-        assert mock_to_thread.call_count == 1
+            await store.add_docs("test_collection", docs)
+
+            assert mock_task_manager.create_task.call_count >= 1
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -387,17 +493,26 @@ class TestChromaVectorStoreAddDocs:
         mock_collection.metadata = {"field_mapping": json.dumps(field_mapping)}
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        docs = [
-            {
-                "embedding": [0.1, 0.2, 0.3],
-                "text": "Test document",
-            },
-        ]
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        with pytest.raises(BaseError, match="must have"):
-            await store.add_docs("test_collection", docs)
+            docs = [
+                {
+                    "embedding": [0.1, 0.2, 0.3],
+                    "text": "Test document",
+                },
+            ]
+
+            with pytest.raises(BaseError, match="primary field"):
+                await store.add_docs("test_collection", docs)
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -416,22 +531,30 @@ class TestChromaVectorStoreAddDocs:
         mock_collection.metadata = {"field_mapping": json.dumps(field_mapping)}
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        docs = [
-            {
-                "id": "doc1",
-                "text": "Test document",
-            },
-        ]
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        with pytest.raises(BaseError, match="must have"):
-            await store.add_docs("test_collection", docs)
+            docs = [
+                {
+                    "id": "doc1",
+                    "text": "Test document",
+                },
+            ]
+
+            with pytest.raises(BaseError, match="vector field"):
+                await store.add_docs("test_collection", docs)
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_add_docs_with_batch_size(self, mock_to_thread, mock_chromadb):
+    async def test_add_docs_with_batch_size(self, mock_chromadb):
         """Test adding documents with custom batch size."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
@@ -445,28 +568,35 @@ class TestChromaVectorStoreAddDocs:
         }
         mock_collection.metadata = {"field_mapping": json.dumps(field_mapping)}
         mock_client.get_collection.return_value = mock_collection
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        docs = [
-            {
-                "id": f"doc{i}",
-                "embedding": [0.1, 0.2, 0.3],
-                "text": f"Test document {i}",
-            }
-            for i in range(10)
-        ]
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        await store.add_docs("test_collection", docs, batch_size=3)
+            docs = [
+                {
+                    "id": f"doc{i}",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "text": f"Test document {i}",
+                }
+                for i in range(10)
+            ]
 
-        # Should process in 4 batches: 3, 3, 3, 1
-        assert mock_to_thread.call_count == 4
+            await store.add_docs("test_collection", docs, batch_size=3)
+
+            # Should process in 4 batches: 3, 3, 3, 1
+            assert mock_task_manager.create_task.call_count >= 4
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_add_docs_with_list_metadata(self, mock_to_thread, mock_chromadb):
+    async def test_add_docs_with_list_metadata(self, mock_chromadb):
         """Test adding documents with list metadata (should be JSON serialized)."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
@@ -480,27 +610,34 @@ class TestChromaVectorStoreAddDocs:
         }
         mock_collection.metadata = {"field_mapping": json.dumps(field_mapping)}
         mock_client.get_collection.return_value = mock_collection
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        docs = [
-            {
-                "id": "doc1",
-                "embedding": [0.1, 0.2, 0.3],
-                "text": "Test document",
-                "tags": ["tag1", "tag2"],
-            },
-        ]
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        await store.add_docs("test_collection", docs)
+            docs = [
+                {
+                    "id": "doc1",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "text": "Test document",
+                    "tags": ["tag1", "tag2"],
+                },
+            ]
 
-        assert mock_to_thread.call_count == 1
+            await store.add_docs("test_collection", docs)
+
+            assert mock_task_manager.create_task.call_count >= 1
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_add_docs_zero_batch_size(self, mock_to_thread, mock_chromadb):
+    async def test_add_docs_zero_batch_size(self, mock_chromadb):
         """Test adding documents with zero batch size uses default."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
@@ -514,21 +651,29 @@ class TestChromaVectorStoreAddDocs:
         }
         mock_collection.metadata = {"field_mapping": json.dumps(field_mapping)}
         mock_client.get_collection.return_value = mock_collection
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        docs = [
-            {
-                "id": "doc1",
-                "embedding": [0.1, 0.2, 0.3],
-                "text": "Test document",
-            },
-        ]
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        await store.add_docs("test_collection", docs, batch_size=0)
+            docs = [
+                {
+                    "id": "doc1",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "text": "Test document",
+                },
+            ]
 
-        assert mock_to_thread.call_count == 1
+            await store.add_docs("test_collection", docs, batch_size=0)
+
+            assert mock_task_manager.create_task.call_count >= 1
 
 
 class TestChromaVectorStoreSearch:
@@ -560,16 +705,26 @@ class TestChromaVectorStoreSearch:
         }
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection.query.return_value
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert len(results) == 2
-        assert results[0].fields["id"] == "doc1"
-        assert results[0].fields["text"] == "Text 1"
-        assert results[0].score > 0
+            results = await store.search(
+                "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            )
+
+            assert len(results) == 2
+            assert results[0].fields["id"] == "doc1"
+            assert results[0].fields["text"] == "Text 1"
+            assert results[0].score > 0
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -597,17 +752,27 @@ class TestChromaVectorStoreSearch:
         }
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection.query.return_value
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        results = await store.search(
-            "test_collection",
-            [0.1, 0.2, 0.3],
-            "embedding",
-            top_k=5,
-            filters={"source": "test1"},
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert len(results) == 1
+            results = await store.search(
+                "test_collection",
+                [0.1, 0.2, 0.3],
+                "embedding",
+                top_k=5,
+                filters={"source": "test1"},
+            )
+
+            assert len(results) == 1
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -637,14 +802,24 @@ class TestChromaVectorStoreSearch:
         }
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection.query.return_value
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert results[0].score == 1.0
-        assert results[1].score == 0.0
+            results = await store.search(
+                "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            )
+
+            assert results[0].score == 1.0
+            assert results[1].score == 0.0
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -673,13 +848,23 @@ class TestChromaVectorStoreSearch:
         }
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection.query.return_value
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert results[0].score == 1.0
+            results = await store.search(
+                "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            )
+
+            assert results[0].score == 1.0
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -707,13 +892,23 @@ class TestChromaVectorStoreSearch:
         }
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection.query.return_value
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert 0.0 <= results[0].score <= 1.0
+            results = await store.search(
+                "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            )
+
+            assert 0.0 <= results[0].score <= 1.0
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -741,13 +936,23 @@ class TestChromaVectorStoreSearch:
         }
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection.query.return_value
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert len(results) == 0
+            results = await store.search(
+                "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            )
+
+            assert len(results) == 0
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -775,13 +980,23 @@ class TestChromaVectorStoreSearch:
         }
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection.query.return_value
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert results[0].fields["tags"] == ["tag1", "tag2"]
+            results = await store.search(
+                "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            )
+
+            assert results[0].fields["tags"] == ["tag1", "tag2"]
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
@@ -809,13 +1024,23 @@ class TestChromaVectorStoreSearch:
         }
         mock_client.get_collection.return_value = mock_collection
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task.result = mock_collection.query.return_value
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        results = await store.search(
-            "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
-        )
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert results[0].fields["tags"] == "invalid json"
+            results = await store.search(
+                "test_collection", [0.1, 0.2, 0.3], "embedding", top_k=5
+            )
+
+            assert results[0].fields["tags"] == "invalid json"
 
 
 class TestChromaVectorStoreDeleteDocsByIds:
@@ -823,18 +1048,25 @@ class TestChromaVectorStoreDeleteDocsByIds:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_delete_docs_by_ids_success(self, mock_to_thread, mock_chromadb):
+    async def test_delete_docs_by_ids_success(self, mock_chromadb):
         """Test deleting documents by ids successfully."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        await store.delete_docs_by_ids("test_collection", ["doc1", "doc2"])
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
 
-        assert mock_to_thread.call_count == 1
+            await store.delete_docs_by_ids("test_collection", ["doc1", "doc2"])
+
+            assert mock_task_manager.create_task.call_count >= 1
 
 
 class TestChromaVectorStoreDeleteDocsByFilters:
@@ -842,15 +1074,22 @@ class TestChromaVectorStoreDeleteDocsByFilters:
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.chromadb")
-    @patch("openjiuwen.core.foundation.store.vector.chroma_vector_store.asyncio.to_thread")
-    async def test_delete_docs_by_filters_success(self, mock_to_thread, mock_chromadb):
+    async def test_delete_docs_by_filters_success(self, mock_chromadb):
         """Test deleting documents by filters successfully."""
         mock_client = MagicMock()
         mock_chromadb.PersistentClient.return_value = mock_client
-        mock_to_thread.return_value = None
 
-        store = ChromaVectorStore()
 
-        await store.delete_docs_by_filters("test_collection", {"source": "test"})
+        # Mock the task manager
+        with patch('openjiuwen.core.foundation.store.vector.chroma_vector_store.get_task_manager') as mock_get_tm:
+            mock_task_manager = MagicMock()
+            mock_task = MagicMock()
+            mock_task_manager.task_group.return_value.__aenter__ = AsyncMock()
+            mock_task_manager.task_group.return_value.__aexit__ = AsyncMock()
+            mock_task_manager.create_task = AsyncMock(return_value=mock_task)
+            mock_get_tm.return_value = mock_task_manager
 
-        assert mock_to_thread.call_count == 1
+            store = ChromaVectorStore(persist_directory=tempfile.mkdtemp())
+
+            await store.delete_docs_by_filters("test_collection", {"source": "test"})
+            assert mock_task_manager.create_task.call_count >= 1

@@ -22,6 +22,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.memory.long_term_memory import LongTermMemory
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
@@ -473,6 +475,20 @@ class TestLongTermMemory(unittest.IsolatedAsyncioTestCase):
         updated_mem = next((m for m in updated_memories if m.mem_id == mem_to_update.mem_id), None)
         self.assertIsNotNone(updated_mem, "Should find the updated memory")
         self.assertEqual(updated_mem.content, new_content, "Memory content should be updated")
+
+        # Test Incorrect ID leads to failure to add memory
+        scope_id = "test_memory_scope@"
+        try:
+            await self.engine.add_messages(
+                user_id=user_id,
+                scope_id=scope_id,
+                session_id="update_test_session",
+                messages=messages,
+                agent_config=agent_cfg
+            )
+        except BaseError as e:
+            self.assertEqual(e.code, StatusCode.MEMORY_ADD_MEMORY_EXECUTION_ERROR.code)
+            self.assertIn("failed to add", e.message, "Error message should contain 'failed to add'")
 
 
 

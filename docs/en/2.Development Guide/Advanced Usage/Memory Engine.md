@@ -17,6 +17,7 @@ The core types of the memory engine are defined in the `openjiuwen.core.memory` 
   Defines engine-level common configuration:
   - `default_model_cfg: ModelRequestConfig`: Default LLM request parameters for generating memories (model name, temperature, etc.).
   - `default_model_client_cfg: ModelClientConfig`: Default LLM client configuration (`client_provider/api_base/api_key/verify_ssl`, etc.).
+  - `forbidden_variables: str`: Forbidden variables (e.g., "user_phone") that cannot be stored. Default: `""` (no forbidden variables).
   - `input_msg_max_len: int`: Maximum length of input messages (default: 8192).
   - `crypto_key: bytes`: AES key for encrypting sensitive fields in storage (must be 32 bytes in length; empty means no encryption).
 
@@ -37,6 +38,116 @@ The core types of the memory engine are defined in the `openjiuwen.core.memory` 
 
 > These classes are defined in the source code at:  
 > `openjiuwen.core.memory.config.config` and `openjiuwen.core.memory.__init__`, and can be directly imported via `from openjiuwen.core.memory import MemoryEngineConfig, MemoryScopeConfig, AgentMemoryConfig, LongTermMemory`.
+
+## Detailed Configuration for LLM and Embedding Models
+
+The memory engine relies on three core configuration classes to define LLM and embedding model parameters. These configuration classes are defined in the `openjiuwen.core.foundation.llm.schema.config` and `openjiuwen.core.foundation.store.base_embedding` modules.
+
+### ModelRequestConfig (LLM Request Configuration)
+
+`ModelRequestConfig` is used to configure LLM request parameters to control model generation behavior.
+
+| Parameter               | Type         | Required | Default | Description                                                                 |
+| ----------------------- | ------------ | -------- | ------- | --------------------------------------------------------------------------- |
+| `model` / `model_name`  | str          | No       | `""`    | Model name, e.g., `gpt-4`. Supports alias `model`                           |
+| `temperature`           | float        | No       | `0.95`  | Temperature parameter, controls output randomness. Higher values produce more random output, lower values produce more deterministic output. Range: [0, 1] |
+| `top_p`                 | float        | No       | `0.1`   | Top-p sampling parameter, controls nucleus sampling range. Range: [0, 1]    |
+| `max_tokens`            | int \| None  | No       | `None`  | Maximum number of tokens to generate                                        |
+| `stop`                  | str \| None  | No       | `None`  | Stop sequence, model stops generating when encountering this sequence       |
+
+**Usage Example:**
+
+```python
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
+
+model_cfg = ModelRequestConfig(
+    model="gpt-4",
+    temperature=0.0
+)
+```
+
+### ModelClientConfig (LLM Client Configuration)
+
+`ModelClientConfig` is used to configure LLM client connection parameters, including API keys, service addresses, etc.
+
+| Parameter         | Type                  | Required | Default | Description                                                                  |
+| ----------------- | --------------------- | -------- | ------- | ---------------------------------------------------------------------------- |
+| `client_id`       | str                   | No       | UUID    | Client unique identifier, used for registration in Runner                    |
+| `client_provider` | ProviderType \| str   | Yes      | -       | Service provider identifier, supports enum values: `OpenAI`, `OpenRouter`, `SiliconFlow`, `DashScope` |
+| `api_key`         | str                   | Yes      | -       | API key                                                                      |
+| `api_base`        | str                   | Yes      | -       | API base URL address                                                         |
+| `timeout`         | float                 | No       | `60.0`  | Request timeout (seconds)                                                    |
+| `max_retries`     | int                   | No       | `3`     | Maximum number of retries                                                    |
+| `verify_ssl`      | bool                  | No       | `True`  | Whether to verify SSL certificate                                            |
+| `ssl_cert`        | str \| None           | No       | `None`  | SSL certificate file path                                                    |
+
+**Supported ProviderType Enum Values:**
+
+```python
+class ProviderType(str, Enum):
+    OpenAI = "OpenAI"           # OpenAI official API
+    OpenRouter = "OpenRouter"   # OpenRouter aggregation service
+    SiliconFlow = "SiliconFlow" # SiliconFlow platform
+    DashScope = "DashScope"     # Alibaba Cloud DashScope platform
+```
+
+**Usage Example:**
+
+```python
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ProviderType
+
+client_cfg = ModelClientConfig(
+    client_id="my_memory_client",
+    client_provider=ProviderType.OpenAI,      
+    api_key="sk-xxxxxxxx",
+    api_base="https://api.openai.com/v1",
+    timeout=120.0,                             
+    max_retries=3,
+    verify_ssl=False,
+)
+```
+
+**Parameter Constraints:**
+
+- `client_provider`: Must be a registered service provider, otherwise `MODEL_PROVIDER_INVALID` error will be raised
+- `api_key` and `api_base`: Required parameters, cannot be empty
+
+### EmbeddingConfig (Embedding Model Configuration)
+
+`EmbeddingConfig` is used to configure embedding model parameters for vector retrieval and semantic search.
+
+| Parameter    | Type          | Required | Default | Description                                      |
+| ------------ | ------------- | -------- | ------- | ------------------------------------------------ |
+| `model_name` | str           | Yes      | -       | Embedding model name                             |
+| `base_url`   | str           | Yes      | -       | API base URL address                             |
+| `api_key`    | str \| None   | No       | `None`  | API key (some services may not require it)       |
+
+**Usage Example:**
+
+```python
+from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
+
+embedding_cfg = EmbeddingConfig(
+    model_name="text-embedding-3",       # Embedding model name
+    base_url="https://api.openai.com/v1/embeddings",      # API address
+    api_key="sk-xxxxxxxx",                     # API key
+)
+```
+
+### Configuration Class Relationship Diagram
+
+```
+MemoryEngineConfig (Global Engine Configuration)
+├── default_model_cfg: ModelRequestConfig      # Default model request configuration
+└── default_model_client_cfg: ModelClientConfig # Default model client configuration
+
+MemoryScopeConfig (Scope Configuration)
+├── model_cfg: ModelRequestConfig              # Scope model request configuration
+├── model_client_cfg: ModelClientConfig        # Scope model client configuration
+└── embedding_cfg: EmbeddingConfig             # Scope embedding model configuration
+```
+
+> **Configuration Priority**: When both global configuration and scope configuration are set, scope configuration takes precedence. That is, configuration in `MemoryScopeConfig` overrides default configuration in `MemoryEngineConfig`.
 
 ## Creating a Memory Engine Instance
 
@@ -217,31 +328,46 @@ async def add_conversation(engine: LongTermMemory):
     scope_id = "app_demo_scope"
     session_id = "session_001"
 
-    messages = [
+    user_profile_messages = [
         BaseMessage(role="user", content="My name is Zhang San, I like playing badminton"),
         BaseMessage(role="assistant", content="Hello Zhang San, nice to meet you"),
         BaseMessage(role="user", content="I am a software engineer, living in Hangzhou"),
     ]
+    episodic_messages = [
+        BaseMessage(role="user", content="Yesterday I participated in the Hangzhou Marathon and finished in 4 hours and 32 minutes"),
+        BaseMessage(role="assistant", content="That's amazing! A full marathon is quite a challenge, 4 hours and 32 minutes is a great result"),
+        BaseMessage(role="user", content="Yes, last week I also went to Beijing for a business trip and attended a tech summit"),
+    ]
+    semantic_messages = [
+        BaseMessage(role="user", content="Python is an interpreted programming language created by Guido van Rossum in 1991"),
+        BaseMessage(role="assistant", content="Yes, Python is known for its concise syntax and rich ecosystem"),
+        BaseMessage(role="user", content="Hangzhou is the capital city of Zhejiang Province and an important internet industry center in China"),
+    ]
 
     timestamp = datetime.now(timezone.utc)
-
-    await engine.add_messages(
-        messages=messages,
-        agent_config=agent_mem_cfg,
-        user_id=user_id,
-        scope_id=scope_id,
-        session_id=session_id,
-        timestamp=timestamp,
-        gen_mem=True,                  # Whether to generate long-term memory
-        gen_mem_with_history_msg_num=5 # How many historical messages to use when generating memory
-    )
+    for messages in [user_profile_messages, episodic_messages, semantic_messages]:
+        await engine.add_messages(
+            messages=messages,
+            agent_config=agent_mem_cfg,
+            user_id=user_id,
+            scope_id=scope_id,
+            session_id=session_id,
+            timestamp=timestamp,
+            gen_mem=True,                  # Whether to generate long-term memory
+            gen_mem_with_history_msg_num=5 # How many historical messages to use when generating memory
+        )
 ```
 
 > Internally it will automatically:  
 > - Write messages to the message table;  
-> - Combine historical messages with `AgentMemoryConfig`, call the LLM to extract variables/user profiles;  
+> - Combine historical messages with `AgentMemoryConfig`, call the LLM to extract variables/user profiles/episodic memories/semantic memories/summary memories;
 > - Write the extracted long-term memories to vector storage and DB.
 
+Description of user profile, episodic, semantic and summary memory types:
+- User profile memory (user_profile): Affirmative or negative statements about the user, including basic identity, interests and preferences, interpersonal relationships, asset status, etc. For example: "User likes playing badminton"  
+- Episodic memory (episodic_memory): Descriptions of specific events experienced by the user. For example: "User participated in the Hangzhou Marathon on March 15, 2025"  
+- Semantic memory (semantic_memory): Other information fragments, including concept definitions, factual information, long-term rules, etc. For example: "Python is an interpreted programming language"
+- Summary memory (summary_memory): A summary of each conversation between the user and the agent.
 
 ## Querying Variable Memories (get_variables)
 
@@ -263,17 +389,17 @@ name_only = await engine.get_variables(user_id="user1", scope_id="app_demo_scope
 
 ## Paginated Viewing of Long-term Memories (get_user_mem_by_page)
 
-Long-term memories (such as user profiles) can be viewed through the pagination interface:
+Long-term memories (such as user profiles) can be viewed through the pagination interface. You can specify viewing specific types of memories using the `memory_type` parameter (memory_type types: USER_PROFILE/EPISODIC_MEMORY/SEMANTIC_MEMORY):
 
 ```python
 from openjiuwen.core.memory.long_term_memory import MemoryType
 
-
+# View specific type of memories
 mem_list = await engine.get_user_mem_by_page(
     user_id="user1",
     scope_id="app_demo_scope",
     page_size=10,
-    page_idx=0,
+    page_idx=1,
     memory_type=MemoryType.USER_PROFILE,  # Only view user profile type memories
 )
 
@@ -287,9 +413,38 @@ for mem in mem_list:
 `search_user_mem` provides vector similarity-based memory retrieval:
 
 ```python
+# Search user profile memory
 search_results = await engine.search_user_mem(
     query="What is the user's occupation?",
-    num=5,
+    num=1,
+    user_id="user1",
+    scope_id="app_demo_scope",
+    threshold=0.3,  # Filter results below the threshold
+)
+
+for item in search_results:
+    mem = item.mem_info
+    print(f"mem_id={mem.mem_id}, type={mem.type}, score={item.score:.4f}, content={mem.content}")
+```
+```python
+# Search user episodic memory
+search_results = await engine.search_user_mem(
+    query="When did the user participate in the marathon?",
+    num=1,
+    user_id="user1",
+    scope_id="app_demo_scope",
+    threshold=0.3,  # Filter results below the threshold
+)
+
+for item in search_results:
+    mem = item.mem_info
+    print(f"mem_id={mem.mem_id}, type={mem.type}, score={item.score:.4f}, content={mem.content}")
+```
+```python
+# Search user semantic memory
+search_results = await engine.search_user_mem(
+    query="What type of language is Python?",
+    num=1,
     user_id="user1",
     scope_id="app_demo_scope",
     threshold=0.3,  # Filter results below the threshold

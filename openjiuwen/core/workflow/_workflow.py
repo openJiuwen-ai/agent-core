@@ -7,19 +7,21 @@ import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Self, Union, Optional, Dict, Any
+
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.utils.dict_utils import flatten_dict
-from openjiuwen.core.graph.pregel import PregelConfig
+from openjiuwen.core.graph.pregel import PregelConfig, GraphInterrupt
+from openjiuwen.core.graph.pregel.config import InnerPregelConfig
 from openjiuwen.core.graph.vertex import Vertex
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.workflow import WorkflowCard
-from openjiuwen.core.workflow.components.component import ComponentComposable, Input, ComponentExecutable
+from openjiuwen.core.workflow.components.component import ComponentComposable
 from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter, WORKFLOW_DRAWABLE
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph, Router, ExecutableGraph
 
-from openjiuwen.core.session import ProxySession, NodeSession
+from openjiuwen.core.session import ProxySession, NodeSession, InteractiveInput
 from openjiuwen.core.session import Transformer
 from openjiuwen.core.session import SubWorkflowSession
 from openjiuwen.core.session import RouterSession
@@ -54,7 +56,7 @@ async def execute_single_component(
         component_id: str,
         session: Session,
         executor: ComponentComposable,
-        inputs: dict,  # Input data
+        inputs: Any,  # Input data
         *,
         inputs_schema: dict = None,  # Input schema
         outputs_schema: dict = None,  # Output schema
@@ -64,15 +66,16 @@ async def execute_single_component(
     workflow_session = WorkflowSession(
         workflow_id=component_id,
         parent=None,
-        session_id=session.get_session_id(),
-        callback_manager=session.get_callback_manager()
+        session_id=session.get_session_id()
     )
-
+    await workflow_session.checkpointer().pre_workflow_execute(workflow_session, inputs)
     # 2. Create NodeSession
     node_session = NodeSession(workflow_session, component_id, type(executor).__name__)
-
+    if not isinstance(inputs, InteractiveInput):
+        node_session.state().commit_user_inputs(inputs)
     # 3. Create Vertex
-    vertex = Vertex(component_id, executor.to_executable())
+    executable = executor.to_executable()
+    vertex = Vertex(component_id, executable)
 
     # 4. Initialize Vertex
     # When context is None, it can still be initialized normally
@@ -97,24 +100,37 @@ async def execute_single_component(
         outputs_schema=outputs_schema
     )
 
-    # 6. Submit input data
-    node_session.state().commit_user_inputs(inputs)
-
     # 7. Create PregelConfig
-    config = PregelConfig(
-        session_id=workflow_session.session_id(),
-        ns=component_id,  # Simulate workflow_id
-        recursion_limit=100  # Recursion limit
-    )
+    sub_workflow_comp = executable.graph_invoker() if hasattr(executable, "graph_invoker") else False
+    if sub_workflow_comp:
+        config = InnerPregelConfig(session_id=workflow_session.session_id(),
+                                   ns=component_id,  # Simulate workflow_id
+                                   recursion_limit=100,  # Recursion limit,
+                                   parent_ns=component_id)
+    else:
+        config = PregelConfig(
+            session_id=workflow_session.session_id(),
+            ns=component_id,  # Simulate workflow_id
+            recursion_limit=100  # Recursion limit
+        )
 
-    # 8. Execute component
-    await vertex.call(config)
-
-    # 9. Commit all state updates
-    node_session.state().commit()
-
-    # 10. Get execution result
-    result = node_session.state().get_outputs(component_id)
+    exception = None
+    try:
+        # 8. Execute component
+        await vertex.call(config)
+    except GraphInterrupt as e:
+        exception = e
+        return e.value[0].value
+    finally:
+        # 9. Commit all state updates
+        node_session.state().commit()
+        # 10. Get execution result
+        result = node_session.state().get_outputs(component_id)
+        result = result if result else {}
+        try:
+            await workflow_session.checkpointer().post_workflow_execute(workflow_session, result, exception=exception)
+        except Exception:
+            pass
     return result.get(component_id)
 
 

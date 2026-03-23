@@ -13,7 +13,6 @@ from dateutil.tz import tzlocal
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import session_logger, LogEventType
-from openjiuwen.core.session.callback.base import BaseHandler, trigger_event
 from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
 from openjiuwen.core.session.tracer.span import Span, TraceAgentSpan, TraceWorkflowSpan
@@ -29,18 +28,17 @@ class TracerHandlerName(Enum):
     TRACER_WORKFLOW = "tracer_workflow"
 
 
-class TraceBaseHandler(BaseHandler):
-    def __init__(self, owner, stream_writer_manager: StreamWriterManager, spanManager: SpanManager):
-        super().__init__(owner)
+class TraceBaseHandler:
+    def __init__(self, stream_writer_manager: StreamWriterManager, span_manager: SpanManager):
         self._stream_writer = stream_writer_manager.get_trace_writer()
-        self._span_manager = spanManager
+        self._span_manager = span_manager
 
     async def emit_stream_writer(self, data):
         await self._emit_stream_writer(data)
 
     @abstractmethod
     def _format_data(self, span: Span) -> dict:
-        return {"type": self.event_name(), "payload": span}
+        ...
 
     async def _emit_stream_writer(self, span):
         if self._stream_writer is None:
@@ -54,7 +52,8 @@ class TraceBaseHandler(BaseHandler):
             return
         await self.emit_stream_writer(copy.deepcopy(span))
 
-    def _get_elapsed_time(self, start_time: datetime, end_time: datetime) -> str:
+    @staticmethod
+    def _get_elapsed_time(start_time: datetime, end_time: datetime) -> str:
         """get elapsed time"""
         elapsed_time = end_time - start_time
         ms = elapsed_time.total_seconds() * 1000
@@ -62,7 +61,8 @@ class TraceBaseHandler(BaseHandler):
             return f"{ms:.0f}ms"
         return f"{(ms / 1000):.2f}s"
 
-    def _get_node_status(self, span: Span) -> str:
+    @staticmethod
+    def _get_node_status(span: Span) -> str:
         if span.error:
             return NodeStatus.ERROR.value
         if span.on_invoke_data:
@@ -73,8 +73,8 @@ class TraceBaseHandler(BaseHandler):
 
 
 class TraceAgentHandler(TraceBaseHandler):
-    def __init__(self, owner, stream_writer_manager, spanManager):
-        super().__init__(owner, stream_writer_manager, spanManager)
+    def __init__(self, stream_writer_manager, span_manager):
+        super().__init__(stream_writer_manager, span_manager)
 
     def event_name(self):
         return TracerHandlerName.TRACE_AGENT.value
@@ -149,127 +149,105 @@ class TraceAgentHandler(TraceBaseHandler):
 
         self._span_manager.update_span(span, {})
 
-    @trigger_event
     async def on_chain_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.CHAIN.value, span=span, inputs=inputs,
                                       instance_info=instance_info, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_chain_end(self, span: TraceAgentSpan, outputs, **kwargs):
         self._update_end_trace_data(span=span, outputs=outputs, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_chain_error(self, span: TraceAgentSpan, error, **kwargs):
         self._update_error_trace_data(span=span, error=error, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.LLM.value, span=span, inputs=inputs,
                                       instance_info=instance_info, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_llm_request(self, span: TraceAgentSpan, **kwargs):
         self._update_running_trace_data(span=span, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_llm_end(self, span: TraceAgentSpan, outputs, **kwargs):
         self._update_end_trace_data(span=span, outputs=outputs, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_llm_error(self, span: TraceAgentSpan, error, **kwargs):
         self._update_error_trace_data(span=span, error=error, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_prompt_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.PROMPT.value, span=span, inputs=inputs,
                                       instance_info=instance_info, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_prompt_end(self, span: TraceAgentSpan, outputs, **kwargs):
         self._update_end_trace_data(span=span, outputs=outputs, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_prompt_error(self, span: TraceAgentSpan, error, **kwargs):
         self._update_error_trace_data(span=span, error=error, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_plugin_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.PLUGIN.value, span=span, inputs=inputs,
                                       instance_info=instance_info, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_plugin_end(self, span: TraceAgentSpan, outputs, **kwargs):
         self._update_end_trace_data(span=span, outputs=outputs, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_plugin_error(self, span: TraceAgentSpan, error, **kwargs):
         self._update_error_trace_data(span=span, error=error, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_retriever_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.RETRIEVER.value, span=span, inputs=inputs,
                                       instance_info=instance_info, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_retriever_end(self, span: TraceAgentSpan, outputs, **kwargs):
         self._update_end_trace_data(span=span, outputs=outputs, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_retriever_error(self, span: TraceAgentSpan, error, **kwargs):
         self._update_error_trace_data(span=span, error=error, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_evaluator_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.EVALUATOR.value, span=span, inputs=inputs,
                                       instance_info=instance_info, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_evaluator_end(self, span: TraceAgentSpan, outputs, **kwargs):
         self._update_end_trace_data(span=span, outputs=outputs, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_evaluator_error(self, span: TraceAgentSpan, error, **kwargs):
         self._update_error_trace_data(span=span, error=error, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_workflow_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         self._update_start_trace_data(invoke_type=InvokeType.WORKFLOW.value, span=span, inputs=inputs,
                                       instance_info=instance_info, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_workflow_end(self, span: TraceAgentSpan, outputs, **kwargs):
         self._update_end_trace_data(span=span, outputs=outputs, **kwargs)
         await self._send_data(span)
 
-    @trigger_event
     async def on_workflow_error(self, span: TraceAgentSpan, error, **kwargs):
         self._update_error_trace_data(span=span, error=error, **kwargs)
         await self._send_data(span)
 
 
 class TraceWorkflowHandler(TraceBaseHandler):
-    def __init__(self, owner, stream_writer_manager, spanManager):
-        super().__init__(owner, stream_writer_manager, spanManager)
+    def __init__(self, stream_writer_manager, span_manager):
+        super().__init__(stream_writer_manager, span_manager)
 
     def event_name(self) -> str:
         return TracerHandlerName.TRACER_WORKFLOW.value
@@ -287,7 +265,6 @@ class TraceWorkflowHandler(TraceBaseHandler):
             return span
         return self._span_manager.create_workflow_span(invoke_id, self._span_manager.last_span)
 
-    @trigger_event
     async def on_call_start(self, invoke_id: str, metadata: dict = None, inputs: Any = None,
                             need_send: bool = False, source_ids: list = None,
                             **kwargs):
@@ -306,7 +283,6 @@ class TraceWorkflowHandler(TraceBaseHandler):
         if need_send:
             await self._send_data(span)
 
-    @trigger_event
     async def on_pre_invoke(self, invoke_id: str, inputs: Any, component_metadata: dict, need_send: bool = False,
                             **kwargs):
         span = self._get_tracer_workflow_span(invoke_id)
@@ -319,7 +295,6 @@ class TraceWorkflowHandler(TraceBaseHandler):
         if need_send:
             await self._send_data(span, exclude={"outputs", "stream_outputs"})
 
-    @trigger_event
     async def on_pre_stream(self, invoke_id: str, chunk, need_send: bool = False, **kwargs):
         span = self._get_tracer_workflow_span(invoke_id)
         if chunk and isinstance(chunk, dict):
@@ -327,7 +302,6 @@ class TraceWorkflowHandler(TraceBaseHandler):
         if need_send:
             await self._send_data(span, exclude={"outputs", "stream_outputs"})
 
-    @trigger_event
     async def on_invoke(self, invoke_id: str, on_invoke_data: dict = None, exception: Exception = None, **kwargs):
         span = self._get_tracer_workflow_span(invoke_id)
         update_data = {}
@@ -358,12 +332,10 @@ class TraceWorkflowHandler(TraceBaseHandler):
         if exception and span.component_type == "LLM":
             self._span_manager.update_span(span, {})
 
-    @trigger_event
     async def on_post_stream(self, invoke_id: str, chunk, **kwargs):
         span = self._get_tracer_workflow_span(invoke_id)
         span.append_stream_output(chunk)
 
-    @trigger_event
     async def on_post_invoke(self, invoke_id: str, outputs, inputs=None, **kwargs):
         span = self._get_tracer_workflow_span(invoke_id)
         update_data = {
@@ -373,7 +345,6 @@ class TraceWorkflowHandler(TraceBaseHandler):
             span.inputs = inputs
         self._span_manager.update_span(span, update_data)
 
-    @trigger_event
     async def on_call_done(self, invoke_id, outputs: Any = None, **kwargs):
         span = self._get_tracer_workflow_span(invoke_id)
         end_time = datetime.now(tz=tzlocal()).replace(tzinfo=None)
@@ -386,7 +357,6 @@ class TraceWorkflowHandler(TraceBaseHandler):
         if span.component_type == "End" and span.end_time:
             self._span_manager.update_span(span, {})
 
-    @trigger_event
     async def on_interact(self, invoke_id: str, inputs: Any, component_metadata: dict, need_send: bool = False,
                           **kwargs):
         span = self._get_tracer_workflow_span(invoke_id)

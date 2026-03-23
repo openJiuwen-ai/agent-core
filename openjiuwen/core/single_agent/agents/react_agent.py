@@ -1,6 +1,7 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""ReActAgent Implementation
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+"""ReActAgent Implementation
 ReAct (Reasoning + Acting) paradigm Agent implementation
 
 Created on: 2025-11-25
@@ -14,7 +15,9 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from pydantic import Field, BaseModel
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig
@@ -32,8 +35,7 @@ from openjiuwen.core.foundation.llm import (
     SystemMessage
 )
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.memory import LongTermMemory, MemoryScopeConfig
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
@@ -45,6 +47,82 @@ from openjiuwen.core.single_agent.rail.base import (
     rail,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+
+def _summarize_tool_call(tc: Any) -> str:
+    """Format a single tool call for logging."""
+    if isinstance(tc, dict):
+        fn = tc.get("function", {})
+        return f"{fn.get('name', '?')}({str(fn.get('arguments', ''))[:100]})"
+    fn = getattr(tc, "function", tc)
+    name = getattr(fn, "name", getattr(tc, "name", "?"))
+    args = str(getattr(fn, "arguments", getattr(tc, "arguments", "")))[:100]
+    return f"{name}({args})"
+
+
+def log_llm_request(
+    log: Any,
+    messages: Optional[List[Any]],
+    tools: Optional[List[Any]],
+) -> None:
+    """Log LLM request messages and tools."""
+    msgs = messages or []
+    tool_count = len(tools) if tools else 0
+    log.info(
+        f"[LLM] >>> request: msg_count={len(msgs)}, "
+        f"tool_count={tool_count}"
+    )
+    if UserConfig.is_sensitive():
+        return
+    for idx, msg in enumerate(msgs):
+        if isinstance(msg, dict):
+            role = msg.get("role", "")
+            content = str(msg.get("content", ""))
+            tool_calls = msg.get("tool_calls")
+            tool_call_id = msg.get("tool_call_id", "")
+        else:
+            role = getattr(msg, "role", "")
+            content = str(getattr(msg, "content", ""))
+            tool_calls = getattr(msg, "tool_calls", None)
+            tool_call_id = getattr(msg, "tool_call_id", "")
+        parts: List[str] = [f"[LLM]   msg[{idx}] role={role}"]
+        if content:
+            parts.append(f"content={content[:300]}")
+        if tool_calls:
+            tc_summary = [_summarize_tool_call(tc) for tc in tool_calls]
+            parts.append(f"tool_calls=[{', '.join(tc_summary)}]")
+        if tool_call_id:
+            parts.append(f"tool_call_id={tool_call_id}")
+        log.info(", ".join(parts))
+
+
+def log_llm_response(log: Any, ai_message: Any) -> None:
+    """Log LLM response content and tool calls."""
+    usage = getattr(ai_message, "usage_metadata", None)
+    usage_str = ""
+    if usage:
+        usage_str = (
+            f", tokens={{input={getattr(usage, 'input_tokens', '?')}, "
+            f"output={getattr(usage, 'output_tokens', '?')}}}"
+        )
+    if UserConfig.is_sensitive():
+        tc_count = len(ai_message.tool_calls) if ai_message.tool_calls else 0
+        log.info(
+            f"[LLM] <<< response: "
+            f"content_len={len(ai_message.content or '')}, "
+            f"tool_call_count={tc_count}{usage_str}"
+        )
+    else:
+        log.info(
+            f"[LLM] <<< response: "
+            f"content={ai_message.content or ''}{usage_str}"
+        )
+        if ai_message.tool_calls:
+            for tc in ai_message.tool_calls:
+                log.info(
+                    f"[LLM]   tool_call: "
+                    f"{tc.name}({tc.arguments})"
+                )
 
 
 class ReActAgentConfig(BaseModel):
@@ -282,12 +360,14 @@ class InterruptionState:
     interrupted_workflows: per-workflow entries keyed by workflow_id
     pending_workflow_id: workflow_id currently waiting for user feedback
     pending_component_id: component_id currently waiting for user feedback
+    original_query: the original user query from the first invoke (before any resume)
     """
     ai_message: AssistantMessage
     iteration: int
     interrupted_workflows: Dict[str, WorkflowInterruptEntry]
     pending_workflow_id: str
     pending_component_id: str
+    original_query: str = ""
 
 
 class ReActAgent(BaseAgent):
@@ -320,19 +400,8 @@ class ReActAgent(BaseAgent):
             self._config.context_engine_config
         )
         self._llm = None
-        self._init_memory_scope()
         super().__init__(card)
         self._ability_manager.set_context_engine(self.context_engine)
-
-    def _init_memory_scope(self) -> None:
-        """Initialize memory scope (subclass can override configuration)"""
-        if self._config.mem_scope_id:
-            asyncio.run(
-                LongTermMemory().set_scope_config(
-                    self._config.mem_scope_id,
-                    MemoryScopeConfig()
-                )
-            )
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -366,10 +435,6 @@ class ReActAgent(BaseAgent):
                 config.context_engine_config
             )
             self._ability_manager.set_context_engine(self.context_engine)
-        # Update memory_scope if memory scope ID changed
-        if old_config.mem_scope_id != config.mem_scope_id:
-            self._init_memory_scope()
-
         # Reset sys operation id if changed
         if old_config.sys_operation_id != config.sys_operation_id:
             self.lazy_init_skill()
@@ -431,7 +496,18 @@ class ReActAgent(BaseAgent):
             messages=context_window.get_messages(),
             tools=context_window.get_tools(),
         )
-        return await self._railed_model_call(ctx)
+
+        log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
+
+        ai_message = await self._railed_model_call(ctx)
+
+        # @rail returns None when a before hook requested force_finish.
+        if ai_message is None:
+            return None
+
+        log_llm_response(logger, ai_message)
+
+        return ai_message
 
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
@@ -441,13 +517,14 @@ class ReActAgent(BaseAgent):
     async def _railed_model_call(self, ctx: AgentCallbackContext) -> AssistantMessage:
         """Execute LLM call with @rail before/after/on_exception hooks.
 
-        Uses llm.stream() when session is present, falls back to llm.invoke() otherwise.
+        Uses llm.stream() when ctx.extra["_streaming"] is True,
+        falls back to llm.invoke() otherwise.
         Rail hooks may have modified ctx.inputs.messages / ctx.inputs.tools.
         """
         llm = self._get_llm()
         session = ctx.session
 
-        if session is None:
+        if not ctx.extra.get("_streaming"):
             ai_message = await llm.invoke(
                 model=self._config.model_name,
                 messages=ctx.inputs.messages,
@@ -474,14 +551,14 @@ class ReActAgent(BaseAgent):
                 await session.write_stream(OutputSchema(
                     type="llm_reasoning",
                     index=chunk_index,
-                    payload={"content": chunk.reasoning_content},
+                    payload={"content": chunk.reasoning_content, "result_type": "answer"},
                 ))
                 chunk_index += 1
             if chunk.content:
                 await session.write_stream(OutputSchema(
                     type="llm_output",
                     index=chunk_index,
-                    payload={"content": chunk.content},
+                    payload={"content": chunk.content, "result_type": "answer"},
                 ))
                 chunk_index += 1
 
@@ -567,6 +644,7 @@ class ReActAgent(BaseAgent):
             tool_calls: list,
             ai_message: AssistantMessage,
             iteration: int,
+            original_query: str = "",
     ) -> Optional[InterruptionState]:
         """Check tool results for interruption and build InterruptionState if found.
 
@@ -602,6 +680,7 @@ class ReActAgent(BaseAgent):
             interrupted_workflows=interrupted,
             pending_workflow_id=first_workflow_id,
             pending_component_id=first_component_id,
+            original_query=original_query,
         )
 
     def _save_interruption_state(self, state: InterruptionState, session) -> None:
@@ -704,7 +783,10 @@ class ReActAgent(BaseAgent):
             all_tool_calls.append(tc_copy)
 
         results = await self._execute_tool_call(ctx, all_tool_calls, session, context)
-        interrupt = self._after_execute_tool_call(results, all_tool_calls, resume_ai_message, resume_iteration)
+        interrupt = self._after_execute_tool_call(
+            results, all_tool_calls, resume_ai_message, resume_iteration,
+            original_query=interruption_state.original_query,
+        )
         if interrupt:
             return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
 
@@ -739,6 +821,31 @@ class ReActAgent(BaseAgent):
                 interactive_input.update(comp_id, str(user_query))
             return interactive_input
         return InteractiveInput(raw_inputs=str(user_query))
+
+    @staticmethod
+    def _render_system_messages(system_messages: List, inputs: Any) -> None:
+        """Render inputs fields into system message placeholders in-place.
+
+        Aligns with MessageHandlerUtils.format_llm_inputs: InteractiveInput skips rendering.
+        Only str-valued fields from inputs dict are used as render variables.
+        """
+        from openjiuwen.core.session import InteractiveInput
+        from openjiuwen.core.foundation.prompt import PromptTemplate
+        if isinstance(inputs, InteractiveInput):
+            return
+        if isinstance(inputs, dict):
+            render_fields = {k: v for k, v in inputs.items() if isinstance(v, str)}
+        else:
+            render_fields = {"query": str(inputs)}
+        if not render_fields:
+            return
+        for msg in system_messages:
+            if not isinstance(msg.content, str):
+                continue
+            try:
+                msg.content = PromptTemplate(content=msg.content).format(render_fields).content
+            except BaseError as e:
+                logger.warning("Failed to render system message placeholder: %s", e)
 
     async def _warn_missing_skill_read_file_tool(self) -> None:
         """
@@ -800,7 +907,8 @@ class ReActAgent(BaseAgent):
     async def invoke(
             self,
             inputs: Any,
-            session: Optional[Session] = None
+            session: Optional[Session] = None,
+            **kwargs,
     ) -> Dict[str, Any]:
         """Execute ReAct process
 
@@ -809,6 +917,8 @@ class ReActAgent(BaseAgent):
                 - dict: {"query": "...", "conversation_id": "..."}
                 - str: Used directly as query
             session: Session object (required for tool execution)
+            **kwargs: Internal flags. _streaming=True selects
+                the llm.stream() path inside _railed_model_call.
 
         Returns:
             Dict with output and result_type
@@ -823,66 +933,110 @@ class ReActAgent(BaseAgent):
             query = inputs
             conversation_id = None
 
+        # Auto-create session when not provided
+        need_cleanup = False
+        if session is None:
+            session_id = conversation_id or "default_session"
+            session = create_agent_session(
+                session_id=session_id, card=self.card
+            )
+            await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+            need_cleanup = True
+
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+        ctx.extra["_streaming"] = kwargs.get("_streaming", False)
+        if isinstance(inputs, dict):
+            ctx.extra["user_id"] = inputs.get("user_id", "")
 
-        async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
-            user_input = ctx.inputs.query
-            if not user_input:
-                raise ValueError("Input must contain 'query'")
+        try:
+            async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
+                user_input = ctx.inputs.query
+                if not user_input:
+                    raise ValueError("Input must contain 'query'")
 
-            interruption_state = self._load_interruption_state(session)
-            if interruption_state is not None:
-                self._clear_interruption_state(session)
+                interruption_state = self._load_interruption_state(session)
+                if interruption_state is not None:
+                    self._clear_interruption_state(session)
+                    # Restore original query so MemoryRail.after_invoke writes the right UserMessage
+                    ctx.extra["_original_query"] = interruption_state.original_query
 
-            context = await self._init_context(session)
-            ctx.context = context
+                context = await self._init_context(session)
+                ctx.context = context
 
-            system_messages = [
-                SystemMessage(role=msg["role"], content=msg["content"])
-                for msg in self._config.prompt_template
-                if msg.get("role") == "system"
-            ]
-            if system_messages and self._skill_util is not None and self._skill_util.has_skill():
-                await self._warn_missing_skill_read_file_tool()
-                skill_prompt = self._skill_util.get_skill_prompt()
-                system_messages[-1].content = (system_messages[-1].content or "") + "\n" + skill_prompt
+                system_messages = [
+                    SystemMessage(role=msg["role"], content=msg["content"])
+                    for msg in self._config.prompt_template
+                    if msg.get("role") == "system"
+                ]
+                self._render_system_messages(system_messages, inputs)
 
-            tools = await self.ability_manager.list_tool_info()
-            await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                if system_messages and self._skill_util is not None and self._skill_util.has_skill():
+                    await self._warn_missing_skill_read_file_tool()
+                    skill_prompt = self._skill_util.get_skill_prompt()
+                    system_messages[-1].content = (system_messages[-1].content or "") + "\n" + skill_prompt
 
-            start_iteration = 0
-            if interruption_state is not None:
-                resume_result = await self._handle_resume(
-                    interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
-                )
-                if resume_result is not None:
-                    return resume_result
-                start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
+                tools = await self.ability_manager.list_tool_info()
+                await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
 
-            for iteration in range(start_iteration, self._config.max_iterations):
-                logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+                start_iteration = 0
+                if interruption_state is not None:
+                    resume_result = await self._handle_resume(
+                        interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
+                    )
+                    if resume_result is not None:
+                        pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
+                    else:
+                        start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
 
-                ai_message = await self._call_model(ctx, context, system_messages, tools)
-                await context.add_messages(
-                    AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
-                )
+                if invoke_inputs.result is None:
+                    for iteration in range(start_iteration, self._config.max_iterations):
+                        logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
-                if not ai_message.tool_calls:
-                    await self.context_engine.save_contexts(session)
-                    result = {"output": ai_message.content, "result_type": "answer"}
-                    invoke_inputs.result = result
-                    return result
+                        ai_message = await self._call_model(ctx, context, system_messages, tools)
 
-                results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
-                interrupt = self._after_execute_tool_call(results, ai_message.tool_calls, ai_message, iteration)
-                if interrupt:
-                    return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+                        finish = ctx.consume_force_finish()
+                        if finish:
+                            await self.context_engine.save_contexts(session)
+                            invoke_inputs.result = finish.result
+                            break
 
-            await self.context_engine.save_contexts(session)
-            result = {"output": "Max iterations reached without completion", "result_type": "error"}
-            invoke_inputs.result = result
-            return result
+                        await context.add_messages(
+                            AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
+                        )
+
+                        if not ai_message.tool_calls:
+                            await self.context_engine.save_contexts(session)
+                            result = {"output": ai_message.content, "result_type": "answer"}
+                            invoke_inputs.result = result
+                            break
+
+                        results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+
+                        finish = ctx.consume_force_finish()
+                        if finish:
+                            await self.context_engine.save_contexts(session)
+                            invoke_inputs.result = finish.result
+                            break
+
+                        interrupt = self._after_execute_tool_call(
+                            results, ai_message.tool_calls, ai_message, iteration,
+                            original_query=ctx.extra.get("_original_query", ""),
+                        )
+                        if interrupt:
+                            await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+                            break
+                    else:
+                        await self.context_engine.save_contexts(session)
+                        result = {"output": "Max iterations reached without completion", "result_type": "error"}
+                        invoke_inputs.result = result
+
+            # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
+            return ctx.extra.get("invoke_result", invoke_inputs.result)
+        finally:
+            if need_cleanup:
+                await self.context_engine.save_contexts(session)
+                await session.post_run()
 
     async def _write_invoke_result_to_stream(
             self,
@@ -927,40 +1081,59 @@ class ReActAgent(BaseAgent):
         """Stream execute ReAct process
 
         Args:
-            inputs: User input (required in new version)
-            session: Session object (required in new version)
+            inputs: User input
+            session: Session object (if None, auto create)
             stream_modes: Stream output modes (optional)
 
         Yields:
             OutputSchema objects from stream_iterator
         """
-        final_result_holder = {"result": None}
+        # Auto-create session when not provided
+        need_cleanup = False
+        if session is None:
+            if isinstance(inputs, dict):
+                conversation_id = inputs.get("conversation_id")
+            else:
+                conversation_id = None
+            session_id = conversation_id or "default_session"
+            session = create_agent_session(
+                session_id=session_id, card=self.card
+            )
+            need_cleanup = True
 
-        if session is not None:
-            await session.pre_run()
+        await session.pre_run(
+            inputs=inputs if isinstance(inputs, dict) else None
+        )
 
         async def stream_process():
             try:
-                final_result = await self.invoke(inputs, session)
-                final_result_holder["result"] = final_result
-                if session is not None:
-                    await self._write_invoke_result_to_stream(final_result, session)
+                final_result = await self.invoke(inputs, session, _streaming=True)
+                if isinstance(final_result, list):
+                    for schema in final_result:
+                        await session.write_stream(schema)
+                else:
+                    await self._write_invoke_result_to_stream(
+                        final_result, session
+                    )
             except Exception as e:
                 logger.error(f"ReActAgent stream error: {e}")
-                final_result_holder["result"] = {"output": str(e), "result_type": "error"}
             finally:
-                if session is not None:
+                if need_cleanup:
                     await self.context_engine.save_contexts(session)
-                    await session.post_run()
+                await session.post_run()
 
         task = asyncio.create_task(stream_process())
 
-        # Read from stream_iterator and yield
-        if session is not None:
-            async for result in session.stream_iterator():
-                yield result
+        async for result in session.stream_iterator():
+            yield result
 
         await task
+
+    async def clear_session(self, session_id: str = "default_session"):
+        """Release session resources and clear context cache."""
+        from openjiuwen.core.runner import Runner
+        await Runner.release(session_id=session_id)
+        await self.context_engine.clear_context(session_id=session_id)
 
 
 __all__ = [

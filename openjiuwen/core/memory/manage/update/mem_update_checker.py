@@ -91,6 +91,7 @@ def _format_input(new_memories: Dict[str, str], old_memories: Dict[str, str]) ->
     new_info_lines = []
     for mem_id, content in new_memories.items():
         new_info_lines.append(f"{mem_id}: {content}")
+    new_info_lines = new_info_lines[::-1]
     new_info_str = "\n".join(new_info_lines)
 
     # Format old memories
@@ -126,7 +127,7 @@ class MemUpdateChecker:
         self,
         new_memories: Dict[str, str],
         old_memories: Dict[str, str],
-        base_chat_model: Tuple[str, Model],
+        base_chat_model: Model,
         retries: int = 3,
     ) -> List[MemoryActionItem]:
         """
@@ -135,7 +136,7 @@ class MemUpdateChecker:
         Args:
             new_memories: Dictionary of new memories to check {id: content}
             old_memories: Dictionary of existing memories {id: content}
-            base_chat_model: Tuple of (model_name, model_client) for LLM invocation
+            base_chat_model: Model instance for LLM invocation
             retries: Number of retries for LLM invocation (default: 3)
 
         Returns:
@@ -145,7 +146,7 @@ class MemUpdateChecker:
                 - Redundant new memories are not included
         """
         # Skip checking if no old memories or no model
-        if not old_memories or not base_chat_model:
+        if not base_chat_model:
             memory_logger.debug(
                 "No need to check memories - no old memories or no model",
                 event_type=LogEventType.MEMORY_PROCESS,
@@ -178,7 +179,6 @@ class MemUpdateChecker:
             },
         )
 
-        model_name, model_client = base_chat_model
         messages = [{"role": "user", "content": user_prompt}]
 
         memory_logger.debug(
@@ -192,7 +192,7 @@ class MemUpdateChecker:
 
         for attempt in range(retries):
             try:
-                response = await model_client.invoke(model=model_name, messages=messages)
+                response = await base_chat_model.invoke(messages=messages)
                 parsed_result = await parser.parse(response.content)
 
                 if isinstance(parsed_result, dict):
@@ -265,11 +265,6 @@ class MemUpdateChecker:
             elif check_item.result == CheckResult.NONE:
                 # No conflict: add new memory with ADD status
                 new_content = new_memories.get(new_id, check_item.info_text)
-                action_items.append(MemoryActionItem(id=new_id, content=new_content, status=MemoryStatus.ADD))
-
-        # Add new memories that weren't in check results (shouldn't happen, but just in case)
-        for new_id, new_content in new_memories.items():
-            if new_id not in processed_new_ids:
                 action_items.append(MemoryActionItem(id=new_id, content=new_content, status=MemoryStatus.ADD))
 
         memory_logger.debug(

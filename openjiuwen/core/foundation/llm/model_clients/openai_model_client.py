@@ -23,7 +23,9 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 if TYPE_CHECKING:
     import openai
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
 
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
+    __client_name__ = ProviderType.OpenAI.name
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
@@ -94,7 +97,7 @@ class OpenAIModelClient(BaseModelClient):
             timeout: Optional timeout override for this specific request
         """
         from openai import AsyncOpenAI
-        
+
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
@@ -169,6 +172,16 @@ class OpenAIModelClient(BaseModelClient):
 
         async_client = None
         try:
+            await trigger(
+                LLMCallEvents.LLM_INPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"))
+
             async_client = self._create_async_openai_client(timeout=timeout)
 
             # Call API
@@ -198,9 +211,26 @@ class OpenAIModelClient(BaseModelClient):
             )
             assistant_message = await self._parse_response(response, output_parser)
 
+            if tracer_record_data:
+                await tracer_record_data(llm_response=assistant_message)
+
+            await trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                response=assistant_message.content,
+                usage=assistant_message.usage_metadata,
+                tool_calls=assistant_message.tool_calls)
+
             return assistant_message
 
         except Exception as e:
+            await trigger(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=False,
+                error=e)
             llm_logger.error(
                 "OpenAI API async invoke error.",
                 event_type=LogEventType.LLM_CALL_ERROR,
@@ -269,24 +299,68 @@ class OpenAIModelClient(BaseModelClient):
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
+
         async_client = None
         try:
+            await trigger(
+                LLMCallEvents.LLM_INPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=True)
+
             async_client = self._create_async_openai_client(timeout=timeout)
 
             # Call API with streaming
             response_stream = await async_client.chat.completions.create(**params)
 
+            final_message = None
             if output_parser:
                 # Use streaming parser
                 async for parsed_result in self._astream_with_parser(response_stream, output_parser):
+                    await trigger(
+                        LLMCallEvents.LLM_RESPONSE_RECEIVED,
+                        model_name=params.get("model"),
+                        model_provider=self.model_client_config.client_provider)
+                    if final_message:
+                        final_message = final_message + parsed_result
+                    else:
+                        final_message = parsed_result
                     yield parsed_result
             else:
                 async for chunk in response_stream:
                     parsed_chunk = self._parse_stream_chunk(chunk)
                     if parsed_chunk:
+                        await trigger(
+                            LLMCallEvents.LLM_RESPONSE_RECEIVED,
+                            model_name=params.get("model"),
+                            model_provider=self.model_client_config.client_provider)
+                        if final_message:
+                            final_message = final_message + parsed_chunk
+                        else:
+                            final_message = parsed_chunk
                         yield parsed_chunk
 
+            if tracer_record_data:
+                await tracer_record_data(llm_response=final_message)
+
+            await trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True)
+
         except Exception as e:
+            await trigger(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                error=e)
             llm_logger.error(
                 "OpenAI API async stream error.",
                 event_type=LogEventType.LLM_CALL_ERROR,

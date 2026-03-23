@@ -13,28 +13,23 @@ class Tracer:
         self._trace_id = str(uuid.uuid4())
         self.tracer_agent_span_manager = SpanManager(self._trace_id)
         self.tracer_workflow_span_manager_dict = {}
-        self._callback_manager = None
+        self._handlers = {}
         self._stream_writer_manager = None
 
-    def init(self, stream_writer_manager, callback_manager):
-        trace_agent_handler = TraceAgentHandler(callback_manager, stream_writer_manager,
-                                                self.tracer_agent_span_manager)
-        parent_tracer_workflow_span_manager = SpanManager(self._trace_id)
-        trace_workflow_handler = TraceWorkflowHandler(callback_manager, stream_writer_manager,
-                                                      parent_tracer_workflow_span_manager)
-        self.tracer_workflow_span_manager_dict[""] = parent_tracer_workflow_span_manager
-        callback_manager.register({TracerHandlerName.TRACE_AGENT.value: trace_agent_handler})
-        callback_manager.register({TracerHandlerName.TRACER_WORKFLOW.value: trace_workflow_handler})
-        self._callback_manager = callback_manager
+    def init(self, stream_writer_manager):
         self._stream_writer_manager = stream_writer_manager
+        agent_handler = TraceAgentHandler(stream_writer_manager, self.tracer_agent_span_manager)
+        parent_wf_span_manager = SpanManager(self._trace_id)
+        wf_handler = TraceWorkflowHandler(stream_writer_manager, parent_wf_span_manager)
+        self.tracer_workflow_span_manager_dict[""] = parent_wf_span_manager
+        self._handlers[TracerHandlerName.TRACE_AGENT.value] = agent_handler
+        self._handlers[TracerHandlerName.TRACER_WORKFLOW.value] = wf_handler
 
     def register_workflow_span_manager(self, parent_node_id: str):
-        tracer_workflow_span_manager = SpanManager(self._trace_id, parent_node_id=parent_node_id)
-        self.tracer_workflow_span_manager_dict[parent_node_id] = tracer_workflow_span_manager
-        trace_workflow_handler = TraceWorkflowHandler(self._callback_manager, self._stream_writer_manager,
-                                                      tracer_workflow_span_manager)
-        self._callback_manager.register(
-            {TracerHandlerName.TRACER_WORKFLOW.value + "." + parent_node_id: trace_workflow_handler})
+        span_manager = SpanManager(self._trace_id, parent_node_id=parent_node_id)
+        self.tracer_workflow_span_manager_dict[parent_node_id] = span_manager
+        handler = TraceWorkflowHandler(self._stream_writer_manager, span_manager)
+        self._handlers[TracerHandlerName.TRACER_WORKFLOW.value + "." + parent_node_id] = handler
 
     def get_workflow_span(self, invoke_id: str, parent_node_id: str):
         workflow_span_manager = self.tracer_workflow_span_manager_dict.get(parent_node_id, None)
@@ -46,7 +41,9 @@ class Tracer:
         parent_node_id = kwargs.get("parent_node_id", None)
         if parent_node_id is not None:
             handler_class_name += "." + parent_node_id if parent_node_id != "" else ""
-        await self._callback_manager.trigger(handler_class_name, event_name, **kwargs)
+        handler = self._handlers.get(handler_class_name)
+        if handler and hasattr(handler, event_name):
+            await getattr(handler, event_name)(**kwargs)
 
     def sync_trigger(self, handler_class_name: str, event_name: str, **kwargs):
         loop = asyncio.get_event_loop()

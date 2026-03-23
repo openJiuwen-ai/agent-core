@@ -114,3 +114,4 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
         )
 
     return real_path
+

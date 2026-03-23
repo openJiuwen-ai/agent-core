@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from typing import Any, Union, Optional, List, Tuple
 
 from openjiuwen.core.session.config.base import Config
-from openjiuwen.core.session.callback.callback_manager import CallbackManager
 from openjiuwen.core.session.state.base import State
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.session.stream.manager import StreamWriterManager
@@ -30,10 +29,6 @@ class BaseSession(ABC):
 
     @abstractmethod
     def stream_writer_manager(self) -> StreamWriterManager:
-        ...
-
-    @abstractmethod
-    def callback_manager(self) -> CallbackManager:
         ...
 
     @abstractmethod
@@ -69,9 +64,6 @@ class ProxySession(BaseSession):
 
     def stream_writer_manager(self) -> StreamWriterManager:
         return self._stub.stream_writer_manager()
-
-    def callback_manager(self) -> CallbackManager:
-        return self._stub.callback_manager()
 
     def session_id(self) -> str:
         return self._stub.session_id()
