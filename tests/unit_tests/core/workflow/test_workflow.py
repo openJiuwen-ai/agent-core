@@ -997,6 +997,7 @@ async def test_invoke_validates_unregistered_edge_nodes():
         await flow1.invoke({"a": 1}, create_workflow_session())
     error_msg = str(context.value)
     assert ("unknown_target" in error_msg)
+
     assert ("start" in error_msg)  # Should show registered components
 
     # Test unregistered source in connection
@@ -1254,9 +1255,9 @@ async def test_workflow_with_loop_component_multi_abilities():
 async def test_executor_single_interupt_component():
     class CustomQuesNode(WorkflowComponent):
         async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
-            print(f'inputs: {inputs}')
+            logger.info(f'inputs: {inputs}')
             result = await session.interact("please input:")
-            print(f'result: {result}')
+            logger.info(f'result: {result}')
 
             return {"result": result, 'inputs': inputs}
     component = CustomQuesNode()
@@ -1273,7 +1274,7 @@ async def test_executor_single_interupt_component():
         executor=component,
         inputs=inputs,
     )
-    print(f"1.result: {result}")
+    logger.info(f"1.result: {result}")
     # 分步验证，更易调试
     assert result.payload is not None, "payload属性为空"
     assert hasattr(result.payload, 'value'), "payload缺少value属性"
@@ -1283,10 +1284,15 @@ async def test_executor_single_interupt_component():
         component_id=component_id,
         session=session,
         executor=component,
-        inputs=InteractiveInput("shanghai"),
+        inputs_schema={"a": "${a}", "b": "${b}"},
+        inputs=InteractiveInput({"a": "shanghai"}),
     )
     print(f"2. result: {result}")
-    assert result == {'result': 'shanghai'}
+    # 验证结果包含 result 和 inputs 字段
+    assert 'result' in result
+    assert 'inputs' in result
+    assert result['result'] == {'a': 'shanghai'}
+    assert result['inputs'] == {'a': '测试输入', 'b': '测试输入2'}
 
 
 async def test_sub_flow_multi_stream_output():
