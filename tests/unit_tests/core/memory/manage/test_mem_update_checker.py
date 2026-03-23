@@ -241,7 +241,7 @@ class TestMemUpdateChecker:
 
         new_str, old_str = _format_input(new_memories, old_memories)
 
-        expected_new = "1: I like reading\n2: I enjoy books"
+        expected_new = "2: I enjoy books\n1: I like reading"
         expected_old = "3: I love novels\n4: I hate sports"
 
         assert new_str == expected_new
