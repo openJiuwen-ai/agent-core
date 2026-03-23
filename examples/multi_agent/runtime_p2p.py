@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""GroupRuntime P2P Communication Example
+"""TeamRuntime P2P Communication Example
 
 点对点（P2P）通信模式：Planner -> Coder -> Reviewer 顺序协作。
 参考 autogen sequential workflow 设计模式。
@@ -10,7 +10,7 @@ import asyncio
 from typing import Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.logging import multi_agent_logger
-from openjiuwen.core.multi_agent.group_runtime import GroupRuntime, CommunicableAgent
+from openjiuwen.core.multi_agent.team_runtime import TeamRuntime, CommunicableAgent
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.session.session import Session
@@ -80,7 +80,7 @@ class ReviewerAgent(CommunicableAgent, BaseAgent):
 
 async def main():
     multi_agent_logger.info("=" * 55)
-    multi_agent_logger.info("GroupRuntime P2P 通信示例")
+    multi_agent_logger.info("TeamRuntime P2P 通信示例")
     multi_agent_logger.info("流程: user -> planner -P2P-> coder -P2P-> reviewer")
     multi_agent_logger.info("=" * 55)
 
@@ -88,8 +88,8 @@ async def main():
     coder_card = AgentCard(id="coder", name="coder", description="代码实现者")
     reviewer_card = AgentCard(id="reviewer", name="reviewer", description="代码审查者")
 
-    # 创建并配置 GroupRuntime
-    runtime = GroupRuntime()
+    # 创建并配置 TeamRuntime
+    runtime = TeamRuntime()
     runtime.register_agent(planner_card, lambda: PlannerAgent(card=planner_card))
     runtime.register_agent(coder_card, lambda: CoderAgent(card=coder_card))
     runtime.register_agent(reviewer_card, lambda: ReviewerAgent(card=reviewer_card))

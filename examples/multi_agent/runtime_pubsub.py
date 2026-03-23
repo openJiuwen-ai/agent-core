@@ -1,15 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""GroupRuntime Pub-Sub Communication Example
+"""TeamRuntime Pub-Sub Communication Example
 
 发布-订阅（Pub-Sub）通信模式：Coordinator 广播任务，多个 Worker 并发处理。
-参考 autogen group chat 设计模式。
+参考 autogen team chat 设计模式。
 """
 import asyncio
 from typing import Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.logging import multi_agent_logger
-from openjiuwen.core.multi_agent.group_runtime import GroupRuntime, CommunicableAgent
+from openjiuwen.core.multi_agent.team_runtime import TeamRuntime, CommunicableAgent
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.session.session import Session
@@ -83,7 +83,7 @@ class MonitorAgent(CommunicableAgent, BaseAgent):
 
 async def main():
     multi_agent_logger.info("=" * 55)
-    multi_agent_logger.info("GroupRuntime Pub-Sub 通信示例")
+    multi_agent_logger.info("TeamRuntime Pub-Sub 通信示例")
     multi_agent_logger.info("流程: coordinator --publish--> [worker1, worker2, worker3]")
     multi_agent_logger.info("      workers --publish--> monitor")
     multi_agent_logger.info("=" * 55)
@@ -94,7 +94,7 @@ async def main():
     worker3_card = AgentCard(id="worker3", name="worker3", description="工作者3")
     monitor_card = AgentCard(id="monitor", name="monitor", description="任务监控者")
 
-    runtime = GroupRuntime()
+    runtime = TeamRuntime()
     runtime.register_agent(coordinator_card, lambda: CoordinatorAgent(card=coordinator_card))
     runtime.register_agent(worker1_card, lambda: WorkerAgent(card=worker1_card, worker_id="1"))
     runtime.register_agent(worker2_card, lambda: WorkerAgent(card=worker2_card, worker_id="2"))

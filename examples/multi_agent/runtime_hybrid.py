@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""GroupRuntime Hybrid Communication Example
+"""TeamRuntime Hybrid Communication Example
 
 混合通信模式（P2P + Pub-Sub）。
 
@@ -16,7 +16,7 @@ import asyncio
 from typing import Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.logging import multi_agent_logger
-from openjiuwen.core.multi_agent.group_runtime import GroupRuntime, CommunicableAgent
+from openjiuwen.core.multi_agent.team_runtime import TeamRuntime, CommunicableAgent
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.session.session import Session
@@ -126,7 +126,7 @@ class ReporterAgent(CommunicableAgent, BaseAgent):
 
 async def main():
     multi_agent_logger.info("=" * 55)
-    multi_agent_logger.info("GroupRuntime Hybrid (P2P + Pub-Sub)")
+    multi_agent_logger.info("TeamRuntime Hybrid (P2P + Pub-Sub)")
     multi_agent_logger.info("Flow: main -P2P-> orchestrator -Pub-Sub-> executors")
     multi_agent_logger.info("      executors -Pub-Sub-> aggregator")
     multi_agent_logger.info("      main -P2P-> reporter")
@@ -143,7 +143,7 @@ async def main():
 
     agg = AggregatorAgent(card=aggregator_card, done_event=done_event, expected=3)
 
-    runtime = GroupRuntime()
+    runtime = TeamRuntime()
     runtime.register_agent(orchestrator_card, lambda: OrchestratorAgent(card=orchestrator_card))
     runtime.register_agent(executor1_card, lambda: ExecutorAgent(card=executor1_card, executor_id=1))
     runtime.register_agent(executor2_card, lambda: ExecutorAgent(card=executor2_card, executor_id=2))

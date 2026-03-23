@@ -6,10 +6,10 @@ from unittest.mock import Mock
 import pytest
 
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore, BasedKVStorePipeline
-from openjiuwen.core.session.checkpointer.persistence import AgentGroupStorage, AgentStorage
+from openjiuwen.core.session.checkpointer.persistence import AgentTeamStorage, AgentStorage
 from openjiuwen.core.session.config.base import Config
 from openjiuwen.core.session.internal.agent import AgentSession
-from openjiuwen.core.session.internal.agent_group import AgentGroupSession
+from openjiuwen.core.session.internal.agent_team import AgentTeamSession
 from openjiuwen.core.session.state.agent_state import StateCollection
 
 
@@ -97,8 +97,8 @@ async def test_persistence_agent_storage_save_recover_exists_and_clear():
 @pytest.mark.asyncio
 async def test_persistence_agent_group_storage_save_recover_exists_and_clear():
     kv_store = MockKVStore()
-    storage = AgentGroupStorage(kv_store)
-    session = AgentGroupSession(session_id="session-group", group_id="group-1", config=Config())
+    storage = AgentTeamStorage(kv_store)
+    session = AgentTeamSession(session_id="session-team", team_id="team-1", config=Config())
     session.state().update({"agent_local": "should_not_be_restored"})
     session.state().update_global({"team": "alpha"})
 
@@ -106,14 +106,14 @@ async def test_persistence_agent_group_storage_save_recover_exists_and_clear():
 
     assert await storage.exists(session) is True
 
-    recovered = AgentGroupSession(session_id="session-group", group_id="group-1", config=Config())
+    recovered = AgentTeamSession(session_id="session-team", team_id="team-1", config=Config())
     recovered.state = Mock(return_value=StateCollection())
     await storage.recover(recovered)
 
     assert recovered.state().get_global("team") == "alpha"
     assert recovered.state().get("agent_local") is None
 
-    await storage.clear("group-1", "session-group")
+    await storage.clear("team-1", "session-team")
     assert await storage.exists(session) is False
 
 

@@ -13,10 +13,10 @@ import pytest
 from openjiuwen.core.session.checkpointer import (
     build_key_with_namespace,
     SESSION_NAMESPACE_AGENT,
-    SESSION_NAMESPACE_AGENT_GROUP,
+    SESSION_NAMESPACE_AGENT_TEAM,
 )
 from openjiuwen.core.session.config.base import Config
-from openjiuwen.core.session.internal.agent_group import AgentGroupSession
+from openjiuwen.core.session.internal.agent_team import AgentTeamSession
 from openjiuwen.core.session.state.agent_state import StateCollection
 from openjiuwen.extensions.checkpointer.redis.storage import (
     AgentGroupStorage,
@@ -153,16 +153,16 @@ async def test_agent_storage_ttl_refresh_on_read(redis_client, mock_agent_sessio
 
 @pytest.mark.asyncio
 async def test_agent_group_storage_save_and_recover(redis_store):
-    """Test save and recover agent group state."""
+    """Test save and recover agent team state."""
     storage = AgentGroupStorage(redis_store)
-    session = AgentGroupSession(session_id="group_session", group_id="group_a", config=Config())
+    session = AgentTeamSession(session_id="group_session", team_id="group_a", config=Config())
     session.state().update({"agent_local": "ignored"})
     session.state().update_global({"shared_key": "shared_value", "counter": 3})
 
     await storage.save(session)
     assert await storage.exists(session) is True
 
-    recovered = AgentGroupSession(session_id="group_session", group_id="group_a", config=Config())
+    recovered = AgentTeamSession(session_id="group_session", team_id="group_a", config=Config())
     recovered.state = Mock(return_value=StateCollection())
 
     await storage.recover(recovered)
@@ -174,9 +174,9 @@ async def test_agent_group_storage_save_and_recover(redis_store):
 
 @pytest.mark.asyncio
 async def test_agent_group_storage_clear(redis_store):
-    """Test clear method for agent group state."""
+    """Test clear method for agent team state."""
     storage = AgentGroupStorage(redis_store)
-    session = AgentGroupSession(session_id="group_session", group_id="group_a", config=Config())
+    session = AgentTeamSession(session_id="group_session", team_id="group_a", config=Config())
     session.state().update_global({"shared_key": "shared_value"})
 
     await storage.save(session)
@@ -189,21 +189,21 @@ async def test_agent_group_storage_clear(redis_store):
 
 @pytest.mark.asyncio
 async def test_agent_group_storage_ttl_refresh_on_read(redis_client):
-    """Test TTL refresh on read for agent group state."""
+    """Test TTL refresh on read for agent team state."""
     ttl = {
         "default_ttl": 1,
         "refresh_on_read": True,
     }
     redis_store = RedisStore(redis_client)
     storage = AgentGroupStorage(redis_store, ttl=ttl)
-    session = AgentGroupSession(session_id="group_session", group_id="group_a", config=Config())
+    session = AgentTeamSession(session_id="group_session", team_id="group_a", config=Config())
     session.state().update_global({"shared_key": "shared_value"})
 
     await storage.save(session)
 
     dump_type_key = build_key_with_namespace(
         "group_session",
-        SESSION_NAMESPACE_AGENT_GROUP,
+        SESSION_NAMESPACE_AGENT_TEAM,
         "group_a",
         storage._state_dump_type_key,
     )

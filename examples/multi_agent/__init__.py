@@ -10,5 +10,5 @@ __all__ = [
     "runtime_p2p",
     "runtime_pubsub",
     "runtime_hybrid",
-    "group_hybrid"
+    "team_hybrid"
 ]

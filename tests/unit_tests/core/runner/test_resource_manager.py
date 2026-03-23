@@ -5,7 +5,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Tool, ToolCard
-from openjiuwen.core.multi_agent import GroupCard
+from openjiuwen.core.multi_agent import TeamCard
 from openjiuwen.core.runner.resources_manager.base import GLOBAL
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 from openjiuwen.core.single_agent import AgentCard
@@ -446,15 +446,15 @@ class TestResourceMgrAgentGroupRemove:
 
     @pytest.mark.asyncio
     async def test_remove_agent_group_returns_ok_with_removed_card(self, resource_mgr):
-        group_card = GroupCard(id="test_group", name="test_group", description="test group")
+        group_card = TeamCard(id="test_group", name="test_group", description="test team")
 
-        add_result = await resource_mgr.add_agent_group(group_card, lambda: Mock())
+        add_result = await resource_mgr.add_agent_team(group_card, lambda: Mock())
         assert add_result.is_ok()
 
-        remove_result = await resource_mgr.remove_agent_group(group_id=group_card.id)
+        remove_result = await resource_mgr.remove_agent_team(team_id=group_card.id)
 
         assert remove_result.is_ok()
         assert remove_result.msg() == group_card
 
-        removed_group = await resource_mgr.get_agent_group(group_id=group_card.id)
+        removed_group = await resource_mgr.get_agent_team(team_id=group_card.id)
         assert removed_group is None
