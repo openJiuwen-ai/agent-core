@@ -240,3 +240,50 @@ class TestTripleBeamSearch:
         assert all(isinstance(b, TripleBeam) for b in beams)
         # Since there are no candidates, beams remain at length 1 (no expansion happened)
         assert all(len(b) == 1 for b in beams)
+
+    @pytest.mark.asyncio
+    async def test_search_candidates_bm25_index_type_uses_sparse_mode(self, mock_retriever_with_embed):
+        """Triple candidate search maps retriever index_type bm25 to retrieve(mode='sparse')."""
+        mock_retriever_with_embed.index_type = "bm25"
+        mock_retriever_with_embed.retrieve = AsyncMock(return_value=[])
+        search = TripleBeamSearch(retriever=mock_retriever_with_embed, num_candidates_per_beam=50)
+        beam = TripleBeam(
+            [
+                RetrievalResult(
+                    text="entity1 relation entity2",
+                    score=0.9,
+                    metadata={"triple": '["entity1", "relation", "entity2"]'},
+                )
+            ],
+            0.9,
+        )
+
+        await search._search_candidates(beam)  # pylint: disable=protected-access
+
+        mock_retriever_with_embed.retrieve.assert_called_once()
+        _, kwargs = mock_retriever_with_embed.retrieve.call_args
+        assert kwargs["mode"] == "sparse"
+        assert kwargs["top_k"] == 50
+        assert "entity1" in kwargs["query"] and "entity2" in kwargs["query"]
+
+    @pytest.mark.asyncio
+    async def test_search_candidates_non_bm25_index_type_passes_through(self, mock_retriever_with_embed):
+        """Other index_type values are forwarded to retrieve unchanged."""
+        mock_retriever_with_embed.index_type = "hybrid"
+        mock_retriever_with_embed.retrieve = AsyncMock(return_value=[])
+        search = TripleBeamSearch(retriever=mock_retriever_with_embed)
+        beam = TripleBeam(
+            [
+                RetrievalResult(
+                    text="a rel b",
+                    score=1.0,
+                    metadata={"triple": '["a", "rel", "b"]'},
+                )
+            ],
+            1.0,
+        )
+
+        await search._search_candidates(beam)  # pylint: disable=protected-access
+
+        _, kwargs = mock_retriever_with_embed.retrieve.call_args
+        assert kwargs["mode"] == "hybrid"
