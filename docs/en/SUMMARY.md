@@ -179,6 +179,7 @@
         - [embedding](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/embedding/README.md)
           - [base](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/embedding/base.md)
           - [api_embedding](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/embedding/api_embedding.md)
+          - [dashscope_embedding](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/embedding/dashscope_embedding.md)
           - [openai_embedding](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/embedding/openai_embedding.md)
           - [vllm_embedding](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/embedding/vllm_embedding.md)
         - [reranker](2.Development%20Guide/API%20Docs/openjiuwen.core/retrieval/reranker/README.md)
