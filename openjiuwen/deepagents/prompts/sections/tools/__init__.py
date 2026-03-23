@@ -46,6 +46,11 @@ from openjiuwen.deepagents.prompts.sections.tools.vision import (
 from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
     TaskMetadataProvider,
 )
+from openjiuwen.deepagents.prompts.sections.tools.web_tools import (
+    FreeSearchMetadataProvider,
+    PaidSearchMetadataProvider,
+    FetchWebpageMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -66,6 +71,9 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     ImageOCRMetadataProvider(),
     VisualQuestionAnsweringMetadataProvider(),
     TaskMetadataProvider(),
+    FreeSearchMetadataProvider(),
+    PaidSearchMetadataProvider(),
+    FetchWebpageMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {

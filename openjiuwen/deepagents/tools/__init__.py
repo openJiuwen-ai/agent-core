@@ -17,6 +17,11 @@ from openjiuwen.deepagents.tools.vision import (
     VisualQuestionAnsweringTool,
     create_vision_tools,
 )
+from openjiuwen.deepagents.tools.web_tools import (
+    WebFreeSearchTool,
+    WebPaidSearchTool,
+    WebFetchWebpageTool,
+)
 
 __all__ = [
     "ToolOutput",
@@ -31,4 +36,7 @@ __all__ = [
     "ImageOCRTool",
     "VisualQuestionAnsweringTool",
     "create_vision_tools",
+    "WebFreeSearchTool",
+    "WebPaidSearchTool",
+    "WebFetchWebpageTool",
 ]
