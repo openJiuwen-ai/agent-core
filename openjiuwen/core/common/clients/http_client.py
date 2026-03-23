@@ -405,7 +405,7 @@ class HttpClient(BaseClient):
         if self._reuse_session and self._session:
             async with self._lock:
                 if self._session:
-                    await self._session_manager.release(self._session)
+                    await self._session_manager.release(self._session.config)
                     self._session = None
 
         self._closed = True
