@@ -14,9 +14,9 @@ from openjiuwen.deepagents.tools.todo import (
     TodoStatus,
     TodoItem,
     TodoTool,
-    create_todo_create_tool,
-    create_todo_list_tool,
-    create_todo_modify_tool,
+    TodoCreateTool,
+    TodoListTool,
+    TodoModifyTool,
     STATUS_ICONS
 )
 
@@ -188,7 +188,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
 
         # Create tool with mock operation
-        self.tool = create_todo_create_tool(operation=self.mock_operation)
+        self.tool = TodoCreateTool(operation=self.mock_operation)
 
         # Mock persistence methods
         self.tool.load_todos = AsyncMock(return_value=[])
@@ -278,13 +278,14 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
 
         # Create tool with mock operation
-        self.tool = create_todo_list_tool(operation=self.mock_operation)
+        self.tool = TodoListTool(operation=self.mock_operation)
 
         # Construct test data
         self.test_todos = [
             TodoItem.create(content="In Progress Task", status=TodoStatus.IN_PROGRESS),
             TodoItem.create(content="Pending Task", status=TodoStatus.PENDING),
-            TodoItem.create(content="Completed Task", status=TodoStatus.COMPLETED)
+            TodoItem.create(content="Completed Task", status=TodoStatus.COMPLETED),
+            TodoItem.create(content="Cancelled Task", status=TodoStatus.CANCELLED)
         ]
 
         # Mock persistence methods
@@ -307,10 +308,11 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
         result = await self.tool.invoke({})
 
         # Verify result
-        self.assertIn("Todo List (Total: 3 items)", result["message"])
+        self.assertIn("Todo List (Total: 4 items)", result["message"])
         self.assertIn(f"{STATUS_ICONS[TodoStatus.IN_PROGRESS]} In Progress Task", result["message"])
         self.assertIn(f"{STATUS_ICONS[TodoStatus.PENDING]} Pending Tasks", result["message"])
         self.assertIn(f"{STATUS_ICONS[TodoStatus.COMPLETED]} Completed Tasks", result["message"])
+        self.assertIn(f"{STATUS_ICONS[TodoStatus.CANCELLED]} Cancelled Tasks", result["message"])
 
 
 class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
@@ -325,7 +327,7 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation.fs.return_value = self.mock_fs
 
         # Create tool with mock operation
-        self.tool = create_todo_modify_tool(operation=self.mock_operation)
+        self.tool = TodoModifyTool(operation=self.mock_operation)
 
         # Construct test data
         self.test_todos = [
@@ -502,6 +504,39 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         saved_todos = self.tool.save_todos.call_args[0][0]
         self.assertEqual(len(saved_todos), 4)
         self.assertEqual(saved_todos[1].id, new_todo_id)  # Verify insertion position
+
+    async def test_invoke_cancel_success(self):
+        """Test successful cancellation of todo items"""
+        # Construct input
+        inputs = {
+            "action": "cancel",
+            "ids": [self.test_todo_ids[1]]  # Cancel Task 2
+        }
+
+        # Execute call
+        result = await self.tool.invoke(inputs)
+
+        # Verify
+        self.assertIn(f"Successfully cancelled 1 task(s) (IDs: {self.test_todo_ids[1]})", result["message"])
+        # Verify Task 2 status changed to CANCELLED
+        saved_todos = self.tool.save_todos.call_args[0][0]
+        self.assertEqual(len(saved_todos), 3)  # Tasks still in list, just status changed
+        cancelled_todo = next(t for t in saved_todos if t.id == self.test_todo_ids[1])
+        self.assertEqual(cancelled_todo.status, TodoStatus.CANCELLED)
+
+    async def test_invoke_cancel_nonexistent(self):
+        """Test cancellation of nonexistent todo items"""
+        # Construct input
+        inputs = {
+            "action": "cancel",
+            "ids": ["nonexistent_id"]
+        }
+
+        # Execute call
+        result = await self.tool.invoke(inputs)
+
+        # Verify
+        self.assertIn("No tasks cancelled: None of the provided IDs (nonexistent_id) were found", result["message"])
 
 
 if __name__ == "__main__":

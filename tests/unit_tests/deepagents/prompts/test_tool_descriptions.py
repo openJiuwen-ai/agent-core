@@ -104,7 +104,7 @@ class TestGetToolDescription:
         names = [
             "bash", "code", "read_file", "write_file", "edit_file",
             "glob", "list_files", "grep", "list_skill",
-            "todo_write", "todo_read", "todo_modify",
+            "todo_create", "todo_list", "todo_modify",
             "image_ocr", "visual_question_answering",
         ]
         for name in names:

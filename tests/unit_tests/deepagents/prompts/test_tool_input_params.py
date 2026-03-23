@@ -242,7 +242,7 @@ class TestGetToolInputParams:
         names = [
             "bash", "code", "read_file", "write_file", "edit_file",
             "glob", "list_files", "grep", "list_skill",
-            "todo_write", "todo_read", "todo_modify",
+            "todo_create", "todo_list", "todo_modify",
             "image_ocr", "visual_question_answering",
         ]
         for name in names:
@@ -303,18 +303,18 @@ class TestToolClassInputParams:
     @staticmethod
     def test_todo_tools_use_builders():
         from openjiuwen.deepagents.tools.todo import (
-            create_todo_create_tool, create_todo_list_tool, create_todo_modify_tool,
+            TodoCreateTool, TodoListTool, TodoModifyTool,
         )
         builders = [
-            (create_todo_create_tool, get_todo_create_input_params),
-            (create_todo_list_tool, get_todo_list_input_params),
-            (create_todo_modify_tool, get_todo_modify_input_params),
+            (TodoCreateTool, get_todo_create_input_params),
+            (TodoListTool, get_todo_list_input_params),
+            (TodoModifyTool, get_todo_modify_input_params),
         ]
-        for factory_fn, builder_fn in builders:
+        for tool_cls, builder_fn in builders:
             for lang in ("cn", "en"):
-                tool = factory_fn(MagicMock(), language=lang)
+                tool = tool_cls(MagicMock(), language=lang)
                 assert tool.card.input_params == builder_fn(lang), \
-                    f"{factory_fn.__name__} lang={lang} mismatch"
+                    f"{tool_cls.__name__} lang={lang} mismatch"
 
     @staticmethod
     def test_vision_tools_use_builders():

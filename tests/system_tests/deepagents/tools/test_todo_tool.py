@@ -26,9 +26,9 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig, SysOperation
 from openjiuwen.deepagents.tools.todo import (
-    create_todo_create_tool,
-    create_todo_list_tool,
-    create_todo_modify_tool,
+    TodoCreateTool,
+    TodoListTool,
+    TodoModifyTool,
 )
 
 API_BASE = os.getenv("API_BASE", "")
@@ -98,9 +98,9 @@ class TestDeepAgentTodoE2E(unittest.IsolatedAsyncioTestCase):
         if not isinstance(sys_operation, SysOperation):
             raise TypeError(f"Expected SysOperation, got {type(sys_operation)}")
 
-        todo_create = create_todo_create_tool(operation=sys_operation)
-        todo_list = create_todo_list_tool(operation=sys_operation)
-        todo_modify = create_todo_modify_tool(operation=sys_operation)
+        todo_create = TodoCreateTool(operation=sys_operation)
+        todo_list = TodoListTool(operation=sys_operation)
+        todo_modify = TodoModifyTool(operation=sys_operation)
         Runner.resource_mgr.add_tool(todo_create)
         Runner.resource_mgr.add_tool(todo_list)
         Runner.resource_mgr.add_tool(todo_modify)
