@@ -870,7 +870,11 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
         mock_mcp_tool = ToolInfo(
             name="mcp_tool",
             description="MCP 工具",
-            parameters={}
+            parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            }
         )
         mock_get_mcp_tool_infos.return_value = [mock_mcp_tool]
 
@@ -894,6 +898,7 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mcp_tool", self.ability_manager._tools)
         # 验证 ID 格式为 {server_id}.{server_name}.{tool_name}
         self.assertEqual(self.ability_manager._tools["mcp_tool"].id, "mcp_001.test_mcp.mcp_tool")
+        self.assertEqual(self.ability_manager._tools["mcp_tool"].input_params, mock_mcp_tool.parameters)
 
     @patch('openjiuwen.core.runner.Runner.resource_mgr.get_mcp_tool_infos')
     async def test_remove_mcp_server_also_removes_mcp_tools(self, mock_get_mcp_tool_infos):

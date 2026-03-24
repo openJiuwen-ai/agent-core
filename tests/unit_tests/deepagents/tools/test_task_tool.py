@@ -8,10 +8,17 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.deepagents.schema.config import SubAgentConfig
 from openjiuwen.deepagents.tools.task_tool import TaskTool, create_task_tool
+
+
+class InspectableTaskTool(TaskTool):
+    def find_subagent_spec(self, subagent_type: str):
+        return self._find_subagent_spec(subagent_type)
 
 
 @pytest_asyncio.fixture(name="runner_started")
@@ -86,3 +93,66 @@ def test_create_task_tool():
 
     assert len(tools) == 1
     assert isinstance(tools[0], TaskTool)
+
+
+def test_general_purpose_subagent_inherits_parent_mcps():
+    parent_agent = SimpleNamespace(
+        deep_config=SimpleNamespace(
+            subagents=[],
+            system_prompt="parent prompt",
+            tools=[ToolCard(id="parent_tool", name="read_file", description="read file")],
+            mcps=[
+                McpServerConfig(
+                    server_name="parent_mcp",
+                    server_id="mcp_parent_001",
+                    server_path="http://127.0.0.1:8930/mcp",
+                )
+            ],
+            model=None,
+            skills=["skill_a"],
+        )
+    )
+    tool = InspectableTaskTool(
+        card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+        parent_agent=parent_agent,
+    )
+
+    spec = tool.find_subagent_spec("general-purpose")
+
+    assert spec is not None
+    assert spec.tools == parent_agent.deep_config.tools
+    assert spec.mcps == parent_agent.deep_config.mcps
+
+
+def test_explicit_general_purpose_subagent_overrides_default():
+    explicit_spec = SubAgentConfig(
+        agent_card=AgentCard(name="general-purpose", description="custom general subagent"),
+        system_prompt="custom prompt",
+        tools=[ToolCard(id="custom_tool", name="custom_tool", description="custom tool")],
+        mcps=[
+            McpServerConfig(
+                server_name="custom_mcp",
+                server_id="custom_mcp_001",
+                server_path="http://127.0.0.1:8931/mcp",
+            )
+        ],
+        skills=["skill_b"],
+    )
+    parent_agent = SimpleNamespace(
+        deep_config=SimpleNamespace(
+            subagents=[explicit_spec],
+            system_prompt="parent prompt",
+            tools=[ToolCard(id="parent_tool", name="read_file", description="read file")],
+            mcps=[],
+            model=None,
+            skills=["skill_a"],
+        )
+    )
+    tool = InspectableTaskTool(
+        card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+        parent_agent=parent_agent,
+    )
+
+    spec = tool.find_subagent_spec("general-purpose")
+
+    assert spec is explicit_spec

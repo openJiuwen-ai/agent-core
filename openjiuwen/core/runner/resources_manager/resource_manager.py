@@ -1074,6 +1074,16 @@ class ResourceMgr:
                     results.append(tool_card.tool_info())
         return results
 
+    def get_mcp_server_config(self, server_id: str) -> Optional[McpServerConfig]:
+        """Get MCP server configuration by server_id if it is already registered."""
+        self._inner_validate_resource_id(server_id, "mcp server")
+        return self._resource_registry.tool().get_mcp_server_config(server_id)
+
+    def get_mcp_tool_ids(self, server_id: str) -> list[str]:
+        """Get registered MCP tool ids for a server_id."""
+        self._inner_validate_resource_id(server_id, "mcp server")
+        return self._resource_registry.tool().get_mcp_tool_ids(server_id)
+
     def get_resource_by_tag(self,
                             tag: Tag) -> Optional[list[BaseCard]]:
         """

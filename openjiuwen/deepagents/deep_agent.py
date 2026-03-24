@@ -12,6 +12,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
@@ -213,10 +214,52 @@ class DeepAgent(BaseAgent):
 
         return agent
 
+    async def _register_pending_mcps(self) -> None:
+        """Register configured MCP servers before rails initialize."""
+        cfg = self._deep_config
+        if cfg is None or not cfg.mcps:
+            return
+
+        for mcp_config in cfg.mcps:
+            existing_config = Runner.resource_mgr.get_mcp_server_config(mcp_config.server_id)
+            if existing_config is None:
+                result = await Runner.resource_mgr.add_mcp_server(
+                    mcp_config,
+                    tag=self.card.id,
+                )
+                if result.is_err():
+                    raise result.msg()
+            else:
+                if existing_config.model_dump() != mcp_config.model_dump():
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR,
+                        server_config=mcp_config,
+                        reason=(
+                            f"server_id '{mcp_config.server_id}' is already registered "
+                            "with a different config"
+                        ),
+                    )
+
+                tag_result = Runner.resource_mgr.add_resource_tag(
+                    mcp_config.server_id,
+                    self.card.id,
+                )
+                if tag_result.is_err():
+                    raise tag_result.msg()
+
+                for tool_id in Runner.resource_mgr.get_mcp_tool_ids(mcp_config.server_id):
+                    tag_result = Runner.resource_mgr.add_resource_tag(tool_id, self.card.id)
+                    if tag_result.is_err():
+                        raise tag_result.msg()
+
+            self.ability_manager.add(mcp_config)
+
     async def _ensure_initialized(self) -> None:
         """Perform lazy async initialization."""
         if self._initialized:
             return
+
+        await self._register_pending_mcps()
 
         for rail_inst in self._pending_rails:
             if isinstance(rail_inst, DeepAgentRail):

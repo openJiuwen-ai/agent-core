@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
+from openjiuwen.core.foundation.tool.schema import ToolInfo
+from openjiuwen.core.runner.resources_manager.base import Ok
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -123,6 +126,19 @@ class CountingRail(AgentRail):
 
 def _build_tool_card(name: str) -> ToolCard:
     return ToolCard(name=name, description=f"{name} tool")
+
+
+class DummyTool(Tool):
+    def __init__(self, name: str, tool_id: Optional[str] = None) -> None:
+        super().__init__(ToolCard(id=tool_id or name, name=name, description=f"{name} tool"))
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
+        _ = kwargs
+        return {"inputs": inputs}
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Dict[str, Any]]:
+        _ = kwargs
+        yield {"inputs": inputs}
 
 
 def test_configure_set_react_agent_and_is_initialized() -> None:
@@ -382,6 +398,202 @@ async def test_create_deep_agent_factory_public_api() -> None:
     assert rail.after_invoke_count == 1
 
 
+def test_create_deep_agent_registers_tool_instances() -> None:
+    tool = DummyTool("factory_tool_instance")
+
+    try:
+        agent = create_deep_agent(
+            model=_create_dummy_model(),
+            tools=[tool],
+        )
+
+        assert isinstance(agent, DeepAgent)
+        assert agent.ability_manager.get(tool.card.name) is tool.card
+        assert Runner.resource_mgr.get_tool(tool.card.id) is not None
+    finally:
+        Runner.resource_mgr.remove_tool(tool.card.id)
+
+
+def test_create_deep_agent_reuses_same_tool_instance_across_agents() -> None:
+    tool = DummyTool("shared_tool_instance", tool_id="shared_tool_instance_id")
+
+    try:
+        first_agent = create_deep_agent(
+            model=_create_dummy_model(),
+            tools=[tool],
+        )
+        second_agent = create_deep_agent(
+            model=_create_dummy_model(),
+            tools=[tool],
+        )
+
+        assert isinstance(first_agent, DeepAgent)
+        assert isinstance(second_agent, DeepAgent)
+        assert second_agent.ability_manager.get(tool.card.name) is tool.card
+    finally:
+        Runner.resource_mgr.remove_tool(tool.card.id)
+
+
+def test_create_deep_agent_rejects_conflicting_tool_instances_with_same_id() -> None:
+    first_tool = DummyTool("tool_a", tool_id="shared_tool_id")
+    second_tool = DummyTool("tool_b", tool_id="shared_tool_id")
+
+    try:
+        create_deep_agent(
+            model=_create_dummy_model(),
+            tools=[first_tool],
+        )
+
+        with pytest.raises(ValueError, match="different tool instance"):
+            create_deep_agent(
+                model=_create_dummy_model(),
+                tools=[second_tool],
+            )
+    finally:
+        Runner.resource_mgr.remove_tool(first_tool.card.id)
+
+
+@pytest.mark.asyncio
+async def test_create_deep_agent_registers_mcps_on_first_invoke() -> None:
+    mcp_config = McpServerConfig(
+        server_name="test_mcp_server",
+        server_id="mcp_server_001",
+        server_path="http://127.0.0.1:8930/mcp",
+        client_type="streamable-http",
+    )
+    mcp_tool = ToolInfo(
+        name="mcp_lookup",
+        description="lookup through mcp",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    )
+
+    with patch.object(
+        Runner.resource_mgr,
+        "add_mcp_server",
+        new=AsyncMock(return_value=Ok(mcp_config.server_id)),
+    ) as mock_add_mcp_server, patch.object(
+        Runner.resource_mgr,
+        "get_mcp_tool_infos",
+        new=AsyncMock(return_value=[mcp_tool]),
+    ) as mock_get_mcp_tool_infos:
+        agent = create_deep_agent(
+            model=_create_dummy_model(),
+            mcps=[mcp_config],
+            enable_task_loop=False,
+        )
+        fake_react = FakeReactAgent()
+        agent.set_react_agent(fake_react, initialized=False)
+
+        assert mock_add_mcp_server.await_count == 0
+
+        result = await agent.invoke("factory_call")
+
+        assert result["output"] == "echo:factory_call"
+        mock_add_mcp_server.assert_awaited_once_with(
+            mcp_config,
+            tag=agent.card.id,
+        )
+        assert agent.ability_manager.get(mcp_config.server_name) is mcp_config
+
+        tool_infos = await agent.ability_manager.list_tool_info()
+        assert any(tool_info.name == "mcp_lookup" for tool_info in tool_infos)
+        mcp_tool_card = agent.ability_manager.get("mcp_lookup")
+        assert isinstance(mcp_tool_card, ToolCard)
+        assert mcp_tool_card.input_params == mcp_tool.parameters
+        mock_get_mcp_tool_infos.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_deep_agent_reuses_registered_mcps_with_same_config() -> None:
+    mcp_config = McpServerConfig(
+        server_name="test_mcp_server",
+        server_id="mcp_server_001",
+        server_path="http://127.0.0.1:8930/mcp",
+        client_type="streamable-http",
+    )
+    mcp_tool = ToolInfo(
+        name="mcp_lookup",
+        description="lookup through mcp",
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    )
+    mcp_tool_id = f"{mcp_config.server_id}.{mcp_config.server_name}.{mcp_tool.name}"
+
+    with patch.object(
+        Runner.resource_mgr,
+        "get_mcp_server_config",
+        return_value=mcp_config,
+    ), patch.object(
+        Runner.resource_mgr,
+        "add_mcp_server",
+        new=AsyncMock(),
+    ) as mock_add_mcp_server, patch.object(
+        Runner.resource_mgr,
+        "get_mcp_tool_ids",
+        return_value=[mcp_tool_id],
+    ), patch.object(
+        Runner.resource_mgr,
+        "add_resource_tag",
+        return_value=Ok(["deep_agent_id"]),
+    ) as mock_add_resource_tag, patch.object(
+        Runner.resource_mgr,
+        "get_mcp_tool_infos",
+        new=AsyncMock(return_value=[mcp_tool]),
+    ):
+        agent = create_deep_agent(
+            model=_create_dummy_model(),
+            mcps=[mcp_config],
+            enable_task_loop=False,
+        )
+        fake_react = FakeReactAgent()
+        agent.set_react_agent(fake_react, initialized=False)
+
+        result = await agent.invoke("factory_call")
+
+        assert result["output"] == "echo:factory_call"
+        mock_add_mcp_server.assert_not_awaited()
+        mock_add_resource_tag.assert_has_calls(
+            [
+                call(mcp_config.server_id, agent.card.id),
+                call(mcp_tool_id, agent.card.id),
+            ]
+        )
+        assert agent.ability_manager.get(mcp_config.server_name) is mcp_config
+
+
+@pytest.mark.asyncio
+async def test_create_deep_agent_rejects_conflicting_registered_mcp_config() -> None:
+    mcp_config = McpServerConfig(
+        server_name="test_mcp_server",
+        server_id="mcp_server_001",
+        server_path="http://127.0.0.1:8930/mcp",
+        client_type="streamable-http",
+    )
+    conflicting_config = mcp_config.model_copy(update={"server_path": "http://127.0.0.1:8940/mcp"})
+
+    with patch.object(
+        Runner.resource_mgr,
+        "get_mcp_server_config",
+        return_value=conflicting_config,
+    ):
+        agent = create_deep_agent(
+            model=_create_dummy_model(),
+            mcps=[mcp_config],
+            enable_task_loop=False,
+        )
+        agent.set_react_agent(FakeReactAgent(), initialized=False)
+
+        with pytest.raises(Exception, match="different config"):
+            await agent.invoke("factory_call")
+
+
 def test_create_deep_agent_with_custom_card() -> None:
     custom_card = AgentCard(name="custom_deep", description="custom")
     agent = create_deep_agent(model=_create_dummy_model(), card=custom_card)
@@ -475,3 +687,19 @@ def test_create_code_agent_explicit_tools_and_rails_override_defaults() -> None:
     assert agent.ability_manager.get("code") is None
     assert any(isinstance(rail, CountingRail) for rail in agent._pending_rails)
     assert not any(isinstance(rail, FileSystemRail) for rail in agent._pending_rails)
+
+
+def test_create_code_agent_accepts_explicit_mcps() -> None:
+    mcp_config = McpServerConfig(
+        server_name="wrapper_mcp",
+        server_id="wrapper_mcp_001",
+        server_path="http://127.0.0.1:8930/mcp",
+    )
+
+    agent = create_code_agent(
+        model=_create_dummy_model(),
+        mcps=[mcp_config],
+    )
+
+    assert agent.deep_config is not None
+    assert agent.deep_config.mcps == [mcp_config]
