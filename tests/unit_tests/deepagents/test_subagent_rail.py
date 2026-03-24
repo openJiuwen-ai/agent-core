@@ -4,12 +4,10 @@
 """Unit tests for SubagentRail."""
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import Mock, patch
 
 import pytest
 
-from openjiuwen.core.foundation.llm.schema.message import SystemMessage
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents.rails.subagent_rail import SubagentRail
 from openjiuwen.deepagents.schema.config import SubAgentConfig
@@ -282,184 +280,6 @@ class TestSubagentRail:
         assert '"general-purpose": DeepAgent instance' in available_agents
 
     @staticmethod
-    @patch(_TASK_SYSTEM_PROMPT)
-    def test_inject_prompt_with_dict_message(mock_build):
-        """Fallback path appends task prompt to dict system message."""
-        mock_build.return_value = "Injected prompt"
-
-        rail = SubagentRail()
-        ctx = Mock()
-        ctx.inputs = Mock()
-        ctx.inputs.messages = [
-            {"role": "system", "content": "Original system message"},
-            {"role": "user", "content": "User message"},
-        ]
-        ctx.extra = {}
-        rail.tools = [Mock()]
-
-        asyncio.run(rail.before_model_call(ctx))
-
-        assert "Original system message" in ctx.inputs.messages[0]["content"]
-        assert "Injected prompt" in ctx.inputs.messages[0]["content"]
-
-    @staticmethod
-    @patch(_TASK_SYSTEM_PROMPT)
-    def test_inject_prompt_with_systemmessage(mock_build):
-        """Fallback path appends task prompt to SystemMessage."""
-        mock_build.return_value = "Injected prompt"
-
-        rail = SubagentRail()
-        ctx = Mock()
-        ctx.inputs = Mock()
-        system_msg = SystemMessage(content="Original system message")
-        ctx.inputs.messages = [system_msg, {"role": "user", "content": "User message"}]
-        ctx.extra = {}
-        rail.tools = [Mock()]
-
-        asyncio.run(rail.before_model_call(ctx))
-
-        assert "Original system message" in system_msg.content
-        assert "Injected prompt" in system_msg.content
-
-    @staticmethod
-    @patch(_TASK_SYSTEM_PROMPT)
-    def test_inject_prompt_duplicate_avoidance(mock_build):
-        """Fallback path does not append when prompt substring already present."""
-        mock_build.return_value = "Injected prompt"
-
-        rail = SubagentRail()
-        ctx = Mock()
-        ctx.inputs = Mock()
-        original_content = "Original system message"
-        ctx.inputs.messages = [
-            {"role": "system", "content": original_content + "\n\nInjected prompt"}
-        ]
-        ctx.extra = {}
-        rail.tools = [Mock()]
-
-        asyncio.run(rail.before_model_call(ctx))
-
-        assert ctx.inputs.messages[0]["content"] == original_content + "\n\nInjected prompt"
-
-    @staticmethod
-    @patch(_TASK_SYSTEM_PROMPT)
-    def test_inject_prompt_no_system_message(mock_build):
-        """Fallback path inserts SystemMessage when none exists."""
-        mock_build.return_value = "New system prompt"
-
-        rail = SubagentRail()
-        ctx = Mock()
-        ctx.inputs = Mock()
-        ctx.inputs.messages = [{"role": "user", "content": "User message"}]
-        ctx.extra = {}
-        rail.tools = [Mock()]
-
-        asyncio.run(rail.before_model_call(ctx))
-
-        assert len(ctx.inputs.messages) == 2
-        assert isinstance(ctx.inputs.messages[0], SystemMessage)
-        assert ctx.inputs.messages[0].content == "New system prompt"
-
-    @staticmethod
-    @patch("openjiuwen.deepagents.rails.subagent_rail.build_task_section")
-    @patch("openjiuwen.deepagents.rails.subagent_rail.Runner")
-    @patch("openjiuwen.deepagents.rails.subagent_rail.create_task_tool")
-    def test_replace_system_message_with_dict(mock_create, mock_runner, mock_build_section):
-        """Builder path replaces dict system message content with built prompt."""
-        mock_runner.resource_mgr = Mock()
-        mock_tool = _make_tool_mock()
-        mock_create.return_value = [mock_tool]
-        mock_build_section.return_value = "task section content"
-
-        prompt_builder = Mock()
-        prompt_builder.build.return_value = "Replaced content"
-
-        mock_agent = Mock()
-        mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
-        mock_agent.ability_manager = Mock()
-        mock_agent.configure_mock(_prompt_builder=prompt_builder)
-
-        rail = SubagentRail()
-        rail.init(mock_agent)
-
-        ctx = Mock()
-        ctx.inputs = Mock()
-        ctx.inputs.messages = [
-            {"role": "system", "content": "Original content"},
-            {"role": "user", "content": "User message"},
-        ]
-        ctx.extra = {}
-
-        asyncio.run(rail.before_model_call(ctx))
-
-        assert ctx.inputs.messages[0]["content"] == "Replaced content"
-
-    @staticmethod
-    @patch("openjiuwen.deepagents.rails.subagent_rail.build_task_section")
-    @patch("openjiuwen.deepagents.rails.subagent_rail.Runner")
-    @patch("openjiuwen.deepagents.rails.subagent_rail.create_task_tool")
-    def test_replace_system_message_with_systemmessage(mock_create, mock_runner, mock_build_section):
-        """Builder path replaces SystemMessage.content with built prompt."""
-        mock_runner.resource_mgr = Mock()
-        mock_tool = _make_tool_mock()
-        mock_create.return_value = [mock_tool]
-        mock_build_section.return_value = "task section content"
-
-        prompt_builder = Mock()
-        prompt_builder.build.return_value = "Replaced content"
-
-        mock_agent = Mock()
-        mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
-        mock_agent.ability_manager = Mock()
-        mock_agent.configure_mock(_prompt_builder=prompt_builder)
-
-        rail = SubagentRail()
-        rail.init(mock_agent)
-
-        ctx = Mock()
-        ctx.inputs = Mock()
-        system_msg = SystemMessage(content="Original content")
-        ctx.inputs.messages = [system_msg, {"role": "user", "content": "User message"}]
-        ctx.extra = {}
-
-        asyncio.run(rail.before_model_call(ctx))
-
-        assert system_msg.content == "Replaced content"
-
-    @staticmethod
-    @patch("openjiuwen.deepagents.rails.subagent_rail.build_task_section")
-    @patch("openjiuwen.deepagents.rails.subagent_rail.Runner")
-    @patch("openjiuwen.deepagents.rails.subagent_rail.create_task_tool")
-    def test_replace_system_message_insert_new(mock_create, mock_runner, mock_build_section):
-        """Builder path inserts SystemMessage when no system role exists."""
-        mock_runner.resource_mgr = Mock()
-        mock_tool = _make_tool_mock()
-        mock_create.return_value = [mock_tool]
-        mock_build_section.return_value = "task section content"
-
-        prompt_builder = Mock()
-        prompt_builder.build.return_value = "New system content"
-
-        mock_agent = Mock()
-        mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
-        mock_agent.ability_manager = Mock()
-        mock_agent.configure_mock(_prompt_builder=prompt_builder)
-
-        rail = SubagentRail()
-        rail.init(mock_agent)
-
-        ctx = Mock()
-        ctx.inputs = Mock()
-        ctx.inputs.messages = [{"role": "user", "content": "User message"}]
-        ctx.extra = {}
-
-        asyncio.run(rail.before_model_call(ctx))
-
-        assert len(ctx.inputs.messages) == 2
-        assert isinstance(ctx.inputs.messages[0], SystemMessage)
-        assert ctx.inputs.messages[0].content == "New system content"
-
-    @staticmethod
     @pytest.mark.asyncio
     @patch("openjiuwen.deepagents.rails.subagent_rail.build_task_section")
     @patch("openjiuwen.deepagents.rails.subagent_rail.Runner")
@@ -467,33 +287,29 @@ class TestSubagentRail:
     async def test_before_model_call_with_builder(
         mock_create, mock_runner, mock_build_task_section
     ):
-        """Builder path adds task section, builds prompt, and updates system message."""
+        """before_model_call adds task section to builder; build is deferred."""
         mock_runner.resource_mgr = Mock()
         mock_tool = _make_tool_mock()
         mock_create.return_value = [mock_tool]
         mock_build_task_section.return_value = "task section content"
 
-        prompt_builder = Mock()
-        prompt_builder.build.return_value = "built prompt"
+        system_prompt_builder = Mock()
 
         mock_agent = Mock()
         mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
         mock_agent.ability_manager = Mock()
-        mock_agent.configure_mock(_prompt_builder=prompt_builder)
+        mock_agent.configure_mock(system_prompt_builder=system_prompt_builder)
 
         rail = SubagentRail()
         rail.init(mock_agent)
 
         ctx = Mock()
-        ctx.inputs = Mock()
-        ctx.inputs.messages = [{"role": "system", "content": "old"}]
-        ctx.extra = {}
 
         await rail.before_model_call(ctx)
 
-        prompt_builder.add_section.assert_called_once_with("task section content")
-        prompt_builder.build.assert_called_once()
-        assert ctx.inputs.messages[0]["content"] == "built prompt"
+        system_prompt_builder.add_section.assert_called_once_with("task section content")
+        # build() is deferred to _railed_model_call — NOT called here.
+        system_prompt_builder.build.assert_not_called()
 
     @staticmethod
     @pytest.mark.asyncio
@@ -505,22 +321,6 @@ class TestSubagentRail:
         rail.tools = None
 
         await rail.before_model_call(ctx)
-
-    @staticmethod
-    @pytest.mark.asyncio
-    @patch(_TASK_SYSTEM_PROMPT)
-    async def test_before_model_call_avoid_duplicate_injection(mock_build):
-        """When extra marks injection done, fallback path skips building task prompt."""
-        mock_tool = Mock()
-        ctx = Mock()
-        ctx.extra = {"_task_tool_prompt_injected": True}
-
-        rail = SubagentRail()
-        rail.tools = [mock_tool]
-
-        await rail.before_model_call(ctx)
-
-        mock_build.assert_not_called()
 
     @staticmethod
     def test_all_method():

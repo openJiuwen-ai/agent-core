@@ -39,6 +39,7 @@ from openjiuwen.core.single_agent.agents.react_agent import (
     ReActAgentConfig,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.context_engine import ContextEngineConfig
 
@@ -47,6 +48,13 @@ from tests.unit_tests.fixtures.mock_llm import (
     create_text_response,
     create_tool_call_response,
 )
+
+
+class _TestableReActAgent(ReActAgent):
+    """Test-only hook surface for injecting collaborators."""
+
+    def set_skill_util_for_test(self, skill_util) -> None:
+        self._skill_util = skill_util
 
 
 class TestNewReActAgentConfig(unittest.IsolatedAsyncioTestCase):
@@ -358,6 +366,115 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['result_type'], 'answer')
         self.assertIn('你好', result['output'])
         self.assertEqual(mock_llm.call_count, 1)
+
+    @pytest.mark.asyncio
+    async def test_invoke_syncs_rendered_identity_and_skills_into_prompt_builder(self):
+        """运行时 system prompt 应通过 builder 统一组装 identity + skills。"""
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_text_response("已完成"),
+        ])
+
+        mock_context_window = MagicMock(
+            get_messages=MagicMock(return_value=[]),
+            get_tools=MagicMock(return_value=None),
+        )
+        mock_context = MagicMock()
+        mock_context.add_messages = AsyncMock()
+        mock_context.get_context_window = AsyncMock(return_value=mock_context_window)
+
+        mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
+        mock_context_engine.create_context = AsyncMock(return_value=mock_context)
+
+        mock_session = self._create_mock_session()
+
+        config = (
+            ReActAgentConfig()
+            .configure_model("gpt-4")
+            .configure_prompt_template([
+                {"role": "system", "content": "你当前处理的任务是：{{query}}"}
+            ])
+            .configure_max_iterations(1)
+        )
+
+        agent = _TestableReActAgent(card=self.card)
+        agent.configure(config)
+        agent.context_engine = mock_context_engine
+
+        mock_skill_util = MagicMock()
+        mock_skill_util.has_skill.return_value = True
+        mock_skill_util.get_skill_prompt.return_value = "Skill prompt body."
+        agent.set_skill_util_for_test(mock_skill_util)
+
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            with patch.object(agent, "_warn_missing_skill_read_file_tool", AsyncMock()) as mock_warn:
+                result = await agent.invoke(
+                    {"conversation_id": "test_session", "query": "计算1+2"},
+                    session=mock_session
+                )
+
+        self.assertEqual(result["result_type"], "answer")
+        mock_warn.assert_awaited_once()
+
+        final_system = mock_context.get_context_window.await_args.kwargs["system_messages"]
+        self.assertEqual(len(final_system), 1)
+        self.assertIn("你当前处理的任务是：计算1+2", final_system[0].content)
+        self.assertIn("Skill prompt body.", final_system[0].content)
+
+        self.assertIs(agent.system_prompt_builder, agent.prompt_builder)
+        identity = agent.prompt_builder.get_section("identity")
+        skills = agent.prompt_builder.get_section("skills")
+        self.assertIsNotNone(identity)
+        self.assertIsNotNone(skills)
+        self.assertEqual(identity.render("cn"), "你当前处理的任务是：计算1+2")
+        self.assertEqual(skills.render("cn"), "Skill prompt body.")
+
+    @pytest.mark.asyncio
+    async def test_invoke_builds_context_window_only_once_per_iteration(self):
+        """preview should read raw context messages instead of building a window."""
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_text_response("已完成"),
+        ])
+
+        mock_context_window = MagicMock(
+            get_messages=MagicMock(return_value=[]),
+            get_tools=MagicMock(return_value=None),
+        )
+        mock_context = MagicMock()
+        mock_context.add_messages = AsyncMock()
+        mock_context.get_messages = MagicMock(return_value=[UserMessage(content="用户输入")])
+        mock_context.get_context_window = AsyncMock(return_value=mock_context_window)
+
+        mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
+        mock_context_engine.create_context = AsyncMock(return_value=mock_context)
+
+        mock_session = self._create_mock_session()
+
+        config = (
+            ReActAgentConfig()
+            .configure_model("gpt-4")
+            .configure_prompt_template([
+                {"role": "system", "content": "你当前处理的任务是：{{query}}"}
+            ])
+            .configure_max_iterations(1)
+        )
+
+        agent = ReActAgent(card=self.card)
+        agent.configure(config)
+        agent.context_engine = mock_context_engine
+
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            result = await agent.invoke(
+                {"conversation_id": "test_session", "query": "计算1+2"},
+                session=mock_session
+            )
+
+        self.assertEqual(result["result_type"], "answer")
+        mock_context.get_messages.assert_called_once_with()
+        self.assertEqual(mock_context.get_context_window.await_count, 1)
 
     @pytest.mark.asyncio
     async def test_invoke_with_tool_call(self):

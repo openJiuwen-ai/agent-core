@@ -21,6 +21,7 @@ from openjiuwen.core.sys_operation import (
 )
 from openjiuwen.deepagents import Workspace
 from openjiuwen.deepagents.factory import create_deep_agent
+from openjiuwen.deepagents.prompts.builder import PromptSection, SystemPromptBuilder
 from openjiuwen.deepagents.rails.skill_rail import SkillRail
 from openjiuwen.deepagents.tools.list_skill import ListSkillTool
 
@@ -142,7 +143,7 @@ async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
-    """All mode should inject all enabled skills into system prompt."""
+    """All mode should add skills section to builder before model call."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -157,22 +158,26 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     )
     skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
     skill_rail.set_sys_operation(sys_operation)
+
+    # Simulate what _create_react_agent does: provide a builder on the rail.
+    builder = SystemPromptBuilder()
+    builder.add_section(PromptSection(
+        name="identity",
+        content={"cn": "Base system prompt.", "en": "Base system prompt."},
+    ))
+    skill_rail.system_prompt_builder = builder
+
     ctx = AgentCallbackContext(
         agent=None,
-        inputs=ModelCallInputs(
-            messages=[SystemMessage(content="Base system prompt.")],
-            tools=[],
-        ),
+        inputs=ModelCallInputs(tools=[]),
         session=None,
     )
 
     await skill_rail.before_invoke(ctx)
     await skill_rail.before_model_call(ctx)
 
-    messages = ctx.inputs.messages
-    assert len(messages) == 1
-    assert isinstance(messages[0], SystemMessage)
-    content = messages[0].content
+    # Skills are added to the builder; build() produces the final system prompt.
+    content = builder.build()
 
     assert "Base system prompt." in content
     assert "invoice-parser" in content
@@ -252,7 +257,7 @@ async def test_skill_rail_register_rail_auto_list_registers_list_skill_tool(tmp_
 
 @pytest.mark.asyncio
 async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path: Path):
-    """auto_list mode should inject guide prompt without pre-expanding skills."""
+    """auto_list mode should add guide prompt to builder without pre-expanding skills."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -265,19 +270,25 @@ async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path
         include_tools=True,
     )
 
+    # Simulate what _create_react_agent does: provide a builder on the rail.
+    builder = SystemPromptBuilder()
+    builder.add_section(PromptSection(
+        name="identity",
+        content={"cn": "Base system prompt.", "en": "Base system prompt."},
+    ))
+    skill_rail.system_prompt_builder = builder
+
     ctx = AgentCallbackContext(
         agent=None,
-        inputs=ModelCallInputs(
-            messages=[SystemMessage(content="Base system prompt.")],
-            tools=[],
-        ),
+        inputs=ModelCallInputs(tools=[]),
         session=None,
     )
 
     await skill_rail.before_invoke(ctx)
     await skill_rail.before_model_call(ctx)
 
-    content = ctx.inputs.messages[0].content
+    # Skills section is added to the builder; build() produces the final prompt.
+    content = builder.build()
     assert "Base system prompt." in content
     assert "list_skill" in content
 
