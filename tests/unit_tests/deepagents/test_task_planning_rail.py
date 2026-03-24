@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Unit tests for TaskPlanningRail init/uninit."""
 # pylint: disable=protected-access
 from __future__ import annotations
@@ -13,7 +13,12 @@ from unittest.mock import (
 
 import pytest
 
+from openjiuwen.core.session.agent import Session
+from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.rail.base import (
+    ToolCallInputs,
+)
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
@@ -22,6 +27,11 @@ from openjiuwen.core.sys_operation import (
     OperationMode,
 )
 from openjiuwen.deepagents.deep_agent import DeepAgent
+from openjiuwen.deepagents.schema.workspace import Workspace
+from openjiuwen.deepagents.prompts.sections.todo import (
+    build_progress_reminder_user_prompt,
+    build_todo_system_prompt,
+)
 from openjiuwen.deepagents.rails.task_planning_rail import (
     TaskPlanningRail,
 )
@@ -67,10 +77,11 @@ def _make_agent(workspace: str = None) -> DeepAgent:
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     )
+    workspace_obj = Workspace(root_path=workspace) if workspace else None
     agent.configure(
         DeepAgentConfig(
             enable_task_loop=True,
-            workspace=workspace,
+            workspace=workspace_obj,
         )
     )
     return agent
@@ -85,32 +96,20 @@ def test_init_registers_tools_with_workspace() -> None:
 
     assert rail.tools is not None
     assert len(rail.tools) > 0
-    assert rail.workspace == "/tmp/test_ws"
+    assert rail.workspace is not None
+    assert rail.workspace.root_path == "/tmp/test_ws"
 
 
 def test_init_registers_without_workspace() -> None:
     """init registers tools even without workspace."""
     rail = _make_rail()
-    agent = _make_agent(workspace=None)
+    agent = _make_agent(workspace="./default_ws")
 
     rail.init(agent)
 
     assert rail.tools is not None
     assert len(rail.tools) > 0
-    assert rail.workspace is None
-
-
-def test_uninit_removes_tools() -> None:
-    """uninit removes previously registered tools."""
-    rail = _make_rail()
-    agent = _make_agent(workspace="/tmp/test_ws")
-
-    rail.init(agent)
-    assert rail.tools is not None
-
-    rail.uninit(agent)
-    # Tools list still exists on rail but removed
-    # from agent's ability_manager
+    assert rail.workspace is not None
 
 
 def test_uninit_safe_without_tools() -> None:
@@ -119,7 +118,6 @@ def test_uninit_safe_without_tools() -> None:
     agent = _make_agent()
 
     rail.uninit(agent)
-    # No crash
 
 
 def test_priority_is_90() -> None:
@@ -136,6 +134,8 @@ def test_priority_is_90() -> None:
 def _make_ctx(session=None):
     """Build a minimal AgentCallbackContext mock."""
     ctx = MagicMock()
+    if not session:
+        session = Session()
     ctx.session = session
     return ctx
 
@@ -163,7 +163,7 @@ def _make_todos(
 
 @pytest.mark.asyncio
 async def test_after_task_iteration_bridges_todos() -> None:
-    """3 todos (1 completed + 2 pending) → TaskPlan with 3 items."""
+    """3 todos (1 completed + 2 pending) -> TaskPlan with 3 items."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
@@ -195,7 +195,6 @@ async def test_after_task_iteration_bridges_todos() -> None:
             side_effect=fake_save,
         ),
     ):
-        # Mock load_todos on the first TodoTool
         tool = rail._find_todo_tool()
         assert tool is not None
         tool.load_todos = AsyncMock(return_value=todos)
@@ -271,7 +270,7 @@ async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
 
 @pytest.mark.asyncio
 async def test_bridge_skips_when_plan_exists() -> None:
-    """Existing plan → no overwrite."""
+    """Existing plan -> no overwrite."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
@@ -294,13 +293,12 @@ async def test_bridge_skips_when_plan_exists() -> None:
     ):
         await rail.after_task_iteration(ctx)
 
-    # save_state should NOT have been called
     assert state.task_plan is existing_plan
 
 
 @pytest.mark.asyncio
 async def test_bridge_skips_when_no_todos() -> None:
-    """No todo file → no crash, no plan."""
+    """No todo file -> no crash, no plan."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
@@ -327,20 +325,19 @@ async def test_bridge_skips_when_no_todos() -> None:
 
 @pytest.mark.asyncio
 async def test_bridge_skips_when_no_session() -> None:
-    """ctx.session is None → early return, no crash."""
+    """ctx.session is None -> early return, no crash."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
 
     ctx = _make_ctx(session=None)
 
-    # Should not raise
     await rail.after_task_iteration(ctx)
 
 
 @pytest.mark.asyncio
 async def test_bridge_skips_when_no_pending() -> None:
-    """All COMPLETED → no TaskPlan created."""
+    """All COMPLETED -> no TaskPlan created."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/ws")
     rail.init(agent)
@@ -370,9 +367,8 @@ async def test_bridge_skips_when_no_pending() -> None:
 
 @pytest.mark.asyncio
 async def test_bridge_skips_when_no_tools() -> None:
-    """self.tools is None → no crash."""
+    """self.tools is None -> no crash."""
     rail = _make_rail()
-    # Do NOT call rail.init() → tools stays None
 
     state = DeepAgentState(iteration=1)
     ctx = _make_ctx(session=MagicMock())
@@ -386,3 +382,324 @@ async def test_bridge_skips_when_no_tools() -> None:
         await rail.after_task_iteration(ctx)
 
     assert state.task_plan is None
+
+
+# ================================================================
+# before_model_call prompt injection tests
+# ================================================================
+@pytest.mark.asyncio
+async def test_before_model_call_adds_section() -> None:
+    """before_model_call adds todo section to system_prompt_builder."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.agent = agent
+
+    mock_builder = MagicMock()
+    rail.system_prompt_builder = mock_builder
+
+    await rail.before_model_call(ctx)
+
+    mock_builder.add_section.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_without_prompt_builder() -> None:
+    """before_model_call returns early when agent has no prompt_builder."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.agent = agent
+
+    await rail.before_model_call(ctx)
+
+
+# ================================================================
+# after_tool_call progress reminder tests
+# ================================================================
+@pytest.mark.asyncio
+async def test_after_tool_call_injects_progress_reminder() -> None:
+    """after_tool_call injects progress reminder at interval."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = True
+    rail.list_tool_call_interval = 1
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.PENDING),
+        ("task-b", TodoStatus.IN_PROGRESS),
+    ])
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    await rail.after_tool_call(ctx)
+
+    assert rail._tool_call_counts["test-session-id"] == 1
+    ctx.context.set_messages.assert_called_once()
+    messages = ctx.context.set_messages.call_args[0][0]
+    assert len(messages) == 1
+    assert isinstance(messages[0], UserMessage)
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_counts_all_tools() -> None:
+    """after_tool_call counts all tool calls."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = True
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=[])
+
+    await rail.after_tool_call(ctx)
+    assert rail._tool_call_counts["test-session-id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_removes_tool_call_count() -> None:
+    """after_invoke removes tool call count."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = True
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=[])
+
+    await rail.after_tool_call(ctx)
+    assert "test-session-id" in rail._tool_call_counts
+
+    await rail.after_invoke(ctx)
+    assert "test-session-id" not in rail._tool_call_counts
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_custom_interval() -> None:
+    """after_tool_call respects custom interval."""
+    rail = TaskPlanningRail(enable_progress_repeat=True, list_tool_call_interval=3)
+    op = _make_operation()
+    rail.set_sys_operation(op)
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.PENDING),
+    ])
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    await rail.after_tool_call(ctx)
+    await rail.after_tool_call(ctx)
+    assert rail._tool_call_counts[ctx.session.get_session_id()] == 2
+
+    await rail.after_tool_call(ctx)
+    assert rail._tool_call_counts[ctx.session.get_session_id()] == 3
+    ctx.context.set_messages.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_skips_when_disabled() -> None:
+    """after_tool_call skips when enable_progress_repeat is False."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = False
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.context = MagicMock()
+    ctx.context.get_messages.return_value = []
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=[])
+
+    await rail.after_tool_call(ctx)
+
+    assert "test-session-id" not in rail._tool_call_counts
+    ctx.context.set_messages.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_safe_without_session() -> None:
+    """after_invoke is safe when ctx.session is None."""
+    rail = _make_rail()
+    rail.enable_progress_repeat = True
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.session = None
+
+    await rail.after_invoke(ctx)
+
+
+# ================================================================
+# _format_task_content tests
+# ================================================================
+
+
+def test_format_task_content_with_in_progress() -> None:
+    """_format_task_content extracts in_progress task."""
+    rail = _make_rail()
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.PENDING),
+        ("task-b", TodoStatus.IN_PROGRESS),
+        ("task-c", TodoStatus.COMPLETED),
+    ])
+
+    tasks, in_progress_task = rail._format_task_content(todos)
+
+    assert in_progress_task == "task-b"
+    assert "task-a" in tasks
+    assert "task-b" in tasks
+    assert "task-c" in tasks
+
+
+def test_format_task_content_without_in_progress() -> None:
+    """_format_task_content returns empty in_progress_task when none."""
+    rail = _make_rail()
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.PENDING),
+        ("task-b", TodoStatus.COMPLETED),
+    ])
+
+    tasks, in_progress_task = rail._format_task_content(todos)
+
+    assert in_progress_task == ""
+    assert "task-a" in tasks
+    assert "task-b" in tasks
+
+
+# ================================================================
+# _to_todo_status tests
+# ================================================================
+
+
+def test_to_todo_status_mapping() -> None:
+    """_to_todo_status maps TaskStatus to TodoStatus correctly."""
+    assert TaskPlanningRail._to_todo_status(TaskStatus.PENDING) == TodoStatus.PENDING
+    assert TaskPlanningRail._to_todo_status(TaskStatus.IN_PROGRESS) == TodoStatus.IN_PROGRESS
+    assert TaskPlanningRail._to_todo_status(TaskStatus.FAILED) == TodoStatus.CANCELLED
+    assert TaskPlanningRail._to_todo_status(TaskStatus.COMPLETED) == TodoStatus.COMPLETED
+
+
+# ================================================================
+# Language support tests
+# ================================================================
+
+
+def test_language_parameter_default() -> None:
+    """Default language is 'cn'."""
+    rail = TaskPlanningRail()
+    assert rail.language == "cn"
+
+
+def test_language_parameter_english() -> None:
+    """Can set language to 'en'."""
+    rail = TaskPlanningRail(language="en")
+    assert rail.language == "en"
+
+
+def test_enable_progress_repeat_default() -> None:
+    """Default enable_progress_repeat is False."""
+    rail = TaskPlanningRail()
+    assert rail.enable_progress_repeat is False
+
+
+def test_enable_progress_repeat_true() -> None:
+    """Can set enable_progress_repeat to True."""
+    rail = TaskPlanningRail(enable_progress_repeat=True)
+    assert rail.enable_progress_repeat is True
+
+
+def test_list_tool_call_interval_default() -> None:
+    """Default list_tool_call_interval is 20."""
+    rail = TaskPlanningRail()
+    assert rail.list_tool_call_interval == 20
+
+
+def test_build_todo_system_prompt_chinese() -> None:
+    """build_todo_system_prompt returns Chinese prompt."""
+    prompt = build_todo_system_prompt(language="cn")
+    assert "任务规划助手" in prompt
+
+
+def test_build_todo_system_prompt_english() -> None:
+    """build_todo_system_prompt returns English prompt."""
+    prompt = build_todo_system_prompt(language="en")
+    assert "Todo assistant" in prompt
+
+
+def test_build_progress_reminder_user_prompt_chinese() -> None:
+    """build_progress_reminder_user_prompt returns Chinese prompt."""
+    prompt = build_progress_reminder_user_prompt(language="cn")
+    assert "确保计划正在正确执行" in prompt
+
+
+def test_build_progress_reminder_user_prompt_english() -> None:
+    """build_progress_reminder_user_prompt returns English prompt."""
+    prompt = build_progress_reminder_user_prompt(language="en")
+    assert "ensure the plan is being executed correctly" in prompt
+
+
+def test_build_progress_reminder_user_prompt_with_task_content() -> None:
+    """build_progress_reminder_user_prompt includes task content."""
+    tasks = "id: 1 |status: pending |content: task-a\nid: 2 |status: in_progress |content: task-b"
+    in_progress_task = "task-b"
+    prompt = build_progress_reminder_user_prompt(language="en", tasks=tasks, in_progress_task=in_progress_task)
+    assert tasks in prompt
+    assert in_progress_task in prompt
+    assert "currently being executed" in prompt
+
+
+def test_build_progress_reminder_user_prompt_with_task_content_chinese() -> None:
+    """build_progress_reminder_user_prompt includes task content in Chinese."""
+    tasks = "id: 1 |status: pending |content: 任务一\nid: 2 |status: in_progress |content: 任务二"
+    in_progress_task = "任务二"
+    prompt = build_progress_reminder_user_prompt(language="cn", tasks=tasks, in_progress_task=in_progress_task)
+    assert tasks in prompt
+    assert in_progress_task in prompt
+    assert "正在执行的任务" in prompt

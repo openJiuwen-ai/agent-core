@@ -239,11 +239,11 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         mock_llm = MockLLMModel()
         mock_llm.set_responses([
             create_tool_call_response(
-                "todo_write",
+                "todo_create",
                 '{"tasks": "设计打卡系统数据库表结构;实现用户打卡功能接口;开发前端打卡页面;添加打卡统计功能"}'
             ),
             create_tool_call_response(
-                "todo_read",
+                "todo_list",
                 '{}'
             ),
             create_tool_call_response(
@@ -262,6 +262,51 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         )
 
         query = "我想测试任务规划能力，帮我构建一个打卡系统，调用规划工具帮我模拟规划吧"
+
+        with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
+            result = await Runner.run_agent(agent, {"query": query})
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("result_type"), "answer")
+
+    @pytest.mark.asyncio
+    async def test_deep_agent_task_planning_with_progress_reminder(self):
+        """测试任务规划中的工具调用计数和进度提醒功能"""
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        task_planning = TaskPlanningRail(list_tool_call_interval=3)
+        mock_llm = MockLLMModel()
+        
+        # 模拟工具调用序列：前3次不触发提醒，第3次触发提醒
+        mock_llm.set_responses([
+            create_tool_call_response(
+                "todo_create",
+                '{"tasks": "任务1;任务2;任务3;任务4;任务5"}'
+            ),
+            create_tool_call_response(
+                "todo_modify",
+                '{"action": "update", "todos": [{"id": "task_1", "status": "completed"}]}'
+            ),
+            create_tool_call_response(
+                "todo_modify",
+                '{"action": "update", "todos": [{"id": "task_2", "status": "completed"}]}'
+            ),
+            # 第3次工具调用后应该触发进度提醒，模型调用 todo_list
+            create_tool_call_response(
+                "todo_list",
+                '{}'
+            ),
+            create_text_response("任务1和任务2已完成，正在执行任务3。")
+        ])
+
+        agent = create_deep_agent(
+            model=self._create_model(),
+            rails=[task_planning],
+            enable_task_loop=False,
+            max_iterations=20,
+            sys_operation=sys_oper
+        )
+
+        query = "帮我完成前两个任务"
 
         with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
             result = await Runner.run_agent(agent, {"query": query})
