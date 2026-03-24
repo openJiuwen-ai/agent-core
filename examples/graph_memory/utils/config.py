@@ -86,13 +86,14 @@ def build_reranker():
     if not key:
         return None
     model = (os.environ.get("JIUWEN_GRAPH_MEM_RERANK_MODEL") or "qwen3-rerank").strip()
+    api_base = (os.environ.get("JIUWEN_GRAPH_MEM_RERANK_URL") or "https://dashscope.aliyuncs.com/api/v1").strip()
     cfg = get_env_json("JIUWEN_GRAPH_MEM_RERANK_CONFIG")
 
     return AliyunReranker(
         RerankerConfig(
             api_key=key,
-            api_base="https://dashscope.aliyuncs.com/api/v1/services",
-            model_name=model,
+            api_base=api_base,
+            model=model,
             timeout=float(cfg.get("timeout", 60)),
         )
     )
