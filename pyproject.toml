@@ -67,6 +67,7 @@ pgvector = ["pgvector>=0.2.0"]
 gaussvector = ["psycopg2-binary>=2.9.10"]
 chromadb = ["chromadb>=1.5.4", "opentelemetry-proto>=1.33.0", "protobuf>=5.0,<7.0"]
 obs = ["aioboto3>=11.0.0"]
+sandbox = ["agent-sandbox>=0.0.26"]
 
 all-mq = ["openjiuwen[pulsar]"]
 all-storage = ["openjiuwen[sqlite,mysql,redis,obs]"]
