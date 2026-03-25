@@ -362,16 +362,17 @@ class InMemoryCheckpointer(Checkpointer):
                     session_id=session_id,
                     metadata={"storage_type": "inmemory"}
                 )
-
-            removed = self._agent_stores.pop(session_id, None)
-            if removed:
-                session_logger.info(
-                    f"Remove agent checkpoint store on manually release",
-                    event_type=LogEventType.CHECKPOINTER_STORE_REMOVE,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    metadata={"storage_type": "inmemory"}
-                )
+            matching_session_ids = [sid for sid in list(self._agent_stores.keys()) if sid.startswith(session_id)]
+            for sid in matching_session_ids:
+                removed = self._agent_stores.pop(sid, None)
+                if removed:
+                    session_logger.info(
+                        f"Remove agent checkpoint store on manually release",
+                        event_type=LogEventType.CHECKPOINTER_STORE_REMOVE,
+                        session_id=sid,
+                        agent_id=agent_id,
+                        metadata={"storage_type": "inmemory"}
+                    )
 
             removed = self._agent_team_stores.pop(session_id, None)
             if removed:

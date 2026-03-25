@@ -17,6 +17,9 @@ from openjiuwen.deepagents.prompts.builder import PromptSection
 from openjiuwen.deepagents.prompts.sections.tools.base import (
     ToolMetadataProvider,
 )
+from openjiuwen.deepagents.prompts.sections.tools.ask_user import (
+    AskUserMetadataProvider,
+)
 from openjiuwen.deepagents.prompts.sections.tools.bash import (
     BashMetadataProvider,
 )
@@ -65,6 +68,7 @@ from openjiuwen.deepagents.prompts.sections.tools.web_tools import (
 # Provider registry
 # ---------------------------------------------------------------------------
 _PROVIDERS: List[ToolMetadataProvider] = [
+    AskUserMetadataProvider(),
     BashMetadataProvider(),
     CodeMetadataProvider(),
     ReadFileMetadataProvider(),

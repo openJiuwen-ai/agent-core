@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import copy
 import asyncio
-from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Union
 
 from pydantic import Field, BaseModel
 
@@ -41,6 +41,13 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
+from openjiuwen.core.single_agent.interrupt.state import (
+    BaseInterruptionState,
+    RESUME_START_ITERATION_KEY,
+    ToolInterruptionState,
+    INTERRUPTION_KEY
+)
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentCallbackContext,
@@ -353,9 +360,6 @@ class ReActAgentConfig(BaseModel):
         return self
 
 
-_INTERRUPTION_KEY = "__react_agent_interruption__"
-
-
 @dataclass
 class WorkflowInterruptEntry:
     """Per-workflow interruption record."""
@@ -365,8 +369,7 @@ class WorkflowInterruptEntry:
     collected_input: Any = None  # None means not yet collected
 
 
-@dataclass
-class InterruptionState:
+class InterruptionState(BaseInterruptionState):
     """Workflow interruption state for resume support.
 
     interrupted_workflows: per-workflow entries keyed by workflow_id
@@ -374,12 +377,9 @@ class InterruptionState:
     pending_component_id: component_id currently waiting for user feedback
     original_query: the original user query from the first invoke (before any resume)
     """
-    ai_message: AssistantMessage
-    iteration: int
     interrupted_workflows: Dict[str, WorkflowInterruptEntry]
     pending_workflow_id: str
     pending_component_id: str
-    original_query: str = ""
 
 
 class ReActAgent(BaseAgent):
@@ -415,6 +415,7 @@ class ReActAgent(BaseAgent):
         self.prompt_builder: SystemPromptBuilder = SystemPromptBuilder()
         self.system_prompt_builder: SystemPromptBuilder = self.prompt_builder
         super().__init__(card)
+        self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
 
     def _create_default_config(self) -> ReActAgentConfig:
@@ -789,13 +790,13 @@ class ReActAgent(BaseAgent):
             iteration: int,
             original_query: str = "",
     ) -> Optional[InterruptionState]:
-        """Check tool results for interruption and build InterruptionState if found.
+        """Check tool results for workflow interruption and build InterruptionState if found.
 
         Collects ALL interrupted workflows into interrupted_workflows dict.
         Sets pending_workflow_id/pending_component_id to the first interrupted one.
 
         Returns:
-            InterruptionState if any result is interrupted, else None
+            InterruptionState if any workflow result is interrupted, else None
         """
         interrupted: Dict[str, WorkflowInterruptEntry] = {}
         first_workflow_id = None
@@ -826,18 +827,30 @@ class ReActAgent(BaseAgent):
             original_query=original_query,
         )
 
+    def _after_execute_tool_call_for_hitl(
+            self,
+            results: list,
+            tool_calls: list,
+            ai_message: AssistantMessage,
+            iteration: int,
+            original_query: str = "",
+    ) -> tuple[Optional['ToolInterruptionState'], list]:
+        return self._hitl_handler.build_interrupt_state(
+            results, tool_calls, ai_message, iteration, original_query=original_query
+        )
+
     def _save_interruption_state(self, state: InterruptionState, session) -> None:
         if session:
-            session.update_state({_INTERRUPTION_KEY: state})
+            session.update_state({INTERRUPTION_KEY: state})
 
     def _load_interruption_state(self, session) -> Optional[InterruptionState]:
         if session:
-            return session.get_state(_INTERRUPTION_KEY)
+            return session.get_state(INTERRUPTION_KEY)
         return None
 
     def _clear_interruption_state(self, session) -> None:
         if session:
-            session.update_state({_INTERRUPTION_KEY: None})
+            session.update_state({INTERRUPTION_KEY: None})
 
     def _build_interrupt_result(self, state: InterruptionState) -> Dict[str, Any]:
         """Build the interrupt result dict returned to the caller."""
@@ -850,15 +863,21 @@ class ReActAgent(BaseAgent):
 
     async def _commit_interrupt(
             self,
-            interrupt: InterruptionState,
+            interrupt: Union[InterruptionState, 'ToolInterruptionState'],
             context: ModelContext,
             session: Optional[Session],
             invoke_inputs: InvokeInputs,
+            sub_agent_outputs: list = None,
     ) -> Dict[str, Any]:
         """Persist interruption state and return the interrupt result dict.
 
         Writes a single placeholder ToolMessage for the pending workflow's tool_call.
         """
+        if isinstance(interrupt, ToolInterruptionState):
+            return await self._hitl_handler.commit_interrupt(
+                interrupt, context, session, invoke_inputs, sub_agent_outputs
+            )
+
         pending_entry = interrupt.interrupted_workflows[interrupt.pending_workflow_id]
         await context.add_messages(ToolMessage(
             tool_call_id=pending_entry.tool_call.id,
@@ -872,7 +891,7 @@ class ReActAgent(BaseAgent):
 
     async def _handle_resume(
             self,
-            interruption_state: InterruptionState,
+            interruption_state: Union[InterruptionState, 'ToolInterruptionState'],
             user_input: Any,
             ctx: AgentCallbackContext,
             context: ModelContext,
@@ -887,6 +906,18 @@ class ReActAgent(BaseAgent):
 
         Returns interrupt result dict if still waiting, or None to continue ReAct loop.
         """
+        if isinstance(interruption_state, ToolInterruptionState):
+            resume_ctx = ResumeContext(
+                state=interruption_state,
+                user_input=user_input,
+                ctx=ctx,
+                context=context,
+                session=session,
+                invoke_inputs=invoke_inputs,
+                execute_tool_call=self._execute_tool_call,
+            )
+            return await self._hitl_handler.handle_resume(resume_ctx)
+
         resume_iteration = interruption_state.iteration
         logger.info(f"Resuming ReAct from iteration {resume_iteration + 1}")
 
@@ -924,15 +955,15 @@ class ReActAgent(BaseAgent):
             all_tool_calls.append(tc_copy)
 
         results = await self._execute_tool_call(ctx, all_tool_calls, session, context)
-        interrupt = self._after_execute_tool_call(
+        workflow_interrupt = self._after_execute_tool_call(
             results, all_tool_calls, resume_ai_message, resume_iteration,
             original_query=interruption_state.original_query,
         )
-        if interrupt:
-            return await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+        if workflow_interrupt:
+            return await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
 
         # All workflows completed — continue ReAct loop from next iteration
-        ctx.extra["_resume_start_iteration"] = resume_iteration + 1
+        ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
         return None
 
     def _extract_user_text(self, user_input: Any) -> str:
@@ -1071,9 +1102,13 @@ class ReActAgent(BaseAgent):
                 if not user_input:
                     raise ValueError("Input must contain 'query'")
 
-                interruption_state = self._load_interruption_state(session)
+                hitl_state = self._hitl_handler.load(session)
+                interruption_state = hitl_state or self._load_interruption_state(session)
                 if interruption_state is not None:
-                    self._clear_interruption_state(session)
+                    if hitl_state is not None:
+                        self._hitl_handler.clear(session)
+                    else:
+                        self._clear_interruption_state(session)
                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
                     ctx.extra["_original_query"] = interruption_state.original_query
 
@@ -1092,17 +1127,29 @@ class ReActAgent(BaseAgent):
                 await self._update_skill_prompt_builder_section(rendered_system_prompt)
 
                 tools = await self.ability_manager.list_tool_info()
-                await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
 
                 start_iteration = 0
                 if interruption_state is not None:
-                    resume_result = await self._handle_resume(
-                        interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
-                    )
-                    if resume_result is not None:
-                        pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
+                    is_tool_interruption = isinstance(interruption_state, ToolInterruptionState)
+                    
+                    if is_tool_interruption:
+                        # Tool Interrupt: not write UserMessage, recovery input is passed to Rail via ctx.extra
+                        await self._handle_resume(
+                            interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
+                        )
+                        start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                     else:
-                        start_iteration = ctx.extra.pop("_resume_start_iteration", 0)
+                        # Workflow Interrupt
+                        await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                        resume_result = await self._handle_resume(
+                            interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
+                        )
+                        if resume_result is not None:
+                            pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
+                        else:
+                            start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
+                else:
+                    await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
@@ -1138,12 +1185,21 @@ class ReActAgent(BaseAgent):
                             invoke_inputs.result = finish.result
                             break
 
-                        interrupt = self._after_execute_tool_call(
+                        hitl_interrupt, sub_agent_outputs = self._after_execute_tool_call_for_hitl(
                             results, ai_message.tool_calls, ai_message, iteration,
                             original_query=ctx.extra.get("_original_query", ""),
                         )
-                        if interrupt:
-                            await self._commit_interrupt(interrupt, context, session, invoke_inputs)
+                        if hitl_interrupt:
+                            await self._commit_interrupt(hitl_interrupt, context, session, invoke_inputs,
+                                                         sub_agent_outputs)
+                            break
+
+                        workflow_interrupt = self._after_execute_tool_call(
+                            results, ai_message.tool_calls, ai_message, iteration,
+                            original_query=ctx.extra.get("_original_query", ""),
+                        )
+                        if workflow_interrupt:
+                            await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
                             break
                     else:
                         await self.context_engine.save_contexts(session)
@@ -1169,21 +1225,24 @@ class ReActAgent(BaseAgent):
         """
         result_type = result.get("result_type", "")
         if result_type == "interrupt":
-            workflow_state = result.get("workflow_execution_state")
-            component_ids = result.get("component_ids", [])
-            pending_id = component_ids[0] if component_ids else None
-            schemas = (
-                workflow_state.result
-                if workflow_state is not None
-                and isinstance(getattr(workflow_state, "result", None), list)
-                else []
-            )
-            for schema in schemas:
-                if (pending_id is None
-                        or (hasattr(schema, "payload")
-                            and hasattr(schema.payload, "id")
-                            and schema.payload.id == pending_id)):
-                    await session.write_stream(schema)
+            if "interrupt_ids" in result:
+                await self._hitl_handler.write_interrupt_to_stream(result, session)
+            else:
+                workflow_state = result.get("workflow_execution_state")
+                component_ids = result.get("component_ids", [])
+                pending_id = component_ids[0] if component_ids else None
+                schemas = (
+                    workflow_state.result
+                    if workflow_state is not None
+                    and isinstance(getattr(workflow_state, "result", None), list)
+                    else []
+                )
+                for schema in schemas:
+                    if (pending_id is None
+                            or (hasattr(schema, "payload")
+                                and hasattr(schema.payload, "id")
+                                and schema.payload.id == pending_id)):
+                        await session.write_stream(schema)
         else:
             await session.write_stream(OutputSchema(
                 type="answer",

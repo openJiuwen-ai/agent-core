@@ -18,6 +18,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.interrupt.rail import ToolSkipResult
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -26,6 +27,9 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
@@ -455,6 +459,10 @@ class AbilityManager:
             tool_ctx = tool_contexts[i]
             if isinstance(result, Exception):
                 # Handle exception
+                if isinstance(result, ToolInterruptException):
+                    final_results.append((result, None))
+                    continue
+
                 error_msg = f"Ability execution error: {str(result)}"
                 logger.error(error_msg)
                 tool_result = None
@@ -517,6 +525,12 @@ class AbilityManager:
             tag=None,
     ) -> Tuple[Any, ToolMessage]:
         """Execute one tool call under rail lifecycle events."""
+        skip_result = ctx.extra.pop("_skip_tool", None)
+        if isinstance(skip_result, ToolSkipResult):
+            ctx.inputs.tool_result = skip_result.tool_result
+            ctx.inputs.tool_msg = skip_result.tool_message
+            return skip_result.tool_result, skip_result.tool_message
+
         if isinstance(ctx.inputs, ToolCallInputs):
             if ctx.inputs.tool_name:
                 tool_call.name = ctx.inputs.tool_name
@@ -639,7 +653,19 @@ class AbilityManager:
                     f"Agent instance not found in resource_mgr: {agent_id}"
                 )
             try:
-                result = await agent.invoke(tool_args)
+                child_session_id = f"{session.get_session_id()}:{tool_call.id}"
+                tool_args["conversation_id"] = child_session_id
+
+                child_session = create_agent_session(
+                    session_id=child_session_id,
+                    card=agent.card,
+                )
+
+                auto_confirm_config = session.get_state(INTERRUPT_AUTO_CONFIRM_KEY)
+                if auto_confirm_config:
+                    child_session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: auto_confirm_config})
+
+                result = await Runner.run_agent(agent=agent, inputs=tool_args, session=child_session)
             except Exception as e:
                 error_msg = f"Agent execution error: {str(e)}"
                 logger.error(error_msg)

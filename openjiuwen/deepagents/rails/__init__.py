@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """DeepAgent rail definitions."""
-
+from openjiuwen.deepagents.rails.ask_user_rail import AskUserRail
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.deepagents.rails.skill_rail import SkillRail
@@ -12,4 +12,5 @@ __all__ = [
     "TaskPlanningRail",
     "SkillRail",
     "SubagentRail",
+    "AskUserRail",
 ]
