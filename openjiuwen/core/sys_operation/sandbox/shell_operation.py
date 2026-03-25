@@ -1,13 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-from typing import Any, Dict, Optional, AsyncIterator
+from typing import Any, Dict, Optional, AsyncIterator, Literal
 
 from openjiuwen.core.sys_operation.shell import BaseShellOperation
 from openjiuwen.core.sys_operation.registry import operation
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.sandbox.run_config import SandboxRunConfig
 from openjiuwen.core.sys_operation.sandbox.sandbox_mixin import BaseSandboxMixin
-from openjiuwen.core.sys_operation.result import ExecuteCmdResult, ExecuteCmdStreamResult
+from openjiuwen.core.sys_operation.result import (
+    ExecuteCmdResult,
+    ExecuteCmdStreamResult,
+    ExecuteCmdBackgroundResult,
+)
 
 
 @operation(name="shell", mode=OperationMode.SANDBOX, description="Sandbox shell execution operation")
@@ -25,11 +29,12 @@ class ShellOperation(BaseShellOperation, BaseSandboxMixin):
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
             environment: Optional[Dict[str, str]] = None,
-            options: Optional[Dict[str, Any]] = None
+            options: Optional[Dict[str, Any]] = None,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdResult:
         raw = await self.invoke(
             "execute_cmd", command=command, cwd=cwd,
-            timeout=timeout, environment=environment, options=options
+            timeout=timeout, environment=environment, options=options, shell_type=shell_type
         )
         return raw if isinstance(raw, ExecuteCmdResult) else ExecuteCmdResult(**raw)
 
@@ -40,10 +45,30 @@ class ShellOperation(BaseShellOperation, BaseSandboxMixin):
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
             environment: Optional[Dict[str, str]] = None,
-            options: Optional[Dict[str, Any]] = None
+            options: Optional[Dict[str, Any]] = None,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
         async for item in self.invoke_stream(
             "execute_cmd_stream", command=command, cwd=cwd,
-            timeout=timeout, environment=environment, options=options
+            timeout=timeout, environment=environment, options=options, shell_type=shell_type
         ):
             yield ExecuteCmdStreamResult(**item) if isinstance(item, dict) else item
+
+    async def execute_cmd_background(
+            self,
+            command: str,
+            *,
+            cwd: Optional[str] = None,
+            environment: Optional[Dict[str, str]] = None,
+            grace: float = 3.0,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
+    ) -> ExecuteCmdBackgroundResult:
+        raw = await self.invoke(
+            "execute_cmd_background",
+            command=command,
+            cwd=cwd,
+            environment=environment,
+            grace=grace,
+            shell_type=shell_type,
+        )
+        return raw if isinstance(raw, ExecuteCmdBackgroundResult) else ExecuteCmdBackgroundResult(**raw)

@@ -9,13 +9,20 @@ These tests require:
 """
 
 import logging
+import importlib.util
 import os
 import socket
+import sys
 import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+if importlib.util.find_spec("openjiuwen") is None and str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, SandboxGatewayConfig

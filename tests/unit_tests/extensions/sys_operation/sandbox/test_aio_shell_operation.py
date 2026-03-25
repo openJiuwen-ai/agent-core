@@ -97,10 +97,11 @@ async def test_shell_ping_timeout(sys_op):
 @pytest.mark.asyncio
 async def test_shell_list_tools(sys_op):
     tools = sys_op.shell().list_tools()
-    assert len(tools) == 2
+    assert len(tools) == 3
     tool_names = [t.name for t in tools]
     assert "execute_cmd" in tool_names
     assert "execute_cmd_stream" in tool_names
+    assert "execute_cmd_background" in tool_names
 
     exec_tool = next(t for t in tools if t.name == "execute_cmd")
     assert "command" in exec_tool.input_params["properties"]

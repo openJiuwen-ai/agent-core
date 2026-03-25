@@ -76,10 +76,11 @@ async def test_shell_list_tools(local_op):
     """Test tool metadata exposure for shell operation."""
     tools = local_op.shell().list_tools()
 
-    assert len(tools) == 2
+    assert len(tools) == 3
     tool_names = [tool.name for tool in tools]
     assert "execute_cmd" in tool_names
     assert "execute_cmd_stream" in tool_names
+    assert "execute_cmd_background" in tool_names
 
     exec_tool = next(tool for tool in tools if tool.name == "execute_cmd")
     assert "command" in exec_tool.input_params["properties"]

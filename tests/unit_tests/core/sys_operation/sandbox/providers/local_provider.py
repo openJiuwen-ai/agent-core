@@ -40,6 +40,7 @@ from openjiuwen.core.sys_operation.result import (
     DownloadFileStreamResult, DownloadFileChunkData,
     ExecuteCmdResult, ExecuteCmdData,
     ExecuteCmdStreamResult, ExecuteCmdChunkData,
+    ExecuteCmdBackgroundResult, ExecuteCmdBackgroundData,
     ExecuteCodeResult, ExecuteCodeData,
     ExecuteCodeStreamResult, ExecuteCodeChunkData,
 )
@@ -546,7 +547,8 @@ class LocalShellProvider(BaseShellProvider):
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
             environment: Optional[Dict[str, str]] = None,
-            options: Optional[Dict[str, Any]] = None
+            options: Optional[Dict[str, Any]] = None,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdResult:
         if not command or not command.strip():
             return build_operation_error_result(
@@ -584,7 +586,8 @@ class LocalShellProvider(BaseShellProvider):
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
             environment: Optional[Dict[str, str]] = None,
-            options: Optional[Dict[str, Any]] = None
+            options: Optional[Dict[str, Any]] = None,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
         if not command or not command.strip():
             yield build_operation_error_result(
@@ -625,6 +628,28 @@ class LocalShellProvider(BaseShellProvider):
             code=0,
             message="Command executed successfully",
             data=ExecuteCmdChunkData(text="", type="stdout", chunk_index=chunk_index, exit_code=0),
+        )
+
+    async def execute_cmd_background(
+            self,
+            command: str,
+            *,
+            cwd: Optional[str] = None,
+            environment: Optional[Dict[str, str]] = None,
+            grace: float = 3.0,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
+    ) -> ExecuteCmdBackgroundResult:
+        if not command or not command.strip():
+            return build_operation_error_result(
+                error_type=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                msg_format_kwargs={"execution": "execute_cmd_background", "error_msg": "command can not be empty"},
+                result_cls=ExecuteCmdBackgroundResult,
+                data=ExecuteCmdBackgroundData(command=command, cwd=cwd or "/tmp", pid=None),
+            )
+        return ExecuteCmdBackgroundResult(
+            code=0,
+            message="success",
+            data=ExecuteCmdBackgroundData(command=command, cwd=cwd or "/tmp", pid=12345),
         )
 
 
