@@ -16,11 +16,16 @@ from openjiuwen.core.memory.graph.extraction.extraction_models import EntityExtr
 
 
 def _object_nodes_with_wrong_additional_properties(schema: object, path: str = "$") -> list[str]:
-    """Return paths where type=object but additionalProperties is not False (strict OpenAI-style)."""
+    """Return paths where a structured object (type=object with dict properties) lacks additionalProperties=False.
+
+    Matches ``multilingual_model_json_schema(..., strict=True)``: only nodes with a ``properties`` mapping
+    are forced to ``additionalProperties: False``; free-form ``dict`` fields stay as emitted by Pydantic.
+    """
     bad: list[str] = []
     if isinstance(schema, dict):
-        if schema.get("type") == "object" and schema.get("additionalProperties") is not False:
-            bad.append(f"{path}: additionalProperties={schema.get('additionalProperties')!r}")
+        if schema.get("type") == "object" and isinstance(schema.get("properties"), dict):
+            if schema.get("additionalProperties") is not False:
+                bad.append(f"{path}: additionalProperties={schema.get('additionalProperties')!r}")
         for key, val in schema.items():
             bad.extend(_object_nodes_with_wrong_additional_properties(val, f"{path}.{key}"))
     elif isinstance(schema, list):
@@ -61,9 +66,10 @@ class TestMultilingualBaseModelSchema:
     @staticmethod
     @patch.dict(MULTILINGUAL_DESCRIPTION, {"cn": {}}, clear=False)
     def test_schema_strict_sets_additional_properties_false():
-        """When strict=True, additionalProperties is False in schema and $defs"""
+        """When strict=True, root object with properties gets additionalProperties False."""
         schema = _SampleModel.multilingual_model_json_schema("cn", strict=True)
         assert schema.get("additionalProperties") is False
+        assert isinstance(schema.get("properties"), dict)
 
 
 class _StrictInner(MultilingualBaseModel):
@@ -86,7 +92,7 @@ class _StrictOuterWithNestedDict(MultilingualBaseModel):
 
 
 class TestStrictSchemaNestedAdditionalProperties:
-    """strict=True BFS: every nested JSON Schema object has additionalProperties=False."""
+    """strict=True BFS: structured objects (with properties dict) get additionalProperties=False."""
 
     _NESTED_PATCH = {
         "cn": {
@@ -129,19 +135,20 @@ class TestStrictSchemaNestedAdditionalProperties:
 
     @staticmethod
     @patch.dict(MULTILINGUAL_DESCRIPTION, _DICT_PATCH, clear=False)
-    def test_strict_inline_dict_field_object_additional_properties_false():
-        """Inline type=object under properties (e.g. dict field) gets additionalProperties False."""
+    def test_strict_inline_dict_field_free_form_unchanged():
+        """Bare ``dict`` fields have no fixed keys: Pydantic keeps additionalProperties True; strict BFS skips."""
         schema = _StrictWithDict.multilingual_model_json_schema("cn", strict=True)
         attrs = schema["properties"]["attributes"]
         assert attrs.get("type") == "object"
-        assert attrs.get("additionalProperties") is False
+        assert not isinstance(attrs.get("properties"), dict)
+        assert attrs.get("additionalProperties") is True
         bad = _object_nodes_with_wrong_additional_properties(schema)
         assert bad == [], bad
 
     @staticmethod
     @patch.dict(MULTILINGUAL_DESCRIPTION, _OUTER_NESTED_DICT_PATCH, clear=False)
-    def test_strict_outer_model_with_nested_dict_model_all_objects_additional_properties_false():
-        """Nested _StrictWithDict in $defs: its inline dict-shaped attributes object is still strict."""
+    def test_strict_outer_model_with_nested_dict_model_structured_strict_dict_field_unchanged():
+        """$defs model gets strict on its root object; nested bare dict attributes stay free-form."""
         schema = _StrictOuterWithNestedDict.multilingual_model_json_schema("cn", strict=True)
         assert "$defs" in schema
         inner_defs = [k for k in schema["$defs"] if k.endswith("StrictWithDict")]
@@ -149,7 +156,9 @@ class TestStrictSchemaNestedAdditionalProperties:
         inner = schema["$defs"][inner_defs[0]]
         attrs = inner["properties"]["attributes"]
         assert attrs.get("type") == "object"
-        assert attrs.get("additionalProperties") is False
+        assert not isinstance(attrs.get("properties"), dict)
+        assert attrs.get("additionalProperties") is True
+        assert inner.get("additionalProperties") is False
         assert schema["properties"]["payload"].get("$ref") == f"#/$defs/{inner_defs[0]}"
         bad = _object_nodes_with_wrong_additional_properties(schema)
         assert bad == [], bad
@@ -157,7 +166,7 @@ class TestStrictSchemaNestedAdditionalProperties:
     @staticmethod
     @patch.dict(MULTILINGUAL_DESCRIPTION, _ENTITY_EXTRACTION_PATCH, clear=False)
     def test_strict_entity_extraction_all_objects_additional_properties_false():
-        """Real extraction model: root and $defs objects all strict."""
+        """Real extraction model: structured objects in root and $defs get additionalProperties False."""
         schema = EntityExtraction.multilingual_model_json_schema("cn", strict=True)
         bad = _object_nodes_with_wrong_additional_properties(schema)
         assert bad == [], bad
@@ -165,7 +174,7 @@ class TestStrictSchemaNestedAdditionalProperties:
     @staticmethod
     @patch.dict(MULTILINGUAL_DESCRIPTION, {"cn": {}}, clear=False)
     def test_response_format_nested_matches_strict_schema():
-        """response_format embeds schema that passes nested additionalProperties audit."""
+        """response_format embeds schema that passes structured-object additionalProperties audit."""
         fmt = _StrictNestedRoot.response_format("cn")
         inner = fmt["json_schema"]["schema"]
         bad = _object_nodes_with_wrong_additional_properties(inner)
@@ -210,12 +219,13 @@ class TestResponseFormat:
     @staticmethod
     @patch.dict(MULTILINGUAL_DESCRIPTION, {"cn": {}}, clear=False)
     def test_response_format_has_json_schema_type_and_name():
-        """response_format returns dict with type json_schema and model name"""
+        """response_format returns dict with type json_schema, model name, and embedded strict schema."""
         fmt = _SampleModel.response_format("cn")
         assert fmt["type"] == "json_schema"
         assert "json_schema" in fmt
         assert fmt["json_schema"]["name"] == "_SampleModel"
-        assert fmt["json_schema"].get("strict") is True
+        assert fmt["json_schema"].get("strict") is False
+        assert fmt["json_schema"]["schema"].get("additionalProperties") is False
 
 
 class TestRecursiveReplace:
