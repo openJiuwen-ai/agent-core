@@ -38,9 +38,11 @@ from openjiuwen.core.sys_operation.result.shell_operation_result import (
     # Data classes
     ExecuteCmdData,
     ExecuteCmdChunkData,
+    ExecuteCmdBackgroundData,
     # Result classes
     ExecuteCmdResult,
-    ExecuteCmdStreamResult
+    ExecuteCmdStreamResult,
+    ExecuteCmdBackgroundResult
 )
 
 # ===================== Export Control __all__ =====================
@@ -84,7 +86,9 @@ __all__ = [
     # Data classes
     "ExecuteCmdData",
     "ExecuteCmdChunkData",
+    "ExecuteCmdBackgroundData",
     # Result classes
     "ExecuteCmdResult",
     "ExecuteCmdStreamResult",
+    "ExecuteCmdBackgroundResult",
 ]

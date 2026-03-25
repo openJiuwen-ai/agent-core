@@ -303,6 +303,13 @@ class SysOperation:
             return lambda: self._get_operation(name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
+    @property
+    def work_dir(self) -> Optional[str]:
+        """Return the configured work directory (local mode only), or None if not set."""
+        if self.mode == OperationMode.LOCAL:
+            return getattr(self._run_config, "work_dir", None)
+        return None
+
     def fs(self) -> BaseFsOperation:
         return self._get_operation("fs")
 

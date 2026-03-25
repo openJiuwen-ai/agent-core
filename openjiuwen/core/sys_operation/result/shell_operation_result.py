@@ -31,6 +31,16 @@ class ExecuteCmdChunkData(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
+class ExecuteCmdBackgroundData(BaseModel):
+    """Data structure for background execute cmd"""
+
+    command: str = Field(..., description="Original shell command executed")
+    cwd: str = Field(default=".", description="Current working directory")
+    pid: Optional[int] = Field(default=None, description="Process ID of the background process")
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
 class ExecuteCmdResult(BaseResult[ExecuteCmdData]):
     """ExecuteCmdResult"""
     pass
@@ -38,4 +48,9 @@ class ExecuteCmdResult(BaseResult[ExecuteCmdData]):
 
 class ExecuteCmdStreamResult(BaseResult[ExecuteCmdChunkData]):
     """ExecuteCmdStreamResult"""
+    pass
+
+
+class ExecuteCmdBackgroundResult(BaseResult[ExecuteCmdBackgroundData]):
+    """ExecuteCmdBackgroundResult"""
     pass

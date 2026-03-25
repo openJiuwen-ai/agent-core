@@ -19,6 +19,11 @@ class LocalWorkConfig(BaseModel):
         default=None,
         description="Local working directory path")
 
+    dangerous_patterns: Optional[List[str]] = Field(
+        default=None,
+        description="List of regex patterns for dangerous commands to block. "
+                    "If None, uses built-in default patterns.")
+
 
 class ContainerScope(str, Enum):
     """Container creation granularity
