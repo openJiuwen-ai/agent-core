@@ -9,7 +9,10 @@ These tests require:
 """
 
 import logging
+import os
+import socket
 import uuid
+from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
@@ -21,9 +24,37 @@ from openjiuwen.core.sys_operation.config import SandboxIsolationConfig, PreDepl
 logger = logging.getLogger(__name__)
 
 
+def _is_truthy_env(value: str) -> bool:
+    return value.lower() in {"1", "true", "yes"}
+
+
+def _aio_sandbox_is_reachable(base_url: str = "http://localhost:8080") -> bool:
+    """Check whether the configured AIO sandbox endpoint is reachable."""
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _require_real_aio_sandbox() -> None:
+    """Skip real AIO integration tests unless service is reachable or explicitly enabled."""
+    env_value = os.environ.get("RUN_REAL_AIO_SANDBOX_TESTS", "")
+    if _is_truthy_env(env_value) or _aio_sandbox_is_reachable():
+        return
+    pytest.skip(
+        "Requires running AIO sandbox on http://localhost:8080; "
+        "start the service or set RUN_REAL_AIO_SANDBOX_TESTS=1 to force-enable."
+    )
+
+
 @pytest_asyncio.fixture(name="real_aio_op")
 async def real_aio_op_fixture():
     """Fixture that provides a real SysOperationCard connected to AIO sandbox at localhost:8080."""
+    _require_real_aio_sandbox()
     await Runner.start()
     card_id = f"real_aio_sandbox_{uuid.uuid4().hex[:8]}"
     card = SysOperationCard(
@@ -55,6 +86,7 @@ async def aio_agent_op_fixture():
     This fixture is designed for Agent integration tests where tools need to be
     mounted onto a ReActAgent.
     """
+    _require_real_aio_sandbox()
     card_id = f"aio_agent_sandbox_{uuid.uuid4().hex[:8]}"
 
     card = SysOperationCard(
