@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Skill prompt section for DeepAgent (migrated from skill_rail_prompt.py)."""
+"""Skill prompt section for DeepAgent (used by SkillUseRail)."""
 from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional

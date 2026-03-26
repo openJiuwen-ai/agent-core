@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""SkillRail implementation for DeepAgent."""
+"""SkillUseRail implementation for DeepAgent."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from openjiuwen.deepagents.tools import BashTool, CodeTool, ReadFileTool
 from openjiuwen.deepagents.tools.list_skill import ListSkillTool
 
 
-class SkillRail(DeepAgentRail):
+class SkillUseRail(DeepAgentRail):
     """Rail that manages skill prompt injection and tool registration."""
 
     priority = 100
@@ -47,7 +47,7 @@ class SkillRail(DeepAgentRail):
         disabled_skills: Optional[Union[str, List[str]]] = None,
         language: str = "cn",
     ):
-        """Initialize SkillRail.
+        """Initialize SkillUseRail.
 
         Args:
             skills_dir: Skill root directory or directories.
@@ -167,7 +167,7 @@ class SkillRail(DeepAgentRail):
             setattr(skill, "update_at", update_at)
         except (AttributeError, TypeError, ValueError) as exc:
             logger.debug(
-                "[SkillRail] skip setting update_at for skill '%s': %s",
+                "[SkillUseRail] skip setting update_at for skill '%s': %s",
                 skill.name,
                 exc,
             )
@@ -185,7 +185,7 @@ class SkillRail(DeepAgentRail):
 
             if skill.name in seen_names:
                 logger.warning(
-                    f"[SkillRail] duplicate skill name detected: '{skill.name}'. "
+                    f"[SkillUseRail] duplicate skill name detected: '{skill.name}'. "
                     f"keep first loaded skill, skip '{skill.directory}'."
                 )
                 continue
@@ -240,7 +240,7 @@ class SkillRail(DeepAgentRail):
                     self._owned_tool_ids.add(tool.card.id)
             except Exception as exc:
                 logger.warning(
-                    f"[SkillRail] failed to add tool resource '{tool.card.id}' "
+                    f"[SkillUseRail] failed to add tool resource '{tool.card.id}' "
                     f"to resource_mgr: {exc}"
                 )
 
@@ -252,7 +252,7 @@ class SkillRail(DeepAgentRail):
                         self._owned_tool_names.add(tool.card.name)
                 except Exception as exc:
                     logger.warning(
-                        f"[SkillRail] failed to add tool card '{tool.card.name}' "
+                        f"[SkillUseRail] failed to add tool card '{tool.card.name}' "
                         f"to ability_manager: {exc}"
                     )
 
@@ -264,7 +264,7 @@ class SkillRail(DeepAgentRail):
                     agent.ability_manager.remove(tool_name)
                 except Exception as exc:
                     logger.warning(
-                        f"[SkillRail] failed to remove tool '{tool_name}' "
+                        f"[SkillUseRail] failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
 
@@ -476,7 +476,7 @@ class SkillRail(DeepAgentRail):
                 if skill.name in skill_map:
                     prev_dir = skill_map[skill.name].directory
                     logger.warning(
-                        f"[SkillRail] duplicate skill name detected: '{skill.name}'. "
+                        f"[SkillUseRail] duplicate skill name detected: '{skill.name}'. "
                         f"keep='{prev_dir}', skip='{item}'."
                     )
                     continue
@@ -487,5 +487,5 @@ class SkillRail(DeepAgentRail):
 
 
 __all__ = [
-    "SkillRail",
+    "SkillUseRail",
 ]

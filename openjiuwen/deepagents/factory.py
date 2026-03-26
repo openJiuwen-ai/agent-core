@@ -15,7 +15,7 @@ from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.deepagents.deep_agent import DeepAgent
-from openjiuwen.deepagents.rails import TaskPlanningRail, SkillRail, SubagentRail
+from openjiuwen.deepagents.rails import TaskPlanningRail, SkillUseRail, SubagentRail
 from openjiuwen.deepagents.schema.config import (
     DeepAgentConfig,
     VisionModelConfig,
@@ -205,7 +205,7 @@ def create_deep_agent(
         for rail_inst in rails:
             if isinstance(rail_inst, TaskPlanningRail):
                 task_plan_flag = True
-            if isinstance(rail_inst, SkillRail):
+            if isinstance(rail_inst, SkillUseRail):
                 skill_flag = True
             if isinstance(rail_inst, SubagentRail):
                 subagent_flag = True
@@ -219,7 +219,7 @@ def create_deep_agent(
         for skill in skills:
             skill_dir = os.path.join(str(workspace_obj.root_path), skill)
             skills_dir.append(skill_dir)
-        skill_rail = SkillRail(skills_dir=skills_dir, skill_mode="all", language=resolved_language)
+        skill_rail = SkillUseRail(skills_dir=skills_dir, skill_mode="all", language=resolved_language)
         agent.add_rail(skill_rail)
     if subagents and not subagent_flag:
         subagent_rail = SubagentRail(language=resolved_language)

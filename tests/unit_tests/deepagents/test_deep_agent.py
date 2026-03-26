@@ -617,7 +617,7 @@ def test_create_deep_agent_auto_add_task_planning_rail() -> None:
 
 
 def test_create_deep_agent_auto_add_skill_rail() -> None:
-    """Test that SkillRail is auto-added when skills parameter is provided."""
+    """Test that SkillUseRail is auto-added when skills parameter is provided."""
     skills = ["name", "test_skill", "description", "test"]
     agent = create_deep_agent(
         model=_create_dummy_model(),
@@ -628,7 +628,7 @@ def test_create_deep_agent_auto_add_skill_rail() -> None:
     assert len(pending_rails) > 0
 
     rail_types = [type(rail).__name__ for rail in [r for r in pending_rails if r is not None]]
-    assert "SkillRail" in rail_types
+    assert "SkillUseRail" in rail_types
 
 
 def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
@@ -648,10 +648,10 @@ def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
 
 
 def test_create_deep_agent_no_duplicate_skill_rail() -> None:
-    """Test that SkillRail is not duplicated when manually provided."""
-    from openjiuwen.deepagents.rails import SkillRail
+    """Test that SkillUseRail is not duplicated when manually provided."""
+    from openjiuwen.deepagents.rails import SkillUseRail
 
-    manual_rail = SkillRail(skills_dir="./", skill_mode="all")
+    manual_rail = SkillUseRail(skills_dir="./", skill_mode="all")
     skills = [{"name": "test_skill", "description": "test"}]
     agent = create_deep_agent(
         model=_create_dummy_model(),
@@ -660,8 +660,8 @@ def test_create_deep_agent_no_duplicate_skill_rail() -> None:
     )
 
     pending_rails = agent._pending_rails
-    skill_rail_count = sum(1 for rail in pending_rails if isinstance(rail, SkillRail))
-    assert skill_rail_count == 1, f"Expected 1 SkillRail, but found {skill_rail_count}"
+    skill_rail_count = sum(1 for rail in pending_rails if isinstance(rail, SkillUseRail))
+    assert skill_rail_count == 1, f"Expected 1 SkillUseRail, but found {skill_rail_count}"
 
 
 def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:

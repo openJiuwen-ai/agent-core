@@ -22,7 +22,7 @@ from openjiuwen.core.sys_operation import (
 from openjiuwen.deepagents import Workspace
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.prompts.builder import PromptSection, SystemPromptBuilder
-from openjiuwen.deepagents.rails.skill_rail import SkillRail
+from openjiuwen.deepagents.rails.skill_use_rail import SkillUseRail
 from openjiuwen.deepagents.tools.list_skill import ListSkillTool
 
 
@@ -41,8 +41,8 @@ class _DummyModel:
         return _DummyResponse(self._content)
 
 
-class _TrackingSkillRail(SkillRail):
-    """Test-only SkillRail that records _load_skill calls via subclass override."""
+class _TrackingSkillUseRail(SkillUseRail):
+    """Test-only SkillUseRail that records _load_skill calls via subclass override."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -109,7 +109,7 @@ def _sorted_skill_names(skills) -> List[str]:
 
 @pytest.mark.asyncio
 async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path):
-    """SkillRail should auto-load skills in before_invoke without explicit prepare()."""
+    """SkillUseRail should auto-load skills in before_invoke without explicit prepare()."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -117,7 +117,7 @@ async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path)
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
 
     sys_operation = _make_sys_operation(tmp_path)
-    skill_rail = SkillRail(
+    skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",
         include_tools=True,
@@ -151,7 +151,7 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
 
     sys_operation = _make_sys_operation(tmp_path)
-    skill_rail = SkillRail(
+    skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",
         include_tools=True,
@@ -188,7 +188,7 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_skill_rail_filters_enabled_and_disabled_skills(tmp_path: Path):
-    """SkillRail should respect enabled_skills and disabled_skills."""
+    """SkillUseRail should respect enabled_skills and disabled_skills."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -197,7 +197,7 @@ async def test_skill_rail_filters_enabled_and_disabled_skills(tmp_path: Path):
     _write_skill(skills_root, "legacy-skill", "Old skill")
 
     sys_operation = _make_sys_operation(tmp_path)
-    skill_rail = SkillRail(
+    skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",
         enabled_skills="invoice-parser,xlsx-writer,legacy-skill",
@@ -234,7 +234,7 @@ async def test_skill_rail_register_rail_auto_list_registers_list_skill_tool(tmp_
     )
     agent = _make_agent(sys_operation, skills_root)
 
-    skill_rail = SkillRail(
+    skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="auto_list",
         list_skill_model=routing_model,
@@ -264,7 +264,7 @@ async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path
     _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
 
     sys_operation = _make_sys_operation(tmp_path)
-    skill_rail = SkillRail(
+    skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="auto_list",
         include_tools=True,
@@ -306,7 +306,7 @@ async def test_list_skill_tool_reads_latest_skills_from_skill_rail(tmp_path: Pat
     routing_model = _DummyModel(
         content='{"skills": ["xlsx-writer"]}'
     )
-    skill_rail = SkillRail(
+    skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="auto_list",
         list_skill_model=routing_model,
@@ -340,7 +340,7 @@ async def test_list_skill_tool_returns_all_skills_when_query_empty(tmp_path: Pat
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
 
     sys_operation = _make_sys_operation(tmp_path)
-    skill_rail = SkillRail(
+    skill_rail = SkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="auto_list",
         include_tools=True,
@@ -366,7 +366,7 @@ async def test_list_skill_tool_returns_all_skills_when_query_empty(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
-    """SkillRail should reuse cached skills across invokes when no skill is changed."""
+    """SkillUseRail should reuse cached skills across invokes when no skill is changed."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -374,7 +374,7 @@ async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
 
     sys_operation = _make_sys_operation(tmp_path)
-    skill_rail = _TrackingSkillRail(
+    skill_rail = _TrackingSkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",
         include_tools=False,
@@ -403,14 +403,14 @@ async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_skill_rail_only_loads_new_skill_on_incremental_refresh(tmp_path: Path):
-    """SkillRail should load only newly added skills on later invokes."""
+    """SkillUseRail should load only newly added skills on later invokes."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
     _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
 
     sys_operation = _make_sys_operation(tmp_path)
-    skill_rail = _TrackingSkillRail(
+    skill_rail = _TrackingSkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",
         include_tools=False,
@@ -440,7 +440,7 @@ async def test_skill_rail_only_loads_new_skill_on_incremental_refresh(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_skill_rail_reload_updated_skill_by_update_at(tmp_path: Path):
-    """SkillRail should reload only updated skills when SKILL.md update_at changes."""
+    """SkillUseRail should reload only updated skills when SKILL.md update_at changes."""
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -448,7 +448,7 @@ async def test_skill_rail_reload_updated_skill_by_update_at(tmp_path: Path):
     _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
 
     sys_operation = _make_sys_operation(tmp_path)
-    skill_rail = _TrackingSkillRail(
+    skill_rail = _TrackingSkillUseRail(
         skills_dir=str(skills_root),
         skill_mode="all",
         include_tools=False,

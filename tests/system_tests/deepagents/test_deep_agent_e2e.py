@@ -385,7 +385,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
 
     @pytest.mark.asyncio
     async def test_deep_agent_auto_rails_creation_e2e(self):
-        """Test automatic creation of TaskPlanningRail and SkillRail."""
+        """Test automatic creation of TaskPlanningRail and SkillUseRail."""
         sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
 
         skills = ["name", "test_skill", "description", "test"]
@@ -403,8 +403,8 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("TaskPlanningRail", rail_types,
                       "TaskPlanningRail should be auto-created when enable_task_loop=True")
-        self.assertIn("SkillRail", rail_types,
-                      "SkillRail should be auto-created when skills parameter is provided")
+        self.assertIn("SkillUseRail", rail_types,
+                      "SkillUseRail should be auto-created when skills parameter is provided")
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
