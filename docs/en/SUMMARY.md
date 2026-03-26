@@ -105,6 +105,8 @@
           - [events](2.Development%20Guide/API%20Docs/openjiuwen.core/common/logging/events.md)
           - [manager](2.Development%20Guide/API%20Docs/openjiuwen.core/common/logging/manager.md)
           - [protocol](2.Development%20Guide/API%20Docs/openjiuwen.core/common/logging/protocol.md)
+        - [clients](2.Development%20Guide/API%20Docs/openjiuwen.core/common/clients/clients.md)
+        - [task_manager](2.Development%20Guide/API%20Docs/openjiuwen.core/common/task_manager/task_manager.md)
       - [foundation](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation.README.md)
         - [llm](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/llm.README.md)
         - [tool](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool.README.md)

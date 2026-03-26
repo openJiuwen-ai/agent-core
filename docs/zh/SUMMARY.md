@@ -104,6 +104,8 @@
           - [events](2.开发指南/API文档/openjiuwen.core/common/logging/events.md)
           - [manager](2.开发指南/API文档/openjiuwen.core/common/logging/manager.md)
           - [protocol](2.开发指南/API文档/openjiuwen.core/common/logging/protocol.md)
+        - [clients](2.开发指南/API文档/openjiuwen.core/common/clients/clients.md)
+        - [task_manager](2.开发指南/API文档/openjiuwen.core/common/task_manager/task_manager.md)
       - [foundation](2.开发指南/API文档/openjiuwen.core/foundation.README.md)
         - [llm](2.开发指南/API文档/openjiuwen.core/foundation/llm/llm.md)
         - [tool](2.开发指南/API文档/openjiuwen.core/foundation/tool/tool.md)
