@@ -1,21 +1,28 @@
 # openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp
 
-## class KnowledgeRetrievalCompConfig
+## class ComponentKBConfig
 
-Configuration dataclass for the `KnowledgeRetrievalComponent`. Extends `ComponentConfig`.
+Per-knowledge-base configuration model used inside the knowledge retrieval component.
 
 **Parameters**:
 
-* **kb_configs**(List[KnowledgeBaseConfig]): List of knowledge base configurations. Each entry defines a knowledge base to retrieve from.
-* **retrieval_config**(RetrievalConfig): Retrieval configuration (top_k, score_threshold, graph/agentic options, etc.).
-* **vector_store_config**(VectorStoreConfig): Vector store configuration. The `store_provider` field determines which backend is used (Milvus, ChromaDB, PGVector).
-* **vector_store_additional_config**(Dict[str, Any]): Additional keyword arguments passed to the vector store constructor (e.g., `{"milvus_uri": "http://localhost:19530"}` or `{"chroma_path": "/tmp/chroma"}`).
+* **kb_config**(KnowledgeBaseConfig): Knowledge base configuration.
+* **vector_store_config**(VectorStoreConfig): Vector store configuration. `store_provider` determines the backend (Milvus, ChromaDB, PGVector).
 * **embed_config**(EmbeddingConfig, optional): Embedding model configuration. Required when `index_type` is `"vector"` or `"hybrid"`. Default: None.
+* **embed_additional_config**(Dict[str, Any]): Additional keyword arguments passed to the embedding model constructor. Default: {}.
+
+## class KnowledgeRetrievalCompConfig
+
+Configuration dataclass for the `KnowledgeRetrievalComponent`. Extends `ComponentConfig`. Supports multiple knowledge bases; retrieval is run over all configured bases and results are merged.
+
+**Parameters**:
+
+* **component_kb_configs**(List[ComponentKBConfig]): List of per-knowledge-base configs. Each entry defines one knowledge base (kb_config, vector_store_config, embed_config, etc.).
+* **vector_store_connection_config**(Dict[str, Any]): Connection-related arguments for the vector store constructor (e.g. `{"chroma_path": "/tmp/chroma"}` or `{"milvus_uri": "http://localhost:19530", "milvus_token": ""}`).
+* **retrieval_config**(RetrievalConfig): Retrieval configuration (top_k, score_threshold, graph/agentic options, etc.).
 * **model_id**(str, optional): Model ID for retrieving an LLM from the Runner resource manager. Default: None.
-* **model_client_config**(ModelClientConfig, optional): LLM client configuration for agentic retrieval scenarios. Default: None.
+* **model_client_config**(ModelClientConfig, optional): LLM client configuration for agentic retrieval. Default: None.
 * **model_config**(ModelRequestConfig, optional): LLM request configuration for agentic retrieval. Default: None.
-* **result_separator**(str): Separator string used when joining retrieved texts into the `context` output. Default: `"\n\n"`.
-* **include_metadata**(bool): Whether to include `results_with_metadata` in the output. Default: False.
 
 ## class KnowledgeRetrievalComponent
 
@@ -61,6 +68,5 @@ Convert the composable component into its executable counterpart.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `results` | List[str] | List of retrieved text strings. |
-| `context` | str | All retrieved texts joined by `result_separator`. |
-| `results_with_metadata` | List[dict] (optional) | Only present when `include_metadata=True`. Each item is a serialized `MultiKBRetrievalResult`. |
+| `results` | List[str] | List of retrieved text strings (merged from all configured knowledge bases). |
+| `context` | str | All retrieved texts joined with the default separator `"\n\n"`. |

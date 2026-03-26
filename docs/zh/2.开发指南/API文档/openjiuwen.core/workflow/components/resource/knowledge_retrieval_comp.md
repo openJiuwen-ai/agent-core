@@ -1,21 +1,28 @@
 # openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp
 
-## class KnowledgeRetrievalCompConfig
+## class ComponentKBConfig
 
-`KnowledgeRetrievalComponent` 的配置数据类，继承自 `ComponentConfig`。
+单个知识库在知识检索组件中的配置模型
 
 **参数**：
 
-* **kb_configs**(List[KnowledgeBaseConfig])：知识库配置列表。每个条目定义一个用于检索的知识库。
-* **retrieval_config**(RetrievalConfig)：检索配置（top_k、score_threshold、图检索/智能检索选项等）。
-* **vector_store_config**(VectorStoreConfig)：向量存储配置。`store_provider` 字段决定使用哪个后端（Milvus、ChromaDB、PGVector）。
-* **vector_store_additional_config**(Dict[str, Any])：传递给向量存储构造函数的额外关键字参数（如 `{"milvus_uri": "http://localhost:19530"}` 或 `{"chroma_path": "/tmp/chroma"}`）。
+* **kb_config**(KnowledgeBaseConfig)：知识库配置（知识库 ID、索引类型等）。
+* **vector_store_config**(VectorStoreConfig)：向量存储配置。`store_provider` 决定后端（Milvus、ChromaDB、PGVector）。
 * **embed_config**(EmbeddingConfig, 可选)：嵌入模型配置。当 `index_type` 为 `"vector"` 或 `"hybrid"` 时必填。默认值：None。
+* **embed_additional_config**(Dict[str, Any])：嵌入模型构造时的额外关键字参数。默认值：{}。
+
+## class KnowledgeRetrievalCompConfig
+
+`KnowledgeRetrievalComponent` 的配置数据类，继承自 `ComponentConfig`。支持配置多个知识库，检索时对所有知识库执行检索并合并结果。
+
+**参数**：
+
+* **component_kb_configs**(List[ComponentKBConfig])：各知识库的配置列表。每个元素对应一个知识库（含 kb_config、vector_store_config、embed_config 等）。
+* **vector_store_connection_config**(Dict[str, Any])：向量存储连接相关参数，创建向量存储时传入（如 `{"chroma_path": "/tmp/chroma"}` 或 `{"milvus_uri": "http://localhost:19530", "milvus_token": ""}`）。
+* **retrieval_config**(RetrievalConfig)：检索配置（top_k、score_threshold、图检索/智能检索选项等）。
 * **model_id**(str, 可选)：从 Runner 资源管理器获取 LLM 的模型 ID。默认值：None。
 * **model_client_config**(ModelClientConfig, 可选)：用于智能检索场景的 LLM 客户端配置。默认值：None。
 * **model_config**(ModelRequestConfig, 可选)：用于智能检索场景的 LLM 请求配置。默认值：None。
-* **result_separator**(str)：将检索到的文本连接成 `context` 输出时使用的分隔符。默认值：`"\n\n"`。
-* **include_metadata**(bool)：是否在输出中包含 `results_with_metadata`。默认值：False。
 
 ## class KnowledgeRetrievalComponent
 
@@ -61,6 +68,5 @@ to_executable() -> KnowledgeRetrievalExecutable
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `results` | List[str] | 检索到的文本字符串列表。 |
-| `context` | str | 所有检索到的文本通过 `result_separator` 连接后的结果。 |
-| `results_with_metadata` | List[dict]（可选） | 仅当 `include_metadata=True` 时存在。每个条目是序列化的 `MultiKBRetrievalResult`。 |
+| `results` | List[str] | 检索到的文本字符串列表（来自所有配置的知识库合并结果）。 |
+| `context` | str | 所有检索到的文本使用默认分隔符 `"\n\n"` 连接后的结果。 |

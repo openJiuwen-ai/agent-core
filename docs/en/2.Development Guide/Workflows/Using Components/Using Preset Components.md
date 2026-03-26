@@ -1586,23 +1586,22 @@ main workflow with sub workflow run result: result={'output': {'result': 'hello'
 
 # KnowledgeRetrieval Component
 
-The `KnowledgeRetrievalComponent` is a preset component that integrates knowledge retrieval into openJiuwen workflows. It wraps `KnowledgeBase` and supports multiple vector store backends (Milvus, ChromaDB, PGVector) via the `store_provider` field in `VectorStoreConfig`.
+The `KnowledgeRetrievalComponent` is a preset component that integrates knowledge retrieval into openJiuwen workflows. It wraps knowledge-base retrieval and supports **multiple knowledge bases**: you configure one or more knowledge bases via `component_kb_configs`; retrieval runs over all of them and results are merged. Each knowledge base uses a vector store backend (Milvus, ChromaDB, PGVector) via the `store_provider` field in `VectorStoreConfig`.
 
 ## Configuration
 
 Create a `KnowledgeRetrievalCompConfig` to configure the component. The key fields are:
 
-- `kb_configs`: List of `KnowledgeBaseConfig` defining which knowledge bases to retrieve from.
-- `retrieval_config`: `RetrievalConfig` controlling top_k, score_threshold, etc.
-- `vector_store_config`: `VectorStoreConfig` with `store_provider` set to `StoreType.Milvus`, `StoreType.Chroma`, or `StoreType.PGVector`.
-- `vector_store_additional_config`: Additional keyword arguments for the vector store constructor.
-- `embed_config`: `EmbeddingConfig` for embedding model (required for vector/hybrid index types).
-- `result_separator`: Separator when joining retrieved texts into `context`. Default: `"\n\n"`.
-- `include_metadata`: Set to `True` to include `results_with_metadata` in the output.
+- `component_kb_configs`: List of `ComponentKBConfig`, each defining one knowledge base. You can configure multiple knowledge bases; retrieval is performed over all of them and results are merged.
+  - Each `ComponentKBConfig` includes: `kb_config` (`KnowledgeBaseConfig`, e.g. kb_id and index_type), `vector_store_config` (`VectorStoreConfig`), `embed_config` (`EmbeddingConfig`, optional but required for vector/hybrid index types), and `embed_additional_config` (optional).
+- `vector_store_connection_config`: Connection-related arguments passed to the vector store constructor (e.g. `{"chroma_path": "/tmp/chroma"}` or `{"milvus_uri": "http://localhost:19530", "milvus_token": ""}`). Shared when creating vector stores for all entries in `component_kb_configs`.
+- `retrieval_config`: `RetrievalConfig` for top_k, score_threshold, graph/agentic options, etc.
+- `model_id` (optional): Model ID to resolve an LLM from the Runner resource manager (e.g. for agentic retrieval).
+- `model_client_config`, `model_config` (optional): LLM client and request config for agentic retrieval.
 
 ## Example: RAG Workflow (Start → KnowledgeRetrieval → LLM → End)
 
-The following example builds a simple Retrieval-Augmented Generation pipeline using the `KnowledgeRetrievalComponent`:
+The following example builds a simple Retrieval-Augmented Generation pipeline using the `KnowledgeRetrievalComponent` (single knowledge base):
 
 ```python
 from openjiuwen.core.retrieval.common.config import (
@@ -1614,6 +1613,7 @@ from openjiuwen.core.retrieval.common.config import (
 )
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.workflow import (
+    ComponentKBConfig,
     End,
     KnowledgeRetrievalCompConfig,
     KnowledgeRetrievalComponent,
@@ -1630,25 +1630,25 @@ flow = Workflow(card=WorkflowCard(name="RAG Workflow", id="rag_wf", version="1.0
 
 start = Start()
 
-# 2. Configure KnowledgeRetrieval component
+# 2. Configure KnowledgeRetrieval component (supports multiple knowledge bases; here one is configured)
 kr_config = KnowledgeRetrievalCompConfig(
-    kb_configs=[
-        KnowledgeBaseConfig(kb_id="demo_kb", index_type="vector"),
+    component_kb_configs=[
+        ComponentKBConfig(
+            kb_config=KnowledgeBaseConfig(kb_id="demo_kb", index_type="vector"),
+            vector_store_config=VectorStoreConfig(
+                store_provider=StoreType.Chroma,
+                collection_name="demo_collection",
+                distance_metric="cosine",
+            ),
+            embed_config=EmbeddingConfig(
+                model_name="text-embedding-v3",
+                base_url="https://api.example.com/embeddings",
+                api_key="your-api-key",
+            ),
+        ),
     ],
+    vector_store_connection_config={"chroma_path": "/tmp/demo_chroma"},
     retrieval_config=RetrievalConfig(top_k=3, score_threshold=0.0),
-    vector_store_config=VectorStoreConfig(
-        store_provider=StoreType.Chroma,
-        collection_name="demo_collection",
-        distance_metric="cosine",
-    ),
-    vector_store_additional_config={"chroma_path": "/tmp/demo_chroma"},
-    embed_config=EmbeddingConfig(
-        model_name="text-embedding-v3",
-        base_url="https://api.example.com/embeddings",
-        api_key="your-api-key",
-    ),
-    result_separator="\n\n",
-    include_metadata=False,
 )
 kr_component = KnowledgeRetrievalComponent(component_config=kr_config)
 
