@@ -7,12 +7,14 @@ from openjiuwen.deepagents.rails.interrupt.interrupt_base import BaseInterruptRa
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.deepagents.rails.skill_use_rail import SkillUseRail
+from openjiuwen.deepagents.rails.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.deepagents.rails.subagent_rail import SubagentRail
 
 __all__ = [
     "DeepAgentRail",
     "TaskPlanningRail",
     "SkillUseRail",
+    "SkillEvolutionRail",
     "SubagentRail",
     "AskUserRail",
     "ConfirmInterruptRail",
