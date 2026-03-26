@@ -104,6 +104,21 @@ def test_create_vision_tools_register_and_invoke(monkeypatch):
     assert len(prompts) == 2
 
 
+def test_runner_stop_clears_registered_vision_tools():
+    async def _run():
+        await Runner.start()
+        tools = create_vision_tools()
+        add_results = Runner.resource_mgr.add_tool(tools)
+        assert all(result.is_ok() for result in add_results)
+        assert Runner.resource_mgr.get_tool("VisualQuestionAnsweringTool") is not None
+        await Runner.stop()
+        return Runner.resource_mgr.get_tool("VisualQuestionAnsweringTool")
+
+    leaked_tool = asyncio.run(_run())
+
+    assert leaked_tool is None
+
+
 @pytest.mark.skipif(
     not _vision_system_tests_enabled(),
     reason="Set RUN_VISION_SYSTEM_TESTS=1 to run live vision system tests.",

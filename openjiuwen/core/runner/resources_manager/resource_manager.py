@@ -1293,6 +1293,9 @@ class ResourceMgr:
         This method should be called when the ResourceMgr is no longer needed.
         """
         await self._resource_registry.tool().release()
+        self._resource_registry = ResourceRegistry()
+        self._tag_mgr = TagMgr()
+        self._id_to_card = {}
 
     def _inner_add_resource(self, *, resource_id: str, resource_type: str, resource: Any,
                             resource_card: Optional[BaseCard] = None, tag: Optional[Tag | list[Tag]] = None):

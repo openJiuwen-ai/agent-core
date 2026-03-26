@@ -11,11 +11,12 @@ import unittest
 import uuid
 from collections import Counter
 from pathlib import Path
-from typing import List
-from unittest.mock import patch
+from types import SimpleNamespace
+from typing import List, cast
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.llm import (
     Model,
     ModelClientConfig,
@@ -59,6 +60,26 @@ os.environ.setdefault("LLM_SSL_VERIFY", "false")
 os.environ.setdefault("IS_SENSITIVE", "false")
 
 logger = logging.getLogger(__name__)
+
+
+class _MockRuntimeModel:
+    """Expose MockLLMModel through DeepAgent's public model contract."""
+
+    def __init__(self, client: MockLLMModel):
+        self.client = client
+        self.model_client_config = client.model_client_config
+        self.model_config = client.model_config
+
+    async def invoke(self, *args, **kwargs):
+        return await self.client.invoke(*args, **kwargs)
+
+    async def stream(self, *args, **kwargs):
+        async for chunk in self.client.stream(*args, **kwargs):
+            yield chunk
+
+
+def _build_mock_runtime_model(mock_llm: MockLLMModel) -> Model:
+    return cast(Model, _MockRuntimeModel(mock_llm))
 
 
 class ToolTraceRail(AgentRail):
@@ -185,51 +206,193 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bool(result["output"]))
 
     @pytest.mark.asyncio
-    @unittest.skip("skip system test")
     async def test_deep_agent_complex_task_multi_tool_chain(self):
-        """复杂任务：连续调用 fs 工具完成写入、列举、读取。"""
-        self._require_llm_config()
+        """复杂任务：用 mock LLM 连续调用 fs 工具完成写入、列举、读取。"""
+        class _FakeFsBackend:
+            def __init__(self, root: Path):
+                self.root = root
+
+            def _resolve(self, path: str) -> Path:
+                return (self.root / path).resolve()
+
+            async def write_file(self, path: str, content: str | bytes, **kwargs):
+                file_path = self._resolve(path)
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+
+                mode = kwargs.get("mode", "text")
+                encoding = kwargs.get("encoding", "utf-8")
+                prepend_newline = kwargs.get("prepend_newline", True)
+                append_newline = kwargs.get("append_newline", False)
+
+                if mode == "text":
+                    text = str(content)
+                    if prepend_newline:
+                        text = "\n" + text
+                    if append_newline:
+                        text = text + "\n"
+                    data = text.encode(encoding)
+                else:
+                    data = content if isinstance(content, (bytes, bytearray)) else bytes(content)
+
+                file_path.write_bytes(data)
+                return SimpleNamespace(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=SimpleNamespace(path=str(file_path), size=len(data), mode=mode),
+                )
+
+            async def read_file(self, path: str, line_range=None, **kwargs):
+                file_path = self._resolve(path)
+                encoding = kwargs.get("encoding", "utf-8")
+                content = file_path.read_text(encoding=encoding)
+
+                if line_range is not None:
+                    start, end = line_range
+                    lines = content.splitlines()
+                    content = "\n".join(lines[start - 1:end])
+
+                return SimpleNamespace(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=SimpleNamespace(path=str(file_path), content=content, mode="text"),
+                )
+
+            async def list_files(self, path: str, **kwargs):
+                dir_path = self._resolve(path)
+                items = [
+                    SimpleNamespace(name=item.name, path=str(item))
+                    for item in dir_path.iterdir()
+                    if item.is_file()
+                ]
+                return SimpleNamespace(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=SimpleNamespace(list_items=items),
+                )
+
+            async def list_directories(self, path: str, **kwargs):
+                dir_path = self._resolve(path)
+                items = [
+                    SimpleNamespace(name=item.name, path=str(item))
+                    for item in dir_path.iterdir()
+                    if item.is_dir()
+                ]
+                return SimpleNamespace(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=SimpleNamespace(list_items=items),
+                )
+
+        class _FakeExecBackend:
+            async def execute_cmd(self, *args, **kwargs):
+                return SimpleNamespace(
+                    code=1,
+                    message="unsupported in test",
+                    data=SimpleNamespace(stdout="", stderr="unsupported in test", exit_code=1),
+                )
+
+            async def execute_code(self, *args, **kwargs):
+                return SimpleNamespace(
+                    code=1,
+                    message="unsupported in test",
+                    data=SimpleNamespace(stdout="", stderr="unsupported in test", exit_code=1),
+                )
+
+        class _FakeSysOperation:
+            def __init__(self, root: Path):
+                self._fs = _FakeFsBackend(root)
+                self._shell = _FakeExecBackend()
+                self._code = _FakeExecBackend()
+
+            def fs(self):
+                return self._fs
+
+            def shell(self):
+                return self._shell
+
+            def code(self):
+                return self._code
 
         tool_trace = ToolTraceRail()
         fs_rail = self._get_fs_rail()
-        model = self._create_model()
-        agent = create_deep_agent(
-            model=model,
-            system_prompt=(
-                "你是一个严谨的任务执行助手。"
-                "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response(
+                "write_file",
+                '{"file_path": "todo_alpha.txt", "content": "准备数据\\n实现功能\\n验证结果"}',
+                tool_call_id="mock_call_write_alpha",
             ),
-            rails=[tool_trace, fs_rail],
-            enable_task_loop=False,
-            max_iterations=12,
-        )
+            create_tool_call_response(
+                "write_file",
+                '{"file_path": "todo_beta.txt", "content": "发布版本\\n回滚预案"}',
+                tool_call_id="mock_call_write_beta",
+            ),
+            create_tool_call_response(
+                "list_files",
+                '{"path": "."}',
+                tool_call_id="mock_call_list_files",
+            ),
+            create_tool_call_response(
+                "read_file",
+                '{"file_path": "todo_alpha.txt"}',
+                tool_call_id="mock_call_read_alpha",
+            ),
+            create_tool_call_response(
+                "read_file",
+                '{"file_path": "todo_beta.txt"}',
+                tool_call_id="mock_call_read_beta",
+            ),
+            create_text_response("已按顺序完成文件写入、列出和读取。"),
+        ])
+        model = _build_mock_runtime_model(mock_llm)
+        tmp_root = Path(__file__).parent / ".tmp"
+        tmp_root.mkdir(exist_ok=True)
 
-        query = (
-            "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"
-            "1. 写入 todo_alpha.txt，内容为三行：准备数据、实现功能、验证结果；\n"
-            "2. 写入 todo_beta.txt，内容为两行：发布版本、回滚预案；\n"
-            "3. 使用工具列出当前目录文件，确认上面两个文件存在；\n"
-            "4. 使用工具读取这两个文件；\n"
-            "5. 最后输出一句中文总结。"
-        )
-        result = await Runner.run_agent(agent, {"query": query})
-        self.assertIsInstance(result, dict)
-        self.assertEqual(result.get("result_type"), "answer")
-        self.assertIn("output", result)
-        self.assertTrue(bool(result["output"]))
+        with tempfile.TemporaryDirectory(
+            prefix="deepagent_tool_chain_",
+            dir=tmp_root,
+        ) as work_dir:
+            fake_sys_operation = _FakeSysOperation(Path(work_dir))
+            agent = create_deep_agent(
+                model=model,
+                system_prompt=(
+                    "你是一个严谨的任务执行助手。"
+                    "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
+                ),
+                rails=[tool_trace, fs_rail],
+                enable_task_loop=False,
+                max_iterations=12,
+                workspace=work_dir,
+            )
+            agent.deep_config.sys_operation = fake_sys_operation
 
-        tool_counts = Counter(tool_trace.tool_calls)
-        self.assertGreaterEqual(tool_counts.get("write_file", 0), 2)
-        self.assertGreaterEqual(tool_counts.get("list_files", 0), 1)
-        self.assertGreaterEqual(tool_counts.get("read_file", 0), 1)
-        self.assertGreaterEqual(sum(tool_counts.values()), 4)
+            query = (
+                "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"
+                "1. 写入 todo_alpha.txt，内容为三行：准备数据、实现功能、验证结果；\n"
+                "2. 写入 todo_beta.txt，内容为两行：发布版本、回滚预案；\n"
+                "3. 使用工具列出当前目录文件，确认上面两个文件存在；\n"
+                "4. 使用工具读取这两个文件；\n"
+                "5. 最后输出一句中文总结。"
+            )
+            result = await Runner.run_agent(agent, {"query": query})
 
-        alpha_path = Path(self._work_dir) / "todo_alpha.txt"
-        beta_path = Path(self._work_dir) / "todo_beta.txt"
-        self.assertTrue(alpha_path.exists())
-        self.assertTrue(beta_path.exists())
-        self.assertTrue(alpha_path.read_text(encoding="utf-8").strip())
-        self.assertTrue(beta_path.read_text(encoding="utf-8").strip())
+            self.assertIsInstance(result, dict)
+            self.assertEqual(result.get("result_type"), "answer")
+            self.assertIn("output", result)
+            self.assertTrue(bool(result["output"]))
+
+            tool_counts = Counter(tool_trace.tool_calls)
+            self.assertGreaterEqual(tool_counts.get("write_file", 0), 2)
+            self.assertGreaterEqual(tool_counts.get("list_files", 0), 1)
+            self.assertGreaterEqual(tool_counts.get("read_file", 0), 1)
+            self.assertGreaterEqual(sum(tool_counts.values()), 4)
+
+            alpha_path = Path(work_dir) / "todo_alpha.txt"
+            beta_path = Path(work_dir) / "todo_beta.txt"
+            self.assertTrue(alpha_path.exists())
+            self.assertTrue(beta_path.exists())
+            self.assertTrue(alpha_path.read_text(encoding="utf-8").strip())
+            self.assertTrue(beta_path.read_text(encoding="utf-8").strip())
 
     @pytest.mark.asyncio
     async def test_deep_agent_task_planning(self):
@@ -253,7 +416,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         ])
 
         agent = create_deep_agent(
-            model=self._create_model(),
+            model=_build_mock_runtime_model(mock_llm),
             enable_task_loop=False,
             max_iterations=20,
             sys_operation=sys_oper,
@@ -262,8 +425,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
 
         query = "我想测试任务规划能力，帮我构建一个打卡系统，调用规划工具帮我模拟规划吧"
 
-        with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
-            result = await Runner.run_agent(agent, {"query": query})
+        result = await Runner.run_agent(agent, {"query": query})
 
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
@@ -298,7 +460,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         ])
 
         agent = create_deep_agent(
-            model=self._create_model(),
+            model=_build_mock_runtime_model(mock_llm),
             rails=[task_planning],
             enable_task_loop=False,
             max_iterations=20,
@@ -307,8 +469,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
 
         query = "帮我完成前两个任务"
 
-        with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
-            result = await Runner.run_agent(agent, {"query": query})
+        result = await Runner.run_agent(agent, {"query": query})
 
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
