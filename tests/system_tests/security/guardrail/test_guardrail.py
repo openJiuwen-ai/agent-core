@@ -309,8 +309,9 @@ def _get_test_mock_llm() -> MockLLMModel:
 
 class _TestMockLLMClient(MockLLMModel):
     """Mock LLM client that uses a global instance for testing."""
+    __client_name__ = "TestMockLLM"
 
-    def __init__(self, model_config, client_config):
+    def __init__(self, model_config, model_client_config):
         super().__init__()
         self._global_mock = _get_test_mock_llm()
 
@@ -327,8 +328,7 @@ class TestGuardrailWithReActAgentMock(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
-        from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
-        _CLIENT_TYPE_REGISTRY["TestMockLLM"] = _TestMockLLMClient
+        pass
 
     async def asyncSetUp(self):
         os.environ.setdefault("LLM_SSL_VERIFY", "false")

@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Union, List, Optional, AsyncIterator, Type, Dict
 
+from openjiuwen.core.common.clients import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.model_clients.dashscope_model_client import DashScopeModelClient
@@ -108,19 +109,18 @@ class Model:
         if client_config.client_id is None:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config client_id is none")
-        client_provider = client_config.client_provider
-
-        client_class = _CLIENT_TYPE_REGISTRY.get(client_provider)
-
-        if client_class is None:
-            supported_types = ", ".join(_CLIENT_TYPE_REGISTRY.keys())
-
+        client_provider = client_config.client_provider.value if hasattr(client_config.client_provider,
+            'value') else client_config.client_provider
+        try:
+            client = get_client_registry().get_client(client_provider, "llm", model_config=self.model_config,
+                                                      model_client_config=client_config)
+        except ValueError as e:
+            supported_types = [name for name in get_client_registry().list_clients() if name.startswith("llm_")]
             raise build_error(
                 StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                 error_msg=f"Unsupported client_type: '{client_provider}', Supported types: {supported_types}"
             )
-
-        return client_class(self.model_config, client_config)
+        return client
 
     async def invoke(
             self,
@@ -334,17 +334,17 @@ class Model:
 
 
 def init_model(
-    provider: str,
-    model_name: str,
-    api_key: str,
-    api_base: str,
-    *,
-    temperature: float = 0.95,
-    top_p: float = 0.1,
-    max_tokens: Optional[int] = None,
-    timeout: float = 60.0,
-    max_retries: int = 3,
-    verify_ssl: bool = False,
+        provider: str,
+        model_name: str,
+        api_key: str,
+        api_base: str,
+        *,
+        temperature: float = 0.95,
+        top_p: float = 0.1,
+        max_tokens: Optional[int] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        verify_ssl: bool = False,
 ) -> Model:
     """Convenience factory to create a Model instance.
 

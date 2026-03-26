@@ -69,26 +69,27 @@ class ClientRegistry:
         if not hasattr(client_class, '__client_type__'):
             raise ValueError(f"Client class {client_class.__name__} must define __client_type__")
 
-        name = client_class.__client_name__
+        names = client_class.__client_name__ if isinstance(client_class.__client_name__, list) else [
+            client_class.__client_name__]
         client_type = client_class.__client_type__
 
         if not client_type:
             raise ValueError(f"Client class {client_class.__name__} __client_type__ cannot be empty, register failed")
+        for name in names:
+            full_name = f'{client_type}_{name}'
 
-        full_name = f'{client_type}_{name}'
+            if full_name in self._factories or full_name in self._client_classes:
+                logger.warning(f"Client type '{full_name}' already registered")
+                return
 
-        if full_name in self._factories or full_name in self._client_classes:
-            logger.warning(f"Client type '{full_name}' already registered")
-            return
+            # Store the client class
+            self._client_classes[full_name] = client_class
 
-        # Store the client class
-        self._client_classes[full_name] = client_class
+            # Create factory function
+            def factory(**kwargs):
+                return client_class(**kwargs)
 
-        # Create factory function
-        def factory(**kwargs):
-            return client_class(**kwargs)
-
-        self._factories[full_name] = factory
+            self._factories[full_name] = factory
 
     def get_client(self, name: str, client_type: Optional[str] = "common", **kwargs) -> Any:
         """Get a client instance.

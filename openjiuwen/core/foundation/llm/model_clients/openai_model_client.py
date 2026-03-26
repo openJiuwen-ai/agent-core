@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
-    __client_name__ = ProviderType.OpenAI.name
+    __client_name__ = [ProviderType.OpenAI.value, ProviderType.OpenRouter.value]
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)

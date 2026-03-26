@@ -31,7 +31,7 @@ from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 class SiliconFlowModelClient(BaseModelClient):
     """SiliconFlow API client supporting GPT models and OpenAI-compatible services."""
-    __client_name__ = ProviderType.SiliconFlow.name
+    __client_name__ = ProviderType.SiliconFlow.value
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)

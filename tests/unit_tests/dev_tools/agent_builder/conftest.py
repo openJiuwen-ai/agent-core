@@ -21,6 +21,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 
 class MockModelClient(BaseModelClient):
     """Mock LLM client for testing"""
+    __client_name__ = "MockTestLLM"
 
     def __init__(
             self,
@@ -124,14 +125,11 @@ class MockModelClient(BaseModelClient):
         pass
 
 
-_CLIENT_TYPE_REGISTRY["MockTestLLM"] = MockModelClient
-
-
 @pytest.fixture
 def mock_model():
     """Create a mock Model instance for testing"""
     from openjiuwen.core.foundation.llm import Model
-    
+
     client_config = ModelClientConfig(
         client_provider="MockTestLLM",
         api_key="test_key",
@@ -139,7 +137,7 @@ def mock_model():
         verify_ssl=False,
     )
     request_config = ModelRequestConfig(model="test-model")
-    
+
     return Model(
         model_client_config=client_config,
         model_config=request_config

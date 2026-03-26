@@ -62,12 +62,7 @@ class ModelClientConfig(BaseModel):
             self.client_provider = to_provider_type(normalized_provider)
             return self
 
-        supported_providers = ", ".join(_CLIENT_TYPE_REGISTRY.keys())
-        raise build_error(
-            StatusCode.MODEL_PROVIDER_INVALID,
-            error_msg=f"unavailable model provider: {self.client_provider},"
-                      f"and available providers are: {supported_providers}"
-        )
+        return self
 
 
 class ModelRequestConfig(BaseModel):
