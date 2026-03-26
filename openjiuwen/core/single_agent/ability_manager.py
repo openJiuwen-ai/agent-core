@@ -102,6 +102,65 @@ class AbilityManager:
         return tool_calls
 
     @staticmethod
+    def _repair_tool_arguments_json(arguments: str) -> Optional[str]:
+        text = arguments.strip()
+        if not text:
+            return None
+
+        stack: List[str] = []
+        in_string = False
+        escape = False
+        for char in text:
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                continue
+            if char in "{[":
+                stack.append(char)
+                continue
+            if char == "}":
+                if not stack or stack[-1] != "{":
+                    return None
+                stack.pop()
+                continue
+            if char == "]":
+                if not stack or stack[-1] != "[":
+                    return None
+                stack.pop()
+
+        if in_string:
+            return None
+        if not stack:
+            return text
+
+        suffix = "".join("}" if opener == "{" else "]" for opener in reversed(stack))
+        return f"{text}{suffix}"
+
+    @classmethod
+    def _parse_tool_arguments(cls, arguments: Any) -> Any:
+        if not isinstance(arguments, str):
+            return arguments
+        try:
+            return json.loads(arguments)
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            repaired = cls._repair_tool_arguments_json(arguments)
+            if repaired and repaired != arguments:
+                try:
+                    logger.warning("Recovered malformed tool arguments by balancing closing brackets")
+                    return json.loads(repaired)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return {}
+
+    @staticmethod
     def _build_execution_error(
             tool_call: ToolCall,
             message: str,
@@ -595,14 +654,7 @@ class AbilityManager:
         tool_name = tool_call.name
 
         # Parse arguments
-        try:
-            tool_args = (
-                json.loads(tool_call.arguments)
-                if isinstance(tool_call.arguments, str)
-                else tool_call.arguments
-            )
-        except (json.JSONDecodeError, AttributeError):
-            tool_args = {}
+        tool_args = self._parse_tool_arguments(tool_call.arguments)
 
         # Check ability type and execute accordingly
         if tool_name in self._tools:

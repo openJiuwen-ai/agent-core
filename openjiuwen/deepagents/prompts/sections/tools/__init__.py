@@ -26,6 +26,9 @@ from openjiuwen.deepagents.prompts.sections.tools.bash import (
 from openjiuwen.deepagents.prompts.sections.tools.code import (
     CodeMetadataProvider,
 )
+from openjiuwen.deepagents.prompts.sections.tools.cron import (
+    CronMetadataProvider,
+)
 from openjiuwen.deepagents.prompts.sections.tools.filesystem import (
     ReadFileMetadataProvider,
     WriteFileMetadataProvider,
@@ -71,6 +74,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     AskUserMetadataProvider(),
     BashMetadataProvider(),
     CodeMetadataProvider(),
+    CronMetadataProvider(),
     ReadFileMetadataProvider(),
     WriteFileMetadataProvider(),
     EditFileMetadataProvider(),
