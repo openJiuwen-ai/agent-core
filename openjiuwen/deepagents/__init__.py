@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from openjiuwen.deepagents.schema.stop_condition import (
         StopCondition,
     )
-    from openjiuwen.deepagents.schema.workspace import Workspace
+    from openjiuwen.deepagents.workspace.workspace import Workspace
 
 __all__ = [
     "DeepAgent",
@@ -73,7 +73,7 @@ def __getattr__(name: str) -> Any:
         )
         return create_deep_agent
     if name == "Workspace":
-        from openjiuwen.deepagents.schema.workspace import (
+        from openjiuwen.deepagents.workspace.workspace import (
             Workspace,
         )
         return Workspace

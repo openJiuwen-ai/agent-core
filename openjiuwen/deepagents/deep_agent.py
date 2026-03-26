@@ -110,10 +110,20 @@ class DeepAgent(BaseAgent):
         self._initialized = False
         self.prompt_builder: Optional[SystemPromptBuilder] = None
         self.system_prompt_builder: Optional[SystemPromptBuilder] = None
+        self._workspace_initialized: bool = False
         super().__init__(card)
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
+        from pathlib import Path as PathType
+
+        if config.workspace is not None and isinstance(config.workspace, (str, PathType)):
+            from openjiuwen.deepagents import Workspace
+            config.workspace = Workspace(
+                root_path=str(config.workspace),
+                language=config.language
+            )
+
         self._deep_config = config
         self._react_agent = self._create_react_agent()
         self._pending_rails.clear()
@@ -124,6 +134,7 @@ class DeepAgent(BaseAgent):
             )
 
         self._initialized = False
+        self._workspace_initialized = False
         return self
 
     def set_react_agent(
@@ -283,6 +294,10 @@ class DeepAgent(BaseAgent):
 
         await self._register_pending_mcps()
 
+        if self._needs_workspace_init():
+            await self.init_workspace()
+            self._workspace_initialized = True
+
         for rail_inst in self._pending_rails:
             if isinstance(rail_inst, DeepAgentRail):
                 rail_inst.set_sys_operation(self._deep_config.sys_operation)
@@ -291,6 +306,43 @@ class DeepAgent(BaseAgent):
             await self._register_rail_selective(rail_inst)
         self._pending_rails.clear()
         self._initialized = True
+
+    def _needs_workspace_init(self) -> bool:
+        """Check if workspace initialization is needed."""
+        config = self._deep_config
+        if config:
+            return (
+                    config.workspace is not None
+                    and config.sys_operation is not None
+                    and config.auto_create_workspace
+                    and not self._workspace_initialized
+            )
+        return False
+
+    async def ensure_initialized(self) -> None:
+        """Perform lazy initialization. For testing only."""
+        await self._ensure_initialized()
+
+    async def init_workspace(self) -> None:
+        """Initialize the workspace with directory structure and default content."""
+        from openjiuwen.deepagents.workspace.directory_builder import DirectoryBuilder
+
+        if self._deep_config and self._deep_config.workspace:
+            agent_id = self.card.id or "default"
+            base_path = self._deep_config.workspace.root_path
+            workspace_root = f"{base_path}/{agent_id}_workspace"
+
+            builder = DirectoryBuilder(
+                sys_operation=self._deep_config.sys_operation,
+                root_path=workspace_root,
+            )
+            await builder.build(self._deep_config.workspace.directories)
+
+    @property
+    def react_config(self) -> ReActAgentConfig:
+        """React agent config. For testing only."""
+        return self._react_agent.config
+
 
     def _normalize_inputs(self, inputs: Any) -> InvokeInputs:
         """Parse user inputs into typed InvokeInputs."""

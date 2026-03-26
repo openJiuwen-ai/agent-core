@@ -27,7 +27,7 @@ from openjiuwen.core.sys_operation import (
     OperationMode,
 )
 from openjiuwen.deepagents.deep_agent import DeepAgent
-from openjiuwen.deepagents.schema.workspace import Workspace
+from openjiuwen.deepagents.workspace.workspace import Workspace
 from openjiuwen.deepagents.prompts.sections.todo import (
     build_progress_reminder_user_prompt,
     build_todo_system_prompt, build_todo_section,

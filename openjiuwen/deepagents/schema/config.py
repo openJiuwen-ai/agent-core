@@ -19,7 +19,7 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents.schema.stop_condition import (
     StopCondition,
 )
-from openjiuwen.deepagents.schema.workspace import (
+from openjiuwen.deepagents.workspace.workspace import (
     Workspace,
 )
 
@@ -111,6 +111,7 @@ class DeepAgentConfig:
     skills: Optional[Union[str, List[str]]] = None
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
+    auto_create_workspace: bool = True
     completion_timeout: float = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None

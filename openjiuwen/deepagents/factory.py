@@ -22,7 +22,7 @@ from openjiuwen.deepagents.schema.config import (
     SubAgentConfig
 )
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
-from openjiuwen.deepagents.schema.workspace import Workspace
+from openjiuwen.deepagents.workspace.workspace import Workspace
 from openjiuwen.deepagents.prompts import resolve_language
 
 
@@ -140,9 +140,12 @@ def create_deep_agent(
 
     normalized_tools, tool_instances = _normalize_tools(tools)
 
-    workspace_obj = Workspace(root_path=workspace or "./") if not workspace or isinstance(workspace, str) else workspace
-
     resolved_language = resolve_language(language)
+
+    if not workspace or isinstance(workspace, str):
+        workspace_obj = Workspace(root_path=workspace or "./", language=resolved_language)
+    else:
+        workspace_obj = workspace
 
     if not isinstance(sys_operation, SysOperation):
         sysop_card = SysOperationCard(

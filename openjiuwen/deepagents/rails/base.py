@@ -17,7 +17,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
 )
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.deepagents.schema.workspace import Workspace
+from openjiuwen.deepagents.workspace.workspace import Workspace
 
 DEEP_EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.BEFORE_TASK_ITERATION: "before_task_iteration",

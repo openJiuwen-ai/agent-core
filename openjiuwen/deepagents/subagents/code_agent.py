@@ -18,7 +18,7 @@ from openjiuwen.deepagents.prompts import resolve_language
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.schema.config import SubAgentConfig
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
-from openjiuwen.deepagents.schema.workspace import Workspace
+from openjiuwen.deepagents.workspace.workspace import Workspace
 
 
 DEFAULT_CODE_AGENT_SYSTEM_PROMPT_EN = (
