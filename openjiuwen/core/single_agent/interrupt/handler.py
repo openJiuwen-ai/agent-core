@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from __future__ import annotations
+
 import copy
 import json
 from dataclasses import dataclass
@@ -9,14 +10,13 @@ from typing import Any, Callable, Dict, Optional
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
-from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import (
     InterruptRequest,
@@ -28,14 +28,14 @@ from openjiuwen.core.single_agent.interrupt.state import (
     ToolInterruptionState,
     RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY,
 )
-from openjiuwen.core.single_agent.interrupt.rail.interrupt_base import UserInput
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 
 
 @dataclass
 class ResumeContext:
     """handle_resume 函数的上下文参数封装"""
     state: ToolInterruptionState
-    user_input: UserInput
+    user_input: Any
     ctx: AgentCallbackContext
     context: ModelContext
     session: Optional[Session] = None
@@ -76,8 +76,6 @@ class ToolInterruptHandler:
         )
 
         return state, payloads
-
-
 
     @staticmethod
     def _is_sub_agent_interrupt(result: Any) -> bool:
@@ -159,7 +157,7 @@ class ToolInterruptHandler:
             tool_call=tc,
         )
         payloads.append((inner_id, payload))
-        
+
         tool_name_mapping[inner_id] = tc.name
 
     @staticmethod

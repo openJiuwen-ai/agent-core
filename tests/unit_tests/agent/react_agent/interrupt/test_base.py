@@ -12,7 +12,7 @@ from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAge
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentRail, AgentCallbackContext
-from openjiuwen.core.single_agent.interrupt import ConfirmInterruptRail
+from openjiuwen.deepagents.rails.interrupt.confirm_rail import ConfirmInterruptRail
 
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
 

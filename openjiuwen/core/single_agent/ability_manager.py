@@ -18,7 +18,6 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.single_agent.interrupt.rail import ToolSkipResult
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -585,10 +584,9 @@ class AbilityManager:
     ) -> Tuple[Any, ToolMessage]:
         """Execute one tool call under rail lifecycle events."""
         skip_result = ctx.extra.pop("_skip_tool", None)
-        if isinstance(skip_result, ToolSkipResult):
-            ctx.inputs.tool_result = skip_result.tool_result
-            ctx.inputs.tool_msg = skip_result.tool_message
-            return skip_result.tool_result, skip_result.tool_message
+
+        if skip_result:
+            return ctx.inputs.tool_result, ctx.inputs.tool_msg
 
         if isinstance(ctx.inputs, ToolCallInputs):
             if ctx.inputs.tool_name:

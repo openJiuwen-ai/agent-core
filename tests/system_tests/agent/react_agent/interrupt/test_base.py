@@ -9,13 +9,12 @@ from typing import List, Optional, Dict, Any
 
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
-from openjiuwen.core.single_agent.interrupt import (
-    ConfirmInterruptRail,
-)
+
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentRail, AgentCallbackContext
+from openjiuwen.deepagents.rails import ConfirmInterruptRail
 
 API_BASE = os.getenv("API_BASE", "")
 API_KEY = os.getenv("API_KEY", "")

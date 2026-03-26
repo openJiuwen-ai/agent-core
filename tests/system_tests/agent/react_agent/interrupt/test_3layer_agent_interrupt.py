@@ -1,7 +1,5 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import unittest
-
 import pytest
 
 from openjiuwen.core.runner import Runner
@@ -21,7 +19,7 @@ from tests.system_tests.agent.react_agent.interrupt.test_base import (
 
 
 @pytest.mark.asyncio
-@unittest.skip("skip system test")
+@pytest.mark.skipif(not API_KEY or not API_BASE, reason="API_KEY and API_BASE required")
 async def test_3layer_agent_interrupt():
     """3-layer agent nested interrupt test - single read
 

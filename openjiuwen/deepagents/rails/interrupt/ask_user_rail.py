@@ -7,13 +7,10 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt import InterruptRequest
-from openjiuwen.core.single_agent.interrupt import (
-    BaseInterruptRail,
-    InterruptDecision,
-)
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
 from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 from openjiuwen.deepagents.prompts import resolve_language
+from openjiuwen.deepagents.rails.interrupt.interrupt_base import BaseInterruptRail, InterruptDecision
 
 
 class AskUserPayload(BaseModel):

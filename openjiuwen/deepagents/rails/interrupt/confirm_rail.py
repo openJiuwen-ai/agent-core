@@ -6,12 +6,9 @@ from typing import Any, Iterable, Optional
 from pydantic import BaseModel, Field
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.rail.interrupt_base import (
-    BaseInterruptRail,
-    InterruptDecision,
-)
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.deepagents.rails.interrupt.interrupt_base import BaseInterruptRail, InterruptDecision
 
 
 class ConfirmPayload(BaseModel):

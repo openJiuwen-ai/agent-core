@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping, Optional, Set
+from typing import Any, Iterable, Optional, Set
 
 from pydantic import BaseModel
 
@@ -12,14 +12,13 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
-from openjiuwen.core.single_agent.interrupt.response import (
-    InterruptRequest,
-)
+from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
 )
+
 
 UserInput = Any
 
@@ -42,11 +41,6 @@ class RejectResult(InterruptDecision):
 class InterruptResult(InterruptDecision):
     """Decision to interrupt and wait for user input."""
     request: InterruptRequest
-
-
-class ToolSkipResult(InterruptDecision):
-    tool_result: object
-    tool_message: ToolMessage
 
 
 class BaseInterruptRail(AgentRail):
@@ -89,7 +83,7 @@ class BaseInterruptRail(AgentRail):
         """Register multiple tool names to intercept."""
         self._tool_names.update(tool_names)
 
-    def add_policy(self, tool_name: str, _policy: Optional[BaseModel] = None) -> None:
+    def add_policy(self, tool_name: str, _policy=None) -> None:
         """Deprecated alias of add_tool (policy ignored)."""
         self.add_tool(tool_name)
 
@@ -116,7 +110,7 @@ class BaseInterruptRail(AgentRail):
             self,
             ctx: AgentCallbackContext,
             tool_call: Optional[ToolCall],
-            user_input: Optional[Any],
+            user_input: Optional[UserInput],
     ) -> InterruptDecision:
         """Override to handle resume and return decision.
 
@@ -173,17 +167,16 @@ class BaseInterruptRail(AgentRail):
             content=str(tool_result),
             tool_call_id=tool_call_id,
         )
-        ctx.extra["_skip_tool"] = ToolSkipResult(
-            tool_result=tool_result,
-            tool_message=msg,
-        )
+        ctx.extra["_skip_tool"] = True
+        ctx.inputs.tool_result = tool_result
+        ctx.inputs.tool_msg = msg
 
     def _resolve_tool_call_id(self, tool_call: Optional[ToolCall]) -> str:
         if tool_call is None:
             return ""
         return tool_call.id if hasattr(tool_call, "id") else ""
 
-    def _get_user_input(self, ctx: AgentCallbackContext, tool_call_id: str) -> Optional[Any]:
+    def _get_user_input(self, ctx: AgentCallbackContext, tool_call_id: str) -> Optional[UserInput]:
         """Get user input from ctx.extra (passed by handler) or session global state.
         
         For subagent internal rail: tool_call_id is inner_id, can directly match user_inputs key.
@@ -198,7 +191,7 @@ class BaseInterruptRail(AgentRail):
                 return raw_input.user_inputs[tool_call_id]
             return None
 
-        if isinstance(raw_input, Mapping):
+        if isinstance(raw_input, dict):
             if tool_call_id in raw_input:
                 return raw_input[tool_call_id]
             return raw_input
