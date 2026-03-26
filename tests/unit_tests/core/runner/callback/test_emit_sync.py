@@ -120,6 +120,65 @@ async def test_emit_after_sync_generator_once(framework):
     assert received == [[10, 20]]
 
 
+@pytest.mark.asyncio
+async def test_emit_after_sync_generator_per_item_pass_args(framework):
+    """Sync generator with emit_after per_item and pass_args=True
+    passes each item along with original arguments to the handler.
+    """
+    received = []
+
+    @framework.on("after_item_args")
+    async def handler(*args, **kwargs):
+        received.append({"args": args, "kwargs": kwargs})
+
+    @framework.emit_after(
+        "after_item_args",
+        pass_args=True,
+        stream_mode="per_item",
+    )
+    async def generate(prefix, sep="-"):
+        yield f"{prefix}{sep}1"
+        yield f"{prefix}{sep}2"
+
+    items = []
+    async for item in generate("val", sep=":"):
+        items.append(item)
+
+    assert items == ["val:1", "val:2"]
+    assert len(received) == 2
+    for entry in received:
+        assert entry["args"] == ("val",)
+        assert entry["kwargs"]["sep"] == ":"
+    assert received[0]["kwargs"]["item"] == "val:1"
+    assert received[1]["kwargs"]["item"] == "val:2"
+
+
+@pytest.mark.asyncio
+async def test_emit_after_gen_per_item_pass_args(framework):
+    received_args = []
+    received_result = []
+
+    @framework.on("end", priority=50)
+    async def on_end(num, item):
+        received_args.append(num)
+        received_result.append(item)
+
+    @framework.on("complete", priority=50)
+    async def on_complete(num, result):
+        received_args.append(num)
+        received_result.append(result)
+
+    @framework.emit_after("end", pass_args=True, stream_mode="per_item")
+    async def generate(num):
+        for i in range(num):
+            yield i * 2
+
+    async for _n in generate(3):
+        pass
+
+    assert received_args == [3, 3, 3]
+    assert received_result == [0, 2, 4]
+
 # === emit_around — sync ===
 
 

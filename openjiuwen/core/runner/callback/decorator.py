@@ -320,8 +320,8 @@ def create_emit_after_decorator(
             async def async_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
                 async for item in func(*args, **kwargs):
                     await _do_trigger(
-                        framework, event, (), {},
-                        pass_args=False,
+                        framework, event, args, kwargs,
+                        pass_args=pass_args,
                         extra={item_key: item},
                         extra_kwargs=extra_kwargs,
                     )
@@ -365,8 +365,8 @@ def create_emit_after_decorator(
             async def sync_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
                 for item in func(*args, **kwargs):
                     await _do_trigger(
-                        framework, event, (), {},
-                        pass_args=False,
+                        framework, event, args, kwargs,
+                        pass_args=pass_args,
                         extra={item_key: item},
                         extra_kwargs=extra_kwargs,
                     )
