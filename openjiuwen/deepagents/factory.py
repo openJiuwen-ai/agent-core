@@ -93,6 +93,7 @@ def create_deep_agent(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     vision_model_config: Optional[VisionModelConfig] = None,
+    enable_task_planning: bool = False,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -123,6 +124,7 @@ def create_deep_agent(
         vision_model_config: Shared vision-model
             configuration injected into all vision
             tools registered by DeepAgent rails.
+        enable_task_planning: Enable task_planning_rail.
         **config_kwargs: Extra fields forwarded to
             DeepAgentConfig.
 
@@ -206,7 +208,7 @@ def create_deep_agent(
                 subagent_flag = True
             agent.add_rail(rail_inst)
 
-    if enable_task_loop and not task_plan_flag:
+    if enable_task_planning and not task_plan_flag:
         task_plan_rail = TaskPlanningRail(language=resolved_language)
         agent.add_rail(task_plan_rail)
     if skills and not skill_flag:

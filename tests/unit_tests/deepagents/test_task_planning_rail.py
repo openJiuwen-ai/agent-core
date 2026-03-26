@@ -30,7 +30,7 @@ from openjiuwen.deepagents.deep_agent import DeepAgent
 from openjiuwen.deepagents.schema.workspace import Workspace
 from openjiuwen.deepagents.prompts.sections.todo import (
     build_progress_reminder_user_prompt,
-    build_todo_system_prompt,
+    build_todo_system_prompt, build_todo_section,
 )
 from openjiuwen.deepagents.rails.task_planning_rail import (
     TaskPlanningRail,
@@ -118,6 +118,18 @@ def test_uninit_safe_without_tools() -> None:
     agent = _make_agent()
 
     rail.uninit(agent)
+
+
+def test_uninit_removes_todo_section() -> None:
+    """uninit removes todo section from system_prompt_builder."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/test_ws")
+    rail.init(agent)
+    task_planning_section = build_todo_section()
+    rail.system_prompt_builder.add_section(task_planning_section)
+    assert rail.system_prompt_builder.get_section("todo") is not None
+    rail.uninit(agent)
+    assert rail.system_prompt_builder.get_section("todo") is None
 
 
 def test_priority_is_90() -> None:

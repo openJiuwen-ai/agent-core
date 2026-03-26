@@ -104,6 +104,8 @@ class TaskPlanningRail(DeepAgentRail):
     def uninit(self, agent) -> None:
         """Remove todo tools from the agent."""
         try:
+            if self.system_prompt_builder:
+                self.system_prompt_builder.remove_section("todo")
             if self.tools and hasattr(agent, "ability_manager"):
                 for tool in self.tools:
                     name = getattr(tool, "name", None)

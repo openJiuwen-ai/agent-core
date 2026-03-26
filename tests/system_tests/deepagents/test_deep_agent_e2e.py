@@ -235,7 +235,6 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
     async def test_deep_agent_task_planning(self):
         """复杂任务：agent的规划能力"""
         sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
-        task_planning = TaskPlanningRail()
         mock_llm = MockLLMModel()
         mock_llm.set_responses([
             create_tool_call_response(
@@ -255,10 +254,10 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
 
         agent = create_deep_agent(
             model=self._create_model(),
-            rails=[task_planning],
             enable_task_loop=False,
             max_iterations=20,
-            sys_operation=sys_oper
+            sys_operation=sys_oper,
+            enable_task_planning=True
         )
 
         query = "我想测试任务规划能力，帮我构建一个打卡系统，调用规划工具帮我模拟规划吧"
@@ -392,7 +391,7 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
         skills = ["name", "test_skill", "description", "test"]
         agent = create_deep_agent(
             model=self._create_model(),
-            enable_task_loop=True,
+            enable_task_planning=True,
             skills=skills,
             sys_operation=sys_oper,
             max_iterations=10,

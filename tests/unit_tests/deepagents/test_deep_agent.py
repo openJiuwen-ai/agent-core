@@ -606,7 +606,7 @@ def test_create_deep_agent_auto_add_task_planning_rail() -> None:
     """Test that TaskPlanningRail is auto-added when enable_task_loop=True."""
     agent = create_deep_agent(
         model=_create_dummy_model(),
-        enable_task_loop=True,
+        enable_task_planning=True,
     )
 
     pending_rails = agent._pending_rails
