@@ -55,7 +55,7 @@ class WorkspaceNode(Enum):
     SOUL_MD = "Soul.md"
     HEARTBEAT_MD = "HeartBeat.md"
     IDENTITY_MD = "Identity.md"
-    USER = "user"
+    USER_MD = "User.md"
     MEMORY = "memory"
     TODO = "todo"
     MESSAGES = "messages"
@@ -115,6 +115,28 @@ class Workspace:
         if result is not None:
             return result
         return find_in_nodes(self._get_default_schema())
+
+    def get_node_path(self, node: str | WorkspaceNode) -> Path | None:
+        """Return the full absolute filesystem path for a top-level workspace node.
+
+        This method only looks at top-level nodes (direct children of directories).
+        Nested nodes (children of top-level nodes) are not supported.
+
+        Args:
+            node: Node name as string (e.g., "memory", "Agent.md") or WorkspaceNode enum.
+
+        Returns:
+            Path object with the full absolute path to the node.
+            Returns None if the node is not found at the top level.
+        """
+        name_str = node.value if isinstance(node, WorkspaceNode) else node
+
+        for node_def in self.directories:
+            if node_def.get("name") == name_str:
+                relative_path = node_def.get("path", name_str)
+                return Path(self.root_path) / relative_path
+
+        return None
 
     def set_directory(
         self, nodes: Union[DirectoryNode, List[DirectoryNode]]
@@ -223,10 +245,12 @@ DEFAULT_WORKSPACE_SCHEMA: List[DirectoryNode] = [
         "default_content": _load_default_content("cn", "Identity.md"),
     },
     {
-        "name": "user",
+        "name": "User.md",
         "description": "用户数据目录",
-        "path": "user",
+        "path": "User.md",
         "children": [],
+        "is_file": True,
+        "default_content": "",
     },
     {
         "name": "memory",
@@ -373,10 +397,12 @@ DEFAULT_WORKSPACE_SCHEMA_EN: List[DirectoryNode] = [
         "default_content": _load_default_content("en", "Identity.md"),
     },
     {
-        "name": "user",
+        "name": "User.md",
         "description": "User data directory",
-        "path": "user",
+        "path": "User.md",
         "children": [],
+        "is_file": True,
+        "default_content":"",
     },
     {
         "name": "memory",

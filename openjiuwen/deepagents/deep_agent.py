@@ -125,6 +125,12 @@ class DeepAgent(BaseAgent):
                 language=config.language
             )
 
+        # Pre-calculate the workspace root path
+        if config.workspace is not None:
+            agent_id = self.card.id or "default"
+            base_path = config.workspace.root_path
+            config.workspace.root_path = f"{base_path}/{agent_id}_workspace"
+
         self._deep_config = config
         self._react_agent = self._create_react_agent()
         self._pending_rails.clear()
@@ -325,17 +331,17 @@ class DeepAgent(BaseAgent):
         await self._ensure_initialized()
 
     async def init_workspace(self) -> None:
-        """Initialize the workspace with directory structure and default content."""
+        """Initialize the workspace with directory structure and default content.
+
+        The root_path is pre-calculated in configure(), so we only need to
+        create the directory structure here.
+        """
         from openjiuwen.deepagents.workspace.directory_builder import DirectoryBuilder
 
         if self._deep_config and self._deep_config.workspace:
-            agent_id = self.card.id or "default"
-            base_path = self._deep_config.workspace.root_path
-            workspace_root = f"{base_path}/{agent_id}_workspace"
-
             builder = DirectoryBuilder(
                 sys_operation=self._deep_config.sys_operation,
-                root_path=workspace_root,
+                root_path=self._deep_config.workspace.root_path,
             )
             await builder.build(self._deep_config.workspace.directories)
 
