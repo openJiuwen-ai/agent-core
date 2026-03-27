@@ -43,16 +43,16 @@ class TestSandboxPhase1Validation:
         assert exc_info.value.code == StatusCode.SYS_OPERATION_CARD_PARAM_ERROR.code
 
     @staticmethod
-    def test_non_aio_sandbox_type_is_rejected():
+    def test_missing_sandbox_type_is_rejected():
         card = SysOperationCard(
-            id="sandbox_non_aio",
+            id="sandbox_missing_sandbox_type",
             mode=OperationMode.SANDBOX,
             gateway_config=SandboxGatewayConfig(
                 isolation=SandboxIsolationConfig(container_scope="system"),
-                launcher_config=PreDeployLauncherConfig(base_url="http://localhost:8080", sandbox_type="mock"),
+                launcher_config=PreDeployLauncherConfig(base_url="http://localhost:8080", sandbox_type=""),
             ),
         )
 
-        with pytest.raises(Exception, match="only supports aio sandbox_type") as exc_info:
+        with pytest.raises(Exception, match="sandbox mode requires sandbox_type") as exc_info:
             SysOperation(card)
         assert exc_info.value.code == StatusCode.SYS_OPERATION_CARD_PARAM_ERROR.code

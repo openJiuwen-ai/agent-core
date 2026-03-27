@@ -3,7 +3,7 @@
 
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
-from openjiuwen.core.sys_operation.sys_operation import (SysOperationCard, SysOperation, SysOperationMgr,
+from openjiuwen.core.sys_operation.sys_operation import (SysOperationCard, SysOperation,
                                                          generate_isolation_key_template)
 
 __all__ = [
@@ -12,6 +12,5 @@ __all__ = [
     "SandboxGatewayConfig",
     "SysOperationCard",
     "SysOperation",
-    "SysOperationMgr",
     "generate_isolation_key_template",
 ]

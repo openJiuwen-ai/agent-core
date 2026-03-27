@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-import threading
-from typing import Optional, Dict
+from typing import Optional
 from pydantic import Field, field_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -63,114 +62,6 @@ def generate_isolation_key_template(
         identity = "default"
 
     return f"{container_scope.value}_{launcher_type}_{sandbox_type}_{prefix}{identity}"
-
-
-class SysOperationMgr:
-    """Manager for SysOperation instances with sandbox key ownership tracking.
-
-    This manager handles:
-    - SysOperation instance storage
-    - Isolation key template conflict detection
-    - Sandbox key to operation_id mapping
-    """
-
-    _instance: Optional["SysOperationMgr"] = None
-    _lock = threading.Lock()
-
-    def __init__(self) -> None:
-        self._sys_operations: Dict[str, "SysOperation"] = {}
-        self._sandbox_key_owner_map: Dict[str, str] = {}
-        self._operation_to_key_map: Dict[str, str] = {}
-        self._internal_lock = threading.Lock()
-
-    @classmethod
-    def get_instance(cls) -> "SysOperationMgr":
-        """Get singleton instance of SysOperationMgr."""
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls()
-        return cls._instance
-
-    def register_sandbox_key(self, isolation_key_template: str, operation_id: str) -> None:
-        """Register an isolation key template and check for conflicts.
-
-        Args:
-            isolation_key_template: The isolation key template to register
-            operation_id: The operation ID that owns this key
-
-        Raises:
-            ValueError: If the key template already exists with a different operation_id
-        """
-        with self._internal_lock:
-            if isolation_key_template in self._sandbox_key_owner_map:
-                existing_op_id = self._sandbox_key_owner_map[isolation_key_template]
-                if existing_op_id != operation_id:
-                    raise ValueError(
-                        f"Isolation key template '{isolation_key_template}' is already registered "
-                        f"by operation '{existing_op_id}'. Cannot register operation '{operation_id}' "
-                        f"with the same sandbox configuration."
-                    )
-            self._sandbox_key_owner_map[isolation_key_template] = operation_id
-            self._operation_to_key_map[operation_id] = isolation_key_template
-
-    def unregister_sandbox_key(self, isolation_key_template: str) -> None:
-        """Unregister an isolation key template.
-
-        Args:
-            isolation_key_template: The isolation key template to unregister
-        """
-        with self._internal_lock:
-            operation_id = self._sandbox_key_owner_map.pop(isolation_key_template, None)
-            if operation_id:
-                self._operation_to_key_map.pop(operation_id, None)
-
-    def unregister_by_operation_id(self, operation_id: str) -> None:
-        """Unregister the sandbox key associated with the given operation_id.
-
-        Args:
-            operation_id: The operation ID whose sandbox key should be unregistered
-        """
-        with self._internal_lock:
-            isolation_key_template = self._operation_to_key_map.pop(operation_id, None)
-            if isolation_key_template:
-                self._sandbox_key_owner_map.pop(isolation_key_template, None)
-
-    def get_operation_id_by_key(self, isolation_key_template: str) -> Optional[str]:
-        """Get the operation ID that owns the given isolation key template.
-
-        Args:
-            isolation_key_template: The isolation key template to look up
-
-        Returns:
-            The operation ID if found, None otherwise
-        """
-        with self._internal_lock:
-            return self._sandbox_key_owner_map.get(isolation_key_template)
-
-    def get_sandbox_key_templates(self) -> Dict[str, str]:
-        """Get a copy of all registered sandbox key templates.
-
-        Returns:
-            Dictionary of all isolation_key_template -> operation_id mappings
-        """
-        with self._internal_lock:
-            return self._sandbox_key_owner_map.copy()
-
-    def clear(self) -> None:
-        """Clear all internal state. For testing purposes only."""
-        with self._internal_lock:
-            self._sys_operations.clear()
-            self._sandbox_key_owner_map.clear()
-            self._operation_to_key_map.clear()
-
-    @classmethod
-    def reset_instance(cls) -> None:
-        """Reset the singleton instance. For testing purposes only."""
-        with cls._lock:
-            if cls._instance is not None:
-                cls._instance.clear()
-            cls._instance = None
 
 
 class ToolIdProxy:
@@ -310,6 +201,13 @@ class SysOperation:
             return getattr(self._run_config, "work_dir", None)
         return None
 
+    @property
+    def isolation_key_template(self) -> Optional[str]:
+        """Return the sandbox isolation key template, or None for local mode."""
+        if self.mode == OperationMode.SANDBOX:
+            return getattr(self._run_config, "isolation_key_template", None)
+        return None
+
     def fs(self) -> BaseFsOperation:
         return self._get_operation("fs")
 
@@ -326,14 +224,12 @@ class SysOperation:
         if launcher_config is None:
             raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
                               error_msg="sandbox mode requires launcher_config")
-        if launcher_config.launcher_type != "pre_deploy":
+        if not launcher_config.launcher_type:
             raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
-                              error_msg=f"phase 1 sandbox mode only supports pre_deploy launcher, "
-                                        f"current value: {launcher_config.launcher_type}")
-        if launcher_config.sandbox_type != "aio":
+                              error_msg="sandbox mode requires launcher_type")
+        if not launcher_config.sandbox_type:
             raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
-                              error_msg=f"phase 1 sandbox mode only supports aio sandbox_type, "
-                                        f"current value: {launcher_config.sandbox_type}")
+                              error_msg="sandbox mode requires sandbox_type")
         return config
 
     def _get_operation(self, name):

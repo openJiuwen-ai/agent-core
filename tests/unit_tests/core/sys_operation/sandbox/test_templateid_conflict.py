@@ -10,49 +10,15 @@ the system correctly detects the conflict and prevents registration.
 
 import logging
 import uuid
-from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, SandboxGatewayConfig, SysOperation
+from openjiuwen.core.sys_operation import SandboxGatewayConfig, SysOperationCard, OperationMode
 from openjiuwen.core.sys_operation.config import SandboxIsolationConfig, PreDeployLauncherConfig, ContainerScope
-from openjiuwen.core.sys_operation.sys_operation import SysOperationMgr
 
 logger = logging.getLogger(__name__)
-
-
-def _patched_validate(self, gateway_config):
-    """Patched version of _validate_sandbox_gateway_config that accepts 'local' sandbox_type."""
-    config = gateway_config or SandboxGatewayConfig()
-    launcher_config = config.launcher_config
-    if launcher_config is None:
-        from openjiuwen.core.common.exception import build_error
-        from openjiuwen.core.common.exception.codes import StatusCode
-        raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
-                         error_msg="sandbox mode requires launcher_config")
-    if launcher_config.launcher_type != "pre_deploy":
-        from openjiuwen.core.common.exception import build_error
-        from openjiuwen.core.common.exception.codes import StatusCode
-        raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
-                         error_msg=f"only pre_deploy launcher is supported, current: {launcher_config.launcher_type}")
-    # Accept both "aio" and "local" sandbox_type
-    if launcher_config.sandbox_type not in ("aio", "local"):
-        from openjiuwen.core.common.exception import build_error
-        from openjiuwen.core.common.exception.codes import StatusCode
-        raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
-                         error_msg=f"only aio and local sandbox_type are supported, "
-                                   f"current: {launcher_config.sandbox_type}")
-    return config
-
-
-@pytest_asyncio.fixture(autouse=True)
-async def reset_sys_op_mgr():
-    """Reset SysOperationMgr singleton before and after each test."""
-    SysOperationMgr.reset_instance()
-    yield
-    SysOperationMgr.reset_instance()
 
 
 @pytest.mark.asyncio
@@ -63,7 +29,10 @@ class TestSandboxTemplateidConflict:
     async def setup_runner(self):
         """Setup Runner before tests and stop after."""
         await Runner.start()
-        yield
+        created_operation_ids = []
+        yield created_operation_ids
+        for operation_id in reversed(created_operation_ids):
+            Runner.resource_mgr.remove_sys_operation(operation_id, skip_if_tag_not_exists=True)
         await Runner.stop()
 
     @pytest.mark.asyncio
@@ -98,9 +67,9 @@ class TestSandboxTemplateidConflict:
         )
 
         # Add first card - should succeed
-        with patch.object(SysOperation, '_validate_sandbox_gateway_config', _patched_validate):
-            result1 = Runner.resource_mgr.add_sys_operation(card1)
-            assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        result1 = Runner.resource_mgr.add_sys_operation(card1)
+        assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        setup_runner.append(card_id_1)
 
         # Create second card with same configuration (same isolation_key_template)
         gateway_config_2 = SandboxGatewayConfig(
@@ -120,16 +89,15 @@ class TestSandboxTemplateidConflict:
         )
 
         # Add second card with same sandbox config - should fail with conflict error
-        with patch.object(SysOperation, '_validate_sandbox_gateway_config', _patched_validate):
-            result2 = Runner.resource_mgr.add_sys_operation(card2)
-            assert result2.is_err(), (
-                "Second add_sys_operation with identical sandbox config should fail "
-                "due to isolation key template conflict"
-            )
-            error_msg = str(result2.error())
-            assert "conflict" in error_msg.lower() or "already registered" in error_msg.lower(), (
-                f"Error message should mention conflict, got: {error_msg}"
-            )
+        result2 = Runner.resource_mgr.add_sys_operation(card2)
+        assert result2.is_err(), (
+            "Second add_sys_operation with identical sandbox config should fail "
+            "due to isolation key template conflict"
+        )
+        error_msg = str(result2.error())
+        assert "conflict" in error_msg.lower() or "already registered" in error_msg.lower(), (
+            f"Error message should mention conflict, got: {error_msg}"
+        )
 
     @pytest.mark.asyncio
     async def test_add_two_sandbox_ops_with_different_container_scope_should_succeed(
@@ -177,15 +145,16 @@ class TestSandboxTemplateidConflict:
             gateway_config=gateway_config_2,
         )
 
-        with patch.object(SysOperation, '_validate_sandbox_gateway_config', _patched_validate):
-            result1 = Runner.resource_mgr.add_sys_operation(card1)
-            assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        result1 = Runner.resource_mgr.add_sys_operation(card1)
+        assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        setup_runner.append(card_id_1)
 
-            result2 = Runner.resource_mgr.add_sys_operation(card2)
-            assert result2.is_ok(), (
-                f"Second add_sys_operation with different container_scope should succeed, "
-                f"got: {result2.err()}"
-            )
+        result2 = Runner.resource_mgr.add_sys_operation(card2)
+        assert result2.is_ok(), (
+            f"Second add_sys_operation with different container_scope should succeed, "
+            f"got: {result2.err()}"
+        )
+        setup_runner.append(card_id_2)
 
     @pytest.mark.asyncio
     async def test_add_two_sandbox_ops_with_different_custom_id_should_succeed(
@@ -239,15 +208,16 @@ class TestSandboxTemplateidConflict:
             gateway_config=gateway_config_2,
         )
 
-        with patch.object(SysOperation, '_validate_sandbox_gateway_config', _patched_validate):
-            result1 = Runner.resource_mgr.add_sys_operation(card1)
-            assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        result1 = Runner.resource_mgr.add_sys_operation(card1)
+        assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        setup_runner.append(card_id_1)
 
-            result2 = Runner.resource_mgr.add_sys_operation(card2)
-            assert result2.is_ok(), (
-                f"Second add_sys_operation with different custom_id should succeed, "
-                f"got: {result2.err()}"
-            )
+        result2 = Runner.resource_mgr.add_sys_operation(card2)
+        assert result2.is_ok(), (
+            f"Second add_sys_operation with different custom_id should succeed, "
+            f"got: {result2.err()}"
+        )
+        setup_runner.append(card_id_2)
 
     @pytest.mark.asyncio
     async def test_add_two_sandbox_ops_with_different_prefix_should_succeed(
@@ -301,15 +271,16 @@ class TestSandboxTemplateidConflict:
             gateway_config=gateway_config_2,
         )
 
-        with patch.object(SysOperation, '_validate_sandbox_gateway_config', _patched_validate):
-            result1 = Runner.resource_mgr.add_sys_operation(card1)
-            assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        result1 = Runner.resource_mgr.add_sys_operation(card1)
+        assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        setup_runner.append(card_id_1)
 
-            result2 = Runner.resource_mgr.add_sys_operation(card2)
-            assert result2.is_ok(), (
-                f"Second add_sys_operation with different prefix should succeed, "
-                f"got: {result2.err()}"
-            )
+        result2 = Runner.resource_mgr.add_sys_operation(card2)
+        assert result2.is_ok(), (
+            f"Second add_sys_operation with different prefix should succeed, "
+            f"got: {result2.err()}"
+        )
+        setup_runner.append(card_id_2)
 
     @pytest.mark.asyncio
     async def test_add_same_sandbox_op_twice_should_succeed_idempotently(
@@ -338,16 +309,17 @@ class TestSandboxTemplateidConflict:
             gateway_config=gateway_config,
         )
 
-        with patch.object(SysOperation, '_validate_sandbox_gateway_config', _patched_validate):
-            result1 = Runner.resource_mgr.add_sys_operation(card)
-            assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        result1 = Runner.resource_mgr.add_sys_operation(card)
+        assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        setup_runner.append(card_id)
 
-            # Remove it first, then add the same card again
-            Runner.resource_mgr.remove_sys_operation(card_id)
-            result2 = Runner.resource_mgr.add_sys_operation(card)
-            assert result2.is_ok(), (
-                f"Re-adding the same operation after removal should succeed, got: {result2.err()}"
-            )
+        Runner.resource_mgr.remove_sys_operation(card_id)
+        setup_runner.pop()
+        result2 = Runner.resource_mgr.add_sys_operation(card)
+        assert result2.is_ok(), (
+            f"Re-adding the same operation after removal should succeed, got: {result2.err()}"
+        )
+        setup_runner.append(card_id)
 
     @pytest.mark.asyncio
     async def test_local_mode_operations_no_conflict_check(self, setup_runner):
@@ -371,9 +343,11 @@ class TestSandboxTemplateidConflict:
 
         result1 = Runner.resource_mgr.add_sys_operation(card1)
         assert result1.is_ok(), f"First add_sys_operation should succeed, got: {result1.err()}"
+        setup_runner.append(card_id_1)
 
         result2 = Runner.resource_mgr.add_sys_operation(card2)
         assert result2.is_ok(), (
             f"Second local operation should succeed (no conflict check for local mode), "
             f"got: {result2.err()}"
         )
+        setup_runner.append(card_id_2)
