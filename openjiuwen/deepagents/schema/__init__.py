@@ -3,9 +3,10 @@
 """DeepAgent schema definitions."""
 
 from openjiuwen.deepagents.schema.config import (
+    AudioModelConfig,
     DeepAgentConfig,
+    SubAgentConfig,
     VisionModelConfig,
-    SubAgentConfig
 )
 from openjiuwen.deepagents.schema.loop_event import (
     DeepLoopEvent,
@@ -28,6 +29,7 @@ from openjiuwen.deepagents.schema.task import (
 
 __all__ = [
     "DeepAgentConfig",
+    "AudioModelConfig",
     "VisionModelConfig",
     "SubAgentConfig",
     "StopCondition",

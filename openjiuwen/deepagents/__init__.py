@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     )
     from openjiuwen.deepagents.factory import create_deep_agent
     from openjiuwen.deepagents.schema.config import (
+        AudioModelConfig,
         DeepAgentConfig,
         VisionModelConfig,
     )
@@ -28,6 +29,7 @@ __all__ = [
     "TaskLoopEventHandler",
     "TaskLoopEventExecutor",
     "DeepAgentConfig",
+    "AudioModelConfig",
     "VisionModelConfig",
     "StopCondition",
     "create_deep_agent",
@@ -57,6 +59,11 @@ def __getattr__(name: str) -> Any:
             DeepAgentConfig,
         )
         return DeepAgentConfig
+    if name == "AudioModelConfig":
+        from openjiuwen.deepagents.schema.config import (
+            AudioModelConfig,
+        )
+        return AudioModelConfig
     if name == "VisionModelConfig":
         from openjiuwen.deepagents.schema.config import (
             VisionModelConfig,

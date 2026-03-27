@@ -17,9 +17,10 @@ from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, Operat
 from openjiuwen.deepagents.deep_agent import DeepAgent
 from openjiuwen.deepagents.rails import TaskPlanningRail, SkillUseRail, SubagentRail, ToolPromptRail
 from openjiuwen.deepagents.schema.config import (
+    AudioModelConfig,
     DeepAgentConfig,
+    SubAgentConfig,
     VisionModelConfig,
-    SubAgentConfig
 )
 from openjiuwen.deepagents.schema.stop_condition import StopCondition
 from openjiuwen.deepagents.workspace.workspace import Workspace
@@ -93,6 +94,7 @@ def create_deep_agent(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     vision_model_config: Optional[VisionModelConfig] = None,
+    audio_model_config: Optional[AudioModelConfig] = None,
     enable_task_planning: bool = False,
     **config_kwargs: Any,
 ) -> DeepAgent:
@@ -123,6 +125,9 @@ def create_deep_agent(
         sys_operation: System operation.
         vision_model_config: Shared vision-model
             configuration injected into all vision
+            tools registered by DeepAgent rails.
+        audio_model_config: Shared audio-model
+            configuration injected into all audio
             tools registered by DeepAgent rails.
         enable_task_planning: Enable task_planning_rail.
         **config_kwargs: Extra fields forwarded to
@@ -177,6 +182,7 @@ def create_deep_agent(
         language=resolved_language,
         prompt_mode=prompt_mode,
         vision_model_config=vision_model_config,
+        audio_model_config=audio_model_config,
     )
 
     # Forward extra kwargs to config fields

@@ -1,20 +1,22 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""DeepAgent configuration dataclass."""
+"""DeepAgent configuration dataclasses."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-
 from typing import Any, List, Optional, Union
 
 from openjiuwen.core.foundation.llm.model import Model
+
+from openjiuwen.core.single_agent.rail.base import AgentRail
+
 from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
+
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
-from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents.schema.stop_condition import (
     StopCondition,
@@ -23,9 +25,27 @@ from openjiuwen.deepagents.workspace.workspace import (
     Workspace,
 )
 
-DEFAULT_OPENAI_VISION_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-2.5-pro"
 DEFAULT_OPENAI_VISION_MODEL = "gpt-4.1-mini"
+
+DEFAULT_OPENAI_AUDIO_TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
+DEFAULT_OPENAI_AUDIO_QA_MODEL = "gpt-4o-audio-preview"
+DEFAULT_ACR_BASE_URL = (
+    "https://identify-ap-southeast-1.acrcloud.com/v1/identify"
+)
+DEFAULT_AUDIO_HTTP_TIMEOUT = 20
+DEFAULT_MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+def _parse_int_from_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 @dataclass
@@ -33,7 +53,7 @@ class VisionModelConfig:
     """Shared runtime configuration for all DeepAgent vision tools."""
 
     api_key: str = ""
-    base_url: str = DEFAULT_OPENAI_VISION_BASE_URL
+    base_url: str = DEFAULT_OPENAI_BASE_URL
     model: str = DEFAULT_OPENAI_VISION_MODEL
     max_retries: int = 3
 
@@ -50,7 +70,7 @@ class VisionModelConfig:
             os.getenv("VISION_BASE_URL")
             or os.getenv("OPENROUTER_BASE_URL")
             or os.getenv("OPENAI_BASE_URL")
-            or DEFAULT_OPENAI_VISION_BASE_URL
+            or DEFAULT_OPENAI_BASE_URL
         )
         model = os.getenv("VISION_MODEL")
 
@@ -64,6 +84,59 @@ class VisionModelConfig:
             api_key=api_key,
             base_url=base_url,
             model=model,
+            max_retries=_parse_int_from_env("VISION_MAX_RETRIES", 3),
+        )
+
+
+@dataclass
+class AudioModelConfig:
+    """Shared runtime configuration for all DeepAgent audio tools."""
+
+    api_key: str = ""
+    base_url: str = DEFAULT_OPENAI_BASE_URL
+    transcription_model: str = DEFAULT_OPENAI_AUDIO_TRANSCRIPTION_MODEL
+    question_answering_model: str = DEFAULT_OPENAI_AUDIO_QA_MODEL
+    max_retries: int = 3
+    http_timeout: int = DEFAULT_AUDIO_HTTP_TIMEOUT
+    max_audio_bytes: int = DEFAULT_MAX_AUDIO_BYTES
+    acr_access_key: str = ""
+    acr_access_secret: str = ""
+    acr_base_url: str = DEFAULT_ACR_BASE_URL
+
+    @classmethod
+    def from_env(cls) -> "AudioModelConfig":
+        """Build an audio config from environment variables."""
+        return cls(
+            api_key=(
+                os.getenv("AUDIO_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+                or ""
+            ),
+            base_url=(
+                os.getenv("AUDIO_BASE_URL")
+                or os.getenv("OPENAI_BASE_URL")
+                or DEFAULT_OPENAI_BASE_URL
+            ),
+            transcription_model=(
+                os.getenv("AUDIO_TRANSCRIPTION_MODEL")
+                or DEFAULT_OPENAI_AUDIO_TRANSCRIPTION_MODEL
+            ),
+            question_answering_model=(
+                os.getenv("AUDIO_QUESTION_ANSWERING_MODEL")
+                or DEFAULT_OPENAI_AUDIO_QA_MODEL
+            ),
+            max_retries=_parse_int_from_env("AUDIO_MAX_RETRIES", 3),
+            http_timeout=_parse_int_from_env(
+                "AUDIO_HTTP_TIMEOUT",
+                DEFAULT_AUDIO_HTTP_TIMEOUT,
+            ),
+            max_audio_bytes=_parse_int_from_env(
+                "AUDIO_MAX_AUDIO_BYTES",
+                DEFAULT_MAX_AUDIO_BYTES,
+            ),
+            acr_access_key=os.getenv("ACR_ACCESS_KEY", ""),
+            acr_access_secret=os.getenv("ACR_ACCESS_SECRET", ""),
+            acr_base_url=os.getenv("ACR_BASE_URL", DEFAULT_ACR_BASE_URL),
         )
 
 
@@ -116,17 +189,22 @@ class DeepAgentConfig:
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
+    audio_model_config: Optional[AudioModelConfig] = None
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False
-    progressive_tool_always_visible_tools: List[str] = field(default_factory=list)
-    progressive_tool_default_visible_tools: List[str] = field(default_factory=list)
+    progressive_tool_always_visible_tools: List[str] = field(
+        default_factory=list
+    )
+    progressive_tool_default_visible_tools: List[str] = field(
+        default_factory=list
+    )
     progressive_tool_max_loaded_tools: int = 12
 
 
 @dataclass
 class SubAgentConfig:
-    """Subagent 完整配置，支持自定义 system_prompt、tools、model。"""
+    """Configuration for a DeepAgent sub-agent."""
 
     agent_card: AgentCard
     system_prompt: str

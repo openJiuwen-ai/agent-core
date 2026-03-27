@@ -24,6 +24,11 @@ from openjiuwen.deepagents.prompts.sections.tools.ask_user import (
 from openjiuwen.deepagents.prompts.sections.tools.bash import (
     BashMetadataProvider,
 )
+from openjiuwen.deepagents.prompts.sections.tools.audio import (
+    AudioMetadataMetadataProvider,
+    AudioQuestionAnsweringMetadataProvider,
+    AudioTranscriptionMetadataProvider,
+)
 from openjiuwen.deepagents.prompts.sections.tools.code import (
     CodeMetadataProvider,
 )
@@ -74,6 +79,9 @@ from openjiuwen.deepagents.prompts.sections.tools.web_tools import (
 _PROVIDERS: List[ToolMetadataProvider] = [
     AskUserMetadataProvider(),
     BashMetadataProvider(),
+    AudioTranscriptionMetadataProvider(),
+    AudioQuestionAnsweringMetadataProvider(),
+    AudioMetadataMetadataProvider(),
     CodeMetadataProvider(),
     CronMetadataProvider(),
     ReadFileMetadataProvider(),
