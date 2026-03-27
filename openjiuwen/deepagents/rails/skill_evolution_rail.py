@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from typing import Any, List, Optional, Union
 
 from openjiuwen.agent_evolving.online.evolver import SkillEvolver
@@ -48,7 +49,20 @@ class SkillEvolutionRail(DeepAgentRail):
         self._auto_scan = auto_scan
         self._processed_signal_keys: set[tuple[str, str]] = set()
         self._auto_save = auto_save
+        self._pending_approval_events: list[OutputSchema] = []
     
+    @property
+    def store(self) -> EvolutionStore:
+        return self._store
+
+    @property
+    def evolver(self) -> SkillEvolver:
+        return self._evolver
+
+    @property
+    def processed_signal_keys(self) -> set[tuple[str, str]]:
+        return self._processed_signal_keys
+
     @property
     def auto_save(self) -> bool:
         return self._auto_save
@@ -157,44 +171,67 @@ class SkillEvolutionRail(DeepAgentRail):
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
 
+    def drain_pending_approval_events(self) -> list[OutputSchema]:
+        """Return and clear buffered approval events.
+
+        Called by the host (JiuWenClaw) after the streaming loop ends,
+        because ``after_invoke`` fires *after* the session stream is
+        closed and ``session.write_stream`` can no longer deliver data.
+        """
+        events = list(self._pending_approval_events)
+        self._pending_approval_events.clear()
+        return events
+
     async def _emit_generated_records(
         self,
         ctx: AgentCallbackContext,
         skill_name: str,
         records: List[EvolutionRecord],
     ) -> None:
-        """Send generated experiences to session stream when auto-save disabled."""
-        session = ctx.session
-        if session is None:
-            logger.info(
-                "[SkillEvolutionRail] auto_save disabled but no session; skip emitting skill=%s",
-                skill_name,
-            )
-            return
+        """Buffer an approval-request OutputSchema for later delivery.
 
-        payload_records = [
-            {
-                "id": record.id,
-                "source": record.source,
-                "timestamp": record.timestamp,
-                "context": record.context,
-                "change": record.change.to_dict(),
-            }
-            for record in records
-        ]
-        await session.write_stream(
-            OutputSchema(
-                type="skill_evolution.generated",
-                index=0,
-                payload={
+        The event is stored in ``_pending_approval_events`` because
+        ``after_invoke`` runs after the session stream is already
+        closed; writing to the stream at this point would be lost.
+        The host drains these events via ``drain_pending_approval_events``.
+        """
+        request_id = f"skill_evolve_approve_{uuid.uuid4().hex[:8]}"
+        questions = []
+        for record in records:
+            content_preview = record.change.content[:1000]
+            section = record.change.section
+            target_tag = record.change.target.value
+            questions.append({
+                "question": (
+                    f"**Skill '{skill_name}' 演进生成了新经验：**\n\n"
+                    f"- **目标**: {target_tag}\n"
+                    f"- **章节**: {section}\n\n"
+                    f"{content_preview}"
+                ),
+                "header": "技能演进审批",
+                "options": [
+                    {"label": "接收", "description": "保留此演进经验"},
+                    {"label": "拒绝", "description": "丢弃此演进经验"},
+                ],
+                "multi_select": False,
+            })
+
+        event = OutputSchema(
+            type="chat.ask_user_question",
+            index=0,
+            payload={
+                "request_id": request_id,
+                "questions": questions,
+                "_evolution_data": {
                     "skill_name": skill_name,
-                    "entries": payload_records,
-                    "auto_saved": False,
+                    "records": [record.to_dict() for record in records],
                 },
-            )
+            },
         )
+        self._pending_approval_events.append(event)
         logger.info(
-            "[SkillEvolutionRail] emitted %d record(s) for skill=%s",
+            "[SkillEvolutionRail] buffered approval request (%s) with %d record(s) for skill=%s",
+            request_id,
             len(records),
             skill_name,
         )

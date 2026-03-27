@@ -23,7 +23,7 @@ def _extract_around_match(
 
 
 _FAILURE_KEYWORDS = re.compile(
-    r"error|exception|traceback|failed|failure|timeout|timed out"
+    r"error(?!\s*=\s*None)|exception|traceback|failed|failure|timeout|timed out"
     r"|errno|connectionerror|oserror|valueerror|typeerror"
     r"|错误|异常|失败|超时"
     r"|no such file|permission denied|access denied"
@@ -55,7 +55,7 @@ _CORRECTION_PATTERNS = [
 ]
 _CORRECTION_PATTERN = re.compile("|".join(_CORRECTION_PATTERNS), re.IGNORECASE)
 _SKILL_MD_PATTERN = re.compile(r"[/\\]+([^/\\]+)[/\\]+SKILL\.md", re.IGNORECASE)
-_TOOL_SCHEMA_PATTERN = re.compile(r"'content':\s*'---\nname:\s*[^\n]+\ndescription:", re.MULTILINE)
+_TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\\n]+\\ndescription:")
 
 
 class SignalDetector:
