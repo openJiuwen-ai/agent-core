@@ -30,8 +30,150 @@ The `quickstart.py` script demonstrates:
 
 ### Prerequisites
 
-1. Create Configure API credentials in `.env` file
-2. Configure algorithm settings in `config.yaml` file
+1. Install Docker (see [Infrastructure Setup](#infrastructure-setup) below)
+2. Start a Milvus instance (see [Infrastructure Setup](#infrastructure-setup) below)
+3. Create and configure API credentials in the `.env` file
+4. Configure algorithm settings in the `config.yaml` file
+
+## Infrastructure Setup
+
+### 1. Install Docker
+
+Docker is required to run Milvus as a containerised service.
+
+#### Linux (Ubuntu / Debian)
+
+```bash
+# Remove any old Docker packages
+sudo apt-get remove -y docker docker-engine docker.io containerd runc
+
+# Install dependencies
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+# Add Docker's official GPG key and repository
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker Engine and the Compose plugin
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Allow running Docker without sudo (log out and back in after this)
+sudo usermod -aG docker $USER
+
+# Verify installation
+docker --version
+docker compose version
+```
+
+#### Windows
+
+1. Download **Docker Desktop for Windows** from [https://docs.docker.com/desktop/install/windows-install/](https://docs.docker.com/desktop/install/windows-install/).
+2. Run the installer (`Docker Desktop Installer.exe`) and follow the wizard.
+3. Ensure **WSL 2 backend** is selected (recommended) or enable Hyper-V when prompted.
+4. After installation, start Docker Desktop and verify from PowerShell:
+
+```powershell
+docker --version
+docker compose version 
+```
+
+#### macOS
+
+1. Download **Docker Desktop for Mac** from [https://docs.docker.com/desktop/install/mac-install/](https://docs.docker.com/desktop/install/mac-install/).
+2. Open the `.dmg`, drag Docker to `Applications`, and launch it.
+3. Verify in a terminal:
+
+```bash
+docker --version
+docker compose version
+```
+
+---
+
+### 2. Install Milvus with Docker
+
+Milvus Standalone is the recommended single-node deployment for development and small-scale production. It uses Docker Compose to manage three services: **Milvus**, **etcd**, and **MinIO**.
+
+#### Step 1 — Download the official Compose file
+
+**Linux / macOS**
+
+```bash
+wget https://github.com/milvus-io/milvus/releases/download/v2.6.2/milvus-standalone-docker-compose.yml \
+    -O docker-compose.yml
+```
+
+**Windows (PowerShell)**
+
+```powershell
+Invoke-WebRequest `
+    -URI "https://github.com/milvus-io/milvus/releases/download/v2.6.2/milvus-standalone-docker-compose.yml" `
+    -OutFile "docker-compose.yml"
+```
+
+#### Step 2 — Start Milvus
+
+```bash
+docker compose up -d
+```
+
+Confirm all three containers are running:
+
+```bash
+docker compose ps
+```
+
+Expected output:
+
+```
+NAME                IMAGE                               STATUS
+milvus-standalone   milvusdb/milvus:v2.6.2             Up (healthy)
+milvus-etcd         quay.io/coreos/etcd:v3.5.5         Up (healthy)
+milvus-minio        minio/minio:RELEASE.2023-03-13...  Up (healthy)
+```
+
+Milvus gRPC is now available at `localhost:19530`.
+
+#### Step 3 — Verify connectivity (optional)
+
+```bash
+# Confirm port 19530 is listening
+docker exec milvus-standalone \
+    python3 -c "from pymilvus import connections; connections.connect(); print('OK')"
+```
+
+#### Stopping and restarting Milvus
+
+```bash
+# Stop (data is preserved in Docker volumes)
+docker compose down
+
+# Start again
+docker compose up -d
+
+# Remove containers AND all data
+docker compose down --volumes --remove-orphans
+```
+
+#### Environment variables for the connector
+
+Add Milvus connection settings to your `.env` file (created in the next section):
+
+```env
+# Milvus Vector Database
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
+MILVUS_COLLECTION=vector_nodes
+```
+
+---
 
 ## Configuration
 
