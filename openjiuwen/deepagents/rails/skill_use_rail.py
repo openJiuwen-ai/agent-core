@@ -25,6 +25,7 @@ from openjiuwen.deepagents.prompts.sections.skills import (
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.tools import BashTool, CodeTool, ReadFileTool
 from openjiuwen.deepagents.tools.list_skill import ListSkillTool
+from openjiuwen.agent_evolving.online.store import EvolutionStore
 
 
 class SkillUseRail(DeepAgentRail):
@@ -47,6 +48,7 @@ class SkillUseRail(DeepAgentRail):
         enabled_skills: Optional[Union[str, List[str]]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
         language: str = "cn",
+        evolution_store: Optional[EvolutionStore] = None,
     ):
         """Initialize SkillUseRail.
 
@@ -60,6 +62,7 @@ class SkillUseRail(DeepAgentRail):
             include_tools: Whether to register read_file / code / bash tools.
             enabled_skills: Optional allow-list of skill names. Supports str or List[str].
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
+            evolution_store: Optional EvolutionStore for progressive disclosure experience text.
         """
         super().__init__()
 
@@ -77,6 +80,7 @@ class SkillUseRail(DeepAgentRail):
         self.enabled_skills = self._normalize_name_set(enabled_skills)
         self.disabled_skills = self._normalize_name_set(disabled_skills)
         self.language = language
+        self.evolution_store: Optional[EvolutionStore] = evolution_store
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
@@ -85,6 +89,9 @@ class SkillUseRail(DeepAgentRail):
         self._skill_cache: Dict[str, Skill] = {}
         self._skill_update_at: Dict[str, float] = {}
         self._skill_order: List[str] = []
+
+        # Cache evolution experience texts per skill name.
+        self._evolution_texts: Dict[str, str] = {}
 
         # Track tools added by this rail only.
         self._owned_tool_names: Set[str] = set()
@@ -276,6 +283,30 @@ class SkillUseRail(DeepAgentRail):
         """Prepare skills before invoke."""
         _ = ctx
         await self._prepare_skills()
+        await self._fetch_evolution_texts()
+
+    async def _fetch_evolution_texts(self) -> None:
+        """Fetch and cache evolution experience texts from EvolutionStore."""
+        if self.evolution_store is None:
+            return
+        for skill in self.skills:
+            try:
+                text = await self.evolution_store.format_desc_experience_text(skill.name)
+                self._evolution_texts[skill.name] = text
+            except Exception as exc:
+                logger.warning(
+                    "[SkillUseRail] failed to fetch evolution text for '%s': %s",
+                    skill.name,
+                    exc,
+                )
+
+    def _get_skill_description(self, skill: Skill) -> str:
+        """Return description with evolution experience text appended if available."""
+        desc = skill.description
+        evo_text = self._evolution_texts.get(skill.name, "")
+        if evo_text:
+            desc = f"{desc}\n  演进经验:\n{evo_text}"
+        return desc
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         _ = ctx
@@ -304,7 +335,7 @@ class SkillUseRail(DeepAgentRail):
                     build_skill_line(
                         index=idx,
                         skill_name=skill.name,
-                        description=skill.description,
+                        description=self._get_skill_description(skill),
                         skill_md_path=str(self._skill_md_path(skill)),
                     )
                 )
@@ -329,7 +360,7 @@ class SkillUseRail(DeepAgentRail):
                 build_skill_line(
                     index=idx,
                     skill_name=skill.name,
-                    description=skill.description,
+                    description=self._get_skill_description(skill),
                     skill_md_path=str(self._skill_md_path(skill)),
                 )
             )
