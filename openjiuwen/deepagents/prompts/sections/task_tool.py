@@ -85,11 +85,12 @@ def build_task_section(language: str = "cn") -> Optional["PromptSection"]:
         A PromptSection instance for task tool.
     """
     from openjiuwen.deepagents.prompts.builder import PromptSection
+    from openjiuwen.deepagents.prompts.sections import SectionName
 
     content = build_task_system_prompt(language)
 
     return PromptSection(
-        name="task_tool",
+        name=SectionName.TASK_TOOL,
         content={language: content},
         priority=85,
     )

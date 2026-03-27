@@ -12,6 +12,7 @@ from openjiuwen.core.single_agent.prompts.builder import (
     PromptSection,
     SystemPromptBuilder as BaseSystemPromptBuilder,
 )
+from openjiuwen.deepagents.prompts.sections import SectionName
 
 
 class PromptMode(str, Enum):
@@ -25,12 +26,12 @@ class SystemPromptBuilder(BaseSystemPromptBuilder):
     """DeepAgent prompt builder with mode filtering and diagnostics."""
 
     _MINIMAL_SECTIONS = frozenset({
-        "identity",
-        "safety",
-        "skills",
-        "tools",
-        "task_tool",
-        "runtime",
+        SectionName.IDENTITY,
+        SectionName.SAFETY,
+        SectionName.SKILLS,
+        SectionName.TOOLS,
+        SectionName.TASK_TOOL,
+        SectionName.RUNTIME,
     })
 
     def __init__(
@@ -44,7 +45,7 @@ class SystemPromptBuilder(BaseSystemPromptBuilder):
     def build(self) -> str:
         """Build prompt according to the current DeepAgent prompt mode."""
         if self.mode == PromptMode.NONE:
-            identity = self.get_section("identity")
+            identity = self.get_section(SectionName.IDENTITY)
             return identity.render(self.language) if identity else ""
         return super().build()
 

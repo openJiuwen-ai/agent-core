@@ -15,7 +15,7 @@ from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.deepagents.deep_agent import DeepAgent
-from openjiuwen.deepagents.rails import TaskPlanningRail, SkillUseRail, SubagentRail
+from openjiuwen.deepagents.rails import TaskPlanningRail, SkillUseRail, SubagentRail, ToolPromptRail
 from openjiuwen.deepagents.schema.config import (
     DeepAgentConfig,
     VisionModelConfig,
@@ -201,6 +201,7 @@ def create_deep_agent(
     task_plan_flag: bool = False
     skill_flag: bool = False
     subagent_flag: bool = False
+    tool_prompt_flag: bool = False
     if rails:
         for rail_inst in rails:
             if isinstance(rail_inst, TaskPlanningRail):
@@ -209,6 +210,8 @@ def create_deep_agent(
                 skill_flag = True
             if isinstance(rail_inst, SubagentRail):
                 subagent_flag = True
+            if isinstance(rail_inst, ToolPromptRail):
+                tool_prompt_flag = True
             agent.add_rail(rail_inst)
 
     if enable_task_planning and not task_plan_flag:
@@ -224,4 +227,7 @@ def create_deep_agent(
     if subagents and not subagent_flag:
         subagent_rail = SubagentRail(language=resolved_language)
         agent.add_rail(subagent_rail)
+    if normalized_tools and not tool_prompt_flag:
+        tool_prompt_rail = ToolPromptRail(language=resolved_language)
+        agent.add_rail(tool_prompt_rail)
     return agent

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional
 
+from openjiuwen.deepagents.prompts.sections import SectionName
+
 # ---------------------------------------------------------------------------
 # List-skill system prompt (bilingual)
 # ---------------------------------------------------------------------------
@@ -197,7 +199,7 @@ def build_skills_section(
         return None
 
     return PromptSection(
-        name="skills",
+        name=SectionName.SKILLS,
         content={language: content},
         priority=90,
     )

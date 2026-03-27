@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from openjiuwen.deepagents.prompts import PromptSection
+from openjiuwen.deepagents.prompts.sections import SectionName
 
 # ---------------------------------------------------------------------------
 # TodoTool system prompt - for system message injection
@@ -150,7 +151,7 @@ def build_todo_section(language: str = "cn") -> Optional["PromptSection"]:
     content = build_todo_system_prompt(language)
 
     return PromptSection(
-        name="todo",
+        name=SectionName.TODO,
         content={language: content},
         priority=90,
     )

@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Dict
 
 from openjiuwen.deepagents.prompts.builder import PromptSection
+from openjiuwen.deepagents.prompts.sections import SectionName
 
 IDENTITY: Dict[str, str] = {
     "cn": (
@@ -23,7 +24,7 @@ def build_identity_section(language: str = "cn") -> PromptSection:
     """Build the identity prompt section."""
     _ = language
     return PromptSection(
-        name="identity",
+        name=SectionName.IDENTITY,
         content=IDENTITY,
         priority=10,
     )

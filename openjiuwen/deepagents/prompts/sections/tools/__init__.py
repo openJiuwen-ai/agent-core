@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.deepagents.prompts.builder import PromptSection
+from openjiuwen.deepagents.prompts.sections import SectionName
 from openjiuwen.deepagents.prompts.sections.tools.base import (
     ToolMetadataProvider,
 )
@@ -203,7 +204,7 @@ def build_tools_section(
 
     content = "\n".join(lines)
     return PromptSection(
-        name="tools",
+        name=SectionName.TOOLS,
         content={language: content},
         priority=40,
     )

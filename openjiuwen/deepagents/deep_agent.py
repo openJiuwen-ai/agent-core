@@ -66,6 +66,7 @@ from openjiuwen.deepagents.prompts import (
     PromptSection,
     SystemPromptBuilder,
 )
+from openjiuwen.deepagents.prompts.sections import SectionName
 from openjiuwen.deepagents.prompts.sections.identity import build_identity_section
 
 # Events bridged to the inner ReActAgent.
@@ -208,7 +209,7 @@ class DeepAgent(BaseAgent):
             # Wrap the provided prompt as the identity section so all
             # rails can consistently operate on prompt_builder.
             prompt_builder.add_section(PromptSection(
-                name="identity",
+                name=SectionName.IDENTITY,
                 content={"cn": cfg.system_prompt, "en": cfg.system_prompt},
             ))
         else:

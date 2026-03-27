@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, List
 
 from openjiuwen.deepagents.prompts.builder import PromptSection
+from openjiuwen.deepagents.prompts.sections import SectionName
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +135,7 @@ def build_navigation_section(
     language: str = "cn",
 ) -> "PromptSection":
     return PromptSection(
-        name="tool_navigation",
+        name=SectionName.TOOL_NAVIGATION,
         content={language: build_navigation_prompt(entries, language)},
         priority=70,
     )
@@ -144,7 +145,7 @@ def build_progressive_tool_rules_section(
     language: str = "cn",
 ) -> "PromptSection":
     return PromptSection(
-        name="progressive_tool_rules",
+        name=SectionName.PROGRESSIVE_TOOL_RULES,
         content={language: build_progressive_tool_rules_prompt(language)},
         priority=75,
     )
@@ -168,7 +169,7 @@ def build_multilingual_navigation_section(
     entries_en: Iterable[str],
 ) -> "PromptSection":
     return PromptSection(
-        name="tool_navigation",
+        name=SectionName.TOOL_NAVIGATION,
         content={
             "cn": build_navigation_prompt(entries_cn, "cn"),
             "en": build_navigation_prompt(entries_en, "en"),
@@ -179,7 +180,7 @@ def build_multilingual_navigation_section(
 
 def build_multilingual_progressive_tool_rules_section() -> "PromptSection":
     return PromptSection(
-        name="progressive_tool_rules",
+        name=SectionName.PROGRESSIVE_TOOL_RULES,
         content={
             "cn": build_progressive_tool_rules_prompt("cn"),
             "en": build_progressive_tool_rules_prompt("en"),

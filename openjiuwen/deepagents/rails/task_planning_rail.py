@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.deepagents.prompts.sections import SectionName
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
@@ -129,7 +130,7 @@ class TaskPlanningRail(DeepAgentRail):
         if task_planning_section is not None:
             self.system_prompt_builder.add_section(task_planning_section)
         else:
-            self.system_prompt_builder.remove_section("todo")
+            self.system_prompt_builder.remove_section(SectionName.TODO)
 
     async def after_tool_call(
         self, ctx: AgentCallbackContext

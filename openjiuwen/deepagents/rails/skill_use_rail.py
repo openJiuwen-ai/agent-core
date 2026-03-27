@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
+from openjiuwen.deepagents.prompts.sections import SectionName
 from openjiuwen.deepagents.prompts.sections.skills import (
     build_all_mode_skill_prompt,
     build_auto_list_mode_skill_prompt,
@@ -292,7 +293,7 @@ class SkillUseRail(DeepAgentRail):
         if skills_section is not None:
             self.system_prompt_builder.add_section(skills_section)
         else:
-            self.system_prompt_builder.remove_section("skills")
+            self.system_prompt_builder.remove_section(SectionName.SKILLS)
 
     def _build_skills_section(self):
         """Build PromptSection from current skills."""

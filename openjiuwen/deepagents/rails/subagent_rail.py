@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import List, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.deepagents.prompts.sections import SectionName
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.deepagents.prompts.sections.task_tool import (
@@ -100,7 +101,7 @@ class SubagentRail(DeepAgentRail):
         if task_section is not None:
             self.system_prompt_builder.add_section(task_section)
         else:
-            self.system_prompt_builder.remove_section("task_tool")
+            self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
 
     def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:
         """Build description of available subagents for tool registration.
