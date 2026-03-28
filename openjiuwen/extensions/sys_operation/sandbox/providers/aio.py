@@ -332,8 +332,9 @@ class AIOFSProvider(BaseFSProvider):
     async def write_file(self, path: str, content: str | bytes, mode: str = "text", **kwargs) -> WriteFileResult:
         prepend_newline = kwargs.get("prepend_newline", True)
         append_newline = kwargs.get("append_newline", False)
+        append = kwargs.get("append", False)
         if mode == "bytes":
-            return await self._write_file_bytes(path=path, content=content)
+            return await self._write_file_bytes(path=path, content=content, append=append)
 
         if isinstance(content, bytes):
             content_str = content.decode('utf-8')
@@ -353,7 +354,7 @@ class AIOFSProvider(BaseFSProvider):
         while time.time() < deadline:
             try:
                 def _write():
-                    res = client.file.write_file(file=path, content=content_str, encoding=encoding)
+                    res = client.file.write_file(file=path, content=content_str, encoding=encoding, append=append)
                     size = len(content_str.encode("utf-8")) if mode != "bytes" else len(base64.b64decode(content_str))
                     data = WriteFileData(path=path, size=size, mode=mode or "text")
                     return WriteFileResult(code=StatusCode.SUCCESS.code, message=StatusCode.SUCCESS.errmsg, data=data)
@@ -373,30 +374,18 @@ class AIOFSProvider(BaseFSProvider):
             WriteFileResult,
         )
 
-    async def _write_file_bytes(self, path: str, content: str | bytes) -> WriteFileResult:
+    async def _write_file_bytes(self, path: str, content: str | bytes, append: bool = False) -> WriteFileResult:
         client = await asyncio.to_thread(self._get_client)
         raw_bytes = content if isinstance(content, (bytes, bytearray)) else bytes(content)
+        content_b64 = base64.b64encode(raw_bytes).decode('ascii')
         deadline = time.time() + max(1, int(self._timeout_seconds))
         delay = 0.5
         last: Optional[Exception] = None
         while time.time() < deadline:
             try:
-                def _upload():
-                    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                        temp_file.write(raw_bytes)
-                        temp_path = temp_file.name
-                    try:
-                        filename = os.path.basename(path) or "binary.bin"
-                        with open(temp_path, "rb") as fh:
-                            client.file.upload_file(
-                                file=(filename, fh, "application/octet-stream"),
-                                path=path,
-                            )
-                    finally:
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-
-                await asyncio.to_thread(_upload)
+                def _write_bytes():
+                    client.file.write_file(file=path, content=content_b64, encoding="base64", append=append)
+                await asyncio.to_thread(_write_bytes)
                 return WriteFileResult(
                     code=StatusCode.SUCCESS.code,
                     message=StatusCode.SUCCESS.errmsg,

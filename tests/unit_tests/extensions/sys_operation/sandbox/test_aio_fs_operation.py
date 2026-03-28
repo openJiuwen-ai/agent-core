@@ -541,3 +541,61 @@ async def test_fs_search_operations(sys_op):
     no_match_res = await sys_op.fs().search_files(test_dir, "*.xyz")
     assert no_match_res.code == StatusCode.SUCCESS.code
     assert len(no_match_res.data.matching_files) == 0
+
+
+@pytest.mark.skip(reason="Requires running AIO sandbox")
+@pytest.mark.asyncio
+async def test_fs_write_file_append_text(sys_op):
+    """Test write_file with append=True for text mode."""
+    append_file = f"{SANDBOX_BASE_PATH}/test_append_text_{uuid.uuid4().hex[:8]}.txt"
+
+    await sys_op.fs().write_file(path=append_file, content="Line 1", prepend_newline=False, append=False)
+    res = await sys_op.fs().read_file(path=append_file)
+    assert res.code == StatusCode.SUCCESS.code
+    assert res.data.content == "Line 1"
+
+    await sys_op.fs().write_file(path=append_file, content="Line 2", prepend_newline=False, append=True)
+    res = await sys_op.fs().read_file(path=append_file)
+    assert res.code == StatusCode.SUCCESS.code
+    assert res.data.content == "Line 1Line 2"
+
+    await sys_op.fs().write_file(path=append_file, content="\nLine 3", prepend_newline=False, append=True)
+    res = await sys_op.fs().read_file(path=append_file)
+    assert res.code == StatusCode.SUCCESS.code
+    assert res.data.content == "Line 1Line 2\nLine 3"
+
+
+@pytest.mark.skip(reason="Requires running AIO sandbox")
+@pytest.mark.asyncio
+async def test_fs_write_file_append_binary(sys_op):
+    """Test write_file with append=True for binary mode."""
+    append_bin_file = f"{SANDBOX_BASE_PATH}/test_append_binary_{uuid.uuid4().hex[:8]}.bin"
+
+    await sys_op.fs().write_file(path=append_bin_file, content=b"\x00\x01", mode="bytes", append=False)
+    res = await sys_op.fs().read_file(path=append_bin_file, mode="bytes")
+    assert res.code == StatusCode.SUCCESS.code
+    assert res.data.content == b"\x00\x01"
+
+    await sys_op.fs().write_file(path=append_bin_file, content=b"\x02\x03", mode="bytes", append=True)
+    res = await sys_op.fs().read_file(path=append_bin_file, mode="bytes")
+    assert res.code == StatusCode.SUCCESS.code
+    assert res.data.content == b"\x00\x01\x02\x03"
+
+    await sys_op.fs().write_file(path=append_bin_file, content=b"\x04\x05", mode="bytes", append=True)
+    res = await sys_op.fs().read_file(path=append_bin_file, mode="bytes")
+    assert res.code == StatusCode.SUCCESS.code
+    assert res.data.content == b"\x00\x01\x02\x03\x04\x05"
+
+
+@pytest.mark.skip(reason="Requires running AIO sandbox")
+@pytest.mark.asyncio
+async def test_fs_write_file_append_new_file(sys_op):
+    """Test write_file with append=True on a non-existent file."""
+    new_file = f"{SANDBOX_BASE_PATH}/test_append_new_file_{uuid.uuid4().hex[:8]}.txt"
+
+    res = await sys_op.fs().write_file(path=new_file, content="First content", prepend_newline=False, append=True)
+    assert res.code == StatusCode.SUCCESS.code
+
+    res = await sys_op.fs().read_file(path=new_file)
+    assert res.code == StatusCode.SUCCESS.code
+    assert res.data.content == "First content"

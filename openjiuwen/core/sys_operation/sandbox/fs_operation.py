@@ -55,13 +55,13 @@ class FsOperation(BaseFsOperation, BaseSandboxMixin):
 
     async def write_file(
             self, path: str, content: str | bytes, *, mode: Literal['text', 'bytes'] = "text",
-            prepend_newline: bool = True, append_newline: bool = False,
+            prepend_newline: bool = True, append_newline: bool = False, append: bool = False,
             create_if_not_exist: bool = True, permissions: str = "644",
             encoding: str = "utf-8", options: Optional[Dict[str, Any]] = None
     ) -> WriteFileResult:
         raw = await self.invoke(
             "write_file", path=path, content=content, mode=mode,
-            prepend_newline=prepend_newline, append_newline=append_newline,
+            prepend_newline=prepend_newline, append_newline=append_newline, append=append,
             create_if_not_exist=create_if_not_exist, permissions=permissions,
             encoding=encoding, options=options
         )

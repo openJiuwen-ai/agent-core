@@ -63,6 +63,7 @@ class BaseFsProtocal(ABC):
                          mode: Literal['text', 'bytes'] = "text",
                          prepend_newline: bool = True,
                          append_newline: bool = False,
+                         append: bool = False,
                          create_if_not_exist: bool = True,
                          permissions: str = "644",
                          encoding: str = "utf-8",

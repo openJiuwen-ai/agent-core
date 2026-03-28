@@ -281,6 +281,7 @@ class LocalFSProvider(BaseFSProvider):
             mode: Literal['text', 'bytes'] = "text",
             prepend_newline: bool = False,
             append_newline: bool = False,
+            append: bool = False,
             create_if_not_exist: bool = True,
             permissions: str = "644",
             encoding: str = "utf-8",
@@ -292,6 +293,9 @@ class LocalFSProvider(BaseFSProvider):
                 file_path.parent.mkdir(parents=True, exist_ok=True)
             if mode == "bytes":
                 data = content if isinstance(content, bytes) else str(content).encode(encoding)
+                if append:
+                    existing = file_path.read_bytes() if file_path.exists() else b""
+                    data = existing + data
                 file_path.write_bytes(data)
                 size = len(data)
             else:
@@ -300,6 +304,9 @@ class LocalFSProvider(BaseFSProvider):
                     text = "\n" + text
                 if append_newline:
                     text = text + "\n"
+                if append:
+                    existing = file_path.read_text(encoding=encoding) if file_path.exists() else ""
+                    text = existing + text
                 file_path.write_text(text, encoding=encoding, newline="")
                 size = len(text.encode(encoding))
             return WriteFileResult(code=0, message="success", data=WriteFileData(path=path, size=size, mode=mode))
