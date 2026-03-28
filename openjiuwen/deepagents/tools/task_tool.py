@@ -90,7 +90,7 @@ class TaskTool(Tool):
         logger.info(f"[TaskTool] Creating subagent: {subagent_type}, parent_session={parent_session.get_session_id()}")
 
         # Create subagent instance
-        subagent = self._create_subagent(subagent_type)
+        subagent = self.parent_agent.create_subagent(subagent_type)
 
         # Create isolated session_id for subagent
         parent_session_id = parent_session.get_session_id()
@@ -115,106 +115,6 @@ class TaskTool(Tool):
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass
-
-    def _create_subagent(self, subagent_type: str) -> "DeepAgent":
-        """Create a subagent instance based on subagent_type.
-
-        Args:
-            subagent_type: Type of subagent to create or subagent name.
-
-        Returns:
-            Configured DeepAgent instance.
-
-        Raises:
-            ToolError: If subagent creation fails.
-        """
-        parent_config = self.parent_agent.deep_config
-        if parent_config is None:
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason="Parent agent has no deep_config",
-            )
-
-        # Find matching SubAgentConfig
-        spec_or_agent = self._find_subagent_spec(subagent_type)
-        if not spec_or_agent:
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason=f"Subagent spec not found for type: {subagent_type}",
-            )
-
-        from openjiuwen.deepagents.deep_agent import DeepAgent
-
-        if isinstance(spec_or_agent, DeepAgent):
-            logger.info("[TaskTool] Imported subagent instance already")
-            return spec_or_agent
-
-        # overrides main agent's configuration using subagents'
-        subagent_model = spec_or_agent.model if spec_or_agent and spec_or_agent.model else parent_config.model
-
-        from openjiuwen.deepagents.factory import create_deep_agent
-
-        logger.info(f"[TaskTool] Creating subagent: type={subagent_type}")
-
-        # Create subagent instance
-        subagent = create_deep_agent(
-            model=subagent_model,
-            card=spec_or_agent.agent_card,
-            system_prompt=spec_or_agent.system_prompt,
-            tools=spec_or_agent.tools or [],
-            mcps=spec_or_agent.mcps or [],
-            rails=spec_or_agent.rails,
-            max_iterations=parent_config.max_iterations,
-            workspace=parent_config.workspace,
-            sys_operation=parent_config.sys_operation,
-            skills=spec_or_agent.skills,
-        )
-
-        return subagent
-
-    def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
-        """Find SubAgentConfig matching subagent_type.
-
-        Args:
-            subagent_type: Type of subagent to find.
-
-        Returns:
-            Matching SubAgentConfig or None.
-        """
-        parent_config = self.parent_agent.deep_config
-        if not parent_config:
-            logger.warning("[TaskTool] Parent agent has no deep_config, skipping")
-            return None
-
-        from openjiuwen.deepagents.deep_agent import DeepAgent
-
-        for spec in parent_config.subagents or []:
-            if isinstance(spec, SubAgentConfig) and spec.agent_card.name == subagent_type:
-                return spec
-            if isinstance(spec, DeepAgent):
-                card = getattr(spec, "card", None)
-                if getattr(card, "name", None) == subagent_type:
-                    return spec
-
-        # default general-purpose subagent, using the same system prompt, tools, model, skills as main agent
-        if subagent_type == "general-purpose":
-            default_desc = GENERAL_PURPOSE_AGENT_DESC.get(self.language, GENERAL_PURPOSE_AGENT_DESC["cn"])
-            return SubAgentConfig(
-                agent_card=AgentCard(
-                    name="general-purpose",
-                    description=default_desc,
-                ),
-                system_prompt=parent_config.system_prompt,
-                tools=parent_config.tools,
-                mcps=parent_config.mcps or [],
-                model=parent_config.model,
-                skills=parent_config.skills,
-            )
-
-        if not parent_config.subagents:
-            logger.warning("[TaskTool] No subagents found, skipping")
-
-        return None
 
 
 def create_task_tool(

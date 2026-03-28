@@ -33,6 +33,7 @@ from openjiuwen.deepagents.task_loop.task_loop_event_executor import (
 from openjiuwen.deepagents.task_loop.loop_queues import (
     LoopQueues,
 )
+from openjiuwen.deepagents.tools.session_tools import SESSION_SPAWN_TASK_TYPE
 from openjiuwen.deepagents.schema.state import (
     load_state,
 )
@@ -82,6 +83,7 @@ class TaskLoopEventHandler(EventHandler):
         self._interaction_queues: Optional[
             LoopQueues
         ] = None
+        self._session_toolkit = None
 
     @property
     def last_result(
@@ -104,6 +106,10 @@ class TaskLoopEventHandler(EventHandler):
     ) -> None:
         """Set interaction queues used by task-loop."""
         self._interaction_queues = queues
+
+    def set_session_toolkit(self, toolkit) -> None:
+        """Inject SessionToolkit for async spawn tracking."""
+        self._session_toolkit = toolkit
 
     def prepare_round(self) -> int:
         """Create a new Future for this round.
@@ -377,11 +383,21 @@ class TaskLoopEventHandler(EventHandler):
             Acknowledgement dict.
         """
         event = inputs.event
+        task_type = (
+            event.metadata.get("task_type")
+            if event.metadata
+            else None
+        )
         task_id = (
             event.metadata.get("task_id")
             if event.metadata
             else None
         )
+
+        if task_type == SESSION_SPAWN_TASK_TYPE:
+            await self._complete_session_spawn(task_id, inputs, is_error=False)
+            return {"status": "session_spawn_completed", "task_id": task_id}
+
         round_id = (
             event.metadata.get(
                 "_handler_round_id", self._round_id
@@ -428,20 +444,31 @@ class TaskLoopEventHandler(EventHandler):
             Acknowledgement dict.
         """
         event = inputs.event
+        task_type = (
+            event.metadata.get("task_type")
+            if event.metadata
+            else None
+        )
         task_id = (
             event.metadata.get("task_id")
             if event.metadata
             else None
         )
+
+        error_msg = getattr(
+            event, "error_message", "unknown"
+        )
+
+        if task_type == SESSION_SPAWN_TASK_TYPE:
+            await self._complete_session_spawn(task_id, inputs, is_error=True)
+            return {"status": "session_spawn_failed", "task_id": task_id, "error": str(error_msg)}
+
         round_id = (
             event.metadata.get(
                 "_handler_round_id", self._round_id
             )
             if event.metadata
             else self._round_id
-        )
-        error_msg = getattr(
-            event, "error_message", "unknown"
         )
 
         self._resolve_future(
@@ -506,6 +533,117 @@ class TaskLoopEventHandler(EventHandler):
                         data.get("query", data)
                     )
         return ""
+
+    async def _complete_session_spawn(
+        self, task_id: str, inputs: EventHandlerInput, is_error: bool
+    ) -> None:
+        """Handle SESSION_SPAWN completion/failure.
+
+        Routes based on whether parent agent has active invoke:
+        - Active invoke: push_steer (data) + push_follow_up (trigger)
+        - No active invoke: push_steer + schedule delayed auto-invoke
+
+        Args:
+            task_id: Task identifier.
+            inputs: Event handler input.
+            is_error: Whether task failed.
+        """
+        result_str = ""
+        error_str = ""
+        if is_error:
+            error_str = self._extract_error_from_event(inputs)
+        else:
+            result_str = self._extract_result_from_event(inputs)
+
+        # Update SessionToolkit
+        if self._session_toolkit is not None:
+            if is_error:
+                self._session_toolkit.mark_failed(task_id, error_str)
+            else:
+                self._session_toolkit.mark_completed(task_id, result_str)
+
+        task_description = (
+            inputs.event.metadata.get("task_description")
+            if inputs.event.metadata
+            else ""
+        )
+        agent = self._deep_agent
+        language = agent.deep_config.language if agent.deep_config else "cn"
+        steer_text = self._format_session_spawn_steer(
+            task_description, is_error, result_str, error_str, language
+        )
+
+        if agent.is_invoke_active:
+            # Path 1: Active invoke - steer + follow_up
+            if self.interaction_queues is not None:
+                follow_up_text = ("后台子任务已完成，请汇总结果。"
+                    if language == "cn"
+                    else "The background task has been completed, please summarize the results.")
+                self.interaction_queues.push_steer(steer_text)
+                self.interaction_queues.push_follow_up(follow_up_text)
+            logger.info(
+                f"[SessionSpawn] task_id={task_id} completed, "
+                "steer+follow_up pushed (active invoke)"
+            )
+        else:
+            # Path 2: No active invoke - steer + schedule auto-invoke
+            if self.interaction_queues is not None:
+                self.interaction_queues.push_steer(steer_text)
+            if not agent.is_auto_invoke_scheduled:
+                agent.set_auto_invoke_scheduled(True)
+                asyncio.create_task(
+                    agent.schedule_auto_invoke_on_spawn_done()
+                )
+            logger.info(
+                f"[SessionSpawn] task_id={task_id} completed, "
+                "steer pushed + auto-invoke scheduled"
+            )
+
+    @staticmethod
+    def _extract_result_from_event(inputs: EventHandlerInput) -> str:
+        """Extract result from completion event."""
+        event = inputs.event
+        task_result = getattr(event, "task_result", None)
+        if task_result:
+            for df in task_result:
+                data = getattr(df, "data", None)
+                if isinstance(data, dict):
+                    output = data.get("output", "")
+                    return str(output)[:500]
+                text = getattr(df, "text", None)
+                if text:
+                    return str(text)[:500]
+        return ""
+
+    @staticmethod
+    def _extract_error_from_event(inputs: EventHandlerInput) -> str:
+        """Extract error from failure event."""
+        event = inputs.event
+        error_msg = getattr(event, "error_message", "unknown")
+        return str(error_msg)[:300]
+
+    @staticmethod
+    def _format_session_spawn_steer(
+        task_description: str, is_error: bool, result: str, error: str, language: str
+    ) -> str:
+        """Format steer text for session spawn completion."""
+        templates = {
+            "cn": {
+                "error": "[后台任务失败] 任务描述={task_description}, 错误={detail}",
+                "success": "[后台任务完成] 任务描述={task_description}, 结果={detail}"
+            },
+            "en": {
+                "error": "[Background task failed] Task Description={task_description}, Error={detail}",
+                "success": "[Background task completed] Task Description={task_description}, Result={detail}"
+            }
+        }
+        
+        lang_templates = templates.get(language, templates["cn"])
+        
+        template = lang_templates["error"] if is_error else lang_templates["success"]
+        detail = error if is_error else result
+        
+        return template.format(task_description=task_description, detail=detail)
 
     async def on_abort(self) -> None:
         """Signal abort to the outer loop.

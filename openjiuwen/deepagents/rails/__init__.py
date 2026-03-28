@@ -10,6 +10,7 @@ from openjiuwen.deepagents.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.deepagents.rails.skill_use_rail import SkillUseRail
 from openjiuwen.deepagents.rails.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.deepagents.rails.subagent_rail import SubagentRail
+from openjiuwen.deepagents.rails.session_rail import SessionRail
 from openjiuwen.deepagents.rails.tool_prompt_rail import ToolPromptRail
 from openjiuwen.deepagents.rails.memory_rail import MemoryRail
 
@@ -19,6 +20,7 @@ __all__ = [
     "SkillUseRail",
     "SkillEvolutionRail",
     "SubagentRail",
+    "SessionRail",
     "AskUserRail",
     "ToolPromptRail",
     "ConfirmInterruptRail",

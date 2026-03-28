@@ -698,11 +698,10 @@ class TaskScheduler:
         Can be called directly by EventHandler in callbacks.
 
         Execution flow:
-        1. Check whether the current task is running; if not, return directly
-        2. Get the executor of the current task and call can_cancel; if it cannot be canceled,
-            return the reason; otherwise continue
-        3. After calling executor.cancel, cancel the corresponding asyncio.Task of the current task
-        4. Update the task status to CANCELED in task_manager
+        1. Check task status; if SUBMITTED, mark as CANCELED directly
+        2. If WORKING, get executor and call can_cancel; if cannot be canceled, return reason
+        3. After calling executor.cancel, cancel the corresponding asyncio.Task
+        4. Update task status to CANCELED in task_manager
 
         Args:
             task_id: Task ID
@@ -720,6 +719,17 @@ class TaskScheduler:
         if not session:
             logger.error(f"Session {task.session_id} not found for task {task_id}")
             return False
+
+        # Handle SUBMITTED tasks (not yet running)
+        if task.status == TaskStatus.SUBMITTED:
+            await self._task_manager.update_task_status(task_id, TaskStatus.CANCELED)
+            logger.info(f"Task {task_id} cancelled (was SUBMITTED, not yet started)")
+            return True
+
+        # Handle already terminal states (idempotent)
+        if task.status in (TaskStatus.CANCELED, TaskStatus.COMPLETED, TaskStatus.FAILED):
+            logger.info(f"Task {task_id} already in terminal state {task.status}, cancel is idempotent")
+            return True
 
         async with self._lock:
             # Check whether the task is running

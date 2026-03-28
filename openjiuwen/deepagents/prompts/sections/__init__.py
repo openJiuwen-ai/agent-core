@@ -16,3 +16,4 @@ class SectionName:
     PROGRESSIVE_TOOL_RULES = "progressive_tool_rules"
     RUNTIME = "runtime"
     MEMORY = "memory"
+    SESSION_TOOLS = "session_tools"

@@ -194,6 +194,7 @@ class StatusCode(Enum):
     DEEPAGENT_CONTEXT_PARAM_ERROR = (123022, "deepagent callback context parameter error, reason: {error_msg}")
     DEEPAGENT_RUNTIME_ERROR = (123023, "deepagent runtime error, reason: {error_msg}")
     DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED = (123024, "deepagent task loop not implemented, reason: {error_msg}")
+    DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND = (123025, "subagent not found, reason: {error_msg}")
 
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999
@@ -826,11 +827,12 @@ class StatusCode(Enum):
     TOOL_TODOS_CLEAR_FAILED = (182502, "todo tool clears failed, error='{reason}'")
     TOOL_TODOS_VALIDATION_INVALID = (182503, "todo tool validation invalid, error='{reason}'")
     TOOL_TODOS_INVOKE_FAILED = (182504, "todo tool invoke failed, error='{reason}'")
-    TOOL_TASK_TOOL_INVOKED = (182505, "task tool invoked, error='{reason}'")
+    TOOL_TASK_TOOL_INVOKED = (182505, "task tool invoked failed, error='{reason}'")
 
     TOOL_WEB_SEARCH_ENGINE_ERROR = (182506, "web search engine error, engine='{engine}', reason='{reason}'")
     TOOL_WEB_SEARCH_ALL_ENGINES_FAILED = (182507, "all web search engines failed, errors='{errors}'")
     TOOL_WEB_API_KEY_NOT_SET = (182508, "web tool api key is not set, key_name='{key_name}'")
+    TOOL_SESSION_TOOL_INVOKED = (182509, "session tool invoked failed, error='{reason}'")
 
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")

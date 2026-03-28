@@ -19,6 +19,7 @@ from openjiuwen.deepagents.deep_agent import DeepAgent
 from openjiuwen.deepagents.rails import (
     SecurityRail,
     SkillUseRail,
+    SessionRail,
     SubagentRail,
     TaskPlanningRail,
     ToolPromptRail,
@@ -93,6 +94,7 @@ def create_deep_agent(
     rails: Optional[List[AgentRail]] = None,
     stop_condition: Optional[StopCondition] = None,
     enable_task_loop: bool = False,
+    enable_async_subagent: bool = False,
     max_iterations: int = 15,
     workspace: Optional[str | Workspace] = None,
     skills: Optional[List[str]] = None,
@@ -125,6 +127,8 @@ def create_deep_agent(
         rails: AgentRail instances to register.
         stop_condition: Task-loop stop conditions.
         enable_task_loop: Enable outer task loop (P1).
+        enable_async_subagent: Enable async subagent via SessionRail (default False).
+            When True and subagents are configured, SessionRail is mounted instead of SubagentRail.
         max_iterations: Max ReAct iterations per
             invoke.
         workspace: Workspace path for file operations.
@@ -235,7 +239,9 @@ def create_deep_agent(
         (SecurityRail, True, lambda: SecurityRail(language=resolved_language)),
         (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail(language=resolved_language)),
         (SkillUseRail, bool(skills), _make_skill_rail),
-        (SubagentRail, bool(subagents), lambda: SubagentRail(language=resolved_language)),
+        (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail(language=resolved_language)),
+        (SubagentRail, bool(subagents) and not enable_async_subagent,
+        lambda: SubagentRail(language=resolved_language)),
         (ToolPromptRail, bool(normalized_tools), lambda: ToolPromptRail(language=resolved_language)),
     ]
     for rail_cls, should_add, make_rail in default_rails:

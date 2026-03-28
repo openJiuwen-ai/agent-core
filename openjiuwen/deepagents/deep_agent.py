@@ -7,6 +7,7 @@ from typing import (
     Any, AsyncIterator, Dict, List, Optional,
     TYPE_CHECKING, Tuple, cast,
 )
+import asyncio
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -56,6 +57,7 @@ from openjiuwen.deepagents.task_loop.task_loop_controller import (
     TaskLoopController,
 )
 from openjiuwen.deepagents.rails.progressive_tool_rail import ProgressiveToolRail
+from openjiuwen.deepagents.tools.session_tools import SessionToolkit
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -114,7 +116,15 @@ class DeepAgent(BaseAgent):
         self.prompt_builder: Optional[SystemPromptBuilder] = None
         self.system_prompt_builder: Optional[SystemPromptBuilder] = None
         self._workspace_initialized: bool = False
+        self._invoke_active: bool = False
+        self._auto_invoke_scheduled: bool = False
+        self._bound_session_id: Optional[str] = None
+        self._session_toolkit: SessionToolkit | None = None
         super().__init__(card)
+
+    def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
+        """Attach or clear the session toolkit (wired by SessionRail)."""
+        self._session_toolkit = toolkit
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
@@ -162,6 +172,20 @@ class DeepAgent(BaseAgent):
         return self._initialized
 
     @property
+    def is_invoke_active(self) -> bool:
+        """Whether is invoke_active."""
+        return self._invoke_active
+
+    @property
+    def is_auto_invoke_scheduled(self) -> bool:
+        """Whether is auto_invoke_scheduled."""
+        return self._auto_invoke_scheduled
+
+    def set_auto_invoke_scheduled(self, is_scheduled: bool) -> None:
+        """Set auto_invoke_scheduled."""
+        self._auto_invoke_scheduled = is_scheduled
+
+    @property
     def deep_config(self) -> DeepAgentConfig:
         """deep_config carried by this agent."""
         return self._deep_config
@@ -175,6 +199,11 @@ class DeepAgent(BaseAgent):
     def loop_coordinator(self) -> Optional[LoopCoordinator]:
         """LoopCoordinator for the outer task loop."""
         return self._loop_coordinator
+
+    @property
+    def loop_controller(self) -> Optional[TaskLoopController]:
+        """LoopController for the outer task loop."""
+        return self._loop_controller
 
     @property
     def event_queue(self) -> Optional["EventQueue"]:
@@ -352,6 +381,87 @@ class DeepAgent(BaseAgent):
         """React agent config. For testing only."""
         return self._react_agent.config
 
+    def create_subagent(self, subagent_type: str) -> "DeepAgent":
+        """Create a subagent instance (shared by TaskTool and SessionSpawnExecutor).
+
+        Args:
+            subagent_type: Type of subagent to create (e.g., "general-purpose").
+
+        Returns:
+            Configured DeepAgent instance.
+
+        Raises:
+            BaseError: If subagent spec not found.
+        """
+        spec = self._find_subagent_spec(subagent_type)
+        if spec is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND,
+                error_msg=f"Subagent spec not found: {subagent_type}",
+            )
+
+        if isinstance(spec, DeepAgent):
+            return spec
+
+        from openjiuwen.deepagents.factory import create_deep_agent
+
+        return create_deep_agent(
+            model=spec.model or self._deep_config.model,
+            card=spec.agent_card,
+            system_prompt=spec.system_prompt,
+            tools=spec.tools or [],
+            mcps=spec.mcps or [],
+            rails=spec.rails,
+            max_iterations=self._deep_config.max_iterations,
+            workspace=self._deep_config.workspace,
+            sys_operation=self._deep_config.sys_operation,
+            skills=spec.skills,
+        )
+
+    def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
+        """Find SubAgentConfig matching subagent_type.
+
+        Args:
+            subagent_type: Type of subagent to find.
+
+        Returns:
+            Matching SubAgentConfig or DeepAgent instance, or None.
+        """
+        if self._deep_config is None:
+            return None
+
+        from openjiuwen.deepagents.schema.config import SubAgentConfig
+
+        for spec in self._deep_config.subagents or []:
+            if isinstance(spec, SubAgentConfig) and spec.agent_card.name == subagent_type:
+                return spec
+            if isinstance(spec, DeepAgent):
+                card = getattr(spec, "card", None)
+                if getattr(card, "name", None) == subagent_type:
+                    return spec
+
+        if subagent_type == "general-purpose":
+            from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
+                GENERAL_PURPOSE_AGENT_DESC,
+            )
+
+            language = self._deep_config.language or "cn"
+            default_desc = GENERAL_PURPOSE_AGENT_DESC.get(
+                language, GENERAL_PURPOSE_AGENT_DESC["cn"]
+            )
+            return SubAgentConfig(
+                agent_card=AgentCard(
+                    name="general-purpose",
+                    description=default_desc,
+                ),
+                system_prompt=self._deep_config.system_prompt,
+                tools=self._deep_config.tools,
+                mcps=self._deep_config.mcps or [],
+                model=self._deep_config.model,
+                skills=self._deep_config.skills,
+            )
+
+        return None
 
     def _normalize_inputs(self, inputs: Any) -> InvokeInputs:
         """Parse user inputs into typed InvokeInputs."""
@@ -472,7 +582,7 @@ class DeepAgent(BaseAgent):
         self,
         session: Session,
     ) -> Tuple[LoopCoordinator, TaskLoopController]:
-        """Create Controller infrastructure for a task loop.
+        """Create or reuse Controller infrastructure for a task loop.
 
         Sets instance attributes and returns the key objects
         needed by the loop body.
@@ -483,6 +593,32 @@ class DeepAgent(BaseAgent):
         Returns:
             (coordinator, controller)
         """
+        session_id = session.get_session_id()
+
+        # Reuse existing controller if session_id matches
+        if (
+            self._loop_controller is not None
+            and self._bound_session_id == session_id
+        ):
+            # Reuse: only reset coordinator
+            coordinator = self._loop_coordinator
+            if coordinator is None:
+                coordinator = LoopCoordinator(
+                    stop_condition=(
+                        self._deep_config.stop_condition
+                        if self._deep_config
+                        else None
+                    ),
+                )
+                self._loop_coordinator = coordinator
+            coordinator.reset()
+            return coordinator, self._loop_controller
+
+        # New controller (first time or session switch)
+        if self._loop_controller is not None:
+            # Session switch but old controller still exists: force cleanup
+            await self._force_cleanup_controller()
+
         coordinator = LoopCoordinator(
             stop_condition=(
                 self._deep_config.stop_condition
@@ -504,17 +640,31 @@ class DeepAgent(BaseAgent):
             ability_manager=self.ability_manager,
             context_engine=context_engine,
         )
+
+        from openjiuwen.deepagents.task_loop.session_spawn_executor import (
+            SESSION_SPAWN_TASK_TYPE,
+            build_session_spawn_executor,
+        )
+        # Register DEEP_TASK_TYPE and SESSION_SPAWN_TASK_TYPE executors
         controller.add_task_executor(
             DEEP_TASK_TYPE, build_deep_executor(self),
+        ).add_task_executor(
+            SESSION_SPAWN_TASK_TYPE, build_session_spawn_executor(self)
         )
 
         handler = TaskLoopEventHandler(self)
         handler.interaction_queues = queues
         controller.set_event_handler(handler)
 
+        # Inject SessionToolkit to Handler
+        toolkit = self._session_toolkit
+        if toolkit is not None and hasattr(handler, "set_session_toolkit"):
+            handler.set_session_toolkit(toolkit)
+
         self._loop_coordinator = coordinator
         self._loop_controller = controller
         self._loop_session = session
+
         return coordinator, controller
 
     def _has_remaining_tasks(self, session: Session) -> bool:
@@ -525,6 +675,41 @@ class DeepAgent(BaseAgent):
             return False
         return st.task_plan.get_next_task() is not None
 
+    def _has_pending_session_spawn(self) -> bool:
+        """Check if there are pending SESSION_SPAWN tasks.
+
+        Returns:
+            True if there are SUBMITTED/WORKING SESSION_SPAWN tasks.
+        """
+        if self._session_toolkit is None:
+            return False
+
+        pending_tasks = self._session_toolkit.list_all()
+        return any(r.status == "running" for r in pending_tasks)
+
+    async def _force_cleanup_controller(self) -> None:
+        """Force cleanup of existing controller (on session switch)."""
+        if self._loop_controller is None:
+            return
+
+        self._log_loop("forcing controller cleanup due to session switch")
+
+        if self._loop_session is not None:
+            try:
+                await self._loop_controller.unbind_session(self._loop_session)
+            except Exception as e:
+                logger.warning(f"unbind_session failed during force cleanup: {e}")
+
+        try:
+            await self._loop_controller.stop()
+        except Exception as e:
+            logger.warning(f"controller.stop() failed during force cleanup: {e}")
+
+        self._loop_coordinator = None
+        self._loop_controller = None
+        self._loop_session = None
+        self._bound_session_id = None
+
     @staticmethod
     def _log_loop(msg: str, detail: str = "") -> None:
         """Log an outer-loop event respecting sensitivity."""
@@ -532,6 +717,40 @@ class DeepAgent(BaseAgent):
             logger.info(f"[OuterLoop] {msg}")
         else:
             logger.info(f"[OuterLoop] {msg}{detail}")
+
+    async def schedule_auto_invoke_on_spawn_done(
+        self,
+        delay: float = 0.5,
+    ) -> None:
+        """Schedule delayed auto-invoke after SESSION_SPAWN completes (no active invoke).
+
+        Called by TaskLoopEventHandler. Waits ``delay`` to merge concurrent completions,
+        then invokes with a summary prompt if still idle and ``_loop_session`` is set.
+
+        Args:
+            delay: Delay in seconds to merge multiple concurrent spawn completions.
+        """
+        await asyncio.sleep(delay)
+        self._auto_invoke_scheduled = False
+
+        if self._invoke_active:
+            return
+
+        if self._loop_session is None:
+            logger.warning("[AutoInvoke] session was cleaned up during delay, skipping")
+            return
+
+        language = self._deep_config.language if self._deep_config else "cn"
+        query = ("后台子任务已完成，请向用户汇总最新结果。"
+            if language == "cn"
+            else "The background task has been completed, please summarize the latest results for the user.")
+        try:
+            await self.invoke(
+                {"query": query},
+                session=self._loop_session,
+            )
+        except Exception as e:
+            logger.error(f"[AutoInvoke] auto-invoke failed: {e}", exc_info=True)
 
     async def _run_task_loop(
         self, ctx: AgentCallbackContext, session: Session,
@@ -555,7 +774,12 @@ class DeepAgent(BaseAgent):
         coordinator, controller = await self._setup_task_loop(session)
         timeout = self._deep_config.completion_timeout if self._deep_config else 600.0
 
-        await controller.bind_session(session)
+        # Only bind if session_id changed
+        session_id = session.get_session_id()
+        if self._bound_session_id != session_id:
+            await controller.bind_session(session)
+            self._bound_session_id = session_id
+
         try:
             current_query = modified.query
             outer_round = 0
@@ -598,11 +822,19 @@ class DeepAgent(BaseAgent):
 
                 current_query = modified.query
         finally:
-            await controller.unbind_session(session)
-            await controller.stop()
-            self._loop_coordinator = None
-            self._loop_controller = None
-            self._loop_session = None
+            # Check if there are pending SESSION_SPAWN tasks
+            if self._has_pending_session_spawn():
+                # Keep controller alive for background tasks
+                self._log_loop("pending SESSION_SPAWN tasks, controller kept alive")
+            else:
+                # No background tasks: full cleanup
+                await controller.unbind_session(session)
+                await controller.stop()
+                self._loop_coordinator = None
+                self._loop_controller = None
+                self._loop_session = None
+                self._bound_session_id = None
+                self._log_loop("all tasks completed, controller cleaned up")
 
     async def _run_task_loop_invoke(
         self,
@@ -669,8 +901,6 @@ class DeepAgent(BaseAgent):
                     "task-loop mode."
                 ),
             )
-
-        import asyncio
 
         async def _stream_process() -> None:
             try:
@@ -751,20 +981,24 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
 
-        result: Dict[str, Any]
-        async with ctx.lifecycle(
-            AgentCallbackEvent.BEFORE_INVOKE,
-            AgentCallbackEvent.AFTER_INVOKE,
-        ):
-            if self._deep_config is not None and self._deep_config.enable_task_loop:
-                result = await self._run_task_loop_invoke(ctx, session)
-            else:
-                result = await self._run_single_round_invoke(ctx, session)
-            invoke_inputs.result = result
+        self._invoke_active = True
+        try:
+            result: Dict[str, Any]
+            async with ctx.lifecycle(
+                AgentCallbackEvent.BEFORE_INVOKE,
+                AgentCallbackEvent.AFTER_INVOKE,
+            ):
+                if self._deep_config is not None and self._deep_config.enable_task_loop:
+                    result = await self._run_task_loop_invoke(ctx, session)
+                else:
+                    result = await self._run_single_round_invoke(ctx, session)
+                invoke_inputs.result = result
 
-        save_state(ctx)
-        clear_state(ctx)
-        return result
+            save_state(ctx)
+            clear_state(ctx)
+            return result
+        finally:
+            self._invoke_active = False
 
     async def stream(  # type: ignore[override]
         self,
@@ -784,19 +1018,23 @@ class DeepAgent(BaseAgent):
         invoke_inputs = self._normalize_inputs(inputs)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
 
-        async with ctx.lifecycle(
-            AgentCallbackEvent.BEFORE_INVOKE,
-            AgentCallbackEvent.AFTER_INVOKE,
-        ):
-            if self._deep_config is not None and self._deep_config.enable_task_loop:
-                async for chunk in self._run_task_loop_stream(ctx, session, stream_modes):
-                    yield chunk
-            else:
-                async for chunk in self._run_single_round_stream(ctx, session, stream_modes):
-                    yield chunk
+        self._invoke_active = True
+        try:
+            async with ctx.lifecycle(
+                AgentCallbackEvent.BEFORE_INVOKE,
+                AgentCallbackEvent.AFTER_INVOKE,
+            ):
+                if self._deep_config is not None and self._deep_config.enable_task_loop:
+                    async for chunk in self._run_task_loop_stream(ctx, session, stream_modes):
+                        yield chunk
+                else:
+                    async for chunk in self._run_single_round_stream(ctx, session, stream_modes):
+                        yield chunk
 
-        save_state(ctx)
-        clear_state(ctx)
+            save_state(ctx)
+            clear_state(ctx)
+        finally:
+            self._invoke_active = False
 
     async def follow_up(
         self,

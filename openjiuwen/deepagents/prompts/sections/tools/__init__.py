@@ -52,6 +52,11 @@ from openjiuwen.deepagents.prompts.sections.tools.load_tools import (
 from openjiuwen.deepagents.prompts.sections.tools.search_tools import (
     SearchToolsMetadataProvider,
 )
+from openjiuwen.deepagents.prompts.sections.tools.session_tools import (
+    SessionsListMetadataProvider,
+    SessionsSpawnMetadataProvider,
+    SessionsCancelMetadataProvider,
+)
 from openjiuwen.deepagents.prompts.sections.tools.todo import (
     TodoCreateMetadataProvider,
     TodoListMetadataProvider,
@@ -93,6 +98,9 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     ListSkillMetadataProvider(),
     SearchToolsMetadataProvider(),
     LoadToolsMetadataProvider(),
+    SessionsListMetadataProvider(),
+    SessionsSpawnMetadataProvider(),
+    SessionsCancelMetadataProvider(),
     TodoCreateMetadataProvider(),
     TodoListMetadataProvider(),
     TodoModifyMetadataProvider(),
