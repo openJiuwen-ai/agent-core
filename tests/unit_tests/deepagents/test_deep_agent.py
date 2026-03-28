@@ -22,7 +22,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.deepagents import create_deep_agent
+from openjiuwen.deepagents import create_deep_agent, Workspace
 from openjiuwen.deepagents.deep_agent import DeepAgent
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
@@ -703,3 +703,20 @@ def test_create_code_agent_accepts_explicit_mcps() -> None:
 
     assert agent.deep_config is not None
     assert agent.deep_config.mcps == [mcp_config]
+
+
+@pytest.mark.asyncio
+async def test_create_deep_agent_with_restrict_to_work_dir_enabled() -> None:
+    """Test that restrict_to_work_dir=True uses workspace root_path."""
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        workspace=Workspace(root_path="./"),
+        restrict_to_work_dir=False,
+    )
+
+    assert agent.deep_config is not None
+    assert agent.deep_config.sys_operation is not None
+
+    sys_op = Runner.resource_mgr.get_sys_operation(f"{agent.card.name}_{agent.card.id}")
+    assert sys_op is not None
+    assert sys_op._run_config.work_dir != "./"

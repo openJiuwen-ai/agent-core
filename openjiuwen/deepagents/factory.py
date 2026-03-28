@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
@@ -96,6 +97,7 @@ def create_deep_agent(
     vision_model_config: Optional[VisionModelConfig] = None,
     audio_model_config: Optional[AudioModelConfig] = None,
     enable_task_planning: bool = False,
+    restrict_to_work_dir: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -130,6 +132,8 @@ def create_deep_agent(
             configuration injected into all audio
             tools registered by DeepAgent rails.
         enable_task_planning: Enable task_planning_rail.
+        restrict_to_work_dir: If True, restrict file access to workspace directory.
+            If False, allow access to any path including system root
         **config_kwargs: Extra fields forwarded to
             DeepAgentConfig.
 
@@ -156,7 +160,9 @@ def create_deep_agent(
         sysop_card = SysOperationCard(
                 id=f"{card.name}_{card.id}",
                 mode=OperationMode.LOCAL,
-                work_config=LocalWorkConfig(work_dir=workspace_obj.root_path),
+                work_config=LocalWorkConfig(
+                    work_dir=workspace_obj.root_path if restrict_to_work_dir else Path.cwd().anchor
+                ),
             )
         add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
         if add_result.is_err():

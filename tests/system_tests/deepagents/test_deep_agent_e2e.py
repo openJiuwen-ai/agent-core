@@ -420,7 +420,8 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
             enable_task_loop=False,
             max_iterations=20,
             sys_operation=sys_oper,
-            enable_task_planning=True
+            enable_task_planning=True,
+            restrict_to_work_dir=False,
         )
 
         query = "我想测试任务规划能力，帮我构建一个打卡系统，调用规划工具帮我模拟规划吧"
