@@ -13,6 +13,7 @@ from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import List, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -37,6 +38,13 @@ from openjiuwen.core.sys_operation import (
 from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.rails.task_planning_rail import (
     TaskPlanningRail,
+)
+from openjiuwen.deepagents.rails.heartbeat_rail import (
+    HeartbeatRail,
+)
+from openjiuwen.core.single_agent.rail.base import (
+    RunKind,
+    HeartbeatReason,
 )
 from openjiuwen.deepagents.schema.config import SubAgentConfig
 from openjiuwen.deepagents.subagents import create_code_agent, create_research_agent
@@ -474,6 +482,44 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(result, dict)
         self.assertEqual(result.get("result_type"), "answer")
+
+    @pytest.mark.asyncio
+    async def test_deep_agent_heartbeat(self):
+        """测试 heartbeat 功能：通过 run 参数传递 heartbeat 上下文"""
+        sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
+        heartbeat_rail = HeartbeatRail()
+        mock_llm = MockLLMModel()
+
+        mock_llm.set_responses([
+            create_text_response("HEARTBEAT_OK")
+        ])
+
+        agent = create_deep_agent(
+            model=self._create_model(),
+            rails=[heartbeat_rail],
+            enable_task_loop=False,
+            max_iterations=5,
+            sys_operation=sys_oper
+        )
+
+        heartbeat_inputs = {
+            "query": "heartbeat check",
+            "run": {
+                "kind": "heartbeat",
+                "context": {
+                    "reason": "interval",
+                    "session_id": "test-session",
+                    "context_mode": "lightweight"
+                }
+            }
+        }
+
+        with patch.object(agent._react_agent, '_get_llm', return_value=mock_llm):
+            result = await Runner.run_agent(agent, heartbeat_inputs)
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("result_type"), "answer")
+        self.assertIn("output", result)
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")

@@ -37,6 +37,27 @@ if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import BaseAgent
 
 
+class RunKind(Enum):
+    """Run kind enumeration for different execution modes."""
+    NORMAL = "normal"
+    HEARTBEAT = "heartbeat"
+
+
+class HeartbeatReason(Enum):
+    """Heartbeat trigger reason."""
+    INTERVAL = "interval"
+    MANUAL = "manual"
+
+
+@dataclass
+class RunContext:
+    """Structured runtime context for heartbeat."""
+    reason: Optional[HeartbeatReason] = None
+    session_id: Optional[str] = None
+    context_mode: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
 # ================================================================
 # Typed Event Inputs
 # ================================================================
@@ -51,10 +72,24 @@ class InvokeInputs:
         query: User query string
         conversation_id: Optional conversation/session ID
         result: Agent invoke result (filled after invoke)
+        run_kind: Run kind (normal or heartbeat)
+        run_context: Structured runtime context
     """
     query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    run_kind: Optional[RunKind] = None
+    run_context: Optional[RunContext] = None
+
+    def is_heartbeat(self) -> bool:
+        """Check if this is a heartbeat run."""
+        return self.run_kind == RunKind.HEARTBEAT
+
+    def is_lightweight_context(self) -> bool:
+        """Check if lightweight context mode is enabled."""
+        if self.run_context and self.run_context.context_mode:
+            return self.run_context.context_mode == "lightweight"
+        return False
 
 
 @dataclass

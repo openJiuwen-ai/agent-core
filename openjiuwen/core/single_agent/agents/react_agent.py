@@ -1095,6 +1095,8 @@ class ReActAgent(BaseAgent):
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
+            ctx.extra["run_kind"] = inputs.get("run_kind", "")
+            ctx.extra["run_context"] = inputs.get("run_context", "")
 
         try:
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):

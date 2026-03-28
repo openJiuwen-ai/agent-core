@@ -48,6 +48,8 @@ class TaskLoopController(Controller):
         session: Session,
         query: str,
         is_follow_up: bool = False,
+        run_kind: Any = None,
+        run_context: Any = None,
     ) -> None:
         """Prepare a round, build InputEvent, publish it.
 
@@ -59,6 +61,8 @@ class TaskLoopController(Controller):
             query: User query text.
             is_follow_up: Whether this round is a
                 follow-up continuation.
+            run_kind: Run kind for heartbeat support.
+            run_context: Run context for heartbeat support.
         """
         handler = self._event_handler
         round_id = handler.prepare_round()
@@ -68,6 +72,10 @@ class TaskLoopController(Controller):
         event.metadata["_handler_round_id"] = round_id
         if is_follow_up:
             event.metadata["is_follow_up"] = True
+        if run_kind is not None:
+            event.metadata["run_kind"] = run_kind
+        if run_context is not None:
+            event.metadata["run_context"] = run_context
 
         await self.publish_event_async(session, event)
 

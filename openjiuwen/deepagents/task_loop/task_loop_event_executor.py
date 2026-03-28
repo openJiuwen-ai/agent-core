@@ -116,6 +116,13 @@ class TaskLoopEventExecutor(TaskExecutor):
         if cid:
             effective["conversation_id"] = cid
 
+        if tasks and tasks[0].metadata:
+            metadata = tasks[0].metadata
+            if metadata.get("run_kind") is not None:
+                effective["run_kind"] = metadata.get("run_kind")
+            if metadata.get("run_context") is not None:
+                effective["run_context"] = metadata.get("run_context")
+
         # Inject pending steering messages into query
         handler = agent.event_handler
         if handler is not None:

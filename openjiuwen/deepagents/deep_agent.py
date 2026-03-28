@@ -22,6 +22,8 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
     AgentRail,
     InvokeInputs,
+    RunKind,
+    RunContext,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents.rails import DeepAgentRail
@@ -356,16 +358,32 @@ class DeepAgent(BaseAgent):
         if isinstance(inputs, dict):
             query = inputs.get("query", "")
             conversation_id = inputs.get("conversation_id")
+            run = inputs.get("run", {})
+            run_kind = None
+            run_context = None
+            if run:
+                kind = run.get("kind", "normal")
+                run_kind = RunKind(kind)
+                context_data = run.get("context")
+                if context_data:
+                    run_context = RunContext(**context_data)
         elif isinstance(inputs, str):
             query = inputs
             conversation_id = None
+            run_kind = None
+            run_context = None
         else:
             raise build_error(
                 StatusCode.DEEPAGENT_INPUT_PARAM_ERROR,
                 error_msg="Input must be dict with 'query' or str.",
             )
 
-        return InvokeInputs(query=query, conversation_id=conversation_id)
+        return InvokeInputs(
+            query=query,
+            conversation_id=conversation_id,
+            run_kind=run_kind,
+            run_context=run_context
+        )
 
     @staticmethod
     def _to_effective_inputs(invoke_inputs: InvokeInputs) -> Dict[str, Any]:
@@ -373,6 +391,10 @@ class DeepAgent(BaseAgent):
         effective_inputs: Dict[str, Any] = {"query": invoke_inputs.query}
         if invoke_inputs.conversation_id is not None:
             effective_inputs["conversation_id"] = invoke_inputs.conversation_id
+        if invoke_inputs.run_kind is not None:
+            effective_inputs["run_kind"] = invoke_inputs.run_kind
+        if invoke_inputs.run_context is not None:
+            effective_inputs["run_context"] = invoke_inputs.run_context
         return effective_inputs
 
     def add_rail(self, rail: AgentRail) -> "DeepAgent":
@@ -551,6 +573,8 @@ class DeepAgent(BaseAgent):
 
                 await controller.submit_round(
                     session, current_query, is_follow_up=bool(follow_ups),
+                    run_kind=modified.run_kind,
+                    run_context=modified.run_context,
                 )
                 result = await controller.wait_round_completion(timeout=timeout)
 

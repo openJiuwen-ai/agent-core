@@ -224,6 +224,17 @@ class TaskLoopEventHandler(EventHandler):
             if event.metadata
             else None
         )
+        run_kind = (
+            event.metadata.get("run_kind", None)
+            if event.metadata
+            else None
+        )
+
+        run_context = (
+            event.metadata.get("run_context", None)
+            if event.metadata
+            else None
+        )
 
         coordinator = agent.loop_coordinator
         if coordinator is None:
@@ -274,7 +285,9 @@ class TaskLoopEventHandler(EventHandler):
         # (add_task does model_copy, so post-add writes
         # would be lost).
         task_metadata = {
-            "_handler_round_id": current_round
+            "_handler_round_id": current_round,
+            "run_kind": run_kind,
+            "run_context": run_context,
         }
 
         try:
