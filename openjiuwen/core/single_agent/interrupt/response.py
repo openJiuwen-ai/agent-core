@@ -10,6 +10,7 @@ class InterruptRequest(BaseModel):
     """Request for user interruption/confirmation."""
     message: str = ""
     payload_schema: dict = Field(default_factory=dict)
+    auto_confirm_key: str = ""
 
 
 class ToolCallInterruptRequest(InterruptRequest):
@@ -34,6 +35,7 @@ class ToolCallInterruptRequest(InterruptRequest):
         return cls(
             message=request.message,
             payload_schema=request.payload_schema,
+            auto_confirm_key=request.auto_confirm_key,
             tool_name=tool_call.name if hasattr(tool_call, 'name') else str(tool_call),
             tool_call_id=tool_call.id if hasattr(tool_call, 'id') else "",
             tool_args=tool_call.arguments if hasattr(tool_call, 'arguments') else None,

@@ -13,12 +13,11 @@ from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY
+from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY, INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
 )
-
 
 UserInput = Any
 
@@ -102,7 +101,13 @@ class BaseInterruptRail(AgentRail):
         tool_call_id = self._resolve_tool_call_id(tool_call)
         user_input = self._get_user_input(ctx, tool_call_id)
 
-        decision = await self.resolve_interrupt(ctx, tool_call, user_input)
+        auto_confirm_config = None
+        if ctx.session:
+            auto_confirm_config = ctx.session.get_state(INTERRUPT_AUTO_CONFIRM_KEY)
+            if not isinstance(auto_confirm_config, dict):
+                auto_confirm_config = {}
+
+        decision = await self.resolve_interrupt(ctx, tool_call, user_input, auto_confirm_config)
 
         self._apply_decision(ctx, tool_call, tool_name, decision)
 
@@ -111,6 +116,7 @@ class BaseInterruptRail(AgentRail):
             ctx: AgentCallbackContext,
             tool_call: Optional[ToolCall],
             user_input: Optional[UserInput],
+            auto_confirm_config: Optional[dict] = None,
     ) -> InterruptDecision:
         """Override to handle resume and return decision.
 
@@ -118,6 +124,7 @@ class BaseInterruptRail(AgentRail):
             ctx: Agent callback context
             tool_call: The tool call being intercepted
             user_input: User input from resume (None if first time)
+            auto_confirm_config: Current auto-confirm config from session
 
         Returns:
             InterruptDecision: ApproveResult, RejectResult, or InterruptResponse

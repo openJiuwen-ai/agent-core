@@ -2,11 +2,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from __future__ import annotations
+
 from typing import Any, Iterable, Optional
+
 from pydantic import BaseModel, Field
+
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.deepagents.rails.interrupt.interrupt_base import BaseInterruptRail, InterruptDecision
 
@@ -43,21 +45,26 @@ class ConfirmInterruptRail(BaseInterruptRail):
         super().__init__(tool_names=tool_names)
         self.request = ConfirmRequest()
 
+    def _get_auto_confirm_key(self, tool_call: ToolCall) -> str:
+        return tool_call.name
+
     async def resolve_interrupt(
             self,
             ctx: AgentCallbackContext,
             tool_call: Optional[ToolCall],
             user_input: Optional[Any],
+            auto_confirm_config: Optional[dict] = None,
     ) -> InterruptDecision:
-        tool_name = tool_call.name if tool_call is not None else ""
+        auto_confirm_key = self._get_auto_confirm_key(tool_call)
 
         # Check auto-confirm on first call (user_input is None)
         if user_input is None:
-            if self._is_auto_confirmed(ctx, tool_name):
+            if self._is_auto_confirmed(auto_confirm_config, auto_confirm_key):
                 return self.approve()
             return self.interrupt(InterruptRequest(
                 message=self.request.message,
                 payload_schema=self.request.payload_schema,
+                auto_confirm_key=auto_confirm_key,
             ))
 
         try:
@@ -69,33 +76,23 @@ class ConfirmInterruptRail(BaseInterruptRail):
                 return self.interrupt(InterruptRequest(
                     message=self.request.message,
                     payload_schema=self.request.payload_schema,
+                    auto_confirm_key=auto_confirm_key,
                 ))
         except Exception:
             return self.interrupt(InterruptRequest(
                 message=self.request.message,
                 payload_schema=self.request.payload_schema,
+                auto_confirm_key=auto_confirm_key,
             ))
-
-        if payload.auto_confirm:
-            if ctx.session is not None and tool_name:
-                config = ctx.session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) or {}
-                config[tool_name] = True
-                ctx.session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: config})
 
         if payload.approved:
             return self.approve()
 
-        return self.reject(tool_result=payload.feedback or "User feedback: rejected the action")
+        return self.reject(tool_result=payload.feedback or "User feedback: rejected\n action")
 
     @staticmethod
-    def _is_auto_confirmed(ctx: AgentCallbackContext, tool_name: str) -> bool:
-        """Check if tool is auto-confirmed in session state."""
-        session = ctx.session
-        if session is None:
-            return False
-
-        config = session.get_state(INTERRUPT_AUTO_CONFIRM_KEY)
+    def _is_auto_confirmed(config: Optional[dict], key: str) -> bool:
+        """Check if key is auto-confirmed in config."""
         if config is None:
             return False
-
-        return config.get(tool_name, False)
+        return config.get(key, False)

@@ -60,7 +60,7 @@ class ToolInterruptHandler:
             original_query: str = "",
     ) -> tuple[Optional[ToolInterruptionState], list]:
 
-        interrupted_tools, payloads, tool_name_mapping = self._collect_interrupts(
+        interrupted_tools, payloads, auto_confirm_mapping = self._collect_interrupts(
             results, tool_calls
         )
 
@@ -72,7 +72,7 @@ class ToolInterruptHandler:
             iteration=iteration,
             interrupted_tools=interrupted_tools,
             original_query=original_query,
-            tool_name_mapping=tool_name_mapping,
+            auto_confirm_mapping=auto_confirm_mapping,
         )
 
         return state, payloads
@@ -141,7 +141,7 @@ class ToolInterruptHandler:
             tool_call: ToolCall,
             interrupted_tools: Dict[str, ToolInterruptEntry],
             payloads: list,
-            tool_name_mapping: Dict[str, str],
+            auto_confirm_mapping: Dict[str, str],
     ) -> None:
         tc = tool_result.tool_call or tool_call
         outer_id = tc.id
@@ -158,7 +158,7 @@ class ToolInterruptHandler:
         )
         payloads.append((inner_id, payload))
 
-        tool_name_mapping[inner_id] = tc.name
+        auto_confirm_mapping[inner_id] = tool_result.request.auto_confirm_key
 
     @staticmethod
     def _handle_sub_agent_interrupt(
@@ -166,7 +166,7 @@ class ToolInterruptHandler:
             tool_call: ToolCall,
             interrupted_tools: Dict[str, ToolInterruptEntry],
             payloads: list,
-            tool_name_mapping: Dict[str, str],
+            auto_confirm_mapping: Dict[str, str],
     ) -> None:
         outer_id = tool_call.id
 
@@ -191,8 +191,8 @@ class ToolInterruptHandler:
             if isinstance(payload_obj, ToolCallInterruptRequest):
                 interrupt_requests[inner_id] = payload_obj
                 payloads.append((inner_id, output))
-                if payload_obj.tool_name:
-                    tool_name_mapping[inner_id] = payload_obj.tool_name
+                if payload_obj.auto_confirm_key:
+                    auto_confirm_mapping[inner_id] = payload_obj.auto_confirm_key
 
         if outer_id not in interrupted_tools:
             interrupted_tools[outer_id] = ToolInterruptEntry(
@@ -211,25 +211,25 @@ class ToolInterruptHandler:
         Returns:
             interrupted_tools: outer_id -> ToolInterruptEntry
             payloads: List[Tuple[inner_id, payload]]
-            tool_name_mapping: inner_id -> tool_name
+            auto_confirm_mapping: inner_id -> auto_confirm_key
         """
         interrupted_tools: Dict[str, ToolInterruptEntry] = {}
         payloads: list = []
-        tool_name_mapping: Dict[str, str] = {}
+        auto_confirm_mapping: Dict[str, str] = {}
 
         for i, (tool_result, tool_msg) in enumerate(results):
             tool_call = tool_calls[i]
 
             if isinstance(tool_result, ToolInterruptException):
                 self._handle_tool_interrupt_exception(
-                    tool_result, tool_call, interrupted_tools, payloads, tool_name_mapping
+                    tool_result, tool_call, interrupted_tools, payloads, auto_confirm_mapping
                 )
             elif self._is_sub_agent_interrupt(tool_result):
                 self._handle_sub_agent_interrupt(
-                    tool_result, tool_call, interrupted_tools, payloads, tool_name_mapping
+                    tool_result, tool_call, interrupted_tools, payloads, auto_confirm_mapping
                 )
 
-        return interrupted_tools, payloads, tool_name_mapping
+        return interrupted_tools, payloads, auto_confirm_mapping
 
     @staticmethod
     def build_interrupt_result(
@@ -317,13 +317,15 @@ class ToolInterruptHandler:
         resume_iteration = state.iteration
         logger.info(f"Resuming tool interrupt from iteration {resume_iteration + 1}")
 
+        self._save_auto_confirm_from_state(state, user_input, session)
+
         ctx.extra[RESUME_USER_INPUT_KEY] = user_input
 
         tools_to_execute = []
         for outer_id, entry in state.interrupted_tools.items():
             tc = copy.deepcopy(entry.tool_call)
             if entry.is_sub_agent:
-                tc = self._build_sub_agent_resume_tool_call(tc, user_input, session, state)
+                tc = self._build_sub_agent_resume_tool_call(tc, user_input)
             tools_to_execute.append(tc)
 
         if tools_to_execute:
@@ -334,11 +336,12 @@ class ToolInterruptHandler:
 
         ctx.extra.pop(RESUME_USER_INPUT_KEY, None)
 
-        new_interrupted_tools, sub_agent_outputs, _ = self._collect_interrupts(
+        new_interrupted_tools, sub_agent_outputs, auto_confirm_mapping = self._collect_interrupts(
             results, tools_to_execute
         )
 
         state.interrupted_tools = new_interrupted_tools
+        state.auto_confirm_mapping = auto_confirm_mapping
 
         if new_interrupted_tools:
             return await self.commit_interrupt(state, context, session, invoke_inputs, sub_agent_outputs)
@@ -347,31 +350,39 @@ class ToolInterruptHandler:
         return None
 
     @staticmethod
-    def _build_sub_agent_resume_tool_call(
-            tool_call: ToolCall,
-            user_input: UserInput,
-            session: Optional[Session] = None,
-            state: Optional[ToolInterruptionState] = None,
-    ) -> ToolCall:
-        """Build tool call for sub-agent resume with proper user input.
-        
-        Also propagates auto_confirm state to sub-agent for multi-layer scenarios.
-        """
+    def _save_auto_confirm_from_state(
+            state: ToolInterruptionState,
+            user_input: Any,
+            session: Optional[Session],
+    ) -> None:
+        """Save auto-confirm config from user input to session state."""
+        if session is None:
+            return
+
+        if not isinstance(user_input, InteractiveInput):
+            return
+
+        config = session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) or {}
+        if not isinstance(config, dict):
+            config = {}
+
+        for inner_id, user_value in user_input.user_inputs.items():
+            if isinstance(user_value, dict) and user_value.get("auto_confirm"):
+                auto_confirm_key = state.auto_confirm_mapping.get(inner_id)
+                if auto_confirm_key:
+                    config[auto_confirm_key] = True
+
+        session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: config})
+
+    @staticmethod
+    def _build_sub_agent_resume_tool_call(tool_call: ToolCall, user_input: Any) -> ToolCall:
+        """Build tool call for sub-agent resume with proper user input."""
         try:
             args = json.loads(tool_call.arguments) if isinstance(tool_call.arguments, str) else tool_call.arguments
         except (json.JSONDecodeError, TypeError):
             args = {}
 
         args["query"] = user_input
-
-        if isinstance(user_input, InteractiveInput) and state is not None:
-            for inner_id, tool_name in state.tool_name_mapping.items():
-                if inner_id in user_input.user_inputs:
-                    user_value = user_input.user_inputs[inner_id]
-                    if isinstance(user_value, dict) and user_value.get("auto_confirm"):
-                        if session is not None:
-                            session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: {tool_name: True}})
-                        break
 
         tool_call.arguments = args
         return tool_call

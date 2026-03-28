@@ -33,4 +33,4 @@ class ToolInterruptionState(BaseInterruptionState):
     """Tool interruption state for resume support.
     """
     interrupted_tools: Dict[str, ToolInterruptEntry] = field(default_factory=dict)
-    tool_name_mapping: Dict[str, str] = field(default_factory=dict)
+    auto_confirm_mapping: Dict[str, str] = field(default_factory=dict)

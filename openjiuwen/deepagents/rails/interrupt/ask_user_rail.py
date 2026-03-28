@@ -92,6 +92,7 @@ class AskUserRail(BaseInterruptRail):
             ctx: AgentCallbackContext,
             tool_call: Optional[ToolCall],
             user_input: Optional[Any],
+            auto_confirm_config: Optional[dict] = None,
     ) -> InterruptDecision:
         if user_input is None:
             return self.interrupt(self._build_ask_request(tool_call))
