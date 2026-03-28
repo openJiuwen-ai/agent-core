@@ -10,10 +10,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
+from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
 from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import (
-    AuthHeaderAndQueryProvider,
     StreamableHttpClient,
 )
+
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 
 

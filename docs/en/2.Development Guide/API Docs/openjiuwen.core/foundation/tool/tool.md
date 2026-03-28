@@ -105,6 +105,10 @@ This is an abstract method that supports partial result returns for long-running
 
 **AsyncIterator[Output]**, an iterator of incremental results during tool execution.
 
+## Auth
+
+Tools are registered with SSL authentication and parameter authentication by default, and support custom registration of authentication methods. For details, please refer to [auth.md](./auth/auth.md).
+
 ## class LocalFunction
 
 ```python

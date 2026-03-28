@@ -166,6 +166,7 @@ class ToolCallEvents(EventBase):
         TOOL_INVOKE_OUTPUT: Fired after Tool.invoke with the result
         TOOL_STREAM_INPUT: Fired before Tool.stream with call arguments
         TOOL_STREAM_OUTPUT: Fired for each item yielded by Tool.stream
+        TOOL_AUTH: Tool authentication event for configuring authentication
     """
     TOOL_CALL_STARTED = EventBase.get_event("tool_call_started")
     TOOL_CALL_FINISHED = EventBase.get_event("tool_call_finished")
@@ -177,6 +178,7 @@ class ToolCallEvents(EventBase):
     TOOL_INVOKE_OUTPUT = EventBase.get_event("tool_invoke_output")
     TOOL_STREAM_INPUT = EventBase.get_event("tool_stream_input")
     TOOL_STREAM_OUTPUT = EventBase.get_event("tool_stream_output")
+    TOOL_AUTH = EventBase.get_event("tool_auth")
 
 
 class ContextEvents(EventBase):

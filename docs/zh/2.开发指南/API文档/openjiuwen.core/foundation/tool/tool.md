@@ -105,6 +105,10 @@ async def stream(inputs: Input, **kwargs) -> AsyncIterator[Output]
 
 **AsyncIterator[Output]**，工具执行过程中的增量结果迭代器。
 
+## Auth
+
+tool默认注册了ssl认证和参数认证，并支持自定义注册认证方式，详情请参考[auth.md](./auth/auth.md)。
+
 ## class LocalFunction
 
 ```python

@@ -2,7 +2,10 @@
 
 `openjiuwen.core.foundation.tool` is the tool module of openJiuwen, supporting conversion of developer-defined tools into tools that can be recognized and invoked by LLMs.
 
-**Detailed API Documentation**: [tool.md](./tool/tool.md)
+**Detailed API Documentation**:
+
+[tool.md](./tool/tool.md)
+[auth.md](./tool/auth/auth.md)
 
 **Classes**:
 
@@ -21,6 +24,14 @@
 | **StdioClient** | Standard input/output MCP client. |
 | **SseClient** | SSE MCP client. |
 | **PlaywrightClient** | Playwright MCP client. |
+| **ToolAuthConfig** | Tool authentication configuration data class. |
+| **ToolAuthResult** | Tool authentication result data class. |
+| **AuthType** | Authentication type enum. |
+| **AuthStrategy** | Authentication strategy abstract base class. |
+| **SSLAuthStrategy** | SSL authentication strategy. |
+| **HeaderQueryAuthStrategy** | Custom Header and Query parameter authentication strategy. |
+| **AuthStrategyRegistry** | Authentication strategy registry. |
+| **AuthHeaderAndQueryProvider** | Custom Header and Query parameter authentication provider. |
 
 **Functions**:
 

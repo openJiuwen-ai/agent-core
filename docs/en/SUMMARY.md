@@ -110,6 +110,8 @@
       - [foundation](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation.README.md)
         - [llm](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/llm.README.md)
         - [tool](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool.README.md)
+          - [tool](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool/tool.md)
+          - [auth](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool/auth/auth.md)
         - [prompt](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/prompt.README.md)
         - [store](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/store.README.md)
           - [store](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/store/store.md)

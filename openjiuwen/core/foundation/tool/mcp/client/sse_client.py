@@ -7,8 +7,10 @@ import httpx
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig
 from openjiuwen.core.foundation.tool.mcp.base import McpServerConfig, NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
+from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
 class SseClient(McpClient):
@@ -24,20 +26,33 @@ class SseClient(McpClient):
         self._write = None
         self._exit_stack = AsyncExitStack()
         self._is_disconnected: bool = False
-        if config.auth_headers is not None or config.auth_query_params is not None:
-            self._auth_provider = AuthHeaderAndQueryProvider(
-                auth_headers=config.auth_headers or {},
-                auth_query_params=config.auth_query_params or {},
-            )
-            logger.info("Using custom header and query authorization for SSE client")
-        else:
-            self._auth_provider = None
+        self._auth_headers = config.auth_headers
+        self._auth_query_params = config.auth_query_params
+        self._server_id = config.server_id
+        self._auth_provider = None
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
         try:
+            from openjiuwen.core.foundation.tool.auth.auth_callback import AuthType
+            from openjiuwen.core.runner import Runner
+            framework = Runner.callback_framework
+            auth_result = await framework.trigger(
+                ToolCallEvents.TOOL_AUTH,
+                auth_config=ToolAuthConfig(
+                    auth_type=AuthType.HEADER_AND_QUERY,
+                    config={
+                        "auth_headers": self._auth_headers,
+                        "auth_query_params": self._auth_query_params,
+                    },
+                    tool_type=self._name,
+                    tool_id=self._server_id
+                ),
+            )
+            self._auth_provider = next(item for item in auth_result
+                                       if item is not None).auth_data.get("auth_provider")
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
             self._client = sse_client(self._server_path, timeout=actual_timeout, auth=self._auth_provider)
             self._read, self._write = await self._exit_stack.enter_async_context(self._client)
@@ -122,22 +137,3 @@ class SseClient(McpClient):
                 return tool
         logger.warning(f"Tool '{tool_name}' not found via SSE")
         return None
-
-
-class AuthHeaderAndQueryProvider(httpx.Auth):
-    def __init__(self, auth_headers: Dict[str, str], auth_query_params: Dict[str, str]):
-        self.headers = auth_headers
-        self.query_params = auth_query_params
-
-    async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
-        # Add custom headers
-        if self.headers:
-            for key, value in self.headers.items():
-                request.headers[key] = value
-
-        # Add custom query parameters
-        if self.query_params:
-            url = request.url.copy_merge_params(self.query_params)
-            request.url = url
-
-        yield request

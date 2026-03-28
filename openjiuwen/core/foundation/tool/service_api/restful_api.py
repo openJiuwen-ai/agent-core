@@ -15,6 +15,7 @@ from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig
 from openjiuwen.core.foundation.tool.base import Input, Output, ToolCard
 from openjiuwen.core.foundation.tool.service_api.api_param_mapper import APIParamLocation, APIParamMapper
 from openjiuwen.core.foundation.tool.service_api.response_parser import ParserRegistry
@@ -196,12 +197,23 @@ class RestfulApi(Tool):
         else:
             # POST, PUT, PATCH send data as JSON in request body
             request_arg["json"] = map_results.get(APIParamLocation.BODY)
-        ssl_verify, ssl_cert = SslUtils.get_ssl_config(self._RESTFUL_SSL_VERIFY, self._RESTFUL_SSL_CERT, ["false"])
-        if ssl_verify:
-            ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-        else:
-            connector = aiohttp.TCPConnector(ssl=False)
+        from openjiuwen.core.foundation.tool.auth.auth_callback import AuthType
+        from openjiuwen.core.runner import Runner
+        framework = Runner.callback_framework
+        auth_result = await framework.trigger(
+            ToolCallEvents.TOOL_AUTH,
+            auth_config=ToolAuthConfig(
+                auth_type=AuthType.SSL,
+                config={
+                    "verify_switch_env": self._RESTFUL_SSL_VERIFY,
+                    "ssl_cert_env": self._RESTFUL_SSL_CERT,
+                },
+                tool_type="restful_api",
+                tool_id=self.card.id,
+            ),
+        )
+        connector = next(item for item in auth_result
+                         if item is not None).auth_data.get("connector")
         url = self._url
         path_params = {k: str(v) for k, v in map_results.get(APIParamLocation.PATH).items()}
         if path_params:
