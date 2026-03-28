@@ -16,7 +16,13 @@ from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.deepagents.deep_agent import DeepAgent
-from openjiuwen.deepagents.rails import TaskPlanningRail, SkillUseRail, SubagentRail, ToolPromptRail
+from openjiuwen.deepagents.rails import (
+    SecurityRail,
+    SkillUseRail,
+    SubagentRail,
+    TaskPlanningRail,
+    ToolPromptRail,
+)
 from openjiuwen.deepagents.schema.config import (
     AudioModelConfig,
     DeepAgentConfig,
@@ -210,36 +216,29 @@ def create_deep_agent(
             agent.ability_manager.add(tool)
 
     # Queue rails for lazy async registration
-    task_plan_flag: bool = False
-    skill_flag: bool = False
-    subagent_flag: bool = False
-    tool_prompt_flag: bool = False
     if rails:
         for rail_inst in rails:
-            if isinstance(rail_inst, TaskPlanningRail):
-                task_plan_flag = True
-            if isinstance(rail_inst, SkillUseRail):
-                skill_flag = True
-            if isinstance(rail_inst, SubagentRail):
-                subagent_flag = True
-            if isinstance(rail_inst, ToolPromptRail):
-                tool_prompt_flag = True
             agent.add_rail(rail_inst)
 
-    if enable_task_planning and not task_plan_flag:
-        task_plan_rail = TaskPlanningRail(language=resolved_language)
-        agent.add_rail(task_plan_rail)
-    if skills and not skill_flag:
-        skills_dir: List[str] = []
-        for skill in skills:
-            skill_dir = os.path.join(str(workspace_obj.root_path), skill)
-            skills_dir.append(skill_dir)
-        skill_rail = SkillUseRail(skills_dir=skills_dir, skill_mode="all", language=resolved_language)
-        agent.add_rail(skill_rail)
-    if subagents and not subagent_flag:
-        subagent_rail = SubagentRail(language=resolved_language)
-        agent.add_rail(subagent_rail)
-    if normalized_tools and not tool_prompt_flag:
-        tool_prompt_rail = ToolPromptRail(language=resolved_language)
-        agent.add_rail(tool_prompt_rail)
+    # Auto-add default rails that the caller did not explicitly provide.
+    # Each entry: (RailClass, should_add, make_rail)
+    user_provided_rail_types = {type(r) for r in rails} if rails else set()
+
+    def _already_provided(rail_cls: type) -> bool:
+        return any(issubclass(t, rail_cls) for t in user_provided_rail_types)
+
+    def _make_skill_rail() -> SkillUseRail:
+        skills_dir = [os.path.join(str(workspace_obj.root_path), s) for s in (skills or [])]
+        return SkillUseRail(skills_dir=skills_dir, skill_mode="all", language=resolved_language)
+
+    default_rails = [
+        (SecurityRail, True, lambda: SecurityRail(language=resolved_language)),
+        (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail(language=resolved_language)),
+        (SkillUseRail, bool(skills), _make_skill_rail),
+        (SubagentRail, bool(subagents), lambda: SubagentRail(language=resolved_language)),
+        (ToolPromptRail, bool(normalized_tools), lambda: ToolPromptRail(language=resolved_language)),
+    ]
+    for rail_cls, should_add, make_rail in default_rails:
+        if should_add and not _already_provided(rail_cls):
+            agent.add_rail(make_rail())
     return agent

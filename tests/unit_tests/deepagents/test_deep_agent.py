@@ -664,6 +664,47 @@ def test_create_deep_agent_no_duplicate_skill_rail() -> None:
     assert skill_rail_count == 1, f"Expected 1 SkillUseRail, but found {skill_rail_count}"
 
 
+def test_create_deep_agent_subclass_skill_rail_not_duplicated() -> None:
+    """Subclass of SkillUseRail should suppress the default SkillUseRail fallback."""
+    from openjiuwen.deepagents.rails import SkillUseRail
+
+    class _CustomSkillRail(SkillUseRail):
+        pass
+
+    custom_rail = _CustomSkillRail(skills_dir="./", skill_mode="all")
+    skills = ["some_skill"]
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        skills=skills,
+        rails=[custom_rail],
+    )
+
+    skill_rail_count = sum(1 for r in agent._pending_rails if isinstance(r, SkillUseRail))
+    assert skill_rail_count == 1, (
+        f"Subclass should suppress default SkillUseRail, but found {skill_rail_count}"
+    )
+
+
+def test_create_deep_agent_subclass_task_planning_rail_not_duplicated() -> None:
+    """Subclass of TaskPlanningRail should suppress the default TaskPlanningRail fallback."""
+    from openjiuwen.deepagents.rails import TaskPlanningRail
+
+    class _CustomTaskPlanningRail(TaskPlanningRail):
+        pass
+
+    custom_rail = _CustomTaskPlanningRail()
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        enable_task_planning=True,
+        rails=[custom_rail],
+    )
+
+    task_plan_count = sum(1 for r in agent._pending_rails if isinstance(r, TaskPlanningRail))
+    assert task_plan_count == 1, (
+        f"Subclass should suppress default TaskPlanningRail, but found {task_plan_count}"
+    )
+
+
 def test_create_code_agent_injects_default_code_tool_and_fs_rail() -> None:
     agent = create_code_agent(model=_create_dummy_model())
 

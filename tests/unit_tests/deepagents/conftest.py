@@ -44,6 +44,24 @@ def _install_dashscope_stub() -> None:
     module.base_http_api_url = ""
     sys.modules["dashscope"] = module
 
+    # dashscope.api_entities.dashscope_response
+    api_entities = types.ModuleType("dashscope.api_entities")
+    dashscope_response = types.ModuleType("dashscope.api_entities.dashscope_response")
+    dashscope_response.DashScopeAPIResponse = object
+    api_entities.dashscope_response = dashscope_response
+    module.api_entities = api_entities
+    sys.modules["dashscope.api_entities"] = api_entities
+    sys.modules["dashscope.api_entities.dashscope_response"] = dashscope_response
+
+    # dashscope.common.constants
+    common = types.ModuleType("dashscope.common")
+    constants = types.ModuleType("dashscope.common.constants")
+    constants.REQUEST_TIMEOUT_KEYWORD = "request_timeout"
+    common.constants = constants
+    module.common = common
+    sys.modules["dashscope.common"] = common
+    sys.modules["dashscope.common.constants"] = constants
+
 
 _install_dashscope_stub()
 
