@@ -13,27 +13,29 @@ from openjiuwen.deepagents.prompts.sections.tools.base import (
 # Todo-create description
 # ---------------------------------------------------------------------------
 TODO_CREATE_DESCRIPTION_CN = """
-用于给智能体创建待办事项的工具
-核心用途：创建新的待办事项
-支持格式：用tasks参数传递带分隔符'；'的任务集：
+创建待办事项列表
+
+使用分号(;)分隔多个任务：
     {
         "tasks": "设计用户界面；实现接口集成；添加单元测试"
     }
-核心规则：
-    - 同一时间待办任务中只能有一个处于 'in_progress' 状态
-    - 提供的任务集就是任务实际执行的顺序，第一个任务会自动设为'in_progress'，其余任务默认为 'pending'
+
+规则：
+- 第一个任务自动设为in_progress，其余为pending
+- 同一时间只能有一个in_progress任务
 """
 
 TODO_CREATE_DESCRIPTION_EN = """
-Tool for creating todo items for the agent.
-Core purpose: Create new todo items.
-Supported format: Pass a delimited task set via the tasks parameter using ';' as delimiter:
+Create a todo list
+
+Use semicolons (;) to separate multiple tasks:
     {
         "tasks": "Design user interface;Implement API integration;Add unit tests"
     }
-Core rules:
-    - Only one todo item can be 'in_progress' at a time
-    - The provided task set defines the actual execution order; the first task is automatically set to 'in_progress', the rest default to 'pending'
+
+Rules:
+- First task automatically set to in_progress, others to pending
+- Only one in_progress task at a time
 """
 
 TODO_CREATE_DESCRIPTION: Dict[str, str] = {
@@ -244,8 +246,8 @@ TODO_MODIFY_DESCRIPTION: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 TODO_CREATE_PARAMS: Dict[str, Dict[str, str]] = {
     "tasks": {
-        "cn": "简化任务列表（用换行符/分号分隔）。示例：'创建登录表单；实现表单验证；添加错误处理'",
-        "en": ("Simplified task list (delimited by newlines/semicolons). "
+        "cn": "任务列表（仅支持分号分隔）。示例：'创建登录表单；实现表单验证；添加错误处理'",
+        "en": ("Task list (only semicolons supported). "
                "Example: 'Create login form;Implement form validation;Add error handling'"),
     },
 }

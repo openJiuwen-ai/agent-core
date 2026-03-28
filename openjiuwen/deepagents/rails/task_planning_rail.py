@@ -33,6 +33,7 @@ from openjiuwen.deepagents.tools.todo import (
     TodoTool,
     create_todos_tool,
 )
+from openjiuwen.deepagents.workspace.workspace import WorkspaceNode
 
 
 class TaskPlanningRail(DeepAgentRail):
@@ -89,9 +90,10 @@ class TaskPlanningRail(DeepAgentRail):
         if not self.workspace:
             self.set_workspace(agent.deep_config.workspace)
 
+        workspace_dir = str(self.workspace.get_node_path(WorkspaceNode.TODO))
         tools = create_todos_tool(
             self.sys_operation,
-            self.workspace.root_path,
+            workspace_dir,
             self.language,
         )
         self.tools = tools

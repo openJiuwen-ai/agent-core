@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
 import json
+import os.path
 import re
 import uuid
 from datetime import datetime, timezone
@@ -162,7 +163,7 @@ class TodoTool(Tool):
         super().__init__(card)
         self.workspace = workspace if workspace else "./"
         self.fs = operation.fs()
-        self._file = f"./todos/session_id/todo.json"
+        self._file = os.path.join(self.workspace, "./session_id/todo.json")
 
     async def load_todos(self) -> List[TodoItem]:
         """Load todo items from session-specific JSON file
@@ -254,7 +255,7 @@ class TodoTool(Tool):
             session_id: Unique identifier of the session id, used as the JSON file name
         """
         if session_id:
-            self._file = f"./todos/{session_id}/todo.json"
+            self._file = os.path.join(self.workspace, f"./{session_id}/todo.json")
 
 
 class TodoCreateTool(TodoTool):
@@ -349,7 +350,7 @@ class TodoCreateTool(TodoTool):
         Returns:
             List of trimmed non-empty task descriptions
         """
-        parsed_tasks = re.split(r'[\n;；]', tasks_str)
+        parsed_tasks = re.split(r'[;；]', tasks_str)
         parsed_tasks = [t.strip() for t in parsed_tasks if t.strip()]
         tool_logger.info(
             "Parsed single task string",

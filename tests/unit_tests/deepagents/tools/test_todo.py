@@ -209,7 +209,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         """Test creating Todo items from mixed separators string"""
         # Construct input
         inputs = {
-            "tasks": "Create Task 1；Create Task 2\nCreate Task 3"
+            "tasks": "Create Task 1；Create Task 2；Create Task 3"
         }
 
         # Execute call
