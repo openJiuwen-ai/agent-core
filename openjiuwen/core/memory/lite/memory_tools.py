@@ -319,6 +319,7 @@ async def write_memory(
                 content=content,
                 create_if_not_exist=True,
                 prepend_newline=append,
+                append=True
             )
             file_existed = write_result.data.size > 0
             

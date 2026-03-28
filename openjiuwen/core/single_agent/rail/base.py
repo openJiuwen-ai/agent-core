@@ -41,6 +41,7 @@ class RunKind(Enum):
     """Run kind enumeration for different execution modes."""
     NORMAL = "normal"
     HEARTBEAT = "heartbeat"
+    CRON = "cron"
 
 
 class HeartbeatReason(Enum):
@@ -90,6 +91,10 @@ class InvokeInputs:
         if self.run_context and self.run_context.context_mode:
             return self.run_context.context_mode == "lightweight"
         return False
+
+    def is_cron(self) -> bool:
+        """Check if this is a cron run."""
+        return self.run_kind == RunKind.CRON
 
 
 @dataclass

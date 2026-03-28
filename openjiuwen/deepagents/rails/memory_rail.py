@@ -9,7 +9,7 @@ from typing import Set
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.core.memory.lite.memory_tools import (
     get_decorated_tools,
     init_memory_manager_async,
@@ -116,8 +116,10 @@ class MemoryRail(DeepAgentRail):
             return
 
         self.system_prompt_builder.remove_section("memory")
+        is_read_only = isinstance(ctx.inputs, InvokeInputs) and (ctx.inputs.is_cron() or ctx.inputs.is_heartbeat())
         memory_section = build_memory_section(
             language=self._language,
+            read_only=is_read_only
         )
         if memory_section is not None:
             self.system_prompt_builder.add_section(memory_section)
