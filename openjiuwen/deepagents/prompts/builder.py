@@ -32,6 +32,7 @@ class SystemPromptBuilder(BaseSystemPromptBuilder):
         SectionName.TOOLS,
         SectionName.TASK_TOOL,
         SectionName.RUNTIME,
+        SectionName.MEMORY,
     })
 
     def __init__(

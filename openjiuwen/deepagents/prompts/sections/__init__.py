@@ -15,3 +15,4 @@ class SectionName:
     TOOL_NAVIGATION = "tool_navigation"
     PROGRESSIVE_TOOL_RULES = "progressive_tool_rules"
     RUNTIME = "runtime"
+    MEMORY = "memory"
