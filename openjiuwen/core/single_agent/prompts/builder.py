@@ -32,9 +32,11 @@ class PromptSection:
         self.priority = priority
 
     def render(self, language: str = "cn") -> str:
+        if language in self.content:
+            return self.content[language]
         return self.content.get(
-            language,
-            self.content.get(DEFAULT_LANGUAGE, ""),
+            DEFAULT_LANGUAGE,
+            next(iter(self.content.values()), ""),
         )
 
     def char_count(self, language: str = "cn") -> int:

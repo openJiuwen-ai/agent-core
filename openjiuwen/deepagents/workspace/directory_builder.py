@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from typing import Dict, List
 
@@ -19,8 +20,26 @@ class DirectoryBuilder:
 
     @staticmethod
     def _is_safe_path(path: str) -> bool:
-        normalized = os.path.normpath(path)
-        return not normalized.startswith('..') and '..' not in path
+        if path is None or path == "":
+            return True
+
+        if os.path.isabs(path):
+            return False
+        if path.startswith(("/", "\\")):
+            return False
+
+        if re.match(r"^[A-Za-z]:", path):
+            return False
+        if path.startswith("\\\\"):
+            return False
+
+        p = path.replace("\\", "/")
+        normalized = os.path.normpath(p).replace("\\", "/")
+        parts = [x for x in normalized.split("/") if x not in ("", ".")]
+        if ".." in parts:
+            return False
+
+        return True
 
     async def _create_directory_recursive(self, node: Dict, parent_path: str = "") -> None:
         """Create directories recursively."""
