@@ -162,11 +162,11 @@ async def test_init_preset_defaults(tmp_path: Path):
     comp = procs.get("DialogueCompressor")
     off = procs.get("MessageOffloader")
     assert comp is not None
-    assert comp.messages_threshold is None
+    assert comp.messages_threshold == 40
     assert comp.tokens_threshold == 100000
     assert comp.keep_last_round is False
     assert off is not None
-    assert off.messages_threshold is None
+    assert off.messages_threshold == 40
     assert off.tokens_threshold == 5000
     assert off.offload_message_type == ["tool"]
 

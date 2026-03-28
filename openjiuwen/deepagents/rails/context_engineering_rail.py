@@ -123,6 +123,7 @@ class ContextEngineeringRail(DeepAgentRail):
             (
                 "DialogueCompressor",
                 DialogueCompressorConfig(
+                    messages_threshold=40,
                     tokens_threshold=100000,
                     keep_last_round=False,
                     model=model_cfg,
@@ -132,6 +133,7 @@ class ContextEngineeringRail(DeepAgentRail):
             (
                 "MessageOffloader",
                 MessageOffloaderConfig(
+                    messages_threshold=40,
                     tokens_threshold=5000,
                     large_message_threshold=20000,
                     trim_size=5000,
