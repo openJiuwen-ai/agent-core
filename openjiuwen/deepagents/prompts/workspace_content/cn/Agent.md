@@ -20,11 +20,11 @@ root/
 ├── Soul.md # 性格和行为准则
 ├── HeartBeat.md # 周期性任务清单
 ├── Identity.md # 凭证和权限
+├── User.md/ # 用户数据
 ├── memory/ # 记忆核心
 │   ├── Memory.md # 长期记忆概览
 │   ├── daily_memory/ # 每日记忆 (YYYY-MM-DD.md)
 │   └── memory.db # 记忆数据库
-├── user/ # 用户数据
 ├── todo/ # 任务规划
 ├── messages/ # 消息历史
 ├── skills/ # 技能库

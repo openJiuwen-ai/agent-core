@@ -81,7 +81,7 @@ async def _scan_directory_structure(
                 "children": children,
             })
 
-    if current_depth == 0:
+    if current_depth < max_depth:
         file_result = await sys_operation.fs().list_files(root_path, recursive=False)
         if file_result.code == 0 and file_result.data and file_result.data.list_items:
             for item in sorted(file_result.data.list_items, key=lambda x: x.name):

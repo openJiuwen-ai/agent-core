@@ -136,20 +136,14 @@ class DeepAgent(BaseAgent):
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
-        from pathlib import Path as PathType
 
-        if config.workspace is not None and isinstance(config.workspace, (str, PathType)):
-            from openjiuwen.deepagents import Workspace
-            config.workspace = Workspace(
-                root_path=str(config.workspace),
-                language=config.language
-            )
-
-        # Pre-calculate the workspace root path
+        # Pre-calculate the workspace root path (per-agent isolation)
+        # Only do this if factory hasn't already processed it
         if config.workspace is not None:
             agent_id = self.card.id or "default"
-            base_path = config.workspace.root_path
-            config.workspace.root_path = f"{base_path}/{agent_id}_workspace"
+            if f"/{agent_id}_workspace" not in config.workspace.root_path:
+                base_path = config.workspace.root_path
+                config.workspace.root_path = f"{base_path}/{agent_id}_workspace"
 
         if self._deep_config is None:
             self._initial_configure(config)

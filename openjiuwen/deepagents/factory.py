@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, List, Optional
+from os import PathLike
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
@@ -157,10 +158,18 @@ def create_deep_agent(
 
     resolved_language = resolve_language(language)
 
-    if not workspace or isinstance(workspace, str):
-        workspace_obj = Workspace(root_path=workspace or "./", language=resolved_language)
+    if not workspace:
+        workspace_obj = Workspace(root_path="./", language=resolved_language)
+    elif isinstance(workspace, (str, PathLike)):
+        workspace_obj = Workspace(root_path=str(workspace), language=resolved_language)
     else:
         workspace_obj = workspace
+
+    # Pre-calculate workspace root path for per-agent isolation
+    if workspace_obj is not None:
+        agent_id = card.id or "default"
+        base_path = workspace_obj.root_path
+        workspace_obj.root_path = f"{base_path}/{agent_id}_workspace"
 
     if not isinstance(sys_operation, SysOperation):
         sysop_card = SysOperationCard(
@@ -227,7 +236,8 @@ def create_deep_agent(
         return any(issubclass(t, rail_cls) for t in user_provided_rail_types)
 
     def _make_skill_rail() -> SkillUseRail:
-        skills_dir = [os.path.join(str(workspace_obj.root_path), s) for s in (skills or [])]
+        skills_base = workspace_obj.get_node_path("skills")
+        skills_dir = [str(skills_base / s) for s in (skills or [])] if skills_base else []
         return SkillUseRail(skills_dir=skills_dir, skill_mode="all")
 
     default_rails = [
