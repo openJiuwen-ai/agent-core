@@ -16,6 +16,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.base import BaseAgent
@@ -501,10 +502,15 @@ class DeepAgent(BaseAgent):
             conversation_id = None
             run_kind = None
             run_context = None
+        elif isinstance(inputs, InteractiveInput):
+            query = inputs
+            conversation_id = None
+            run_kind = None
+            run_context = None
         else:
             raise build_error(
                 StatusCode.DEEPAGENT_INPUT_PARAM_ERROR,
-                error_msg="Input must be dict with 'query' or str.",
+                error_msg="Input must be dict with 'query', str, or InteractiveInput.",
             )
 
         return InvokeInputs(
@@ -529,7 +535,6 @@ class DeepAgent(BaseAgent):
     @staticmethod
     def _is_resume_input(invoke_inputs: InvokeInputs) -> bool:
         """Return True if the query is an InteractiveInput (interrupt resume)."""
-        from openjiuwen.core.session import InteractiveInput
         return isinstance(invoke_inputs.query, InteractiveInput)
 
     def add_rail(self, rail: AgentRail) -> "DeepAgent":
@@ -931,9 +936,10 @@ class DeepAgent(BaseAgent):
                 if follow_ups:
                     current_query = follow_ups[-1]
 
+                query_preview = str(current_query)[:120]
                 self._log_loop(
                     f"round={outer_round} started",
-                    f", query={current_query[:120]}",
+                    f", query={query_preview}",
                 )
 
                 await controller.submit_round(

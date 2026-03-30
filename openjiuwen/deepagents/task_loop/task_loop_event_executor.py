@@ -87,17 +87,26 @@ class TaskLoopEventExecutor(TaskExecutor):
             )
             return
 
-        # Build query from core Task description
-        query = task_id
         tasks = await self._task_manager.get_task(
             task_filter=self._make_filter(task_id)
         )
+
+        query: Any = task_id
+        raw_input: Any = None
+
         if tasks:
-            desc = tasks[0].description
+            core_task = tasks[0]
+            desc = core_task.description
             if desc:
                 query = desc
 
-        # Also try TaskPlan for richer context
+            if core_task.inputs:
+                for evt in core_task.inputs:
+                    if isinstance(evt, InputEvent):
+                        raw_input = self._extract_interactive_input(evt)
+                        if raw_input is not None:
+                            break
+
         state = self._get_state(session)
         plan_task = self._get_plan_task(state, task_id)
         if plan_task:
@@ -136,6 +145,7 @@ class TaskLoopEventExecutor(TaskExecutor):
             else 1
         )
 
+        query_preview = str(query)[:120]
         if UserConfig.is_sensitive():
             logger.info(
                 f"[OuterLoop] iteration={iteration} "
@@ -145,7 +155,7 @@ class TaskLoopEventExecutor(TaskExecutor):
             logger.info(
                 f"[OuterLoop] iteration={iteration} "
                 f"task_id={task_id}, "
-                f"query={query[:120]}"
+                f"query={query_preview}"
             )
 
         # Build iteration context for lifecycle.
@@ -175,8 +185,8 @@ class TaskLoopEventExecutor(TaskExecutor):
             AgentCallbackEvent.BEFORE_TASK_ITERATION
         )
 
-        # Use the (possibly modified) query from iter_inputs.
-        effective_query = iter_inputs.query or query
+        # Use raw_input (InteractiveInput) if present, otherwise use query.
+        effective_query = raw_input or iter_inputs.query or query
         effective: Dict[str, Any] = {
             "query": effective_query,
         }
@@ -325,6 +335,21 @@ class TaskLoopEventExecutor(TaskExecutor):
             TaskFilter,
         )
         return TaskFilter(task_id=task_id)
+
+    @staticmethod
+    def _extract_interactive_input(event: Any) -> Any:
+        """Extract InteractiveInput from InputEvent if present."""
+        from openjiuwen.core.session import InteractiveInput
+
+        if not isinstance(event, InputEvent):
+            return None
+        for df in event.input_data:
+            data = getattr(df, "data", None)
+            if isinstance(data, dict):
+                query = data.get("query")
+                if isinstance(query, InteractiveInput):
+                    return query
+        return None
 
 
 def build_deep_executor(

@@ -9,6 +9,7 @@ from typing import List, Optional, Union, Dict, Any, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.controller.schema.dataframe import DataFrame, TextDataFrame, JsonDataFrame
+from openjiuwen.core.session import InteractiveInput
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.schema.task import Task
@@ -87,8 +88,14 @@ class InputEvent(Event):
                 event_type=EventType.INPUT,
                 input_data=[JsonDataFrame(data=user_input)]
             )
+        if isinstance(user_input, InteractiveInput):
+            return cls(
+                event_type=EventType.INPUT,
+                input_data=[JsonDataFrame(data={"query": user_input})]
+            )
 
-        raise TypeError(f"Unsupported user input type: {type(user_input)}. Must be str, dict, or InputEvent.")
+        raise TypeError(f"Unsupported user input type: {type(user_input)}. Must be str, dict, InteractiveInput, "
+                        f"or InputEvent.")
 
 
 class TaskInteractionEvent(Event):

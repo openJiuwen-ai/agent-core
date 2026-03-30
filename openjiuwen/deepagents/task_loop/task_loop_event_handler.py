@@ -296,6 +296,7 @@ class TaskLoopEventHandler(EventHandler):
                 description=query,
                 status=CoreTaskStatus.SUBMITTED,
                 metadata=task_metadata,
+                inputs=[event] if isinstance(event, InputEvent) else None,
             )
             if self._task_manager is not None:
                 await self._task_manager.add_task(
