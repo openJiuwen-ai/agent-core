@@ -7,7 +7,10 @@ from openjiuwen.deepagents.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
 from openjiuwen.deepagents.schema.stop_condition import (
-    StopCondition,
+    CustomPredicateEvaluator,
+    MaxRoundsEvaluator,
+    TimeoutEvaluator,
+    TokenBudgetEvaluator,
 )
 
 
@@ -31,7 +34,7 @@ def test_increment_iteration() -> None:
 def test_max_iterations_stop() -> None:
     """Loop stops when max_iterations reached."""
     coord = LoopCoordinator(
-        StopCondition(max_iterations=2)
+        evaluators=[MaxRoundsEvaluator(max_rounds=2)]
     )
     coord.reset()
     assert coord.should_continue() is True
@@ -44,7 +47,7 @@ def test_max_iterations_stop() -> None:
 def test_max_token_usage_stop() -> None:
     """Loop stops when token budget exhausted."""
     coord = LoopCoordinator(
-        StopCondition(max_token_usage=100)
+        evaluators=[TokenBudgetEvaluator(max_tokens=100)]
     )
     coord.reset()
     coord.add_token_usage(50)
@@ -65,7 +68,7 @@ def test_abort_stops_immediately() -> None:
 def test_timeout_stop() -> None:
     """Loop stops when timeout exceeded."""
     coord = LoopCoordinator(
-        StopCondition(timeout_seconds=0.0)
+        evaluators=[TimeoutEvaluator(timeout_seconds=0.0)]
     )
     coord.reset()
     assert coord.should_continue() is False
@@ -74,7 +77,7 @@ def test_timeout_stop() -> None:
 def test_custom_predicate_stop() -> None:
     """Custom predicate returning True stops loop."""
     coord = LoopCoordinator(
-        StopCondition(custom=lambda _ctx: True)
+        evaluators=[CustomPredicateEvaluator(lambda _ctx: True)]
     )
     coord.reset()
     assert coord.should_continue() is False
@@ -83,7 +86,7 @@ def test_custom_predicate_stop() -> None:
 def test_custom_predicate_continue() -> None:
     """Custom predicate returning False allows loop."""
     coord = LoopCoordinator(
-        StopCondition(custom=lambda _ctx: False)
+        evaluators=[CustomPredicateEvaluator(lambda _ctx: False)]
     )
     coord.reset()
     assert coord.should_continue() is True
@@ -92,7 +95,7 @@ def test_custom_predicate_continue() -> None:
 def test_reset_clears_state() -> None:
     """reset() clears iteration, tokens, abort."""
     coord = LoopCoordinator(
-        StopCondition(max_iterations=10)
+        evaluators=[MaxRoundsEvaluator(max_rounds=10)]
     )
     coord.reset()
     coord.increment_iteration()
@@ -108,7 +111,7 @@ def test_reset_clears_state() -> None:
 def test_negative_tokens_ignored() -> None:
     """add_token_usage ignores negative values."""
     coord = LoopCoordinator(
-        StopCondition(max_token_usage=100)
+        evaluators=[TokenBudgetEvaluator(max_tokens=100)]
     )
     coord.reset()
     coord.add_token_usage(-50)

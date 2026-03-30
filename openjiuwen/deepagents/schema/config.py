@@ -18,9 +18,6 @@ from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.deepagents.schema.stop_condition import (
-    StopCondition,
-)
 from openjiuwen.deepagents.workspace.workspace import (
     Workspace,
 )
@@ -177,7 +174,6 @@ class DeepAgentConfig:
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
     enable_task_loop: bool = False
-    stop_condition: Optional[StopCondition] = None
     max_iterations: int = 15
     subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None
     tools: Optional[List[ToolCard]] = None

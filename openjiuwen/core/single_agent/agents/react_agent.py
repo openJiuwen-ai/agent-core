@@ -1268,6 +1268,14 @@ class ReActAgent(BaseAgent):
                 await self.context_engine.save_contexts(session)
                 await session.post_run()
 
+    async def write_invoke_result_to_stream(
+            self,
+            result: Dict[str, Any],
+            session: Session,
+    ) -> None:
+        """Public wrapper — delegates to the internal implementation."""
+        await self._write_invoke_result_to_stream(result, session)
+
     async def _write_invoke_result_to_stream(
             self,
             result: Dict[str, Any],

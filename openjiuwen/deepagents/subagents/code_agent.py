@@ -17,7 +17,6 @@ from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 from openjiuwen.deepagents.prompts import resolve_language
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.schema.config import SubAgentConfig
-from openjiuwen.deepagents.schema.stop_condition import StopCondition
 from openjiuwen.deepagents.workspace.workspace import Workspace
 
 
@@ -57,7 +56,6 @@ def create_code_agent(
     mcps: Optional[List[McpServerConfig]] = None,
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
-    stop_condition: Optional[StopCondition] = None,
     enable_task_loop: bool = False,
     max_iterations: int = 15,
     workspace: Optional[str | Workspace] = None,
@@ -82,7 +80,6 @@ def create_code_agent(
         mcps: MCP server configs to register on the agent.
         subagents: Sub-agent specification, supports subagent using different model, tools and prompt.
         rails: AgentRail instances to register.
-        stop_condition: Task-loop stop conditions.
         enable_task_loop: Enable outer task loop.
         max_iterations: Max ReAct iterations per
             invoke.
@@ -119,7 +116,6 @@ def create_code_agent(
         mcps=mcps,
         subagents=subagents,
         rails=final_rails,
-        stop_condition=stop_condition,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
         workspace=workspace,

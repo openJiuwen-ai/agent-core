@@ -4,11 +4,10 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List
 from unittest.mock import (
     AsyncMock,
     MagicMock,
-    patch,
 )
 
 import pytest
@@ -189,30 +188,20 @@ async def test_after_task_iteration_bridges_todos() -> None:
     state = DeepAgentState(iteration=1)
     saved_states: List[DeepAgentState] = []
 
-    def fake_save(_ctx, st):
+    def _capture_state(_s: Any, st: DeepAgentState) -> None:
         saved_states.append(st)
 
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-1"
+    ctx.agent.load_state.return_value = state
+    ctx.agent.save_state.side_effect = _capture_state
 
-    with (
-        patch(
-            "openjiuwen.deepagents.rails"
-            ".task_planning_rail.load_state",
-            return_value=state,
-        ),
-        patch(
-            "openjiuwen.deepagents.rails"
-            ".task_planning_rail.save_state",
-            side_effect=fake_save,
-        ),
-    ):
-        tool = rail._find_todo_tool()
-        assert tool is not None
-        tool.load_todos = AsyncMock(return_value=todos)
-        tool.save_todos = AsyncMock()
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+    tool.save_todos = AsyncMock()
 
-        await rail.after_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
 
     assert len(saved_states) == 1
     plan = saved_states[0].task_plan
@@ -258,18 +247,14 @@ async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
     )
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-sync-1"
+    ctx.agent.load_state.return_value = state
 
-    with patch(
-        "openjiuwen.deepagents.rails"
-        ".task_planning_rail.load_state",
-        return_value=state,
-    ):
-        tool = rail._find_todo_tool()
-        assert tool is not None
-        tool.load_todos = AsyncMock(return_value=todos)
-        tool.save_todos = AsyncMock()
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+    tool.save_todos = AsyncMock()
 
-        await rail.after_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
 
     tool.save_todos.assert_awaited_once()
     saved_todos = tool.save_todos.call_args[0][0]
@@ -297,13 +282,9 @@ async def test_bridge_skips_when_plan_exists() -> None:
 
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-2"
+    ctx.agent.load_state.return_value = state
 
-    with patch(
-        "openjiuwen.deepagents.rails"
-        ".task_planning_rail.load_state",
-        return_value=state,
-    ):
-        await rail.after_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
 
     assert state.task_plan is existing_plan
 
@@ -318,19 +299,15 @@ async def test_bridge_skips_when_no_todos() -> None:
     state = DeepAgentState(iteration=1)
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-3"
+    ctx.agent.load_state.return_value = state
 
-    with patch(
-        "openjiuwen.deepagents.rails"
-        ".task_planning_rail.load_state",
-        return_value=state,
-    ):
-        tool = rail._find_todo_tool()
-        assert tool is not None
-        tool.load_todos = AsyncMock(
-            side_effect=Exception("file not found")
-        )
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(
+        side_effect=Exception("file not found")
+    )
 
-        await rail.after_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
 
     assert state.task_plan is None
 
@@ -362,17 +339,13 @@ async def test_bridge_skips_when_no_pending() -> None:
     state = DeepAgentState(iteration=1)
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-5"
+    ctx.agent.load_state.return_value = state
 
-    with patch(
-        "openjiuwen.deepagents.rails"
-        ".task_planning_rail.load_state",
-        return_value=state,
-    ):
-        tool = rail._find_todo_tool()
-        assert tool is not None
-        tool.load_todos = AsyncMock(return_value=todos)
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
 
-        await rail.after_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
 
     assert state.task_plan is None
 
@@ -385,13 +358,9 @@ async def test_bridge_skips_when_no_tools() -> None:
     state = DeepAgentState(iteration=1)
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-6"
+    ctx.agent.load_state.return_value = state
 
-    with patch(
-        "openjiuwen.deepagents.rails"
-        ".task_planning_rail.load_state",
-        return_value=state,
-    ):
-        await rail.after_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
 
     assert state.task_plan is None
 

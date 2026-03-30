@@ -99,31 +99,22 @@ class TaskLoopEventExecutor(TaskExecutor):
 
         # Also try TaskPlan for richer context
         state = self._get_state(session)
-        if state and state.task_plan:
-            plan_task = state.task_plan.get_task(
-                task_id
+        plan_task = self._get_plan_task(state, task_id)
+        if plan_task:
+            query = (
+                f"{plan_task.title}: {plan_task.description}"
+                if plan_task.description
+                else plan_task.title
             )
-            if plan_task:
-                query = (
-                    f"{plan_task.title}: "
-                    f"{plan_task.description}"
-                    if plan_task.description
-                    else plan_task.title
-                )
 
-        effective: Dict[str, Any] = {"query": query}
         cid = session.get_session_id()
-        if cid:
-            effective["conversation_id"] = cid
 
-        if tasks and tasks[0].metadata:
-            metadata = tasks[0].metadata
-            if metadata.get("run_kind") is not None:
-                effective["run_kind"] = metadata.get("run_kind")
-            if metadata.get("run_context") is not None:
-                effective["run_context"] = metadata.get("run_context")
+        # Read is_follow_up from task metadata written by handler.
+        is_follow_up = False
+        if tasks:
+            meta = tasks[0].metadata or {}
+            is_follow_up = bool(meta.get("is_follow_up", False))
 
-        # Inject pending steering messages into query
         handler = agent.event_handler
         if handler is not None:
             queues = getattr(
@@ -133,7 +124,7 @@ class TaskLoopEventExecutor(TaskExecutor):
                 steering = queues.drain_steering()
                 if steering:
                     combined = "\n".join(steering)
-                    effective["query"] = (
+                    query = (
                         f"{query}\n\n"
                         f"[STEERING] {combined}"
                     )
@@ -157,12 +148,16 @@ class TaskLoopEventExecutor(TaskExecutor):
                 f"query={query[:120]}"
             )
 
-        # Build iteration context for lifecycle
+        # Build iteration context for lifecycle.
+        # Rails may modify iter_inputs.query in
+        # before_task_iteration (e.g. task_instruction template).
         loop_event = InputEvent.from_user_input(query)
         iter_inputs = TaskIterationInputs(
             iteration=iteration,
             loop_event=loop_event,
             conversation_id=cid,
+            query=query,
+            is_follow_up=is_follow_up,
         )
         ctx = AgentCallbackContext(
             agent=agent,
@@ -171,37 +166,39 @@ class TaskLoopEventExecutor(TaskExecutor):
         )
 
         # Mark task in-progress in TaskPlan
-        if state and state.task_plan:
-            plan_task = state.task_plan.get_task(
-                task_id
-            )
-            if plan_task:
-                state.task_plan.mark_in_progress(
-                    task_id
-                )
+        if self._get_plan_task(state, task_id):
+            state.task_plan.mark_in_progress(task_id)
 
-        # Fire BEFORE_TASK_ITERATION
+        # Fire BEFORE_TASK_ITERATION.
+        # Rails may modify iter_inputs.query here.
         await ctx.fire(
             AgentCallbackEvent.BEFORE_TASK_ITERATION
         )
+
+        # Use the (possibly modified) query from iter_inputs.
+        effective_query = iter_inputs.query or query
+        effective: Dict[str, Any] = {
+            "query": effective_query,
+        }
+        if cid:
+            effective["conversation_id"] = cid
+        if tasks and tasks[0].metadata:
+            metadata = tasks[0].metadata
+            if metadata.get("run_kind") is not None:
+                effective["run_kind"] = metadata.get("run_kind")
+            if metadata.get("run_context") is not None:
+                effective["run_context"] = metadata.get("run_context")
 
         try:
             result = await agent.react_agent.invoke(
                 effective, session, _streaming=True
             )
 
-            # Mark completed in TaskPlan
-            if state and state.task_plan:
-                plan_task = state.task_plan.get_task(
-                    task_id
-                )
-                if plan_task:
-                    summary = str(
-                        result.get("output", "")
-                    )[:200]
-                    state.task_plan.mark_completed(
-                        task_id, summary
-                    )
+            # Mark completed in TaskPlan (skip for interrupt)
+            if result.get("result_type") != "interrupt":
+                if self._get_plan_task(state, task_id):
+                    summary = str(result.get("output", ""))[:200]
+                    state.task_plan.mark_completed(task_id, summary)
 
             # Fire AFTER_TASK_ITERATION
             iter_inputs.result = result
@@ -211,8 +208,8 @@ class TaskLoopEventExecutor(TaskExecutor):
                 .AFTER_TASK_ITERATION
             )
 
-            if coordinator:
-                coordinator.increment_iteration()
+            # increment_iteration is called in
+            # DeepAgent._run_task_loop after yield.
 
             if UserConfig.is_sensitive():
                 logger.info(
@@ -245,14 +242,8 @@ class TaskLoopEventExecutor(TaskExecutor):
             )
 
             # Mark failed in TaskPlan
-            if state and state.task_plan:
-                plan_task = state.task_plan.get_task(
-                    task_id
-                )
-                if plan_task:
-                    state.task_plan.mark_failed(
-                        task_id, str(exc)
-                    )
+            if self._get_plan_task(state, task_id):
+                state.task_plan.mark_failed(task_id, str(exc))
 
             payload = ControllerOutputPayload(
                 type=EventType.TASK_FAILED,
@@ -310,10 +301,8 @@ class TaskLoopEventExecutor(TaskExecutor):
             True if cancellation succeeded.
         """
         state = self._get_state(session)
-        if state and state.task_plan:
-            state.task_plan.mark_failed(
-                task_id, "cancelled"
-            )
+        if self._get_plan_task(state, task_id):
+            state.task_plan.mark_failed(task_id, "cancelled")
         coordinator = self._deep_agent.loop_coordinator
         if coordinator:
             coordinator.request_abort()
@@ -321,10 +310,13 @@ class TaskLoopEventExecutor(TaskExecutor):
 
     def _get_state(self, session: Session) -> Any:
         """Load DeepAgentState from session."""
-        from openjiuwen.deepagents.schema.state import (
-            _read_runtime_state,
-        )
-        return _read_runtime_state(session)
+        return self._deep_agent.load_state(session)
+
+    def _get_plan_task(self, state: Any, task_id: str) -> Any:
+        """Return the TaskPlan item for task_id, or None."""
+        if state and state.task_plan:
+            return state.task_plan.get_task(task_id)
+        return None
 
     @staticmethod
     def _make_filter(task_id: str) -> Any:

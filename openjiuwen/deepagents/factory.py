@@ -30,7 +30,6 @@ from openjiuwen.deepagents.schema.config import (
     SubAgentConfig,
     VisionModelConfig,
 )
-from openjiuwen.deepagents.schema.stop_condition import StopCondition
 from openjiuwen.deepagents.workspace.workspace import Workspace
 from openjiuwen.deepagents.prompts import resolve_language
 
@@ -92,7 +91,6 @@ def create_deep_agent(
     mcps: Optional[List[McpServerConfig]] = None,
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
-    stop_condition: Optional[StopCondition] = None,
     enable_task_loop: bool = False,
     enable_async_subagent: bool = False,
     max_iterations: int = 15,
@@ -125,7 +123,6 @@ def create_deep_agent(
         subagents: Sub-agent specification or sub-agent instance,
             supports subagent using different model, tools and prompt.
         rails: AgentRail instances to register.
-        stop_condition: Task-loop stop conditions.
         enable_task_loop: Enable outer task loop (P1).
         enable_async_subagent: Enable async subagent via SessionRail (default False).
             When True and subagents are configured, SessionRail is mounted instead of SubagentRail.
@@ -185,7 +182,6 @@ def create_deep_agent(
         model=model,
         card=card,
         system_prompt=system_prompt,
-        stop_condition=stop_condition,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
         subagents=subagents,

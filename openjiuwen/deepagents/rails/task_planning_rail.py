@@ -18,10 +18,6 @@ from openjiuwen.deepagents.prompts.sections.todo import (
     build_todo_section,
 )
 from openjiuwen.deepagents.rails.base import DeepAgentRail
-from openjiuwen.deepagents.schema.state import (
-    load_state,
-    save_state,
-)
 from openjiuwen.deepagents.schema.task import (
     TaskItem,
     TaskPlan,
@@ -215,7 +211,7 @@ class TaskPlanningRail(DeepAgentRail):
         if ctx.session is None:
             return
 
-        state = load_state(ctx)
+        state = ctx.agent.load_state(ctx.session)  # type: ignore[attr-defined]
 
         if (
             state.task_plan is not None
@@ -268,7 +264,7 @@ class TaskPlanningRail(DeepAgentRail):
             )
 
         state.task_plan = plan
-        save_state(ctx, state)
+        ctx.agent.save_state(ctx.session, state)  # type: ignore[attr-defined]
         logger.info(
             "TaskPlanningRail: bridged %d todos "
             "into TaskPlan (%s)",
@@ -289,7 +285,7 @@ class TaskPlanningRail(DeepAgentRail):
         if ctx.session is None:
             return
 
-        state = load_state(ctx)
+        state = ctx.agent.load_state(ctx.session)  # type: ignore[attr-defined]
         plan = state.task_plan
         if plan is None or len(plan.tasks) == 0:
             return

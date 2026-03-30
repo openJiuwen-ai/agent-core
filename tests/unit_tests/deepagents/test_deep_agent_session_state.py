@@ -1,18 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Session-state tests for DeepAgent runtime helpers."""
+"""Session-state tests for DeepAgent runtime state methods."""
 from __future__ import annotations
 
-from openjiuwen.deepagents.schema.state import (
-    clear_state,
-    DeepAgentState,
-    load_state,
-    save_state,
-)
+from openjiuwen.deepagents.deep_agent import DeepAgent
+from openjiuwen.deepagents.schema.state import DeepAgentState
 from openjiuwen.deepagents.schema.task import (
     TaskItem,
     TaskPlan,
 )
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
 class FakeSession:
@@ -32,33 +29,32 @@ class FakeSession:
         self._state.update(data)
 
 
-class FakeCtx:
-    def __init__(self, session: FakeSession) -> None:
-        self.session = session
+def _make_agent() -> DeepAgent:
+    return DeepAgent(AgentCard(name="test_state"))
 
 
 def test_load_empty_state() -> None:
     """Loading from empty session yields defaults."""
+    agent = _make_agent()
     session = FakeSession()
-    ctx = FakeCtx(session)
-    state = load_state(ctx)
+    state = agent.load_state(session)
     assert state.iteration == 0
     assert state.task_plan is None
 
 
 def test_save_and_reload_state() -> None:
     """Round-trip: save → clear → load preserves data."""
+    agent = _make_agent()
     session = FakeSession()
-    ctx = FakeCtx(session)
     plan = TaskPlan(
         goal="demo",
         tasks=[TaskItem(id="t1", title="first")],
     )
     state = DeepAgentState(iteration=3, task_plan=plan)
-    save_state(ctx, state)
-    clear_state(ctx)
+    agent.save_state(session, state)
+    agent.clear_state(session)
 
-    loaded = load_state(ctx)
+    loaded = agent.load_state(session)
     assert loaded.iteration == 3
     assert loaded.task_plan is not None
     assert loaded.task_plan.goal == "demo"

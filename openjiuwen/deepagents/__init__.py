@@ -19,9 +19,6 @@ if TYPE_CHECKING:
         DeepAgentConfig,
         VisionModelConfig,
     )
-    from openjiuwen.deepagents.schema.stop_condition import (
-        StopCondition,
-    )
     from openjiuwen.deepagents.workspace.workspace import Workspace
 
 __all__ = [
@@ -31,7 +28,6 @@ __all__ = [
     "DeepAgentConfig",
     "AudioModelConfig",
     "VisionModelConfig",
-    "StopCondition",
     "create_deep_agent",
     "Workspace",
 ]
@@ -69,11 +65,6 @@ def __getattr__(name: str) -> Any:
             VisionModelConfig,
         )
         return VisionModelConfig
-    if name == "StopCondition":
-        from openjiuwen.deepagents.schema.stop_condition import (
-            StopCondition,
-        )
-        return StopCondition
     if name == "create_deep_agent":
         from openjiuwen.deepagents.factory import (
             create_deep_agent,

@@ -143,11 +143,20 @@ class TaskIterationInputs:
         loop_event: Event object that triggered this iteration
         conversation_id: Optional conversation/session ID
         result: Iteration result (filled after iteration)
+        query: Effective query for this iteration.  Rails may
+            modify this field in ``before_task_iteration`` to
+            alter the query sent to the inner agent.
+        is_follow_up: True when this iteration was triggered by
+            a controller follow-up rather than the original user
+            query.  ``task_instruction`` templates should not be
+            applied to follow-up queries.
     """
     iteration: int
     loop_event: Any
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    query: Optional[str] = None
+    is_follow_up: bool = False
 
 
 @dataclass

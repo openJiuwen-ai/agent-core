@@ -3,6 +3,7 @@
 """DeepAgent implementation."""
 from __future__ import annotations
 
+import sys
 from typing import (
     Any, AsyncIterator, Dict, List, Optional,
     TYPE_CHECKING, Tuple, cast,
@@ -28,6 +29,9 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents.rails import DeepAgentRail
+from openjiuwen.deepagents.rails.task_completion_rail import (
+    TaskCompletionRail,
+)
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.context_engine import ContextEngine
@@ -46,9 +50,9 @@ from openjiuwen.deepagents.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
 from openjiuwen.deepagents.schema.state import (
-    clear_state,
-    load_state,
-    save_state,
+    DeepAgentState,
+    _SESSION_RUNTIME_ATTR,
+    _SESSION_STATE_KEY,
 )
 from openjiuwen.deepagents.task_loop.loop_queues import (
     LoopQueues,
@@ -112,8 +116,8 @@ class DeepAgent(BaseAgent):
         self._loop_coordinator: Optional[LoopCoordinator] = None
         self._loop_controller: Optional[TaskLoopController] = None
         self._loop_session: Optional[Session] = None
+        self._task_completion_rail: Optional[TaskCompletionRail] = None
         self._initialized = False
-        self.prompt_builder: Optional[SystemPromptBuilder] = None
         self.system_prompt_builder: Optional[SystemPromptBuilder] = None
         self._workspace_initialized: bool = False
         self._invoke_active: bool = False
@@ -146,11 +150,19 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         self._react_agent = self._create_react_agent()
         self._pending_rails.clear()
+        self._task_completion_rail = None
 
         if config.progressive_tool_enabled:
             self._pending_rails.append(
                 ProgressiveToolRail(config=config)
             )
+
+        # Auto-inject a default TaskCompletionRail when the outer
+        # task loop is enabled.  Users can override it by passing
+        # their own TaskCompletionRail via add_rail() or the
+        # factory's rails= argument.
+        if config.enable_task_loop:
+            self._pending_rails.append(TaskCompletionRail())
 
         self._initialized = False
         self._workspace_initialized = False
@@ -237,7 +249,11 @@ class DeepAgent(BaseAgent):
         )
 
         react_config = ReActAgentConfig()
-        react_config.max_iterations = cfg.max_iterations
+        react_config.max_iterations = (
+            sys.maxsize
+            if cfg.enable_task_loop
+            else cfg.max_iterations
+        )
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
 
@@ -273,7 +289,6 @@ class DeepAgent(BaseAgent):
         #     agent pick it up as the public contract.
         #   - ReActAgent.system_prompt_builder: bridged BEFORE_MODEL_CALL rails
         #     mutate the same builder object before _railed_model_call builds it.
-        self.prompt_builder = prompt_builder
         self.system_prompt_builder = prompt_builder
         agent.prompt_builder = prompt_builder
         agent.system_prompt_builder = prompt_builder
@@ -339,6 +354,8 @@ class DeepAgent(BaseAgent):
             self._workspace_initialized = True
 
         for rail_inst in self._pending_rails:
+            if isinstance(rail_inst, TaskCompletionRail):
+                self._task_completion_rail = rail_inst
             if isinstance(rail_inst, DeepAgentRail):
                 rail_inst.set_sys_operation(self._deep_config.sys_operation)
                 rail_inst.set_workspace(self._deep_config.workspace)
@@ -509,13 +526,32 @@ class DeepAgent(BaseAgent):
             effective_inputs["run_context"] = invoke_inputs.run_context
         return effective_inputs
 
+    @staticmethod
+    def _is_resume_input(invoke_inputs: InvokeInputs) -> bool:
+        """Return True if the query is an InteractiveInput (interrupt resume)."""
+        from openjiuwen.core.session import InteractiveInput
+        return isinstance(invoke_inputs.query, InteractiveInput)
+
     def add_rail(self, rail: AgentRail) -> "DeepAgent":
-        """Synchronously queue a rail for registration."""
+        """Synchronously queue a rail for registration.
+
+        When a TaskCompletionRail is added it replaces any
+        previously queued one (default or user-provided).
+        """
+        if isinstance(rail, TaskCompletionRail):
+            # Remove any existing TaskCompletionRail (auto-default
+            # or a previously queued user rail).
+            self._pending_rails = [
+                r for r in self._pending_rails
+                if not isinstance(r, TaskCompletionRail)
+            ]
         self._pending_rails.append(rail)
         return self
 
     async def register_rail(self, rail: AgentRail) -> "DeepAgent":
         """Register a rail with selective routing."""
+        if isinstance(rail, TaskCompletionRail):
+            self._task_completion_rail = rail
         if isinstance(rail, DeepAgentRail):
             rail.set_sys_operation(self.deep_config.sys_operation)
             rail.set_workspace(self.deep_config.workspace)
@@ -527,6 +563,9 @@ class DeepAgent(BaseAgent):
         """Unregister a rail from pending/outer/inner."""
         # Remove queued instances first so lazy-init does not re-register stale rails.
         self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
+
+        if isinstance(rail, TaskCompletionRail) and self._task_completion_rail is rail:
+            self._task_completion_rail = None
 
         # Remove from outer DeepAgent.
         await self._agent_callback_manager.unregister_rail(rail, self)
@@ -602,32 +641,28 @@ class DeepAgent(BaseAgent):
             self._loop_controller is not None
             and self._bound_session_id == session_id
         ):
-            # Reuse: only reset coordinator
             coordinator = self._loop_coordinator
             if coordinator is None:
-                coordinator = LoopCoordinator(
-                    stop_condition=(
-                        self._deep_config.stop_condition
-                        if self._deep_config
-                        else None
-                    ),
+                evaluators = (
+                    self._task_completion_rail.build_evaluators()
+                    if self._task_completion_rail is not None
+                    else []
                 )
+                coordinator = LoopCoordinator(evaluators=evaluators)
                 self._loop_coordinator = coordinator
             coordinator.reset()
             return coordinator, self._loop_controller
 
         # New controller (first time or session switch)
         if self._loop_controller is not None:
-            # Session switch but old controller still exists: force cleanup
             await self._force_cleanup_controller()
 
-        coordinator = LoopCoordinator(
-            stop_condition=(
-                self._deep_config.stop_condition
-                if self._deep_config
-                else None
-            ),
+        evaluators = (
+            self._task_completion_rail.build_evaluators()
+            if self._task_completion_rail is not None
+            else []
         )
+        coordinator = LoopCoordinator(evaluators=evaluators)
         coordinator.reset()
 
         queues = LoopQueues()
@@ -669,10 +704,114 @@ class DeepAgent(BaseAgent):
 
         return coordinator, controller
 
+    # ----------------------------------------------------------------
+    # State management
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _read_runtime_state(
+        session: Session,
+    ) -> Optional[DeepAgentState]:
+        """Read the cached runtime state from session."""
+        state = getattr(session, _SESSION_RUNTIME_ATTR, None)
+        if state is None:
+            return None
+        if not isinstance(state, DeepAgentState):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg=(
+                    "Invalid deepagent runtime state "
+                    "type on session."
+                ),
+            )
+        return state
+
+    @staticmethod
+    def _write_runtime_state(
+        session: Session,
+        state: DeepAgentState,
+    ) -> None:
+        """Write runtime state to session cache."""
+        setattr(session, _SESSION_RUNTIME_ATTR, state)
+
+    @staticmethod
+    def _clear_runtime_state(session: Session) -> None:
+        """Clear runtime state from session cache."""
+        if hasattr(session, _SESSION_RUNTIME_ATTR):
+            delattr(session, _SESSION_RUNTIME_ATTR)
+
+    def load_state(self, session: Session) -> DeepAgentState:
+        """Load deepagent runtime state from session.
+
+        Returns the cached runtime object when available;
+        otherwise loads from persisted session state and
+        primes the cache.
+
+        Args:
+            session: Current session.
+
+        Returns:
+            Current DeepAgentState (never None).
+        """
+        state = self._read_runtime_state(session)
+        if state is not None:
+            return state
+        data = session.get_state(_SESSION_STATE_KEY)
+        loaded = (
+            DeepAgentState.from_session_dict(data)
+            if isinstance(data, dict)
+            else DeepAgentState()
+        )
+        self._write_runtime_state(session, loaded)
+        return loaded
+
+    def save_state(
+        self,
+        session: Session,
+        state: Optional[DeepAgentState] = None,
+    ) -> None:
+        """Persist deepagent state to session.
+
+        When ``state`` is provided it becomes the new
+        runtime snapshot; otherwise the currently cached
+        state is persisted.
+
+        Args:
+            session: Current session.
+            state: State to save; if None the cached
+                state is used.
+        """
+        target = (
+            state
+            if state is not None
+            else self._read_runtime_state(session)
+        )
+        if target is None:
+            return
+        self._write_runtime_state(session, target)
+        session.update_state(
+            {_SESSION_STATE_KEY: target.to_session_dict()}
+        )
+
+    def clear_state(
+        self,
+        session: Session,
+        clear_persisted: bool = False,
+    ) -> None:
+        """Clear deepagent runtime cache from session.
+
+        Args:
+            session: Current session.
+            clear_persisted: When True, also clears the
+                persisted session snapshot.
+        """
+        self._clear_runtime_state(session)
+        if clear_persisted:
+            session.update_state({_SESSION_STATE_KEY: None})
+
     def _has_remaining_tasks(self, session: Session) -> bool:
         """Check whether the task plan still has pending tasks."""
-        state_ctx = AgentCallbackContext(agent=self, session=session)
-        st = load_state(state_ctx)
+        st = self.load_state(session)
         if st.task_plan is None:
             return False
         return st.task_plan.get_next_task() is not None
@@ -813,6 +952,17 @@ class DeepAgent(BaseAgent):
 
                 yield result
 
+                coordinator.increment_iteration()
+                coordinator.set_last_result(result)
+                _state = self.load_state(session)
+                _state.stop_condition_state = coordinator.get_state()
+                self.save_state(session, _state)
+
+                if result.get("result_type") == "interrupt":
+                    self._log_loop(
+                        f"round={outer_round} interrupted"
+                    )
+                    break
                 if coordinator.is_aborted:
                     self._log_loop(f"round={outer_round} aborted")
                     break
@@ -823,13 +973,21 @@ class DeepAgent(BaseAgent):
                     break
 
                 current_query = modified.query
+
+            stop_reason = coordinator.stop_reason
+            if stop_reason:
+                self._log_loop(
+                    f"loop stopped by: {stop_reason}"
+                )
         finally:
-            # Check if there are pending SESSION_SPAWN tasks
+            # Clear stop_condition_state so the next invoke starts fresh.
+            _state = self.load_state(session)
+            _state.stop_condition_state = None
+            self.save_state(session, _state)
+            # Keep controller alive when SESSION_SPAWN tasks are pending.
             if self._has_pending_session_spawn():
-                # Keep controller alive for background tasks
                 self._log_loop("pending SESSION_SPAWN tasks, controller kept alive")
             else:
-                # No background tasks: full cleanup
                 await controller.unbind_session(session)
                 await controller.stop()
                 self._loop_coordinator = None
@@ -923,21 +1081,25 @@ class DeepAgent(BaseAgent):
 
         await task
 
-    @staticmethod
     async def _write_round_result_to_stream(
+        self,
         result: Dict[str, Any],
         session: Session,
     ) -> None:
-        """Write a task-loop round result as an answer chunk."""
-        from openjiuwen.core.session.stream.base import OutputSchema
-        await session.write_stream(OutputSchema(
-            type="answer",
-            index=0,
-            payload={
-                "output": result.get("output", ""),
-                "result_type": result.get("result_type", ""),
-            },
-        ))
+        """Write a task-loop round result to the session stream.
+
+        Delegates to the inner ReActAgent which already handles
+        normal answers, HITL interrupts, and workflow interrupts
+        consistently.
+
+        Args:
+            result: Result dict from the inner ReActAgent.
+            session: Current session to write into.
+        """
+        if self._react_agent is not None:
+            await self._react_agent.write_invoke_result_to_stream(
+                result, session
+            )
 
     async def _run_single_round_stream(
         self,
@@ -990,14 +1152,19 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
-                if self._deep_config is not None and self._deep_config.enable_task_loop:
+                if (
+                    self._deep_config is not None
+                    and self._deep_config.enable_task_loop
+                    and not self._is_resume_input(invoke_inputs)
+                ):
                     result = await self._run_task_loop_invoke(ctx, session)
                 else:
                     result = await self._run_single_round_invoke(ctx, session)
                 invoke_inputs.result = result
 
-            save_state(ctx)
-            clear_state(ctx)
+            if session is not None:
+                self.save_state(session)
+                self.clear_state(session)
             return result
         finally:
             self._invoke_active = False
@@ -1026,15 +1193,24 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
-                if self._deep_config is not None and self._deep_config.enable_task_loop:
-                    async for chunk in self._run_task_loop_stream(ctx, session, stream_modes):
+                if (
+                    self._deep_config is not None
+                    and self._deep_config.enable_task_loop
+                    and not self._is_resume_input(invoke_inputs)
+                ):
+                    async for chunk in self._run_task_loop_stream(
+                        ctx, session, stream_modes
+                    ):
                         yield chunk
                 else:
-                    async for chunk in self._run_single_round_stream(ctx, session, stream_modes):
+                    async for chunk in self._run_single_round_stream(
+                        ctx, session, stream_modes
+                    ):
                         yield chunk
 
-            save_state(ctx)
-            clear_state(ctx)
+            if session is not None:
+                self.save_state(session)
+                self.clear_state(session)
         finally:
             self._invoke_active = False
 

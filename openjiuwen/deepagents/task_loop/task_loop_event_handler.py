@@ -24,9 +24,6 @@ from openjiuwen.core.controller.schema.task import (
     Task as CoreTask,
     TaskStatus as CoreTaskStatus,
 )
-from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackContext,
-)
 from openjiuwen.deepagents.task_loop.task_loop_event_executor import (
     DEEP_TASK_TYPE,
 )
@@ -34,9 +31,6 @@ from openjiuwen.deepagents.task_loop.loop_queues import (
     LoopQueues,
 )
 from openjiuwen.deepagents.tools.session_tools import SESSION_SPAWN_TASK_TYPE
-from openjiuwen.deepagents.schema.state import (
-    load_state,
-)
 
 if TYPE_CHECKING:
     from openjiuwen.deepagents.deep_agent import (
@@ -266,10 +260,7 @@ class TaskLoopEventHandler(EventHandler):
             and not is_follow_up
             and session is not None
         ):
-            ctx = AgentCallbackContext(
-                agent=agent, session=session,
-            )
-            state = load_state(ctx)
+            state = agent.load_state(session)
             if state.task_plan is not None:
                 next_task = (
                     state.task_plan.get_next_task()
@@ -294,6 +285,7 @@ class TaskLoopEventHandler(EventHandler):
             "_handler_round_id": current_round,
             "run_kind": run_kind,
             "run_context": run_context,
+            "is_follow_up": is_follow_up,
         }
 
         try:

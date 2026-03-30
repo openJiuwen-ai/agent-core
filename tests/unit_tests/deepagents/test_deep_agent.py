@@ -96,6 +96,22 @@ class FakeReactAgent:
         yield {"chunk": 1, "query": inputs["query"]}
         yield {"chunk": 2, "query": inputs["query"]}
 
+    async def write_invoke_result_to_stream(
+        self,
+        result: Dict[str, Any],
+        session: Optional[Any] = None,
+    ) -> None:
+        from openjiuwen.core.session.stream.base import OutputSchema
+        if session is not None:
+            await session.write_stream(OutputSchema(
+                type="answer",
+                index=0,
+                payload={
+                    "output": result.get("output", ""),
+                    "result_type": result.get("result_type", ""),
+                },
+            ))
+
 
 class CountingRail(AgentRail):
     def __init__(self) -> None:

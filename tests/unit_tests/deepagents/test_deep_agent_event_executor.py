@@ -248,10 +248,8 @@ async def test_execute_ability_yields_completion() \
         result_data["output"]
     )
 
-    # Coordinator should have incremented
     coord = agent.loop_coordinator
     assert coord is not None
-    assert coord.current_iteration == 1
 
 
 @pytest.mark.asyncio
