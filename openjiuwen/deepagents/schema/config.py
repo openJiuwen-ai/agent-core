@@ -65,11 +65,12 @@ class VisionModelConfig:
         )
         base_url = (
             os.getenv("VISION_BASE_URL")
+            or os.getenv("VISION_API_BASE")
             or os.getenv("OPENROUTER_BASE_URL")
             or os.getenv("OPENAI_BASE_URL")
             or DEFAULT_OPENAI_BASE_URL
         )
-        model = os.getenv("VISION_MODEL")
+        model = os.getenv("VISION_MODEL") or os.getenv("VISION_MODEL_NAME")
 
         if not model:
             if "openrouter.ai" in base_url:
@@ -111,11 +112,13 @@ class AudioModelConfig:
             ),
             base_url=(
                 os.getenv("AUDIO_BASE_URL")
+                or os.getenv("AUDIO_API_BASE")
                 or os.getenv("OPENAI_BASE_URL")
                 or DEFAULT_OPENAI_BASE_URL
             ),
             transcription_model=(
                 os.getenv("AUDIO_TRANSCRIPTION_MODEL")
+                or os.getenv("AUDIO_MODEL_NAME")
                 or DEFAULT_OPENAI_AUDIO_TRANSCRIPTION_MODEL
             ),
             question_answering_model=(
@@ -188,6 +191,7 @@ class DeepAgentConfig:
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
     audio_model_config: Optional[AudioModelConfig] = None
+    rails: Optional[List[AgentRail]] = None
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False

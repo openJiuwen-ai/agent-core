@@ -33,6 +33,7 @@ from openjiuwen.deepagents.rails import DeepAgentRail
 from openjiuwen.deepagents.rails.task_completion_rail import (
     TaskCompletionRail,
 )
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.deepagents.schema.config import DeepAgentConfig
 from openjiuwen.core.controller.config import ControllerConfig
 from openjiuwen.core.context_engine import ContextEngine
@@ -114,6 +115,8 @@ class DeepAgent(BaseAgent):
         self._deep_config: Optional[DeepAgentConfig] = None
         self._react_agent: Optional[ReActAgent] = None
         self._pending_rails: List[AgentRail] = []
+        self._stale_rails: List[AgentRail] = []
+        self._registered_rails: List[AgentRail] = []
         self._loop_coordinator: Optional[LoopCoordinator] = None
         self._loop_controller: Optional[TaskLoopController] = None
         self._loop_session: Optional[Session] = None
@@ -148,9 +151,150 @@ class DeepAgent(BaseAgent):
             base_path = config.workspace.root_path
             config.workspace.root_path = f"{base_path}/{agent_id}_workspace"
 
+        if self._deep_config is None:
+            self._initial_configure(config)
+        else:
+            self._hot_reconfigure(config)
+
+        self._initialized = False
+        self._workspace_initialized = False
+        return self
+
+    def _initial_configure(self, config: DeepAgentConfig) -> None:
+        """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
         self._deep_config = config
+        if config.card is not None:
+            self.card = config.card
+
         self._react_agent = self._create_react_agent()
+        self._queue_pending_rails(config)
+
+    def _hot_reconfigure(self, config: DeepAgentConfig) -> None:
+        """Hot-reconfigure an already-running agent without restarting it."""
+        self._deep_config = config
+        if config.card is not None:
+            self.card = config.card
+
+        self._hot_reload_rails(config)
+
+        if config.model is not None:
+            self._hot_reload_model(config)
+
+        if config.tools is not None and self._react_agent is not None:
+            self._hot_reload_tools(config)
+
+        if config.system_prompt is not None and self._react_agent is not None:
+            self._hot_reload_system_prompt(config)
+
+        self._queue_pending_rails(config)
+
+    def _hot_reload_rails(self, config: DeepAgentConfig) -> None:
+        """Cycle stale rails out and prepare replacement rails during hot-reconfigure.
+
+        config.rails is not None - partial update: only rails whose type appears
+        in the new list are retired; others are retained.
+        config.rails is None - full replacement: all existing rails become stale.
+        config.rails == [] - nothing to replace; keep all existing rails.
+        """
+        if config.rails is not None:
+            # Partial update: only cycle rails whose type appears in the new list.
+            replacing_types = {type(r) for r in config.rails}
+            retained = []
+            for rail in self._registered_rails:
+                if type(rail) in replacing_types:
+                    self._stale_rails.append(rail)
+                else:
+                    retained.append(rail)
+            self._registered_rails = retained
+        else:
+            # Full replacement: all existing rails become stale.
+            self._stale_rails.extend(self._registered_rails)
+            self._registered_rails.clear()
         self._pending_rails.clear()
+
+    def _hot_reload_model(self, config: DeepAgentConfig) -> None:
+        """Apply updated model/iteration config to the live inner ReActAgent.
+
+        Mutates a copy of the existing ReActAgentConfig with the new model
+        fields, then drives the update through react_agent.configure() so that
+        all side-effects (LLM reset, context-engine rebuild, etc.) fire correctly.
+        """
+        if self._react_agent is None:
+            return
+        new_react_config = self._react_agent.config.model_copy()
+        if config.model is not None:
+            new_react_config.model_client_config = config.model.model_client_config
+            new_react_config.model_config_obj = config.model.model_config
+            if config.model.model_config is not None and config.model.model_config.model_name:
+                new_react_config.model_name = config.model.model_config.model_name
+        new_react_config.max_iterations = (
+            sys.maxsize if config.enable_task_loop else config.max_iterations
+        )
+        if config.context_engine_config is not None:
+            new_react_config.context_engine_config = config.context_engine_config
+        self._react_agent.configure(new_react_config)
+        logger.info("[DeepAgent] Model configuration hot reloaded")
+
+    def _hot_reload_tools(self, config: DeepAgentConfig) -> None:
+        """Sync tool cards in the shared AbilityManager during hot-reconfigure.
+
+        Tools are matched by id: a card whose id already exists in the
+        AbilityManager is left untouched.  Cards with a new id replace any
+        existing entry with the same name, or are added fresh.  Tools present
+        in the AbilityManager but absent from config.tools are removed.
+        MCP server registrations and other ability types are not affected.
+        """
+        new_by_name = {card.name: card for card in (config.tools or [])}
+
+        # Remove tools that are no longer in the new config.
+        existing_tool_names = {
+            a.name for a in self.ability_manager.list() if isinstance(a, ToolCard)
+        }
+        stale = [name for name in existing_tool_names if name not in new_by_name]
+        if stale:
+            self.ability_manager.remove(stale)
+
+        # Add or replace tools whose id has changed (or are new).
+        for name, card in new_by_name.items():
+            existing = self.ability_manager.get(name)
+            existing_tool = existing if isinstance(existing, ToolCard) else None
+            if existing_tool is not None and existing_tool.id == card.id:
+                continue  # Same id — no update needed.
+            if existing_tool is not None:
+                self.ability_manager.remove(name)
+            self.ability_manager.add(card)
+
+    def _hot_reload_system_prompt(self, config: DeepAgentConfig) -> None:
+        """Rebuild the SystemPromptBuilder and update both agents during hot-reconfigure.
+
+        The same builder object must be referenced by both DeepAgent.system_prompt_builder
+        and react_agent.system_prompt_builder so that rails mutating the builder before
+        model calls see a consistent view.
+        """
+        language = resolve_language(config.language)
+        mode = resolve_mode(config.prompt_mode)
+        prompt_builder = SystemPromptBuilder(language=language, mode=mode)
+        if config.system_prompt:
+            prompt_builder.add_section(PromptSection(
+                name=SectionName.IDENTITY,
+                content={"cn": config.system_prompt, "en": config.system_prompt},
+            ))
+        else:
+            prompt_builder.add_section(build_identity_section(language))
+        prompt = prompt_builder.build()
+        new_react_config = self._react_agent.config.model_copy()
+        new_react_config.prompt_template = [{"role": "system", "content": prompt}]
+        self._react_agent.configure(new_react_config)
+        self.system_prompt_builder = prompt_builder
+        self._react_agent.prompt_builder = prompt_builder
+        self._react_agent.system_prompt_builder = prompt_builder
+        logger.info("[DeepAgent] System prompt hot reloaded")
+
+    def _queue_pending_rails(self, config: DeepAgentConfig) -> None:
+        """Append config-driven rails to _pending_rails for lazy registration."""
+        if config.rails is not None:
+            self._pending_rails.extend(config.rails)
+
         self._task_completion_rail = None
 
         if config.progressive_tool_enabled:
@@ -164,10 +308,6 @@ class DeepAgent(BaseAgent):
         # factory's rails= argument.
         if config.enable_task_loop:
             self._pending_rails.append(TaskCompletionRail())
-
-        self._initialized = False
-        self._workspace_initialized = False
-        return self
 
     def set_react_agent(
         self,
@@ -353,6 +493,11 @@ class DeepAgent(BaseAgent):
         if self._needs_workspace_init():
             await self.init_workspace()
             self._workspace_initialized = True
+
+        # Unregister stale rails left over from a previous configure() cycle.
+        for stale_rail in self._stale_rails:
+            await self.unregister_rail(stale_rail)
+        self._stale_rails.clear()
 
         for rail_inst in self._pending_rails:
             if isinstance(rail_inst, TaskCompletionRail):
@@ -616,6 +761,7 @@ class DeepAgent(BaseAgent):
         """Unregister a rail from pending/outer/inner."""
         # Remove queued instances first so lazy-init does not re-register stale rails.
         self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
+        self._registered_rails = [r for r in self._registered_rails if r is not rail]
 
         if isinstance(rail, TaskCompletionRail) and self._task_completion_rail is rail:
             self._task_completion_rail = None
@@ -632,7 +778,7 @@ class DeepAgent(BaseAgent):
         return self
 
     async def _register_rail_selective(self, rail: AgentRail) -> None:
-        """Route rail callbacks to the correct agent."""
+        """Route rail callbacks to the correct agent and record the rail as registered."""
         callbacks = rail.get_callbacks()
 
         for event, callback in callbacks.items():
@@ -649,6 +795,8 @@ class DeepAgent(BaseAgent):
                 f"Unknown rail event {event}, registering on outer DeepAgent"
             )
             await self.register_callback(event, callback, rail.priority)
+
+        self._registered_rails.append(rail)
 
     async def _run_single_round_invoke(
         self, ctx: AgentCallbackContext, session: Optional[Session]
