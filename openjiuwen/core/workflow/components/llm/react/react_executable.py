@@ -27,6 +27,17 @@ class ReActAgentCompExecutable(ComponentExecutable):
         )
         self._react_agent.configure(config)
 
+    @property
+    def ability_manager(self):
+        """Get the ability manager for adding tools/workflows/agents.
+        
+        This provides a public interface to manage agent capabilities.
+        
+        Returns:
+            AbilityManager: The ability manager instance
+        """
+        return self._react_agent.ability_manager
+
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         """Execute ReAct loop synchronously with batch input/output."""
         try:
