@@ -17,6 +17,7 @@ def _install_dashscope_stub() -> None:
         return
 
     module = types.ModuleType("dashscope")
+    module.__path__ = []
 
     class _DummyApi:
         @staticmethod
@@ -39,10 +40,33 @@ def _install_dashscope_stub() -> None:
 
             return _Resp()
 
+    class _DashScopeAPIResponse:
+        status_code = 200
+        output = {}
+        code = ""
+        message = ""
+
     module.MultiModalConversation = _DummyApi
     module.VideoSynthesis = _DummyApi
+    module.AioMultiModalEmbedding = _DummyApi
+    module.MultiModalEmbedding = _DummyApi
     module.base_http_api_url = ""
+
+    api_entities = types.ModuleType("dashscope.api_entities")
+    api_entities.__path__ = []
+    dashscope_response = types.ModuleType("dashscope.api_entities.dashscope_response")
+    dashscope_response.DashScopeAPIResponse = _DashScopeAPIResponse
+
+    common = types.ModuleType("dashscope.common")
+    common.__path__ = []
+    constants = types.ModuleType("dashscope.common.constants")
+    constants.REQUEST_TIMEOUT_KEYWORD = "request_timeout"
+
     sys.modules["dashscope"] = module
+    sys.modules["dashscope.api_entities"] = api_entities
+    sys.modules["dashscope.api_entities.dashscope_response"] = dashscope_response
+    sys.modules["dashscope.common"] = common
+    sys.modules["dashscope.common.constants"] = constants
 
     # dashscope.api_entities.dashscope_response
     api_entities = types.ModuleType("dashscope.api_entities")

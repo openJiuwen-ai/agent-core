@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """CLI entrypoint for Playwright browser runtime."""
 
 from __future__ import annotations
@@ -8,25 +7,24 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import traceback
 
-from openjiuwen.deepagents.tools.browser_move.clients.stdio_client import BrowserMoveStdioClient
-from openjiuwen.deepagents.tools.browser_move.clients.streamable_http_client import (
-    BrowserMoveStreamableHttpClient,
-)
-from openjiuwen.deepagents.tools.browser_move.playwright_runtime.config import (
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.runner import Runner
+
+# Use browser_move client subclasses for MCP transport retry and timeout handling.
+import openjiuwen.core.runner.resources_manager.tool_manager as _tool_mgr_mod
+from ..clients.stdio_client import BrowserMoveStdioClient
+from ..clients.streamable_http_client import BrowserMoveStreamableHttpClient
+
+_tool_mgr_mod.StdioClient = BrowserMoveStdioClient
+_tool_mgr_mod.StreamableHttpClient = BrowserMoveStreamableHttpClient
+
+from .config import (
     MISSING_API_KEY_MESSAGE,
     build_runtime_settings,
     load_repo_dotenv,
 )
-from openjiuwen.deepagents.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime
-
-import openjiuwen.core.runner.resources_manager.tool_manager as _tool_mgr_mod
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner import Runner
-
-_tool_mgr_mod.StdioClient = BrowserMoveStdioClient
-_tool_mgr_mod.StreamableHttpClient = BrowserMoveStreamableHttpClient
+from .runtime import BrowserAgentRuntime
 
 
 async def main() -> None:
@@ -80,8 +78,7 @@ async def main() -> None:
             logger.info(json.dumps(answer, ensure_ascii=False, indent=2))
             query = ""
     except Exception as exc:
-        logger.error(f"Runtime error: {exc}")
-        traceback.print_exc()
+        logger.error("Runtime error: %s", exc, exc_info=True)
         raise
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")

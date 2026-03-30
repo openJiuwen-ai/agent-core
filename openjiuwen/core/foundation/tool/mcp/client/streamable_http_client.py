@@ -15,26 +15,72 @@ from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 class StreamableHttpClient(McpClient):
     """Streamable HTTP transport based MCP client."""
-    __client_name__ = "streamable-http"
+    __client_name__ = ["streamable-http", "streamable_http"]
 
     def __init__(
-        self, config: McpServerConfig,
+        self,
+        config: McpServerConfig | str,
+        name: Optional[str] = None,
+        auth_headers: Optional[Dict[str, str]] = None,
+        auth_query_params: Optional[Dict[str, str]] = None,
     ):
-        super().__init__(config)
-        self._name = config.server_name
-        self._auth_headers = config.auth_headers
-        self._auth_query_params = config.auth_query_params
-        self._server_id = config.server_id
+        resolved_config = self._normalize_config(
+            config,
+            name=name,
+            auth_headers=auth_headers,
+            auth_query_params=auth_query_params,
+        )
+        super().__init__(resolved_config)
+        self._name = resolved_config.server_name
         self._client = None
         self._session = None
         self._read = None
         self._write = None
         self._exit_stack = AsyncExitStack()
+        self._is_disconnected = False
+        self._auth_headers = resolved_config.auth_headers
+        self._auth_query_params = resolved_config.auth_query_params
+        self._server_id = resolved_config.server_id
         self._auth_provider = None
+        if resolved_config.auth_headers is not None or resolved_config.auth_query_params is not None:
+            from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
+            self._auth_provider = AuthHeaderAndQueryProvider(
+                auth_headers=resolved_config.auth_headers or {},
+                auth_query_params=resolved_config.auth_query_params or {},
+            )
+            logger.info("Using custom header and query authorization for streamable-http client")
+
+    @staticmethod
+    def _normalize_config(
+        config: McpServerConfig | str,
+        *,
+        name: Optional[str],
+        auth_headers: Optional[Dict[str, str]],
+        auth_query_params: Optional[Dict[str, str]],
+    ) -> McpServerConfig:
+        if isinstance(config, McpServerConfig):
+            return config
+        resolved_name = (name or "").strip() or "streamable-http"
+        return McpServerConfig(
+            server_id=resolved_name,
+            server_name=resolved_name,
+            server_path=config,
+            client_type="streamable-http",
+            auth_headers=auth_headers or {},
+            auth_query_params=auth_query_params or {},
+        )
+
+    @property
+    def server_path(self) -> str:
+        return self._server_path
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     async def connect(self, *, timeout: float = NO_TIMEOUT) -> bool:
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client import streamable_http as streamable_http_module
 
         try:
             from openjiuwen.core.foundation.tool.auth.auth_callback import AuthType
@@ -52,10 +98,14 @@ class StreamableHttpClient(McpClient):
                     tool_id=self._server_id
                 ),
             )
-            self._auth_provider = next(item for item in auth_result
-                                       if item is not None).auth_data.get("auth_provider")
+            auth_items = [item for item in (auth_result or []) if item is not None]
+            if auth_items:
+                self._auth_provider = auth_items[-1].auth_data.get("auth_provider")
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
-            self._client = streamablehttp_client(
+            streamable_http_client = getattr(streamable_http_module, "streamablehttp_client", None)
+            if streamable_http_client is None:
+                streamable_http_client = getattr(streamable_http_module, "streamable_http_client")
+            self._client = streamable_http_client(
                 self._server_path,
                 timeout=actual_timeout,
                 auth=self._auth_provider
@@ -66,6 +116,7 @@ class StreamableHttpClient(McpClient):
                 ClientSession(self._read, self._write, sampling_callback=None)
             )
             await self._session.initialize()
+            self._is_disconnected = False
             logger.info(f"Streamable-http client connected successfully to {self._server_path}")
             return True
         except Exception as e:
@@ -81,6 +132,7 @@ class StreamableHttpClient(McpClient):
             self._client = None
             self._read = None
             self._write = None
+            self._is_disconnected = True
             logger.info("Streamable-http client disconnected successfully")
             return True
         except Exception as e:

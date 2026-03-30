@@ -1,13 +1,11 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """MCP server wrapper for Playwright browser runtime.
 
-Usage (from the agent-core repo root):
-  uv run python -m openjiuwen.deepagents.tools.browser_move.playwright_runtime_mcp_server
-  uv run python -m openjiuwen.deepagents.tools.browser_move.playwright_runtime_mcp_server \
-      --transport streamable-http --host 127.0.0.1 --port 8940
+Usage (from repo root):
+  uv run python src/playwright_runtime_mcp_server.py
+  uv run python src/playwright_runtime_mcp_server.py --transport streamable-http --host 127.0.0.1 --port 8940
 """
 
 from __future__ import annotations
@@ -15,34 +13,41 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+# Ensure repo and src packages are importable when running as a script.
+_HERE = Path(__file__).resolve().parent
+_SRC_ROOT = _HERE
+_REPO_ROOT = _SRC_ROOT.parent
+for _p in (str(_REPO_ROOT), str(_SRC_ROOT)):
+    if _p not in sys.path:
+        sys.path.append(_p)
+
 from fastmcp import Context, FastMCP
-from openjiuwen.deepagents.tools.browser_move import REPO_ROOT
-from openjiuwen.deepagents.tools.browser_move.clients.stdio_client import BrowserMoveStdioClient
-from openjiuwen.deepagents.tools.browser_move.clients.streamable_http_client import (
-    BrowserMoveStreamableHttpClient,
-)
-from openjiuwen.deepagents.tools.browser_move.playwright_runtime.config import (
+from clients.stdio_client import BrowserMoveStdioClient
+from clients.streamable_http_client import BrowserMoveStreamableHttpClient
+from playwright_runtime.config import (
     DEFAULT_BROWSER_TIMEOUT_S,
     MISSING_API_KEY_MESSAGE,
     build_runtime_settings,
     load_repo_dotenv,
 )
-from openjiuwen.deepagents.tools.browser_move.controllers.action import (
+from controllers.action import (
     bind_runtime,
     clear_runtime_runner,
     list_actions,
-    register_example_actions,
+    register_builtin_actions,
     run_action,
 )
 
+# Use browser_move client subclasses for MCP transport retry and timeout handling.
 import openjiuwen.core.runner.resources_manager.tool_manager as _tool_mgr_mod
 
 if TYPE_CHECKING:
-    from openjiuwen.deepagents.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime
+    from playwright_runtime.runtime import BrowserAgentRuntime
 
 _tool_mgr_mod.StdioClient = BrowserMoveStdioClient
 _tool_mgr_mod.StreamableHttpClient = BrowserMoveStreamableHttpClient
@@ -54,7 +59,7 @@ load_repo_dotenv()
 
 
 def _build_runtime() -> "BrowserAgentRuntime":
-    from openjiuwen.deepagents.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime
+    from playwright_runtime.runtime import BrowserAgentRuntime
 
     settings = build_runtime_settings()
     if not settings.api_key:
@@ -120,7 +125,7 @@ def _resolve_request_id(explicit_request_id: str, ctx: Context | None = None) ->
 @asynccontextmanager
 async def _lifespan(_server: FastMCP):
     try:
-        register_example_actions()
+        register_builtin_actions()
         yield {}
     finally:
         await _shutdown_runtime()
@@ -157,12 +162,18 @@ async def browser_run_task(
     runtime = await _get_runtime()
     effective_session_id = _resolve_session_id(session_id, ctx)
     effective_request_id = _resolve_request_id(request_id, ctx)
-    return await runtime.run_browser_task(
+    result = await runtime.run_browser_task(
         task=task,
         session_id=effective_session_id or None,
         request_id=effective_request_id or None,
         timeout_s=timeout_s if timeout_s > 0 else None,
     )
+    # Strip base64 screenshot from MCP response — it becomes a ToolMessage in
+    # calling agent context and can exceed the LLM context window on its own.
+    screenshot = result.get("screenshot")
+    if isinstance(screenshot, str) and screenshot.startswith("data:"):
+        result = {**result, "screenshot": "[screenshot saved]"}
+    return result
 
 
 @mcp.tool(
@@ -205,11 +216,12 @@ async def browser_clear_cancel(
         "Run a custom controller action by name. Use for actions the Playwright MCP does not provide. "
         "Optional: session_id, request_id, and action-specific args via params object "
         "(e.g. params={'text': 'hello'} for 'echo'). "
-        "Built-in examples: ping, echo, browser_get_element_coordinates, browser_drag_and_drop. "
+        "Built-in examples: ping, echo, browser_get_element_coordinates, browser_drag_and_drop, list_upload_files. "
         "For browser_get_element_coordinates use at least element_source (element_target optional). "
         "For browser_drag_and_drop use element_source+element_target. "
         "Or use coord_source_x+coord_source_y+coord_target_x+coord_target_y. "
         "Aliases source/target and source_x/source_y/target_x/target_y are accepted. "
+        "Use list_upload_files to discover files available at BROWSER_UPLOAD_ROOT before uploading. "
         "Register your own via controllers.action.register_action."
     ),
 )
@@ -254,12 +266,14 @@ async def browser_list_custom_actions() -> dict[str, Any]:
 )
 async def browser_runtime_health() -> dict[str, Any]:
     settings = build_runtime_settings()
+    svc = _runtime.service if _runtime is not None else None
     return {
-        "ok": True,
+        "ok": svc.connection_healthy if svc is not None else False,
+        "started": _runtime is not None,
+        "last_heartbeat_ok": svc.last_heartbeat_ok if svc is not None else None,
         "provider": settings.provider,
         "api_base": settings.api_base,
         "model_name": settings.model_name,
-        "started": _runtime is not None,
     }
 
 
@@ -336,7 +350,7 @@ def _configure_stdio_logging() -> None:
         from openjiuwen.core.common.logging.default.log_config import log_config
         from openjiuwen.core.common.logging.manager import LogManager
 
-        log_path = str((Path(REPO_ROOT) / "logs").resolve())
+        log_path = str((_REPO_ROOT / "logs").resolve())
         log_config._log_config["log_path"] = log_path
         log_config._log_config["output"] = ["file"]
         log_config._log_config["interface_output"] = ["file"]

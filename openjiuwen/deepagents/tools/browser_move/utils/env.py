@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Environment and settings helpers for the runtime."""
 
 from __future__ import annotations
@@ -10,7 +9,10 @@ import os
 import shlex
 from pathlib import Path
 
-from .. import REPO_ROOT
+try:
+    from ..playwright_runtime import REPO_ROOT
+except ImportError:  # pragma: no cover
+    from playwright_runtime import REPO_ROOT
 
 SUPPORTED_MODEL_PROVIDERS = frozenset({"openai", "openrouter", "siliconflow", "dashscope"})
 TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -22,6 +24,7 @@ DEFAULT_GUARDRAIL_MAX_FAILURES = 2
 DEFAULT_GUARDRAIL_RETRY_ONCE = True
 DEFAULT_PLAYWRIGHT_MCP_COMMAND = "npx"
 DEFAULT_PLAYWRIGHT_MCP_ARGS = "-y @playwright/mcp@latest"
+DEFAULT_BROWSER_UPLOAD_ROOT = ""
 MISSING_API_KEY_MESSAGE = (
     "Missing API key. Set API_KEY (or OPENROUTER_API_KEY / SILICONFLOW_API_KEY / "
     "OPENAI_API_KEY / DASHSCOPE_API_KEY)."
@@ -137,6 +140,18 @@ def resolve_browser_timeout_s() -> int:
         default=DEFAULT_BROWSER_TIMEOUT_S,
         minimum=1,
     )
+
+
+def resolve_upload_root() -> Path | None:
+    """Return the configured upload root directory, or None if not set.
+
+    Reads BROWSER_UPLOAD_ROOT.  Returns None when unset or blank so callers
+    can decide whether to enforce path sandboxing.
+    """
+    raw = first_non_empty_env("BROWSER_UPLOAD_ROOT")
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
 
 
 def resolve_model_settings() -> tuple[str, str, str]:

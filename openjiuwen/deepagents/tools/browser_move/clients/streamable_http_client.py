@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, List, Optional, Dict
@@ -22,33 +22,13 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
 
     def __init__(
         self,
-        config_or_server_path: McpServerConfig | str,
-        name: str | None = None,
+        config: McpServerConfig | str,
+        name: Optional[str] = None,
         auth_headers: Optional[Dict[str, str]] = None,
         auth_query_params: Optional[Dict[str, str]] = None,
     ):
-        if isinstance(config_or_server_path, McpServerConfig):
-            super().__init__(config_or_server_path)
-        else:
-            super().__init__(
-                McpServerConfig(
-                    server_id="browser_move_streamable_http",
-                    server_name=name or "browser_move_streamable_http",
-                    server_path=config_or_server_path,
-                    client_type="streamable-http",
-                    auth_headers=auth_headers,
-                    auth_query_params=auth_query_params,
-                )
-            )
+        super().__init__(config, name, auth_headers, auth_query_params)
         self._reconnect_lock = asyncio.Lock()
-
-    @property
-    def server_path(self) -> str:
-        return self._server_path
-
-    @property
-    def name(self) -> str:
-        return self._name
 
     @staticmethod
     def _is_retryable_transport_error(error: Exception) -> bool:
@@ -76,14 +56,14 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
     async def connect(self, *, retry_times: int = 1, timeout: float = NO_TIMEOUT) -> bool:
         """Connect to Streamable HTTP server, optionally retrying on failure."""
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client.streamable_http import streamable_http_client
 
         actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
         attempts = max(1, int(retry_times))
         for attempt in range(1, attempts + 1):
             try:
                 await self.disconnect(timeout=timeout)
-                self._client = streamablehttp_client(
+                self._client = streamable_http_client(
                     self._server_path,
                     timeout=actual_timeout,
                     auth=self._auth_provider,

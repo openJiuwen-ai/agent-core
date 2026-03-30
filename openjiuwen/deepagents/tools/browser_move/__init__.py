@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """browser_move package for browser runtime integration."""
 
@@ -9,7 +9,8 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parent
+_HERE = Path(__file__).resolve()
+REPO_ROOT = _HERE.parents[4]
 
 __all__ = [
     "REPO_ROOT",

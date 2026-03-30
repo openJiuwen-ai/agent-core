@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Agent builders for runtime and browser worker."""
 
@@ -147,7 +146,33 @@ def _normalize_execute_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tu
     return ctx, tool_call, session, tag, extra_kwargs
 
 
-def _build_main_agent_system_prompt(default_timeout_s: float) -> str:
+def _build_browser_worker_system_prompt(screenshot_subdir: str, artifacts_subdir: str) -> str:
+    return (
+        "You are a browser worker agent.\n"
+        "Execute browser tasks step-by-step with Playwright MCP tools only.\n"
+        "Before interacting, ensure page or selector readiness.\n"
+        "Keep actions targeted and avoid unnecessary page snapshots.\n"
+        "If actions repeatedly fail, stop and report the exact failing action.\n"
+        "If you use browser_tabs, action MUST be one of: list, new, close, select.\n"
+        "For specialized operations (file upload, drag-and-drop, coordinates, etc.), "
+        "call browser_list_custom_actions to discover available actions and their params, "
+        "then call browser_custom_action with the matching action name and params.\n"
+        "IMPORTANT: Do NOT use browser_take_screenshot unless strictly necessary. "
+        f"If a screenshot is needed, always save it under '{screenshot_subdir}/'. "
+        "Use browser_run_code with: "
+        f"async (page) => {{ await page.screenshot({{ path: '{screenshot_subdir}/screenshot.png' }}); "
+        f"return '{screenshot_subdir}/screenshot.png'; }}\n"
+        f"If you produce any output files (reports, notes, summaries, markdown, text files, etc.), "
+        f"write them to the '{artifacts_subdir}/' directory relative to the working directory. "
+        "Never write output files to the project root or any other location.\n"
+        "Final output MUST be a single JSON object with keys:\n"
+        "ok (boolean), final (string), page (object with url and title), "
+        "screenshot (string|null), error (string|null).\n"
+        "Return JSON only, even on failures. Do not output markdown or plain text."
+    )
+
+
+def _build_main_agent_system_prompt(default_timeout_s: float, artifacts_subdir: str) -> str:
     timeout_text = f"{int(default_timeout_s)}" if default_timeout_s.is_integer() else f"{default_timeout_s:.1f}"
     return (
         "You are the main orchestration agent.\n"
@@ -164,7 +189,10 @@ def _build_main_agent_system_prompt(default_timeout_s: float) -> str:
         "Do not simulate browser actions yourself.\n"
         "Pass through the full user goal clearly as browser task text.\n"
         "Keep user-facing answer concise and factual.\n"
-        "If a browser tool returns an error, report it explicitly."
+        "If a browser tool returns an error, report it explicitly.\n"
+        f"If you produce any output files (reports, notes, summaries, markdown, text files, etc.), "
+        f"write them to the '{artifacts_subdir}/' directory relative to the working directory. "
+        "Never write output files to the project root or any other location."
     )
 
 
@@ -248,10 +276,14 @@ def build_browser_worker_agent(
     *,
     max_steps: int,
     screenshot_subdir: str = "screenshots",
+    artifacts_subdir: str = "artifacts",
     tool_result_observer: ToolResultObserver | None = None,
 ) -> ReActAgent:
     screenshot_subdir = (
         (screenshot_subdir or "screenshots").strip().replace("\\", "/").strip("/") or "screenshots"
+    )
+    artifacts_subdir = (
+        (artifacts_subdir or "artifacts").strip().replace("\\", "/").strip("/") or "artifacts"
     )
     card = AgentCard(
         id="agent.playwright.browser_worker",
@@ -272,23 +304,7 @@ def build_browser_worker_agent(
             [
                 {
                     "role": "system",
-                    "content": (
-                        "You are a browser worker agent.\n"
-                        "Execute browser tasks step-by-step with Playwright MCP tools only.\n"
-                        "Before interacting, ensure page or selector readiness.\n"
-                        "Keep actions targeted and avoid unnecessary page snapshots.\n"
-                        "If actions repeatedly fail, stop and report the exact failing action.\n"
-                        "If you use browser_tabs, action MUST be one of: list, new, close, select.\n"
-                        "IMPORTANT: Do NOT use browser_take_screenshot unless strictly necessary. "
-                        f"If a screenshot is needed, always save it under '{screenshot_subdir}/'. "
-                        "Use browser_run_code with: "
-                        f"async (page) => {{ await page.screenshot({{ path: '{screenshot_subdir}/screenshot.png' }}); "
-                        f"return '{screenshot_subdir}/screenshot.png'; }}\n"
-                        "Final output MUST be a single JSON object with keys:\n"
-                        "ok (boolean), final (string), page (object with url and title), "
-                        "screenshot (string|null), error (string|null).\n"
-                        "Return JSON only, even on failures. Do not output markdown or plain text."
-                    ),
+                    "content": _build_browser_worker_system_prompt(screenshot_subdir, artifacts_subdir),
                 }
             ]
         )
@@ -317,9 +333,13 @@ def build_main_agent(
     *,
     custom_action_tool_card=None,
     list_actions_tool_card=None,
+    artifacts_subdir: str = "artifacts",
     tool_result_observer: ToolResultObserver | None = None,
 ) -> ReActAgent:
     default_timeout_s = _resolve_tool_timeout_s()
+    artifacts_subdir = (
+        (artifacts_subdir or "artifacts").strip().replace("\\", "/").strip("/") or "artifacts"
+    )
     card = AgentCard(
         id="agent.playwright.main_runtime",
         name="playwright_main_runtime",
@@ -334,12 +354,12 @@ def build_main_agent(
             api_base=api_base,
             model_name=model_name,
         )
-        .configure_max_iterations(20)
+        .configure_max_iterations(8)
         .configure_prompt_template(
             [
                 {
                     "role": "system",
-                    "content": _build_main_agent_system_prompt(default_timeout_s),
+                    "content": _build_main_agent_system_prompt(default_timeout_s, artifacts_subdir),
                 }
             ]
         )

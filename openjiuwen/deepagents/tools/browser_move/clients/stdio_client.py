@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, List, Optional
@@ -8,6 +8,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
 from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
+from ..utils.parsing import sanitize_json_schema
 
 
 class BrowserMoveStdioClient(StdioClient):
@@ -151,7 +152,7 @@ class BrowserMoveStdioClient(StdioClient):
                         name=tool.name,
                         server_name=self._name,
                         description=getattr(tool, "description", ""),
-                        input_params=getattr(tool, "inputSchema", {}),
+                        input_params=sanitize_json_schema(getattr(tool, "inputSchema", {})),
                     )
                     for tool in tools_response.tools
                 ]
@@ -265,3 +266,13 @@ class BrowserMoveStdioClient(StdioClient):
                 return tool
         logger.warning(f"Tool '{tool_name}' not found via Stdio")
         return None
+
+    async def ping(self, *, timeout: float = 5.0) -> bool:
+        """Return True if the stdio subprocess is still responsive."""
+        if not self._session:
+            return False
+        try:
+            await asyncio.wait_for(self._session.list_tools(), timeout=timeout)
+            return True
+        except Exception:
+            return False

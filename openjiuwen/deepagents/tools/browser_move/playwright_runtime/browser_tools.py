@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Browser MCP integration helpers for playwright_runtime."""
 
 from __future__ import annotations
@@ -18,7 +17,6 @@ from urllib.parse import urlparse
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
-
 from .. import REPO_ROOT
 
 _DEFAULT_SERVER_ID = "playwright_runtime_wrapper"
@@ -26,10 +24,15 @@ _DEFAULT_SERVER_NAME = "playwright-runtime-wrapper"
 _SUPPORTED_CLIENT_TYPES = {"stdio", "sse", "streamable-http", "streamable_http", "http"}
 _AUTO_HTTP_FALLBACK = "PLAYWRIGHT_RUNTIME_MCP_AUTO_HTTP_FALLBACK"
 _PROXY_BLOCKLIST = {"http://127.0.0.1:9", "http://localhost:9"}
-_SERVER_MODULE = "openjiuwen.deepagents.tools.browser_move.playwright_runtime_mcp_server"
 _LOCAL_SERVER_PROCESS: subprocess.Popen[str] | None = None
 _LOCAL_SERVER_URL: str | None = None
 _OPENJIUWEN_CLIENTS_PATCHED = False
+_client_registry: dict[str, Any] = {}
+
+
+def get_registered_client(server_id: str) -> Any:
+    """Return the MCP client created for *server_id*, or None if not found."""
+    return _client_registry.get(server_id)
 
 
 def _env_first(*names: str, default: str = "") -> str:
@@ -45,14 +48,6 @@ def _env_bool(*names: str, default: bool = False) -> bool:
     if not value:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
-
-
-def _module_launch_cwd() -> str:
-    current = Path(REPO_ROOT).expanduser().resolve()
-    for candidate in [current, *current.parents]:
-        if (candidate / "pyproject.toml").exists() and (candidate / "openjiuwen" / "__init__.py").exists():
-            return str(candidate)
-    raise RuntimeError(f"Could not resolve module launch cwd from {current}")
 
 
 def _parse_args(raw: str) -> list[str]:
@@ -72,6 +67,10 @@ def _parse_args(raw: str) -> list[str]:
         return text.split()
 
 
+def _server_script() -> Path:
+    return Path(__file__).resolve().parent.parent / "playwright_runtime_mcp_server.py"
+
+
 def _normalize_client_type(client_type: str) -> str:
     value = (client_type or "").strip().lower()
     if value in {"http", "streamable_http"}:
@@ -86,15 +85,20 @@ def _ensure_openjiuwen_client_patch() -> None:
 
     import openjiuwen.core.runner.resources_manager.tool_manager as tool_mgr
 
+    from ..clients.stdio_client import BrowserMoveStdioClient
     from ..clients.streamable_http_client import BrowserMoveStreamableHttpClient
 
+    tool_mgr.StdioClient = BrowserMoveStdioClient
     original_create_client = tool_mgr.ToolMgr._create_client
 
     def _patched_create_client(config: McpServerConfig):
         normalized = _normalize_client_type(getattr(config, "client_type", ""))
         if normalized == "streamable-http":
-            return BrowserMoveStreamableHttpClient(config)
-        return original_create_client(config)
+            client = BrowserMoveStreamableHttpClient(config)
+        else:
+            client = original_create_client(config)
+        _client_registry[config.server_id] = client
+        return client
 
     tool_mgr.StreamableHttpClient = BrowserMoveStreamableHttpClient
     tool_mgr.ToolMgr._create_client = staticmethod(_patched_create_client)
@@ -220,6 +224,10 @@ def _start_local_server(transport: str, host: str, port: int, path: str) -> str:
     if normalized not in {"sse", "streamable-http"}:
         raise ValueError(f"Unsupported local server transport: {transport}")
 
+    server_script = _server_script()
+    if not server_script.exists():
+        raise FileNotFoundError(f"playwright runtime MCP server not found: {server_script}")
+
     command = _env_first(
         "PLAYWRIGHT_RUNTIME_MCP_COMMAND",
         "BROWSER_RUNTIME_MCP_COMMAND",
@@ -227,8 +235,7 @@ def _start_local_server(transport: str, host: str, port: int, path: str) -> str:
     )
     cmd = [
         command,
-        "-m",
-        _SERVER_MODULE,
+        str(server_script),
         "--transport",
         normalized,
         "--host",
@@ -241,7 +248,7 @@ def _start_local_server(transport: str, host: str, port: int, path: str) -> str:
     ]
     _LOCAL_SERVER_PROCESS = subprocess.Popen(
         cmd,
-        cwd=_module_launch_cwd(),
+        cwd=str(REPO_ROOT),
         env=_build_child_env(),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -429,6 +436,10 @@ def build_browser_runtime_mcp_config() -> McpServerConfig | None:
             client_type="streamable-http",
         )
 
+    server_script = _server_script()
+    if not server_script.exists():
+        raise FileNotFoundError(f"playwright runtime MCP server not found: {server_script}")
+
     command = _env_first(
         "PLAYWRIGHT_RUNTIME_MCP_COMMAND",
         "BROWSER_RUNTIME_MCP_COMMAND",
@@ -438,13 +449,21 @@ def build_browser_runtime_mcp_config() -> McpServerConfig | None:
     args = (
         _parse_args(args_raw)
         if args_raw
-        else ["-m", _SERVER_MODULE, "--transport", "stdio", "--no-banner", "--log-level", "ERROR"]
+        else [
+            "-m",
+            "openjiuwen.deepagents.tools.browser_move.playwright_runtime_mcp_server",
+            "--transport",
+            "stdio",
+            "--no-banner",
+            "--log-level",
+            "ERROR",
+        ]
     )
 
     params: dict[str, Any] = {
         "command": command,
         "args": args,
-        "cwd": _module_launch_cwd(),
+        "cwd": str(REPO_ROOT),
     }
     timeout_raw = _env_first(
         "PLAYWRIGHT_RUNTIME_MCP_TIMEOUT_S",

@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Browser backend service with sticky sessions and guardrails."""
 
@@ -21,8 +20,7 @@ from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVSto
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
-
-from .. import REPO_ROOT
+from . import REPO_ROOT
 from .agents import build_browser_worker_agent
 from .config import BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
 from .profiles import BrowserProfile, BrowserProfileStore
@@ -59,14 +57,20 @@ class BrowserService:
         self._sessions: set[str] = set()
         self._inflight_tasks: Dict[str, set[asyncio.Task[Any]]] = {}
         self._screenshot_subdir = "screenshots"
+        self._artifacts_subdir = "artifacts"
         self._mcp_cwd = self._resolve_mcp_cwd()
         self._screenshots_dir = self._mcp_cwd / self._screenshot_subdir
+        self._artifacts_dir = self._mcp_cwd / self._artifacts_subdir
         self._profile_store = BrowserProfileStore(self._resolve_profile_store_path())
         self._profile_name = (os.getenv("BROWSER_PROFILE_NAME") or "jiuwenclaw").strip() or "jiuwenclaw"
         self._driver_mode = self._resolve_driver_mode()
         self._active_profile: Optional[BrowserProfile] = None
         self._managed_driver: Optional[ManagedBrowserDriver] = None
         self._failure_context_by_session: Dict[str, str] = {}
+        self._heartbeat_task: Optional[asyncio.Task[Any]] = None
+        self._heartbeat_interval: float = 30.0
+        self._connection_healthy: bool = False
+        self._last_heartbeat_ok: Optional[float] = None
 
     @property
     def browser_agent(self) -> Optional[ReActAgent]:
@@ -75,6 +79,18 @@ class BrowserService:
     @browser_agent.setter
     def browser_agent(self, value: Optional[ReActAgent]) -> None:
         self._browser_agent = value
+
+    @property
+    def artifacts_subdir(self) -> str:
+        return self._artifacts_subdir
+
+    @property
+    def connection_healthy(self) -> bool:
+        return self._connection_healthy
+
+    @property
+    def last_heartbeat_ok(self) -> Optional[float]:
+        return self._last_heartbeat_ok
 
     @staticmethod
     def _resolve_profile_store_path() -> Path:
@@ -399,6 +415,9 @@ class BrowserService:
         if shutil.which("npx") is None:
             raise RuntimeError("npx not found in PATH. Install Node.js first.")
 
+        from .browser_tools import _ensure_openjiuwen_client_patch
+        _ensure_openjiuwen_client_patch()
+
         await self._ensure_managed_driver_started()
         self._ensure_screenshots_dir()
         await Runner.start()
@@ -422,8 +441,67 @@ class BrowserService:
             mcp_cfg=self.mcp_cfg,
             max_steps=self.guardrails.max_steps,
             screenshot_subdir=self._screenshot_subdir,
+            artifacts_subdir=self._artifacts_subdir,
         )
         self.started = True
+        self._start_heartbeat()
+
+    def _start_heartbeat(self) -> None:
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(), name="browser-heartbeat"
+            )
+
+    async def _check_connection(self) -> None:
+        from .browser_tools import get_registered_client
+        if self._managed_driver is not None:
+            driver_dict = getattr(self._managed_driver, "__dict__", {})
+            endpoint_ready_fn = driver_dict.get("is_endpoint_ready")
+            if endpoint_ready_fn is None:
+                endpoint_ready_fn = driver_dict.get("_is_endpoint_ready")
+            if endpoint_ready_fn is None:
+                endpoint_ready_fn = getattr(self._managed_driver, "is_endpoint_ready", None)
+            if endpoint_ready_fn is None:
+                endpoint_ready_fn = getattr(self._managed_driver, "_is_endpoint_ready", None)
+            ready = await asyncio.to_thread(endpoint_ready_fn)
+            if not ready:
+                raise RuntimeError("Chrome CDP endpoint not responding")
+        server_id = (self.mcp_cfg.server_id or "").strip() or self.mcp_cfg.server_name
+        client = get_registered_client(server_id)
+        if client is None:
+            raise RuntimeError("Playwright MCP client not found in registry")
+        if not await client.ping():
+            raise RuntimeError("Playwright MCP subprocess not responding")
+
+    async def _heartbeat_loop(self) -> None:
+        from openjiuwen.core.common.logging import logger as _logger
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            try:
+                await self._check_connection()
+                self._connection_healthy = True
+                self._last_heartbeat_ok = asyncio.get_event_loop().time()
+                _logger.info("BrowserService heartbeat: connection healthy")
+            except Exception as exc:
+                self._connection_healthy = False
+                _logger.warning("BrowserService heartbeat: connection unhealthy — %s", exc)
+                if not self._inflight_tasks:
+                    try:
+                        await self._restart()
+                        try:
+                            await self._check_connection()
+                        except Exception as recheck_exc:
+                            self._connection_healthy = False
+                            _logger.warning(
+                                "BrowserService heartbeat: restart completed but connection is still unhealthy - %s",
+                                recheck_exc,
+                            )
+                        else:
+                            self._connection_healthy = True
+                            self._last_heartbeat_ok = asyncio.get_event_loop().time()
+                            _logger.info("BrowserService heartbeat: connection restored after restart")
+                    except Exception as restart_exc:
+                        _logger.error("BrowserService heartbeat: restart failed — %s", restart_exc)
 
     async def _restart(self) -> None:
         """Tear down and reinitialize the browser service (e.g. after stdio subprocess dies)."""
@@ -447,7 +525,7 @@ class BrowserService:
         rid = (request_id or "").strip() or "request"
         return f"{sid}:worker:{rid}:{uuid.uuid4().hex}"
 
-    async def run_task_once(self, task: str, session_id: str, request_id: str) -> Dict[str, Any]:
+    async def _run_task_once(self, task: str, session_id: str, request_id: str) -> Dict[str, Any]:
         if self._browser_agent is None:
             raise RuntimeError("BrowserService is not started")
 
@@ -487,6 +565,9 @@ class BrowserService:
             "screenshot": None,
             "error": "Browser worker did not return valid JSON output",
         }
+
+    async def run_task_once(self, task: str, session_id: str, request_id: str) -> Dict[str, Any]:
+        return await self._run_task_once(task=task, session_id=session_id, request_id=request_id)
 
     @staticmethod
     def _is_max_iteration_result(parsed: Dict[str, Any]) -> bool:
@@ -776,6 +857,12 @@ class BrowserService:
                     self._unregister_inflight_task(sid, rid, current_task)
 
     async def shutdown(self) -> None:
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
         try:
             if self.started:
                 await Runner.stop()

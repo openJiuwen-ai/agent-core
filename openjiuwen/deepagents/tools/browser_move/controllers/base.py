@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Base controller contract for action dispatchers."""
 
 from __future__ import annotations
@@ -23,6 +22,18 @@ class BaseController(ABC):
     @abstractmethod
     def clear_runtime_runner(self) -> None:
         """Clear any currently bound runtime runner."""
+
+    @abstractmethod
+    def bind_code_executor(self, executor: Any | None) -> None:
+        """Bind a direct code executor callable: async (js_code: str) -> Any.
+
+        When bound, browser actions that execute pre-built JS (drag-and-drop,
+        coordinate resolution) call this instead of going through an LLM worker.
+        """
+
+    @abstractmethod
+    def clear_code_executor(self) -> None:
+        """Clear the bound code executor."""
 
     @abstractmethod
     def register_action(self, name: str, handler: Any, *, overwrite: bool = True) -> None:

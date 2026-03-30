@@ -423,20 +423,68 @@ class DeepAgent(BaseAgent):
         if isinstance(spec, DeepAgent):
             return spec
 
+        create_kwargs = {
+            "model": spec.model or self._deep_config.model,
+            "card": spec.agent_card,
+            "system_prompt": spec.system_prompt,
+            "tools": spec.tools or [],
+            "mcps": spec.mcps or [],
+            "rails": spec.rails,
+            "enable_task_loop": spec.enable_task_loop,
+            "max_iterations": (
+                spec.max_iterations
+                if spec.max_iterations is not None
+                else self._deep_config.max_iterations
+            ),
+            "workspace": (
+                spec.workspace
+                if spec.workspace is not None
+                else self._deep_config.workspace
+            ),
+            "skills": spec.skills,
+            "backend": (
+                spec.backend
+                if spec.backend is not None
+                else self._deep_config.backend
+            ),
+            "sys_operation": (
+                spec.sys_operation
+                if spec.sys_operation is not None
+                else self._deep_config.sys_operation
+            ),
+            "language": (
+                spec.language
+                if spec.language is not None
+                else self._deep_config.language
+            ),
+            "prompt_mode": (
+                spec.prompt_mode
+                if spec.prompt_mode is not None
+                else self._deep_config.prompt_mode
+            ),
+            "stop_condition": spec.stop_condition,
+        }
+
+        if spec.factory_name:
+            normalized_factory = (spec.factory_name or "").strip().lower()
+            if normalized_factory in {"browser_agent", "browser_runtime"}:
+                from openjiuwen.deepagents.subagents.browser_agent import (
+                    create_browser_agent,
+                )
+
+                return create_browser_agent(
+                    **create_kwargs,
+                    **dict(spec.factory_kwargs or {}),
+                )
+
+            raise build_error(
+                StatusCode.DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND,
+                error_msg=f"Unsupported subagent factory: {spec.factory_name}",
+            )
+
         from openjiuwen.deepagents.factory import create_deep_agent
 
-        return create_deep_agent(
-            model=spec.model or self._deep_config.model,
-            card=spec.agent_card,
-            system_prompt=spec.system_prompt,
-            tools=spec.tools or [],
-            mcps=spec.mcps or [],
-            rails=spec.rails,
-            max_iterations=self._deep_config.max_iterations,
-            workspace=self._deep_config.workspace,
-            sys_operation=self._deep_config.sys_operation,
-            skills=spec.skills,
-        )
+        return create_deep_agent(**create_kwargs)
 
     def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
         """Find SubAgentConfig matching subagent_type.

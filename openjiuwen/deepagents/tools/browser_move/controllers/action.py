@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Runtime-native custom action controller for Playwright runtime.
 It exposes a lightweight action registry consumed by the MCP wrapper.
 """
@@ -11,15 +10,26 @@ import asyncio
 import copy
 import inspect
 import json
+import sys
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
 from openjiuwen.core.common.logging import logger
-
 from .base import BaseController
-from ..utils.parsing import extract_json_object
+try:
+    # Normal package import (openjiuwen.deepagents.tools.browser_move.controllers.action)
+    from ..utils.env import resolve_upload_root
+    from ..utils.parsing import extract_json_object
+except ImportError:  # pragma: no cover
+    # When imported as top-level `controllers.action` (playwright_runtime/__init__.py
+    # appends browser_move/ to sys.path), `..utils` would go beyond the top-level
+    # package. Fall back to sibling top-level `utils.*` imports.
+    from utils.env import resolve_upload_root
+    from utils.parsing import extract_json_object
 
 ActionResult = dict[str, Any]
 ActionHandler = Callable[..., Awaitable[Any] | Any]
+CodeExecutor = Callable[[str], Awaitable[Any]]
 
 
 class RuntimeRunner(Protocol):
@@ -37,6 +47,7 @@ class RuntimeRunner(Protocol):
 _ACTIONS: dict[str, ActionHandler] = {}
 _ACTION_SPECS: dict[str, dict[str, Any]] = {}
 _RUNTIME_RUNNER: RuntimeRunner | None = None
+_CODE_EXECUTOR: CodeExecutor | None = None
 _LOCK = asyncio.Lock()
 
 
@@ -49,12 +60,22 @@ class ActionController(BaseController):
         actions: dict[str, ActionHandler] | None = None,
         action_specs: dict[str, dict[str, Any]] | None = None,
         runtime_runner: RuntimeRunner | None = None,
+        code_executor: CodeExecutor | None = None,
         lock: asyncio.Lock | None = None,
     ) -> None:
         self._actions: dict[str, ActionHandler] = actions if actions is not None else {}
         self._action_specs: dict[str, dict[str, Any]] = action_specs if action_specs is not None else {}
         self._runtime_runner: RuntimeRunner | None = runtime_runner
+        self._code_executor: CodeExecutor | None = code_executor
         self._lock: asyncio.Lock = lock if lock is not None else asyncio.Lock()
+
+    @property
+    def runtime_runner(self) -> RuntimeRunner | None:
+        return self._runtime_runner
+
+    @property
+    def code_executor(self) -> CodeExecutor | None:
+        return self._code_executor
 
     def bind_runtime(self, runtime: Any) -> None:
         run_browser_task = getattr(runtime, "run_browser_task", None)
@@ -77,15 +98,17 @@ class ActionController(BaseController):
 
         self.bind_runtime_runner(_runner)
 
-    @property
-    def runtime_runner(self) -> RuntimeRunner | None:
-        return self._runtime_runner
-
     def bind_runtime_runner(self, runner: RuntimeRunner | None) -> None:
         self._runtime_runner = runner
 
     def clear_runtime_runner(self) -> None:
         self.bind_runtime_runner(None)
+
+    def bind_code_executor(self, executor: CodeExecutor | None) -> None:
+        self._code_executor = executor
+
+    def clear_code_executor(self) -> None:
+        self._code_executor = None
 
     def register_action(self, name: str, handler: ActionHandler, *, overwrite: bool = True) -> None:
         action_name = _normalize_action_name(name)
@@ -167,9 +190,12 @@ class ActionController(BaseController):
             response.setdefault("session_id", sid)
             response.setdefault("request_id", rid)
             response.setdefault("error", None)
+            _ok = bool(response.get("ok", False))
+            _err = response.get("error") if not _ok else None
             logger.info(
                 f"CONTROLLER_ACTION end action={action_name} session_id={sid or '-'} "
-                f"request_id={rid or '-'} ok={bool(response.get('ok', False))}"
+                f"request_id={rid or '-'} ok={_ok}"
+                + (f" error={_err!r}" if _err else "")
             )
             return response
         except Exception as exc:
@@ -185,14 +211,18 @@ class ActionController(BaseController):
                 "error": str(exc),
             }
 
+    def register_builtin_actions(self) -> None:
+        register_builtin_actions(controller=self)
+
     def register_example_actions(self) -> None:
-        register_example_actions(controller=self)
+        register_builtin_actions(controller=self)
 
     def snapshot(self) -> dict[str, Any]:
         return {
             "actions": dict(self._actions),
             "action_specs": copy.deepcopy(self._action_specs),
             "runtime_runner": self._runtime_runner,
+            "code_executor": self._code_executor,
         }
 
     def restore(self, snapshot: dict[str, Any]) -> None:
@@ -201,6 +231,7 @@ class ActionController(BaseController):
         self._action_specs.clear()
         self._action_specs.update(copy.deepcopy(dict(snapshot.get("action_specs", {}))))
         self._runtime_runner = snapshot.get("runtime_runner")
+        self._code_executor = snapshot.get("code_executor")
 
 
 def _normalize_action_name(name: str) -> str:
@@ -323,8 +354,8 @@ def _build_coordinate_resolution_body() -> str:
         "    if (params.element_source) {\n"
         "      source = await getPoint(params.element_source, params.element_source_offset, 'source');\n"
         "      if (!source) {\n"
-        "        return { ok: false, error: 'Failed to determine source coordinates from"
-        " selector. Use the exact visible text (e.g. \"Learn more\" not \"More information\")"
+        "        return { ok: false, error: 'Failed to determine source coordinates from selector."
+        " Use the exact visible text (e.g. \"Learn more\" not \"More information\")"
         " or a valid CSS/Playwright selector.', source: null, target: null };\n"
         "      }\n"
         "    }\n"
@@ -358,8 +389,8 @@ def _build_drag_operation_body() -> str:
         "    source = await getPoint(params.element_source, params.element_source_offset, 'source');\n"
         "    target = await getPoint(params.element_target, params.element_target_offset, 'target');\n"
         "    if (!source || !target) {\n"
-        "      return { ok: false, error: 'Failed to determine source or target"
-        " coordinates from selectors', source, target };\n"
+        "      return { ok: false, error: 'Failed to determine source or target coordinates from selectors',"
+        " source, target };\n"
         "    }\n"
         "  } else {\n"
         "    const values = [params.coord_source_x, params.coord_source_y,"
@@ -419,6 +450,27 @@ def _build_drag_script(payload: dict[str, Any]) -> str:
     return _wrap_page_script(
         _build_selector_resolution_helpers(payload_json),
         _build_drag_operation_body(),
+    )
+
+
+def _build_set_input_files_script(selector: str, paths: list[str]) -> str:
+    selector_js = "'" + str(selector).replace("\\", "\\\\").replace("'", "\\'") + "'"
+    paths_json = json.dumps(paths)
+    return (
+        "async (page) => {\n"
+        "  try {\n"
+        f"    await page.locator({selector_js}).setInputFiles({paths_json});\n"
+        f"    return {{ ok: true, selector: {selector_js}, paths: {paths_json} }};\n"
+        "  } catch (error) {\n"
+        "    const msg = String(error);\n"
+        "    if (msg.includes('strict mode violation')) {\n"
+        f"      return {{ ok: false, error: msg, selector: {selector_js}, paths: {paths_json},"
+        " hint: 'Multiple file inputs matched. Use a more specific selector"
+        " (e.g. an id like #file-upload) targeting the visible input.' }};\n"
+        "    }\n"
+        f"    return {{ ok: false, error: msg, selector: {selector_js}, paths: {paths_json} }};\n"
+        "  }\n"
+        "}"
     )
 
 
@@ -500,6 +552,24 @@ def _normalize_timeout_s(value: Any) -> int | None:
     return parsed
 
 
+def _list_dir_files(root: Path) -> list[dict[str, Any]]:
+    """Return a flat list of files under *root* with name, path, and size."""
+    entries: list[dict[str, Any]] = []
+    try:
+        for item in sorted(root.iterdir()):
+            if item.is_file():
+                try:
+                    size = item.stat().st_size
+                except OSError:
+                    size = -1
+                entries.append({"name": item.name, "path": str(item), "size_bytes": size})
+    except OSError:
+        pass
+    return entries
+
+
+
+
 async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
@@ -532,6 +602,16 @@ def bind_runtime_runner(runner: RuntimeRunner | None) -> None:
 
 def clear_runtime_runner() -> None:
     bind_runtime_runner(None)
+
+
+def bind_code_executor(executor: CodeExecutor | None) -> None:
+    _DEFAULT_CONTROLLER.bind_code_executor(executor)
+    global _CODE_EXECUTOR
+    _CODE_EXECUTOR = executor
+
+
+def clear_code_executor() -> None:
+    bind_code_executor(None)
 
 
 def register_action(name: str, handler: ActionHandler, *, overwrite: bool = True) -> None:
@@ -575,7 +655,7 @@ async def run_action(
     )
 
 
-def register_example_actions(controller: ActionController | None = None) -> None:
+def register_builtin_actions(controller: ActionController | None = None) -> None:
     ctl = controller or _DEFAULT_CONTROLLER
     
     async def ping(session_id: str = "", request_id: str = "", **kwargs: Any) -> ActionResult:
@@ -665,15 +745,6 @@ def register_example_actions(controller: ActionController | None = None) -> None
         **kwargs: Any,
     ) -> ActionResult:
         del kwargs
-        runner = ctl.runtime_runner
-        if runner is None:
-            return {
-                "ok": False,
-                "error": "runtime_not_bound: call bind_runtime(...) before browser_get_element_coordinates",
-                "session_id": session_id,
-                "request_id": request_id,
-            }
-
         payload = _build_drag_payload(
             url=url,
             source=source,
@@ -701,8 +772,40 @@ def register_example_actions(controller: ActionController | None = None) -> None
                 ),
             }
         js_code = _build_coordinate_script(payload)
+        code_executor = ctl.code_executor
+        if code_executor is not None:
+            try:
+                raw = await code_executor(js_code)
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "error": f"browser_run_code failed: {exc}",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                }
+            parsed = extract_json_object(raw)
+            if not parsed:
+                return {
+                    "ok": False,
+                    "error": "Could not parse coordinate result JSON from browser_run_code output",
+                    "raw_preview": str(raw)[:400],
+                }
+            return {
+                "ok": bool(parsed.get("ok", False)),
+                "source": parsed.get("source"),
+                "target": parsed.get("target"),
+                "error": parsed.get("error"),
+            }
+        # Fallback: route through LLM worker (requires runner to be bound)
+        runner = ctl.runtime_runner
+        if runner is None:
+            return {
+                "ok": False,
+                "error": "runtime_not_bound: call bind_runtime(...) before browser_get_element_coordinates",
+                "session_id": session_id,
+                "request_id": request_id,
+            }
         task_prompt = _build_run_code_task(js_code, "resolve source/target coordinates")
-
         runtime_result = await runner(
             task=task_prompt,
             session_id=session_id or None,
@@ -715,7 +818,6 @@ def register_example_actions(controller: ActionController | None = None) -> None
                 "error": runtime_result.get("error") or "runtime error",
                 "runtime": runtime_result,
             }
-
         parsed = extract_json_object(runtime_result.get("final"))
         if not parsed:
             final_preview = str(runtime_result.get("final", ""))[:400]
@@ -731,6 +833,42 @@ def register_example_actions(controller: ActionController | None = None) -> None
             "target": parsed.get("target"),
             "error": parsed.get("error"),
             "runtime": runtime_result,
+        }
+
+    async def list_upload_files(
+        session_id: str = "",
+        request_id: str = "",
+        **kwargs: Any,
+    ) -> ActionResult:
+        del kwargs
+        upload_root = resolve_upload_root()
+        if upload_root is None:
+            return {
+                "ok": False,
+                "error": (
+                    "BROWSER_UPLOAD_ROOT is not configured. "
+                    "Set this env var to the directory where uploadable files are stored."
+                ),
+                "files": [],
+                "session_id": session_id,
+                "request_id": request_id,
+            }
+        if not upload_root.exists():
+            return {
+                "ok": False,
+                "error": f"Upload root directory does not exist: {upload_root}",
+                "files": [],
+                "upload_root": str(upload_root),
+                "session_id": session_id,
+                "request_id": request_id,
+            }
+        files = _list_dir_files(upload_root)
+        return {
+            "ok": True,
+            "upload_root": str(upload_root),
+            "files": files,
+            "session_id": session_id,
+            "request_id": request_id,
         }
 
     async def browser_drag_and_drop(
@@ -758,15 +896,6 @@ def register_example_actions(controller: ActionController | None = None) -> None
         **kwargs: Any,
     ) -> ActionResult:
         del kwargs
-        runner = ctl.runtime_runner
-        if runner is None:
-            return {
-                "ok": False,
-                "error": "runtime_not_bound: call bind_runtime(...) before browser_drag_and_drop",
-                "session_id": session_id,
-                "request_id": request_id,
-            }
-
         payload = _build_drag_payload(
             url=url,
             source=source,
@@ -797,8 +926,43 @@ def register_example_actions(controller: ActionController | None = None) -> None
                 ),
             }
         js_code = _build_drag_script(payload)
+        code_executor = ctl.code_executor
+        if code_executor is not None:
+            try:
+                raw = await code_executor(js_code)
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "error": f"browser_run_code failed: {exc}",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                }
+            parsed = extract_json_object(raw)
+            if not parsed:
+                return {
+                    "ok": False,
+                    "error": "Could not parse drag result JSON from browser_run_code output",
+                    "raw_preview": str(raw)[:400],
+                }
+            return {
+                "ok": bool(parsed.get("ok", False)),
+                "message": parsed.get("message"),
+                "source": parsed.get("source"),
+                "target": parsed.get("target"),
+                "steps": parsed.get("steps"),
+                "delay_ms": parsed.get("delay_ms"),
+                "error": parsed.get("error"),
+            }
+        # Fallback: route through LLM worker (requires runner to be bound)
+        runner = ctl.runtime_runner
+        if runner is None:
+            return {
+                "ok": False,
+                "error": "runtime_not_bound: call bind_runtime(...) before browser_drag_and_drop",
+                "session_id": session_id,
+                "request_id": request_id,
+            }
         task_prompt = _build_run_code_task(js_code, "drag and drop")
-
         runtime_result = await runner(
             task=task_prompt,
             session_id=session_id or None,
@@ -811,7 +975,6 @@ def register_example_actions(controller: ActionController | None = None) -> None
                 "error": runtime_result.get("error") or "runtime error",
                 "runtime": runtime_result,
             }
-
         parsed = extract_json_object(runtime_result.get("final"))
         if not parsed:
             final_preview = str(runtime_result.get("final", ""))[:400]
@@ -828,6 +991,86 @@ def register_example_actions(controller: ActionController | None = None) -> None
             "target": parsed.get("target"),
             "steps": parsed.get("steps"),
             "delay_ms": parsed.get("delay_ms"),
+            "error": parsed.get("error"),
+            "runtime": runtime_result,
+        }
+
+    async def browser_set_input_files(
+        session_id: str = "",
+        request_id: str = "",
+        selector: str = "",
+        paths: list | None = None,
+        **kwargs: Any,
+    ) -> ActionResult:
+        del kwargs
+        effective_selector = (selector or "").strip() or 'input[type="file"]'
+        effective_paths = [str(p) for p in (paths or []) if p]
+        if not effective_paths:
+            return {
+                "ok": False,
+                "error": "paths is required and must be non-empty",
+                "session_id": session_id,
+                "request_id": request_id,
+            }
+        js_code = _build_set_input_files_script(effective_selector, effective_paths)
+        code_executor = ctl.code_executor
+        if code_executor is not None:
+            try:
+                raw = await code_executor(js_code)
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "error": f"browser_run_code failed: {exc}",
+                    "session_id": session_id,
+                    "request_id": request_id,
+                }
+            parsed = extract_json_object(raw)
+            if not parsed:
+                return {
+                    "ok": False,
+                    "error": "Could not parse set_input_files result JSON from browser_run_code output",
+                    "raw_preview": str(raw)[:400],
+                }
+            return {
+                "ok": bool(parsed.get("ok", False)),
+                "selector": parsed.get("selector", effective_selector),
+                "paths": parsed.get("paths", effective_paths),
+                "error": parsed.get("error"),
+            }
+        # Fallback: route through LLM worker (requires runner to be bound)
+        runner = ctl.runtime_runner
+        if runner is None:
+            return {
+                "ok": False,
+                "error": "runtime_not_bound: call bind_runtime(...) before browser_set_input_files",
+                "session_id": session_id,
+                "request_id": request_id,
+            }
+        task_prompt = _build_run_code_task(js_code, f"set input files on {effective_selector}")
+        runtime_result = await runner(
+            task=task_prompt,
+            session_id=session_id or None,
+            request_id=request_id or None,
+            timeout_s=None,
+        )
+        if not runtime_result.get("ok", False):
+            return {
+                "ok": False,
+                "error": runtime_result.get("error") or "runtime error",
+                "runtime": runtime_result,
+            }
+        parsed = extract_json_object(runtime_result.get("final"))
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse set_input_files result JSON from runtime final output",
+                "raw_preview": str(runtime_result.get("final", ""))[:400],
+                "runtime": runtime_result,
+            }
+        return {
+            "ok": bool(parsed.get("ok", False)),
+            "selector": parsed.get("selector", effective_selector),
+            "paths": parsed.get("paths", effective_paths),
             "error": parsed.get("error"),
             "runtime": runtime_result,
         }
@@ -914,6 +1157,55 @@ def register_example_actions(controller: ActionController | None = None) -> None
             "source_x/source_y/target_x/target_y": "int aliases for coord_* fields",
         },
     )
+    ctl.register_action(
+        "browser_set_input_files",
+        browser_set_input_files,
+        overwrite=True,
+    )
+    ctl.register_action_spec(
+        "browser_set_input_files",
+        summary=(
+            "Sets files on an <input type='file'> element. Requires prior page inspection"
+            " to select the correct input — do not call this without first reading the page snapshot."
+        ),
+        when_to_use=(
+            "Use for all file upload tasks. Does NOT require a file chooser dialog — sets files directly "
+            "on the DOM element. Call list_upload_files first to get absolute paths, then call this action. "
+            "IMPORTANT: pages may have multiple file inputs (e.g. a visible input plus a hidden Dropzone input). "
+            "Always prefer a specific selector such as '#file-upload' or 'input#id' over the generic "
+            "'input[type=\"file\"]' to avoid strict mode violations. If you have not yet inspected the page, "
+            "delegate this action to browser_run_task so the worker can read the page snapshot first."
+        ),
+        params={
+            "selector": (
+                "string: CSS/Playwright selector targeting exactly one file input "
+                "(default: 'input[type=\"file\"]'). Use a specific ID selector like '#file-upload' "
+                "when the page has more than one file input element."
+            ),
+            "paths": (
+                "list[string]: absolute file paths to set on the input (required, non-empty). "
+                "Parameter name is 'paths' — not 'files', not 'file_paths'."
+            ),
+        },
+    )
+    ctl.register_action(
+        "list_upload_files",
+        list_upload_files,
+        overwrite=True,
+    )
+    ctl.register_action_spec(
+        "list_upload_files",
+        summary="Lists files available for upload from the configured BROWSER_UPLOAD_ROOT directory.",
+        when_to_use=(
+            "Call this to discover what files are available and get their exact absolute paths "
+            "before calling browser_set_input_files to attach them to a file input. "
+            "Returns a list of {name, path, size_bytes} entries."
+        ),
+    )
+
+
+def register_example_actions(controller: ActionController | None = None) -> None:
+    register_builtin_actions(controller=controller)
 
 
 __all__ = [
@@ -923,10 +1215,15 @@ __all__ = [
     "bind_runtime",
     "bind_runtime_runner",
     "clear_runtime_runner",
+    "bind_code_executor",
+    "clear_code_executor",
     "register_action",
     "register_action_spec",
+    "register_builtin_actions",
     "register_example_actions",
     "list_actions",
     "describe_actions",
     "run_action",
 ]
+
+sys.modules.setdefault("controllers.action", sys.modules[__name__])

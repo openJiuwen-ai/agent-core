@@ -211,3 +211,13 @@ class SubAgentConfig:
     model: Optional[Model] = None
     rails: Optional[List[AgentRail]] = None
     skills: Optional[List[str]] = None
+    backend: Optional[Any] = None
+    workspace: Optional[Workspace] = None
+    sys_operation: Optional[SysOperation] = None
+    language: Optional[str] = None
+    prompt_mode: Optional[str] = None
+    enable_task_loop: bool = False
+    stop_condition: Optional[StopCondition] = None
+    max_iterations: Optional[int] = None
+    factory_name: Optional[str] = None
+    factory_kwargs: dict[str, Any] = field(default_factory=dict)

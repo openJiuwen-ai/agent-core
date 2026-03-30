@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Managed isolated browser launcher for CDP attach."""
 
@@ -50,43 +49,50 @@ def _kill_chrome_by_user_data_dir(user_data_dir: str) -> int:
             "| ConvertTo-Json -Depth 1"
         )
         try:
-            result = subprocess.run(
-                [shutil.which("powershell") or "powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                items = json.loads(result.stdout.strip())
-                if isinstance(items, dict):
-                    items = [items]
-                for item in items or []:
-                    cmdline = str(item.get("CommandLine") or "").lower().replace("\\", "/")
-                    pid = item.get("ProcessId")
-                    if not pid or normalized not in cmdline:
-                        continue
-                    subprocess.run(
-                        [shutil.which("taskkill") or "taskkill", "/F", "/PID", str(pid)],
-                        capture_output=True,
-                        timeout=10,
-                    )
-                    killed += 1
+            powershell_bin = shutil.which("powershell")
+            if powershell_bin:
+                result = subprocess.run(
+                    [powershell_bin, "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    items = json.loads(result.stdout.strip())
+                    if isinstance(items, dict):
+                        items = [items]
+                    taskkill_bin = shutil.which("taskkill")
+                    for item in items or []:
+                        cmdline = str(item.get("CommandLine") or "").lower().replace("\\", "/")
+                        pid = item.get("ProcessId")
+                        if not pid or normalized not in cmdline:
+                            continue
+                        if taskkill_bin:
+                            subprocess.run(
+                                [taskkill_bin, "/F", "/PID", str(pid)],
+                                capture_output=True,
+                                timeout=10,
+                            )
+                        killed += 1
         except Exception:  # noqa: BLE001
             pass
     else:
         try:
-            result = subprocess.run(
-                [shutil.which("pgrep") or "pgrep", "-f", f"--user-data-dir={user_data_dir}"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().splitlines():
-                    pid_str = line.strip()
-                    if pid_str.isdigit():
-                        subprocess.run([shutil.which("kill") or "kill", "-9", pid_str], capture_output=True, timeout=5)
-                        killed += 1
+            pgrep_bin = shutil.which("pgrep")
+            if pgrep_bin:
+                result = subprocess.run(
+                    [pgrep_bin, "-f", f"--user-data-dir={user_data_dir}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                kill_bin = shutil.which("kill")
+                if result.returncode == 0 and kill_bin:
+                    for line in result.stdout.strip().splitlines():
+                        pid_str = line.strip()
+                        if pid_str.isdigit():
+                            subprocess.run([kill_bin, "-9", pid_str], capture_output=True, timeout=5)
+                            killed += 1
         except Exception:  # noqa: BLE001
             pass
 
@@ -173,6 +179,9 @@ class ManagedBrowserDriver:
         host = self.profile.host or "127.0.0.1"
         return f"http://{host}:{int(self.profile.debug_port)}"
 
+    def is_endpoint_ready(self) -> bool:
+        return self._is_endpoint_ready()
+
     def _resolve_binary(self) -> str:
         explicit = (self.profile.browser_binary or "").strip()
         if explicit:
@@ -225,7 +234,7 @@ class ManagedBrowserDriver:
                 payload = json.loads(response.read().decode("utf-8", errors="ignore"))
                 if isinstance(payload, dict):
                     return bool(payload.get("webSocketDebuggerUrl") or payload.get("Browser"))
-        except (URLError, OSError, ValueError):
+        except (OSError, ValueError):
             return False
         return False
 

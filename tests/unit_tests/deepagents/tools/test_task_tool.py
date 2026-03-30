@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
@@ -43,9 +44,6 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
 
         called_inputs: dict[str, str] = {}
 
-        def _fake_create_subagent(_subagent_type: str) -> FakeSubAgent:
-            return FakeSubAgent()
-
         parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
         parent_agent.configure(
             DeepAgentConfig(
@@ -57,16 +55,16 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
                 skills=[],
             )
         )
-        parent_agent.create_subagent = _fake_create_subagent
 
         card = ToolCard(id="task_tool_test", name="task_tool", description="test")
         tool = TaskTool(card=card, parent_agent=parent_agent)
 
         session = Session(session_id="parent_session")
-        result = await tool.invoke(
-            {"subagent_type": "code", "task_description": "run task"},
-            session=session,
-        )
+        with patch.object(tool, "_create_subagent", return_value=FakeSubAgent()):
+            result = await tool.invoke(
+                {"subagent_type": "code", "task_description": "run task"},
+                session=session,
+            )
 
         self.assertTrue(result.success)
         self.assertEqual(result.data, {"output": "done"})

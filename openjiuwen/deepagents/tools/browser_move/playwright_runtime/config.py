@@ -1,6 +1,5 @@
-#!/usr/bin/env python
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Runtime configuration helpers."""
 
 from __future__ import annotations
@@ -12,8 +11,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from openjiuwen.core.foundation.tool import McpServerConfig
-
-from .. import REPO_ROOT
+from .. import REPO_ROOT	 
 from ..utils.env import (
     DEFAULT_BROWSER_TIMEOUT_S,
     DEFAULT_GUARDRAIL_MAX_FAILURES,
@@ -32,7 +30,6 @@ from ..utils.env import (
     resolve_int_env,
     resolve_model_name,
     resolve_model_settings,
-    resolve_repo_dotenv_path,
 )
 
 
@@ -83,10 +80,10 @@ def build_browser_guardrails() -> BrowserRunGuardrails:
 
 
 def build_playwright_mcp_config() -> McpServerConfig:
-    command = (
-        os.getenv("PLAYWRIGHT_MCP_COMMAND", DEFAULT_PLAYWRIGHT_MCP_COMMAND).strip()
-        or DEFAULT_PLAYWRIGHT_MCP_COMMAND
-    )
+    command = (	 
+         os.getenv("PLAYWRIGHT_MCP_COMMAND", DEFAULT_PLAYWRIGHT_MCP_COMMAND).strip() 
+         or DEFAULT_PLAYWRIGHT_MCP_COMMAND 
+     )
     args = parse_command_args(os.getenv("PLAYWRIGHT_MCP_ARGS", DEFAULT_PLAYWRIGHT_MCP_ARGS))
     cwd = resolve_playwright_mcp_cwd()
     driver_mode = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
@@ -164,7 +161,7 @@ def build_playwright_mcp_config() -> McpServerConfig:
         params=params,
     )
 
-    
+
 def build_runtime_settings() -> RuntimeSettings:
     provider, api_key, api_base = resolve_model_settings()
     return RuntimeSettings(
