@@ -193,6 +193,13 @@ class HTTPRequestExecutable(ComponentExecutable):
         
         # Process query parameters
         query_params = self.request_params.query_parameters.copy()
+        # Replace placeholders in query parameter values
+        for key, value in query_params.items():
+            if isinstance(value, str):
+                for input_key, input_value in inputs.items():
+                    placeholder = f"{{{{{input_key}}}}}"  # {{key}} format
+                    value = value.replace(placeholder, str(input_value))
+                query_params[key] = value
         query_params.update(inputs.get('query_parameters', {}))
         processed['query_parameters'] = query_params
         
@@ -225,36 +232,32 @@ class HTTPRequestExecutable(ComponentExecutable):
         
         # Apply authentication to headers
         headers = await self.apply_authentication(headers, auth_config)
-        
+
         # Prepare request body
         request_body, content_type = await self.prepare_request_body(body_config)
         if content_type:
             headers['Content-Type'] = content_type
-        
-        # Prepare SSL context
-        ssl_verify, ssl_cert = SslUtils.get_ssl_config("HTTP_SSL_VERIFY", "HTTP_SSL_CERT", ["false"])
-        if ssl_verify and not self.request_params.advanced_options.ignore_ssl_issues:
-            ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-        else:
-            connector = aiohttp.TCPConnector(ssl=False)
-        
+
         # Prepare proxy
         proxy = self.request_params.advanced_options.proxy or UrlUtils.get_global_proxy_url(url)
-        
+
         # Prepare timeout
         timeout_seconds = self.request_params.timeout
-        
-        # Prepare URL with query parameters
-        if query_params:
-            query_string = urlencode([(k, v) for k, v in query_params.items()])
-            url = f'{url}?{query_string}'
 
         # Handle retries
         max_retries = self.request_params.retry_config.max_retries if self.request_params.retry_config.enabled else 0
         retry_count = 0
 
         while retry_count <= max_retries:
+            # Create a new connector for each retry attempt
+            # This is necessary because the connector is closed when the ClientSession exits
+            ssl_verify, ssl_cert = SslUtils.get_ssl_config("HTTP_SSL_VERIFY", "HTTP_SSL_CERT", ["false"])
+            if ssl_verify and not self.request_params.advanced_options.ignore_ssl_issues:
+                ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
+                connector = aiohttp.TCPConnector(ssl=ssl_context)
+            else:
+                connector = aiohttp.TCPConnector(ssl=False)
+
             try:
                 async with aiohttp.ClientSession(connector=connector) as session:
                     async with session.request(
@@ -262,7 +265,7 @@ class HTTPRequestExecutable(ComponentExecutable):
                         url=url,
                         headers=headers,
                         data=request_body if method in ['POST', 'PUT', 'PATCH'] else None,
-                        params=query_params if method == 'GET' else None,  # For GET requests
+                        params=query_params,
                         allow_redirects=self.request_params.advanced_options.follow_redirect,
                         timeout=aiohttp.ClientTimeout(total=timeout_seconds),
                         proxy=proxy
