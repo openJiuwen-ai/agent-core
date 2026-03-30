@@ -1,6 +1,22 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+"""
+Unit tests for KVCacheManager behavior inside ContextEngine (context layer only).
+
+**Scope**: ContextEngine + ModelContext.get_context_window() + KVCacheManager. No ReActAgent.
+Verifies:
+- When enable_kv_cache_release=True and context changes (MessageOffloader / DialogueCompressor
+  modify messages), KVCacheManager.release() is invoked with the configured model.
+- When enable_kv_cache_release=False, release() is never called.
+- Multiple compression/offload rounds are correctly tracked (release on context change).
+
+Does NOT cover:
+ReActAgent entry (warning when non-InferenceAffinity, model injection) or
+end-to-end invoke flow; see test_react_agent_kv_cache_release.py and
+test_inference_affinity_kv_cache_release_with_processors.py.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

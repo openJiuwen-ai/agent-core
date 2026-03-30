@@ -19,12 +19,14 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
+from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
 
 _CLIENT_TYPE_REGISTRY: Dict[str, Type[BaseModelClient]] = {
     "OpenAI": OpenAIModelClient,
     "OpenRouter": OpenAIModelClient,
     "SiliconFlow": SiliconFlowModelClient,
     "DashScope": DashScopeModelClient,
+    "InferenceAffinity": InferenceAffinityModelClient,
 }
 
 
@@ -210,6 +212,55 @@ class Model:
                 **kwargs
         ):
             yield chunk
+
+    async def release(
+            self,
+            session_id: str,
+            messages: List,
+            messages_released_index: int,
+            *,
+            model: Optional[str] = None,
+            tools: Optional[List] = None,
+            tools_released_index: Optional[int] = None,
+    ) -> bool:
+        """Release model cache/resources if the underlying client supports it."""
+        release_fn = getattr(self._client, "release", None)
+        if release_fn is None:
+            return False
+        return await release_fn(
+            session_id=session_id,
+            messages=messages,
+            messages_released_index=messages_released_index,
+            model=model,
+            tools=tools,
+            tools_released_index=tools_released_index,
+        )
+
+    def supports_kv_cache_release(self) -> bool:
+        """Whether underlying client supports KV cache release."""
+        return callable(getattr(self._client, "release", None))
+
+    def build_kv_cache_invoke_kwargs(
+            self,
+            *,
+            session: object = None,
+            enable_kv_cache_release: bool = False,
+    ) -> dict:
+        """Build extra kwargs for invoke/stream related to KV cache behavior.
+
+        For InferenceAffinity (vLLM):
+          - session_id: use session.get_session_id() if provided
+          - enable_cache_sharing: follow enable_kv_cache_release
+        """
+        if not isinstance(self._client, InferenceAffinityModelClient):
+            return {}
+
+        extra: dict = {}
+        if session is not None and hasattr(session, "get_session_id"):
+            extra["session_id"] = session.get_session_id()
+        if enable_kv_cache_release:
+            extra["enable_cache_sharing"] = True
+        return extra
 
     async def generate_image(
             self,

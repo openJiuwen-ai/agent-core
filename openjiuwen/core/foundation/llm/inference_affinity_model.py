@@ -172,3 +172,19 @@ class InferenceAffinityModel:
             tools=tools,
             tools_released_index=tools_released_index
         )
+
+    @staticmethod
+    def supports_kv_cache_release() -> bool:
+        return True
+
+    @staticmethod
+    def build_kv_cache_invoke_kwargs(
+            session: object = None,
+            enable_kv_cache_release: bool = False,
+    ) -> dict:
+        extra: dict = {}
+        if session is not None and hasattr(session, "get_session_id"):
+            extra["session_id"] = session.get_session_id()
+        if enable_kv_cache_release:
+            extra["enable_cache_sharing"] = True
+        return extra

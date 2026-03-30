@@ -151,7 +151,9 @@ class DeepAgentConfig:
         system_prompt: System prompt injected into the
             ReAct agent's prompt template.
         context_engine_config: Reserved for P1 context
-            engineering configuration.
+            engineering configuration. If set, applied
+            as the inner ReAct agent's ``ContextEngineConfig``
+            when the embedded agent is created.
         enable_task_loop: Whether to enable the outer
             task loop (P1).
         stop_condition: Conditions to terminate the task

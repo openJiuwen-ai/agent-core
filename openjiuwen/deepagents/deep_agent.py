@@ -238,6 +238,8 @@ class DeepAgent(BaseAgent):
 
         react_config = ReActAgentConfig()
         react_config.max_iterations = cfg.max_iterations
+        if cfg.context_engine_config is not None:
+            react_config.context_engine_config = cfg.context_engine_config
 
         language = resolve_language(cfg.language)
         mode = resolve_mode(cfg.prompt_mode)

@@ -256,7 +256,8 @@ class ReActAgentConfig(BaseModel):
             self,
             max_context_message_num: Optional[int] = 200,
             default_window_round_num: Optional[int] = 10,
-            enable_reload: bool = False
+            enable_reload: bool = False,
+            enable_kv_cache_release: bool = False,
     ) -> 'ReActAgentConfig':
         """
         Configure the context-engine parameters that control how conversation history
@@ -277,11 +278,16 @@ class ReActAgentConfig(BaseModel):
             were previously off-loaded (via hints such as `[[OFFLOAD:...]]`).
             Enable this if you want the model to retrieve long content on demand;
             disable it to keep hints as plain text.
+        enable_kv_cache_release : bool, default False
+            Whether to release GPU KV-cache for offloaded messages via the
+            inference backend (e.g. InferenceAffinity).  Matches
+            ``ContextEngineConfig.enable_kv_cache_release``.
         """
         self.context_engine_config = ContextEngineConfig(
             max_context_message_num=max_context_message_num,
             default_window_round_num=default_window_round_num,
-            enable_reload=enable_reload
+            enable_reload=enable_reload,
+            enable_kv_cache_release=enable_kv_cache_release,
         )
         return self
 
@@ -417,6 +423,7 @@ class ReActAgent(BaseAgent):
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
+        self._kv_release_warning_logged: bool = False
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -443,6 +450,7 @@ class ReActAgent(BaseAgent):
                 old_config.api_key != config.api_key or
                 old_config.api_base != config.api_base):
             self._llm = None
+            self._kv_release_warning_logged = False
 
         # Update context_engine if context window limit changed
         if old_config.context_engine_config != config.context_engine_config:
@@ -622,9 +630,44 @@ class ReActAgent(BaseAgent):
         """
         # --- Finalize system message and context window (post-rails) ---
         final_system = [SystemMessage(content=self.prompt_builder.build())]
+
+        # KV cache release:
+        # When ContextEngineConfig.enable_kv_cache_release=True and the current
+        # model supports release (InferenceAffinity), pass `model=llm` into
+        # get_context_window() so KVCacheManager can decide whether/when
+        # to call release().
+        llm = self._get_llm()
+
+        ce_config = self._config.context_engine_config or ContextEngineConfig()
+        enable_kv_release = getattr(ce_config, "enable_kv_cache_release", False)
+        supports_kv_release = False
+        supports_fn = getattr(llm, "supports_kv_cache_release", None)
+        if callable(supports_fn):
+            supports_kv_release = bool(supports_fn())
+
+        # When KV cache release is enabled but the LLM does not support it,
+        # log a one-time warning so users understand the setting is ineffective.
+        if (
+            enable_kv_release
+            and not supports_kv_release
+            and not self._kv_release_warning_logged
+        ):
+            logger.warning(
+                "ContextEngineConfig.enable_kv_cache_release is True, "
+                "but the current LLM does not support KV cache release; "
+                "KV cache release will not take effect."
+            )
+            self._kv_release_warning_logged = True
+
+        context_window_kwargs = {
+            "system_messages": final_system,
+            "tools": ctx.inputs.tools if ctx.inputs.tools else None,
+        }
+        if enable_kv_release and supports_kv_release:
+            context_window_kwargs["model"] = llm
+
         context_window = await ctx.context.get_context_window(
-            system_messages=final_system,
-            tools=ctx.inputs.tools if ctx.inputs.tools else None,
+            **context_window_kwargs
         )
         # Update ctx.inputs: after_model_call hooks inspect these to see
         # what was actually sent. (LLM call uses them too, but could
@@ -635,14 +678,23 @@ class ReActAgent(BaseAgent):
         log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
         # --- End context window finalization ---
 
-        llm = self._get_llm()
         session = ctx.session
+
+        # Build extra kwargs for LLM calls when KV cache release is enabled.
+        extra_kwargs: dict = {}
+        build_kwargs_fn = getattr(llm, "build_kv_cache_invoke_kwargs", None)
+        if callable(build_kwargs_fn):
+            extra_kwargs.update(build_kwargs_fn(
+                session=session,
+                enable_kv_cache_release=enable_kv_release,
+            ))
 
         if not ctx.extra.get("_streaming"):
             ai_message = await llm.invoke(
                 model=self._config.model_name,
                 messages=ctx.inputs.messages,
                 tools=ctx.inputs.tools or None,
+                **extra_kwargs,
             )
             ctx.inputs.response = ai_message
             return ai_message
@@ -655,6 +707,7 @@ class ReActAgent(BaseAgent):
             model=self._config.model_name,
             messages=ctx.inputs.messages,
             tools=ctx.inputs.tools or None,
+            **extra_kwargs,
         ):
             if accumulated_chunk is None:
                 accumulated_chunk = chunk
