@@ -25,17 +25,8 @@ class HeartbeatRail(DeepAgentRail):
 
     priority = 80
 
-    def __init__(
-        self,
-        language: str = "cn",
-    ) -> None:
-        """Initialize HeartbeatRail.
-
-        Args:
-            language: Language for prompts ('cn' or 'en').
-        """
+    def __init__(self) -> None:
         super().__init__()
-        self.language = language
         self.system_prompt_builder = None
         self.heartbeat_dir = None
 
@@ -74,7 +65,8 @@ class HeartbeatRail(DeepAgentRail):
             content = read_res.data.content
         else:
             logger.warning("HeartbeatRail: failed to read HEARTBEAT.md")
-        heartbeat_section = build_heartbeat_section(language=self.language, heartbeat_content=content)
+        heartbeat_section = build_heartbeat_section(
+            language=self.system_prompt_builder.language, heartbeat_content=content)
         if heartbeat_section is not None:
             self.system_prompt_builder.add_section(heartbeat_section)
         else:

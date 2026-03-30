@@ -104,7 +104,7 @@ def create_research_agent(
     )
 
     # Full override rule: if user passes tools/rails explicitly, do not inject defaults.
-    final_rails = rails if rails is not None else [FileSystemRail(language=resolved_language)]
+    final_rails = rails if rails is not None else [FileSystemRail()]
 
     return create_deep_agent(
         model=model,

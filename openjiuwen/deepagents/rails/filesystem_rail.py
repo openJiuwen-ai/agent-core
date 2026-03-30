@@ -23,13 +23,12 @@ class FileSystemRail(DeepAgentRail):
 
     priority = 100
 
-    def __init__(self, language: str = "cn") -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.tools = None
-        self.language = language
 
     def init(self, agent) -> None:
-        lang = self.language
+        lang = agent.system_prompt_builder.language
         read_tool = ReadFileTool(self.sys_operation, lang)
         write_tool = WriteFileTool(self.sys_operation, lang)
         edit_tool = EditFileTool(self.sys_operation, lang)

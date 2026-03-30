@@ -47,20 +47,17 @@ class TaskPlanningRail(DeepAgentRail):
 
     def __init__(
         self,
-        language: str = "cn",
         enable_progress_repeat: bool = False,
         list_tool_call_interval: int = 20,
     ) -> None:
         """Initialize TaskPlanningRail.
 
         Args:
-            language: Language for prompts ('cn' or 'en').
             enable_progress_repeat: Check if progress repeat is enabled.
             list_tool_call_interval: Interval for progress reminder prompts (default: 20).
         """
         super().__init__()
         self.tools = None
-        self.language = language
         self.enable_progress_repeat = enable_progress_repeat
         self.list_tool_call_interval = list_tool_call_interval
         self._tool_call_counts = {}
@@ -90,7 +87,7 @@ class TaskPlanningRail(DeepAgentRail):
         tools = create_todos_tool(
             self.sys_operation,
             workspace_dir,
-            self.language,
+            self.system_prompt_builder.language,
         )
         self.tools = tools
         try:
@@ -124,7 +121,7 @@ class TaskPlanningRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        task_planning_section = build_todo_section(language=self.language)
+        task_planning_section = build_todo_section(language=self.system_prompt_builder.language)
         if task_planning_section is not None:
             self.system_prompt_builder.add_section(task_planning_section)
         else:
@@ -170,7 +167,7 @@ class TaskPlanningRail(DeepAgentRail):
 
         tasks, in_progress_task = self._format_task_content(todos)
         prompt = build_progress_reminder_user_prompt(
-            language=self.language,
+            language=self.system_prompt_builder.language,
             tasks=tasks,
             in_progress_task=in_progress_task,
         )

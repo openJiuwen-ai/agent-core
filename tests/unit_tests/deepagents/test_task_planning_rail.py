@@ -612,18 +612,6 @@ def test_to_todo_status_mapping() -> None:
 # ================================================================
 
 
-def test_language_parameter_default() -> None:
-    """Default language is 'cn'."""
-    rail = TaskPlanningRail()
-    assert rail.language == "cn"
-
-
-def test_language_parameter_english() -> None:
-    """Can set language to 'en'."""
-    rail = TaskPlanningRail(language="en")
-    assert rail.language == "en"
-
-
 def test_enable_progress_repeat_default() -> None:
     """Default enable_progress_repeat is False."""
     rail = TaskPlanningRail()

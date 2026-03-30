@@ -19,9 +19,8 @@ class SecurityRail(DeepAgentRail):
 
     priority = 85
 
-    def __init__(self, language: str = "cn") -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.language = language
         self.system_prompt_builder = None
 
     def init(self, agent) -> None:
@@ -37,7 +36,7 @@ class SecurityRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        safety_section = build_safety_section(self.language)
+        safety_section = build_safety_section(self.system_prompt_builder.language)
         if safety_section is not None:
             self.system_prompt_builder.add_section(safety_section)
 

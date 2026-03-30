@@ -43,13 +43,11 @@ class MemoryRail(DeepAgentRail):
     def __init__(
         self,
         embedding_config: EmbeddingConfig,
-        language: str = "cn",
     ):
         """Initialize MemoryRail.
 
         Args:
             embedding_config: EmbeddingConfig for embedding API (required).
-            language: Language for prompts ('cn' or 'en').
         """
         super().__init__()
         self._initialized = False
@@ -57,7 +55,6 @@ class MemoryRail(DeepAgentRail):
         self._owned_tool_ids: Set[str] = set()
         self._manager_initialized = False
         self._embedding_config = embedding_config
-        self._language = language
         self.system_prompt_builder = None
 
     def init(self, agent) -> None:
@@ -118,7 +115,7 @@ class MemoryRail(DeepAgentRail):
         self.system_prompt_builder.remove_section("memory")
         is_read_only = isinstance(ctx.inputs, InvokeInputs) and (ctx.inputs.is_cron() or ctx.inputs.is_heartbeat())
         memory_section = build_memory_section(
-            language=self._language,
+            language=self.system_prompt_builder.language,
             read_only=is_read_only
         )
         if memory_section is not None:

@@ -28,6 +28,7 @@ class _AbilityManager:
 class _Agent:
     def __init__(self) -> None:
         self.ability_manager = _AbilityManager()
+        self.system_prompt_builder = type("_Builder", (), {"language": "en"})()
 
 
 def test_filesystem_rail_registers_base_tools(tmp_path):
@@ -42,7 +43,7 @@ def test_filesystem_rail_registers_base_tools(tmp_path):
             Runner.resource_mgr.add_sys_operation(card)
             sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
 
-            rail = FileSystemRail(language="en")
+            rail = FileSystemRail()
             rail.set_sys_operation(sys_operation)
             agent = _Agent()
 

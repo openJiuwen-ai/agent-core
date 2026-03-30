@@ -46,7 +46,6 @@ class ContextEngineeringRail(DeepAgentRail):
                 List[Tuple[str, BaseModel]],
                 None,
             ] = None,
-            language: str = "cn",
             preset: bool = True,
     ):
         """Initialize ContextEngineeringRail.
@@ -58,11 +57,9 @@ class ContextEngineeringRail(DeepAgentRail):
                         Config_obj must be an instance of the processor's
                         BaseModel config class.
                         用户配置的增量添加，相同 key 会替换预置或已有的配置。
-            language: Language for workspace prompt, 'cn' or 'en'.
             preset: 是否启用预置的默认 processor 配置。默认为 True。
         """
         super().__init__()
-        self.language = language
         self.system_prompt_builder = None
         self._ability_manager = None
 
@@ -190,18 +187,19 @@ class ContextEngineeringRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("context")
             return
 
+        lang = self.system_prompt_builder.language
         workspace_section = await _build_workspace(
             self.sys_operation,
             workspace,
-            self.language,
+            lang,
         )
         tools_cn = build_tools_content(self._ability_manager, "cn")
         tools_en = build_tools_content(self._ability_manager, "en")
         context_section = await _build_context(
             self.sys_operation,
             workspace,
-            self.language,
-            tools_content=tools_cn if self.language == "cn" else tools_en,
+            lang,
+            tools_content=tools_cn if lang == "cn" else tools_en,
         )
 
         if workspace_section is not None:

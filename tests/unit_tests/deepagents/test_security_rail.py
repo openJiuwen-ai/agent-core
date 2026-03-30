@@ -115,7 +115,7 @@ def test_uninit_removes_safety_section() -> None:
 async def test_before_model_call_injects_safety_section() -> None:
     builder = SystemPromptBuilder(language="en")
     builder.add_section(build_identity_section(language="en"))
-    rail = SecurityRail(language="en")
+    rail = SecurityRail()
     agent = _make_agent(builder)
     rail.init(agent)
     ctx = AgentCallbackContext(agent=agent, inputs=None, session=None)
@@ -136,3 +136,56 @@ async def test_before_model_call_skips_when_builder_missing() -> None:
     await rail.before_model_call(ctx)
 
     assert rail.system_prompt_builder is None
+
+
+# ---------------------------------------------------------------------------
+# Language resolved from shared prompt builder
+# ---------------------------------------------------------------------------
+
+def test_language_read_from_builder_after_init() -> None:
+    """After init(), before_model_call reads language from builder, not a stored attribute."""
+    builder = SystemPromptBuilder(language="en")
+    rail = SecurityRail()
+    rail.init(_make_agent(builder))
+
+    assert rail.system_prompt_builder.language == "en"
+
+
+def test_language_update_on_builder_reflected_immediately() -> None:
+    """Changing builder.language is picked up on the next call without re-init."""
+    builder = SystemPromptBuilder(language="cn")
+    rail = SecurityRail()
+    rail.init(_make_agent(builder))
+
+    builder.language = "en"
+
+    assert rail.system_prompt_builder.language == "en"
+
+
+def test_all_rails_consistent_via_shared_builder() -> None:
+    """Multiple rails sharing the same builder always see the same language."""
+    builder = SystemPromptBuilder(language="cn")
+    rail_a = SecurityRail()
+    rail_b = SecurityRail()
+    rail_a.init(_make_agent(builder))
+    rail_b.init(_make_agent(builder))
+
+    builder.language = "en"
+
+    assert rail_a.system_prompt_builder.language == rail_b.system_prompt_builder.language == "en"
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_uses_updated_builder_language() -> None:
+    """before_model_call injects a section in the language currently set on the builder."""
+    builder = SystemPromptBuilder(language="cn")
+    rail = SecurityRail()
+    rail.init(_make_agent(builder))
+
+    builder.language = "en"
+    ctx = AgentCallbackContext(agent=_make_agent(builder), inputs=None, session=None)
+    await rail.before_model_call(ctx)
+
+    section = builder.get_section(SectionName.SAFETY)
+    assert section is not None
+    assert "Safety Principles" in section.render("en")

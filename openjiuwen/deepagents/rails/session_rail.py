@@ -33,14 +33,8 @@ class SessionRail(DeepAgentRail):
 
     priority = 95
 
-    def __init__(self, language: str = "cn") -> None:
-        """Initialize SessionRail.
-
-        Args:
-            language: Language for prompts ('cn' or 'en').
-        """
+    def __init__(self) -> None:
         super().__init__()
-        self.language = language
         self.tools = None
         self._toolkit = None
         self.system_prompt_builder = None
@@ -66,7 +60,7 @@ class SessionRail(DeepAgentRail):
         self.tools = build_session_tools(
             parent_agent=agent,
             toolkit=self._toolkit,
-            language=self.language,
+            language=self.system_prompt_builder.language,
             available_agents=available_agents,
         )
 
@@ -108,7 +102,7 @@ class SessionRail(DeepAgentRail):
                 build_session_tools_section,
             )
 
-            section = build_session_tools_section(language=self.language)
+            section = build_session_tools_section(language=self.system_prompt_builder.language)
             if section is not None:
                 self.system_prompt_builder.add_section(section)
             else:
@@ -127,7 +121,7 @@ class SessionRail(DeepAgentRail):
             Formatted string describing available subagent types.
         """
         default_desc = GENERAL_PURPOSE_AGENT_DESC.get(
-            self.language, GENERAL_PURPOSE_AGENT_DESC["cn"]
+            self.system_prompt_builder.language, GENERAL_PURPOSE_AGENT_DESC["cn"]
         )
 
         if not subagents:

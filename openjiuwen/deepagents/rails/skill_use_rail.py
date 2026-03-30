@@ -47,7 +47,6 @@ class SkillUseRail(DeepAgentRail):
         include_tools: bool = True,
         enabled_skills: Optional[Union[str, List[str]]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
-        language: str = "cn",
         evolution_store: Optional[EvolutionStore] = None,
     ):
         """Initialize SkillUseRail.
@@ -79,7 +78,6 @@ class SkillUseRail(DeepAgentRail):
         self.include_tools = include_tools
         self.enabled_skills = self._normalize_name_set(enabled_skills)
         self.disabled_skills = self._normalize_name_set(disabled_skills)
-        self.language = language
         self.evolution_store: Optional[EvolutionStore] = evolution_store
 
         self.skills: List[Skill] = []
@@ -222,12 +220,13 @@ class SkillUseRail(DeepAgentRail):
 
         tools = []
 
+        lang = agent.system_prompt_builder.language
         if self.include_tools:
             tools.extend(
                 [
-                    ReadFileTool(self.sys_operation, language=self.language),
-                    CodeTool(self.sys_operation, language=self.language),
-                    BashTool(self.sys_operation, language=self.language),
+                    ReadFileTool(self.sys_operation, language=lang),
+                    CodeTool(self.sys_operation, language=lang),
+                    BashTool(self.sys_operation, language=lang),
                 ]
             )
 
@@ -236,7 +235,7 @@ class SkillUseRail(DeepAgentRail):
                 ListSkillTool(
                     get_skills=lambda: self.skills,
                     list_skill_model=self.list_skill_model,
-                    language=self.language,
+                    language=lang,
                 )
             )
 
@@ -341,13 +340,13 @@ class SkillUseRail(DeepAgentRail):
                 )
             return build_skills_section(
                 skill_lines=build_skill_lines(body_lines),
-                language=self.language,
+                language=self.system_prompt_builder.language,
                 mode="all",
             )
         else:
             return build_skills_section(
                 skill_lines="",
-                language=self.language,
+                language=self.system_prompt_builder.language,
                 mode="auto_list",
             )
 
@@ -365,7 +364,7 @@ class SkillUseRail(DeepAgentRail):
                 )
             )
 
-        return build_all_mode_skill_prompt(build_skill_lines(body_lines), language=self.language)
+        return build_all_mode_skill_prompt(build_skill_lines(body_lines), language=self.system_prompt_builder.language)
 
     @staticmethod
     def _normalize_name_list(raw: Optional[Union[str, List[str]]]) -> List[str]:

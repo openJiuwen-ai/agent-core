@@ -122,17 +122,6 @@ def test_priority_is_80() -> None:
     assert rail.priority == 80
 
 
-def test_language_parameter_default() -> None:
-    """Default language is 'cn'."""
-    rail = HeartbeatRail()
-    assert rail.language == "cn"
-
-
-def test_language_parameter_english() -> None:
-    """Can set language to 'en'."""
-    rail = HeartbeatRail(language="en")
-    assert rail.language == "en"
-
 
 @pytest.mark.asyncio
 async def test_before_invoke_skips_non_heartbeat() -> None:

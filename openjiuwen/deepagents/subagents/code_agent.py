@@ -106,7 +106,7 @@ def create_code_agent(
 
     # Full override rule: if user passes tools/rails explicitly, do not inject defaults.
     final_tools = tools if tools is not None else [build_tool_card("code", "CodeTool", resolved_language)]
-    final_rails = rails if rails is not None else [FileSystemRail(language=resolved_language)]
+    final_rails = rails if rails is not None else [FileSystemRail()]
 
     return create_deep_agent(
         model=model,

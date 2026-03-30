@@ -33,20 +33,6 @@ class TestSubagentRail:
     """Test cases for SubagentRail class."""
 
     @staticmethod
-    def test_init_default_language():
-        """Test SubagentRail initialization with default language."""
-        rail = SubagentRail()
-        assert rail.language == "cn"
-        assert rail.tools is None
-
-    @staticmethod
-    def test_init_custom_language():
-        """Test SubagentRail initialization with custom language."""
-        rail = SubagentRail(language="en")
-        assert rail.language == "en"
-        assert rail.tools is None
-
-    @staticmethod
     def test_priority_attribute():
         """Test that priority is correctly set."""
         rail = SubagentRail()
@@ -65,6 +51,8 @@ class TestSubagentRail:
         mock_runner.resource_mgr = mock_resource_mgr
 
         mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
         mock_agent.deep_config.subagents = [
             SubAgentConfig(
                 agent_card=AgentCard(name="test_agent", description="Test agent"),
@@ -154,6 +142,8 @@ class TestSubagentRail:
         ]
 
         mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
         mock_agent.deep_config.subagents = subagents
         mock_agent.ability_manager = Mock()
 
@@ -187,6 +177,8 @@ class TestSubagentRail:
         ]
 
         mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
         mock_agent.deep_config.subagents = subagents
         mock_agent.ability_manager = Mock()
 
@@ -215,6 +207,8 @@ class TestSubagentRail:
         )
 
         mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
         mock_agent.deep_config.subagents = [spec]
         mock_agent.ability_manager = Mock()
 
@@ -242,6 +236,8 @@ class TestSubagentRail:
         sub.card.description = "agent description"
 
         mock_parent_agent = Mock()
+        mock_parent_agent.system_prompt_builder = Mock()
+        mock_parent_agent.system_prompt_builder.language = "cn"
         mock_parent_agent.deep_config.subagents = [sub]
         mock_parent_agent.ability_manager = Mock()
 
@@ -267,6 +263,8 @@ class TestSubagentRail:
         sub.card = None
 
         mock_parent_agent = Mock()
+        mock_parent_agent.system_prompt_builder = Mock()
+        mock_parent_agent.system_prompt_builder.language = "cn"
         mock_parent_agent.deep_config.subagents = [sub]
         mock_parent_agent.ability_manager = Mock()
 
@@ -294,6 +292,7 @@ class TestSubagentRail:
         mock_build_task_section.return_value = "task section content"
 
         system_prompt_builder = Mock()
+        system_prompt_builder.language = "cn"
 
         mock_agent = Mock()
         mock_agent.deep_config.subagents = [_minimal_subagent_spec()]

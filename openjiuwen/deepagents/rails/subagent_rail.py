@@ -33,15 +33,9 @@ class SubagentRail(DeepAgentRail):
 
     priority = 95
 
-    def __init__(self, language: str = "cn") -> None:
-        """Initialize SubagentRail.
-
-        Args:
-            language: Language for prompts ('cn' or 'en').
-        """
+    def __init__(self) -> None:
         super().__init__()
         self.tools = None
-        self.language = language
         self.system_prompt_builder = None
 
     def init(self, agent) -> None:
@@ -64,7 +58,7 @@ class SubagentRail(DeepAgentRail):
         tools = create_task_tool(
             parent_agent=agent,
             available_agents=available_agents,
-            language=self.language,
+            language=self.system_prompt_builder.language,
         )
         self.tools = tools
 
@@ -97,7 +91,7 @@ class SubagentRail(DeepAgentRail):
         if not self.tools or self.system_prompt_builder is None:
             return
 
-        task_section = build_task_section(language=self.language)
+        task_section = build_task_section(language=self.system_prompt_builder.language)
         if task_section is not None:
             self.system_prompt_builder.add_section(task_section)
         else:
@@ -109,7 +103,8 @@ class SubagentRail(DeepAgentRail):
         Returns:
             Formatted string describing available subagent types.
         """
-        default_desc = GENERAL_PURPOSE_AGENT_DESC.get(self.language, GENERAL_PURPOSE_AGENT_DESC["cn"])
+        default_desc = GENERAL_PURPOSE_AGENT_DESC.get(
+            self.system_prompt_builder.language, GENERAL_PURPOSE_AGENT_DESC["cn"])
 
         if not subagents:
             return f'"general-purpose": {default_desc}'

@@ -22,7 +22,6 @@ from openjiuwen.deepagents.rails import (
     SessionRail,
     SubagentRail,
     TaskPlanningRail,
-    ToolPromptRail,
 )
 from openjiuwen.deepagents.schema.config import (
     AudioModelConfig,
@@ -229,16 +228,14 @@ def create_deep_agent(
 
     def _make_skill_rail() -> SkillUseRail:
         skills_dir = [os.path.join(str(workspace_obj.root_path), s) for s in (skills or [])]
-        return SkillUseRail(skills_dir=skills_dir, skill_mode="all", language=resolved_language)
+        return SkillUseRail(skills_dir=skills_dir, skill_mode="all")
 
     default_rails = [
-        (SecurityRail, True, lambda: SecurityRail(language=resolved_language)),
-        (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail(language=resolved_language)),
+        (SecurityRail, True, lambda: SecurityRail()),
+        (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail()),
         (SkillUseRail, bool(skills), _make_skill_rail),
-        (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail(language=resolved_language)),
-        (SubagentRail, bool(subagents) and not enable_async_subagent,
-        lambda: SubagentRail(language=resolved_language)),
-        (ToolPromptRail, bool(normalized_tools), lambda: ToolPromptRail(language=resolved_language)),
+        (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail()),
+        (SubagentRail, bool(subagents) and not enable_async_subagent, lambda: SubagentRail()),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
