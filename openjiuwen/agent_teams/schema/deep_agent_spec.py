@@ -36,7 +36,6 @@ from openjiuwen.deepagents.schema.config import (
     SubAgentConfig,
     VisionModelConfig,
 )
-from openjiuwen.deepagents.schema.stop_condition import StopCondition
 from openjiuwen.deepagents.workspace.workspace import Workspace
 
 # ---------------------------------------------------------------------------
@@ -73,18 +72,6 @@ def _ensure_builtin_rails_registered() -> None:
 # ---------------------------------------------------------------------------
 # Leaf spec types
 # ---------------------------------------------------------------------------
-
-
-class StopConditionSpec(BaseModel):
-    """Serializable subset of StopCondition (excludes custom callable)."""
-
-    max_iterations: Optional[int] = None
-    max_token_usage: Optional[int] = None
-    completion_promise: Optional[str] = None
-    timeout_seconds: Optional[float] = None
-
-    def build(self) -> StopCondition:
-        return StopCondition(**self.model_dump())
 
 
 class VisionModelSpec(BaseModel):
@@ -240,7 +227,6 @@ class DeepAgentSpec(BaseModel):
     mcps: Optional[list[McpServerConfig]] = None
     subagents: Optional[list[SubAgentSpec]] = None
     rails: Optional[list[RailSpec]] = None
-    stop_condition: Optional[StopConditionSpec] = None
     enable_task_loop: bool = False
     max_iterations: int = 15
     workspace: Optional[WorkspaceSpec] = None
@@ -263,7 +249,6 @@ class DeepAgentSpec(BaseModel):
         llm_model = self.model.build() if self.model else None
         language = resolve_language(self.language)
 
-        stop_condition = self.stop_condition.build() if self.stop_condition else None
         vision_config = self.vision_model.build() if self.vision_model else None
         audio_config = self.audio_model.build() if self.audio_model else None
         workspace = self.workspace.build() if self.workspace else None
@@ -293,7 +278,6 @@ class DeepAgentSpec(BaseModel):
             mcps=self.mcps,
             subagents=subagents,
             rails=rails,
-            stop_condition=stop_condition,
             enable_task_loop=self.enable_task_loop,
             max_iterations=self.max_iterations,
             workspace=workspace,
@@ -325,7 +309,6 @@ __all__ = [
     "DeepAgentSpec",
     "ProgressiveToolSpec",
     "RailSpec",
-    "StopConditionSpec",
     "SubAgentSpec",
     "SysOperationSpec",
     "VisionModelSpec",

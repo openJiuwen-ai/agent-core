@@ -214,7 +214,6 @@ class TeamAgent(BaseAgent):
         self._role_policy = role_policy(ctx.role, language=language)
 
         workspace_obj = agent_spec.workspace.build() if agent_spec.workspace else None
-        stop_condition = agent_spec.stop_condition.build() if agent_spec.stop_condition else None
         model = agent_spec.model.build() if agent_spec.model else None
 
         messager_config = ctx.messager_config
@@ -249,7 +248,6 @@ class TeamAgent(BaseAgent):
             tools=tools,
             rails=[fs_rail, self._first_iter_gate],
             workspace=workspace_obj,
-            stop_condition=stop_condition,
             enable_task_loop=True,
             max_iterations=agent_spec.max_iterations,
             completion_timeout=agent_spec.completion_timeout,
@@ -845,9 +843,11 @@ class TeamAgent(BaseAgent):
             spawn_config=spawn_config,
         )
         self._spawned_handles[member_id] = handle
-        handle.on_unhealthy = lambda: asyncio.ensure_future(
-            self._on_teammate_unhealthy(member_id)
-        )
+
+        def _trigger_unhealthy_recovery() -> asyncio.Task:
+            return asyncio.ensure_future(self._on_teammate_unhealthy(member_id))
+
+        handle.on_unhealthy = _trigger_unhealthy_recovery
         return handle
 
     # ------------------------------------------------------------------
