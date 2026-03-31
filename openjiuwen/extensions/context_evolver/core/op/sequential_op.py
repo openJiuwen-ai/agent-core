@@ -23,6 +23,11 @@ class SequentialOp(BaseOp):
         super().__init__()
         self._ops: List[BaseOp] = list(ops)
 
+    @property
+    def ops(self) -> List[BaseOp]:
+        """The ordered list of operations in this sequence."""
+        return self._ops
+
     async def async_execute(self, context: RuntimeContext) -> None:
         """Execute all operations sequentially.
 

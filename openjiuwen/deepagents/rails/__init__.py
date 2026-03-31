@@ -7,6 +7,10 @@ from openjiuwen.deepagents.rails.interrupt.interrupt_base import BaseInterruptRa
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.rails.security_rail import SecurityRail
 from openjiuwen.deepagents.rails.task_planning_rail import TaskPlanningRail
+from openjiuwen.deepagents.rails.task_memory_rail import (
+    TaskMemoryRail,
+    SummarizeTrajectoriesInput,
+)
 from openjiuwen.deepagents.rails.skill_use_rail import SkillUseRail
 from openjiuwen.deepagents.rails.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.deepagents.rails.subagent_rail import SubagentRail
@@ -17,6 +21,8 @@ from openjiuwen.deepagents.rails.memory_rail import MemoryRail
 __all__ = [
     "DeepAgentRail",
     "TaskPlanningRail",
+    "TaskMemoryRail",
+    "SummarizeTrajectoriesInput",
     "TaskCompletionRail",
     "SkillUseRail",
     "SkillEvolutionRail",
