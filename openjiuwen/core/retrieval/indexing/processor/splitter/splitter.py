@@ -117,7 +117,7 @@ class SentenceSplitter(Splitter):
                 cur_sents.append((sent_text, sent_start, sent_end, sent_len))
             else:
                 chunks, cur_sents = self._flush(chunks, cur_sents)
-                cur_sents = [(sent_text, sent_start, sent_end, sent_len)]
+                cur_sents.append((sent_text, sent_start, sent_end, sent_len))
 
         chunks, _ = self._flush(chunks, cur_sents)
         logger.info(f"Computed the following sentence-level chunks: {len(chunks)} chunks")
