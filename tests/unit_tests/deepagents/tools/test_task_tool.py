@@ -67,7 +67,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         tool = TaskTool(card=card, parent_agent=parent_agent)
 
         session = Session(session_id="parent_session")
-        with patch.object(tool, "_create_subagent", return_value=FakeSubAgent()):
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
             result = await tool.invoke(
                 {"subagent_type": "code", "task_description": "run task"},
                 session=session,
@@ -183,3 +183,4 @@ class TestTaskToolSync(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
