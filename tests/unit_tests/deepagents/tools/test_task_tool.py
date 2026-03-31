@@ -6,12 +6,14 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+import re
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.deepagents import create_deep_agent
 from openjiuwen.deepagents.deep_agent import DeepAgent
 from openjiuwen.deepagents.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.deepagents.tools.task_tool import TaskTool, create_task_tool
@@ -37,18 +39,23 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         await Runner.stop()
 
     async def test_task_tool_invoke_success(self) -> None:
+        called_inputs: dict[str, str] = {}
+
         class FakeSubAgent:
-            async def invoke(self, inputs):
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
                 called_inputs.update(inputs)
                 return {"output": "done"}
 
-        called_inputs: dict[str, str] = {}
-
+        # Match production: subagent_type must correspond to a SubAgentConfig.agent_card.name
+        code_spec = SubAgentConfig(
+            agent_card=AgentCard(name="code", description="code subagent"),
+            system_prompt="sub",
+        )
         parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
         parent_agent.configure(
             DeepAgentConfig(
                 system_prompt="parent",
-                subagents=[],
+                subagents=[code_spec],
                 tools=[],
                 mcps=[],
                 model=None,
@@ -70,8 +77,12 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.data, {"output": "done"})
         self.assertIsNone(result.error)
         self.assertEqual(called_inputs["query"], "run task")
-        self.assertTrue(
-            called_inputs["conversation_id"].startswith("parent_session_sub_code_"),
+        # task_tool: f"{parent_session_id}_sub_{subagent_type}_{uuid.uuid4().hex[:8]}"
+        self.assertIsNotNone(
+            re.fullmatch(
+                r"parent_session_sub_code_[0-9a-f]{8}",
+                called_inputs["conversation_id"],
+            ),
         )
 
     async def test_task_tool_invoke_invalid_session(self) -> None:
@@ -108,7 +119,6 @@ class TestTaskToolSync(unittest.TestCase):
         self.assertIsInstance(tools[0], TaskTool)
 
     def test_general_purpose_subagent_inherits_parent_mcps(self) -> None:
-        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
         tools = [ToolCard(id="parent_tool", name="read_file", description="read file")]
         mcps = [
             McpServerConfig(
@@ -117,18 +127,19 @@ class TestTaskToolSync(unittest.TestCase):
                 server_path="http://127.0.0.1:8930/mcp",
             )
         ]
-        parent_agent.configure(
-            DeepAgentConfig(
-                subagents=[],
-                system_prompt="parent prompt",
-                tools=tools,
-                mcps=mcps,
-                model=_create_dummy_model(),
-                skills=["skill_a"],
-            )
+        model = _create_dummy_model()
+        parent_agent = create_deep_agent(
+            model=model,
+            card=AgentCard(name="parent", description="test"),
+            system_prompt="parent prompt",
+            tools=tools,
+            mcps=mcps,
+            skills=["skill_a"],
+            subagents=[],
+            add_general_purpose_agent=True,
         )
 
-        sub = parent_agent.create_subagent("general-purpose")
+        sub = parent_agent.create_subagent("general-purpose", "sub_session_id")
 
         self.assertEqual(sub.deep_config.tools, tools)
         self.assertEqual(sub.deep_config.mcps, mcps)
@@ -152,19 +163,18 @@ class TestTaskToolSync(unittest.TestCase):
             ],
             skills=["skill_b"],
         )
-        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
-        parent_agent.configure(
-            DeepAgentConfig(
-                subagents=[explicit_spec],
-                system_prompt="parent prompt",
-                tools=[ToolCard(id="parent_tool", name="read_file", description="read file")],
-                mcps=[],
-                model=_create_dummy_model(),
-                skills=["skill_a"],
-            )
+        parent_agent = create_deep_agent(
+            model=_create_dummy_model(),
+            card=AgentCard(name="parent", description="test"),
+            system_prompt="parent prompt",
+            tools=[ToolCard(id="parent_tool", name="read_file", description="read file")],
+            mcps=[],
+            skills=["skill_a"],
+            subagents=[explicit_spec],
+            add_general_purpose_agent=True,
         )
 
-        sub = parent_agent.create_subagent("general-purpose")
+        sub = parent_agent.create_subagent("general-purpose", "sub_session_id")
 
         self.assertEqual(sub.deep_config.tools, explicit_spec.tools)
         self.assertEqual(sub.deep_config.mcps, explicit_spec.mcps)

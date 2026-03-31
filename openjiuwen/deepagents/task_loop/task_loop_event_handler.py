@@ -533,8 +533,8 @@ class TaskLoopEventHandler(EventHandler):
         """Handle SESSION_SPAWN completion/failure.
 
         Routes based on whether parent agent has active invoke:
-        - Active invoke: push_steer (data) + push_follow_up (trigger)
-        - No active invoke: push_steer + schedule delayed auto-invoke
+        - Active invoke: push_steer (data)
+        - No active invoke: schedule delayed auto-invoke
 
         Args:
             task_id: Task identifier.
@@ -567,29 +567,23 @@ class TaskLoopEventHandler(EventHandler):
         )
 
         if agent.is_invoke_active:
-            # Path 1: Active invoke - steer + follow_up
+            # Path 1: Active invoke - steer
             if self.interaction_queues is not None:
-                follow_up_text = ("后台子任务已完成，请汇总结果。"
-                    if language == "cn"
-                    else "The background task has been completed, please summarize the results.")
                 self.interaction_queues.push_steer(steer_text)
-                self.interaction_queues.push_follow_up(follow_up_text)
             logger.info(
                 f"[SessionSpawn] task_id={task_id} completed, "
-                "steer+follow_up pushed (active invoke)"
+                "steer pushed (active invoke)"
             )
         else:
-            # Path 2: No active invoke - steer + schedule auto-invoke
-            if self.interaction_queues is not None:
-                self.interaction_queues.push_steer(steer_text)
+            # Path 2: No active invoke - schedule auto-invoke
             if not agent.is_auto_invoke_scheduled:
                 agent.set_auto_invoke_scheduled(True)
                 asyncio.create_task(
-                    agent.schedule_auto_invoke_on_spawn_done()
+                    agent.schedule_auto_invoke_on_spawn_done(steer_text)
                 )
             logger.info(
                 f"[SessionSpawn] task_id={task_id} completed, "
-                "steer pushed + auto-invoke scheduled"
+                "auto-invoke scheduled"
             )
 
     @staticmethod

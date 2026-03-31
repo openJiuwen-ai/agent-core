@@ -10,9 +10,6 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.deepagents.prompts.sections import SectionName
-from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
-    GENERAL_PURPOSE_AGENT_DESC,
-)
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.schema.config import SubAgentConfig
 from openjiuwen.deepagents.tools.session_tools import (
@@ -120,24 +117,14 @@ class SessionRail(DeepAgentRail):
         Returns:
             Formatted string describing available subagent types.
         """
-        default_desc = GENERAL_PURPOSE_AGENT_DESC.get(
-            self.system_prompt_builder.language, GENERAL_PURPOSE_AGENT_DESC["cn"]
-        )
-
         if not subagents:
-            return f'"general-purpose": {default_desc}'
+            return ""
 
         lines = []
-        has_general_purpose = False
 
         for spec in subagents:
             agent_name, agent_desc = self._extract_agent_meta(spec)
-            if agent_name == "general-purpose":
-                has_general_purpose = True
             lines.append(f'"{agent_name}": {agent_desc}')
-
-        if not has_general_purpose:
-            lines.insert(0, f'"general-purpose": {default_desc}')
 
         return "\n".join(lines)
 

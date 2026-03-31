@@ -13,9 +13,6 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.deepagents.prompts.sections.task_tool import (
     build_task_section,
 )
-from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
-    GENERAL_PURPOSE_AGENT_DESC,
-)
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.schema.config import SubAgentConfig
 from openjiuwen.deepagents.tools.task_tool import create_task_tool
@@ -103,25 +100,15 @@ class SubagentRail(DeepAgentRail):
         Returns:
             Formatted string describing available subagent types.
         """
-        default_desc = GENERAL_PURPOSE_AGENT_DESC.get(
-            self.system_prompt_builder.language, GENERAL_PURPOSE_AGENT_DESC["cn"])
-
         if not subagents:
-            return f'"general-purpose": {default_desc}'
+            return ""
 
         # Build available subagent types
         lines = []
-        has_general_purpose = False
 
         for spec in subagents:
             agent_name, agent_desc = self._extract_agent_meta(spec)
-            if agent_name == "general-purpose":
-                has_general_purpose = True
             lines.append(f'"{agent_name}": {agent_desc}')
-
-        # Add default general-purpose if not explicitly defined
-        if not has_general_purpose:
-            lines.insert(0, f'"general-purpose": {default_desc}')
 
         return "\n".join(lines)
 

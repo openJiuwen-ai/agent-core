@@ -19,9 +19,6 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.deepagents.tools.base_tool import ToolOutput
-from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
-    GENERAL_PURPOSE_AGENT_DESC,
-)
 from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 
 
@@ -229,29 +226,6 @@ class TaskTool(Tool):
                 card = getattr(spec, "card", None)
                 if getattr(card, "name", None) == subagent_type:
                     return spec
-
-        # default general-purpose subagent, using the same system prompt, tools, model, skills as main agent
-        if subagent_type == "general-purpose":
-            default_desc = GENERAL_PURPOSE_AGENT_DESC.get(self.language, GENERAL_PURPOSE_AGENT_DESC["cn"])
-            return SubAgentConfig(
-                agent_card=AgentCard(
-                    name="general-purpose",
-                    description=default_desc,
-                ),
-                system_prompt=parent_config.system_prompt,
-                tools=parent_config.tools,
-                mcps=parent_config.mcps or [],
-                model=parent_config.model,
-                skills=getattr(parent_config, "skills", None),
-                backend=getattr(parent_config, "backend", None),
-                workspace=getattr(parent_config, "workspace", None),
-                sys_operation=getattr(parent_config, "sys_operation", None),
-                language=getattr(parent_config, "language", None),
-                prompt_mode=getattr(parent_config, "prompt_mode", None),
-                enable_task_loop=getattr(parent_config, "enable_task_loop", False),
-                stop_condition=getattr(parent_config, "stop_condition", None),
-                max_iterations=getattr(parent_config, "max_iterations", 15),
-            )
 
         if not parent_config.subagents:
             logger.warning("[TaskTool] No subagents found, skipping")

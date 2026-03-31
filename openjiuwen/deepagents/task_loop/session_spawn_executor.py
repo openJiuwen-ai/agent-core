@@ -70,7 +70,7 @@ class SessionSpawnExecutor(TaskExecutor):
         )
 
         try:
-            subagent = self._deep_agent.create_subagent(subagent_type)
+            subagent = self._deep_agent.create_subagent(subagent_type, cid)
             result = await subagent.invoke({"query": query, "conversation_id": cid})
             payload = result.get("output", "") if isinstance(result, dict) else str(result)
 
@@ -102,8 +102,7 @@ class SessionSpawnExecutor(TaskExecutor):
     ) -> ControllerOutputChunk:
         """Build error chunk for failed task."""
         return ControllerOutputChunk(
-            session_id="",
-            task_id=task_id,
+            index=0,
             payload=ControllerOutputPayload(
                 type=EventType.TASK_FAILED,
                 data=[TextDataFrame(text=error)],

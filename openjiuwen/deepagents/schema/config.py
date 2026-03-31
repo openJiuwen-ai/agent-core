@@ -156,6 +156,10 @@ class DeepAgentConfig:
             when the embedded agent is created.
         enable_task_loop: Whether to enable the outer
             task loop (P1).
+        enable_async_subagent: Enable async subagent via SessionRail (default False).
+            When True and subagents are configured, SessionRail is mounted instead of SubagentRail.
+        add_general_purpose_agent: Add general-purpose agent.
+            When True, a general-purpose agent is added as sub-agents.
         stop_condition: Conditions to terminate the task
             loop.
         max_iterations: Maximum ReAct iterations per
@@ -177,6 +181,8 @@ class DeepAgentConfig:
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
     enable_task_loop: bool = False
+    enable_async_subagent: bool = False
+    add_general_purpose_agent: bool = False
     max_iterations: int = 15
     subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None
     tools: Optional[List[ToolCard]] = None

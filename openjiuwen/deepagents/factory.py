@@ -32,6 +32,7 @@ from openjiuwen.deepagents.schema.config import (
 )
 from openjiuwen.deepagents.workspace.workspace import Workspace
 from openjiuwen.deepagents.prompts import resolve_language
+from openjiuwen.deepagents.prompts.sections.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 
 
 def _normalize_tools(
@@ -82,6 +83,48 @@ def _register_tool_instances(
             raise result.msg()
 
 
+def _inject_general_purpose_subagent(
+    subagents: Optional[List[SubAgentConfig | DeepAgent]],
+    *,
+    add_general_purpose_agent: bool,
+    resolved_language: str,
+    rails: Optional[List[AgentRail]],
+    system_prompt: Optional[str],
+    tools: Optional[List[Tool | ToolCard]],
+    mcps: Optional[List[McpServerConfig]],
+    model: Model,
+    skills: Optional[List[str]],
+) -> list[SubAgentConfig | DeepAgent]:
+    """Inject general-purpose subagent if requested and not already present."""
+    effective_subagents = list(subagents or [])
+    if not add_general_purpose_agent:
+        return effective_subagents
+
+    has_gp = any(
+        (isinstance(s, SubAgentConfig) and s.agent_card.name == "general-purpose")
+        or (isinstance(s, DeepAgent) and getattr(getattr(s, "card", None), "name", None) == "general-purpose")
+        for s in effective_subagents
+    )
+    if has_gp:
+        return effective_subagents
+
+    desc = GENERAL_PURPOSE_AGENT_DESC.get(resolved_language, GENERAL_PURPOSE_AGENT_DESC["cn"])
+    gp_rails = [
+        r for r in (rails or [])
+        if not isinstance(r, (SubagentRail, SessionRail))
+    ] or None
+    effective_subagents.insert(0, SubAgentConfig(
+        agent_card=AgentCard(name="general-purpose", description=desc),
+        system_prompt=system_prompt or "",
+        tools=list(tools or []),
+        mcps=list(mcps or []),
+        model=model,
+        skills=skills,
+        rails=gp_rails,
+    ))
+    return effective_subagents
+
+
 def create_deep_agent(
     model: Model,
     *,
@@ -93,6 +136,7 @@ def create_deep_agent(
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
     enable_async_subagent: bool = False,
+    add_general_purpose_agent: bool = False,
     max_iterations: int = 15,
     workspace: Optional[str | Workspace] = None,
     skills: Optional[List[str]] = None,
@@ -126,6 +170,8 @@ def create_deep_agent(
         enable_task_loop: Enable outer task loop (P1).
         enable_async_subagent: Enable async subagent via SessionRail (default False).
             When True and subagents are configured, SessionRail is mounted instead of SubagentRail.
+        add_general_purpose_agent: Add general-purpose agent.
+             When True, a general-purpose agent is added as sub-agents.
         max_iterations: Max ReAct iterations per
             invoke.
         workspace: Workspace path for file operations.
@@ -157,6 +203,18 @@ def create_deep_agent(
     normalized_tools, tool_instances = _normalize_tools(tools)
 
     resolved_language = resolve_language(language)
+
+    effective_subagents = _inject_general_purpose_subagent(
+        subagents,
+        add_general_purpose_agent=add_general_purpose_agent,
+        resolved_language=resolved_language,
+        rails=rails,
+        system_prompt=system_prompt,
+        tools=tools,
+        mcps=mcps,
+        model=model,
+        skills=skills,
+    )
 
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
@@ -192,7 +250,7 @@ def create_deep_agent(
         system_prompt=system_prompt,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
-        subagents=subagents,
+        subagents=effective_subagents or None,
         tools=normalized_tools or None,
         mcps=mcps,
         workspace=workspace_obj,
@@ -203,6 +261,8 @@ def create_deep_agent(
         prompt_mode=prompt_mode,
         vision_model_config=vision_model_config,
         audio_model_config=audio_model_config,
+        enable_async_subagent=enable_async_subagent,
+        add_general_purpose_agent=add_general_purpose_agent,
     )
 
     # Forward extra kwargs to config fields

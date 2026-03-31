@@ -78,6 +78,7 @@ from openjiuwen.deepagents.prompts import (
 )
 from openjiuwen.deepagents.prompts.sections import SectionName
 from openjiuwen.deepagents.prompts.sections.identity import build_identity_section
+from openjiuwen.deepagents.workspace.workspace import Workspace
 
 # Events bridged to the inner ReActAgent.
 _BRIDGE_EVENTS = frozenset(
@@ -540,11 +541,12 @@ class DeepAgent(BaseAgent):
         """React agent config. For testing only."""
         return self._react_agent.config
 
-    def create_subagent(self, subagent_type: str) -> "DeepAgent":
+    def create_subagent(self, subagent_type: str, subsession_id: str) -> "DeepAgent":
         """Create a subagent instance (shared by TaskTool and SessionSpawnExecutor).
 
         Args:
             subagent_type: Type of subagent to create (e.g., "general-purpose").
+            subsession_id: The session id for the subagent.
 
         Returns:
             Configured DeepAgent instance.
@@ -560,7 +562,24 @@ class DeepAgent(BaseAgent):
             )
 
         if isinstance(spec, DeepAgent):
+            logger.info("already get deepagent instance, return it")
             return spec
+
+        if not self._deep_config.workspace or isinstance(self._deep_config.workspace, str):
+            workspace_path = (
+                f"{self._deep_config.workspace}/{subsession_id}"
+                if self._deep_config.workspace
+                else f"./{subsession_id}"
+            )
+            workspace = Workspace(
+                root_path=workspace_path,
+                language=self._deep_config.language
+            )
+        else:
+            workspace = Workspace(
+                root_path=self._deep_config.workspace.root_path + f"/{subsession_id}",
+                language=self._deep_config.language
+            )
 
         create_kwargs = {
             "model": spec.model or self._deep_config.model,
@@ -578,7 +597,7 @@ class DeepAgent(BaseAgent):
             "workspace": (
                 spec.workspace
                 if spec.workspace is not None
-                else self._deep_config.workspace
+                else workspace
             ),
             "skills": spec.skills,
             "backend": (
@@ -588,8 +607,8 @@ class DeepAgent(BaseAgent):
             ),
             "sys_operation": (
                 spec.sys_operation
-                if spec.sys_operation is not None
-                else self._deep_config.sys_operation
+                if spec.sys_operation is not None and spec.workspace is not None
+                else None
             ),
             "language": (
                 spec.language
@@ -601,7 +620,9 @@ class DeepAgent(BaseAgent):
                 if spec.prompt_mode is not None
                 else self._deep_config.prompt_mode
             ),
-            "stop_condition": spec.stop_condition,
+            "subagents": None,
+            "enable_async_subagent": False,
+            "add_general_purpose_agent": False
         }
 
         if spec.factory_name:
@@ -646,27 +667,6 @@ class DeepAgent(BaseAgent):
                 card = getattr(spec, "card", None)
                 if getattr(card, "name", None) == subagent_type:
                     return spec
-
-        if subagent_type == "general-purpose":
-            from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
-                GENERAL_PURPOSE_AGENT_DESC,
-            )
-
-            language = self._deep_config.language or "cn"
-            default_desc = GENERAL_PURPOSE_AGENT_DESC.get(
-                language, GENERAL_PURPOSE_AGENT_DESC["cn"]
-            )
-            return SubAgentConfig(
-                agent_card=AgentCard(
-                    name="general-purpose",
-                    description=default_desc,
-                ),
-                system_prompt=self._deep_config.system_prompt,
-                tools=self._deep_config.tools,
-                mcps=self._deep_config.mcps or [],
-                model=self._deep_config.model,
-                skills=self._deep_config.skills,
-            )
 
         return None
 
@@ -1056,6 +1056,7 @@ class DeepAgent(BaseAgent):
 
     async def schedule_auto_invoke_on_spawn_done(
         self,
+        query: str,
         delay: float = 0.5,
     ) -> None:
         """Schedule delayed auto-invoke after SESSION_SPAWN completes (no active invoke).
@@ -1064,6 +1065,7 @@ class DeepAgent(BaseAgent):
         then invokes with a summary prompt if still idle and ``_loop_session`` is set.
 
         Args:
+            query: The query to invoke with.
             delay: Delay in seconds to merge multiple concurrent spawn completions.
         """
         await asyncio.sleep(delay)
@@ -1076,10 +1078,6 @@ class DeepAgent(BaseAgent):
             logger.warning("[AutoInvoke] session was cleaned up during delay, skipping")
             return
 
-        language = self._deep_config.language if self._deep_config else "cn"
-        query = ("后台子任务已完成，请向用户汇总最新结果。"
-            if language == "cn"
-            else "The background task has been completed, please summarize the latest results for the user.")
         try:
             await self.invoke(
                 {"query": query},

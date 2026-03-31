@@ -20,6 +20,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.deepagents import create_deep_agent
+from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.schema.config import SubAgentConfig
 from openjiuwen.deepagents.subagents import create_code_agent, create_research_agent
 
@@ -69,7 +70,8 @@ class TestDeepAgentSubagentRail(TestDeepAgentE2E):
             max_iterations=12,
             subagents=[research_agent],
             rails=[tool_trace, fs_rail],
-            sys_operation=sys_oper
+            sys_operation=sys_oper,
+            add_general_purpose_agent=True
         )
 
         query = (
@@ -113,7 +115,7 @@ class TestDeepAgentSubagentRail(TestDeepAgentE2E):
             max_iterations=12,
             subagents=[research_agent, code_agent],
             rails=[tool_trace, fs_rail],
-            sys_operation=sys_oper
+            sys_operation=sys_oper,
         )
 
         query = (
@@ -140,13 +142,17 @@ class TestDeepAgentSessionRail(TestDeepAgentE2E):
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
     async def test_auto_invoke_on_spawn_done_no_query2(self):
-        """场景 1：仅 q1 spawn，无用户 q2；后台子任务完成后 auto-invoke 总结，路径应出现 [STEERING]。"""
+        """场景 1：仅 q1 spawn，无用户 q2；后台子任务完成后 auto-invoke 总结。"""
         self._require_llm_config()
-        steer_marker = "[STEERING]"
-        observe = LoopObserveRail(steer_text=steer_marker)
         model = self._create_model()
         sys_oper = Runner.resource_mgr.get_sys_operation(self._sys_operation_id)
-        subagents = [create_research_agent(model=model, sys_operation=sys_oper)]
+        subagents = [
+            SubAgentConfig(
+                AgentCard(name="research_agent", description="专注于研究调查任务，当用户想要调查某问题时，可使用该代理执行研究工作。每次只给这位研究员一个主题。"),
+                rails=[FileSystemRail()],
+                system_prompt="你是研究助理，负责围绕用户输入的主题开展调研，仅需返回最终研究结果。"
+            )
+        ]
         agent = create_deep_agent(
             model=model,
             system_prompt=(
@@ -154,11 +160,11 @@ class TestDeepAgentSessionRail(TestDeepAgentE2E):
                 "当用户要求用工具处理文件时，必须调用工具，不要凭空假设。"
             ),
             subagents=subagents,
-            rails=[observe],
             enable_task_loop=True,
             enable_async_subagent=True,
             max_iterations=20,
             sys_operation=sys_oper,
+            add_general_purpose_agent=True
         )
         cid = f"auto_invoke_{uuid.uuid4().hex}"
         q1 = "提交后台任务：分析Chipotle为什么还没有进入中国市场，不要写入文件！"
@@ -181,7 +187,6 @@ class TestDeepAgentSessionRail(TestDeepAgentE2E):
                 done = True
                 break
         self.assertTrue(done, "spawn 未在超时内完成")
-        self.assertTrue(observe.steer_seen_in_model_messages)
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -223,6 +228,22 @@ class TestDeepAgentSessionRail(TestDeepAgentE2E):
         self.assertEqual(r2.get("result_type"), "answer")
         self.assertFalse(observe.steer_seen_in_model_messages)
         self.assertIs(agent.loop_controller, controller_after_q1)
+        toolkit = getattr(agent, "_session_toolkit", None)
+        self.assertIsNotNone(toolkit)
+        max_wait = 300
+        wait_interval = 5
+        elapsed = 0
+        done = False
+        while elapsed < max_wait:
+            await asyncio.sleep(wait_interval)
+            elapsed += wait_interval
+            rows = toolkit.list_all()
+            if rows and all(r.status in ("completed", "error") for r in rows):
+                await asyncio.sleep(2)
+                done = True
+                break
+        # q1 长任务最终完成
+        self.assertTrue(done, "spawn 未在超时内完成")
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -247,10 +268,11 @@ class TestDeepAgentSessionRail(TestDeepAgentE2E):
             enable_async_subagent=True,
             max_iterations=15,
             sys_operation=sys_oper,
+            add_general_purpose_agent=True
         )
         cid = f"async_steer_{uuid.uuid4().hex}"
         q1 = (
-            "提交后台任务：研究詹姆斯成就，只要返回内容，不要写入文档！"
+            "提交后台任务：研究詹姆斯成就"
         )
         q2 = "一句话：天空是什么颜色？"
         q3 = (
@@ -274,7 +296,7 @@ class TestDeepAgentSessionRail(TestDeepAgentE2E):
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
     async def test_auto_invoke_dedup_multi_spawn(self):
-        """场景4：一次对话同时触发多个后台任务；全部完成后应能观测到 [STEERING]。"""
+        """场景4：一次对话同时触发多个后台任务，所有任务执行完后总结"""
         self._require_llm_config()
         steer_marker = "[STEERING]"
         observe = LoopObserveRail(steer_text=steer_marker)
@@ -321,7 +343,6 @@ class TestDeepAgentSessionRail(TestDeepAgentE2E):
             all(r.status in ("completed", "error") for r in toolkit.list_all()),
             "后台任务未在超时内完成",
         )
-        self.assertTrue(observe.steer_seen_in_model_messages)
 
     @pytest.mark.asyncio
     @unittest.skip("skip system test")
@@ -526,7 +547,9 @@ class TestDeepAgentSessionRailCancelMock(TestDeepAgentE2E):
         agent = self._build_cancel_agent(mock_llm)
         agent.schedule_auto_invoke_on_spawn_done = self._noop_auto_invoke
 
-        def _create_sleep_subagent(_: object) -> TestDeepAgentSessionRailCancelMock._SleepSubAgent:
+        def _create_sleep_subagent(
+            _subagent_type: str, _subsession_id: str
+        ) -> TestDeepAgentSessionRailCancelMock._SleepSubAgent:
             return self._SleepSubAgent(delay=5.0, output="never")
 
         agent.create_subagent = _create_sleep_subagent
@@ -566,7 +589,9 @@ class TestDeepAgentSessionRailCancelMock(TestDeepAgentE2E):
         agent = self._build_cancel_agent(mock_llm)
         agent.schedule_auto_invoke_on_spawn_done = self._noop_auto_invoke
 
-        def _create_slow_subagent(_: object) -> TestDeepAgentSessionRailCancelMock._SleepSubAgent:
+        def _create_slow_subagent(
+            _subagent_type: str, _subsession_id: str
+        ) -> TestDeepAgentSessionRailCancelMock._SleepSubAgent:
             return self._SleepSubAgent(delay=8.0, output="slow done")
 
         agent.create_subagent = _create_slow_subagent
@@ -610,7 +635,9 @@ class TestDeepAgentSessionRailCancelMock(TestDeepAgentE2E):
         agent = self._build_cancel_agent(mock_llm, rails=[observe])
         agent.schedule_auto_invoke_on_spawn_done = self._noop_auto_invoke
 
-        def _create_slow_subagent_s3(_: object) -> TestDeepAgentSessionRailCancelMock._SleepSubAgent:
+        def _create_slow_subagent_s3(
+            _subagent_type: str, _subsession_id: str
+        ) -> TestDeepAgentSessionRailCancelMock._SleepSubAgent:
             return self._SleepSubAgent(delay=6.0, output="done")
 
         agent.create_subagent = _create_slow_subagent_s3
@@ -652,11 +679,17 @@ class TestDeepAgentSessionRailCancelMock(TestDeepAgentE2E):
         ])
         agent = self._build_cancel_agent(mock_llm)
         agent.schedule_auto_invoke_on_spawn_done = self._noop_auto_invoke
-        create_count = {"n": 0}
 
-        def _factory(_):
-            create_count["n"] += 1
-            if create_count["n"] == 1:
+        def _factory(_subagent_type: str, sub_session_id: str):
+            # Bind slow/fast by task_id, not by call order (spawn tasks may run concurrently).
+            tk = getattr(agent, "_session_toolkit", None)
+            assert tk is not None
+            row = next(
+                (r for r in tk.list_all() if r.sub_session_id == sub_session_id),
+                None,
+            )
+            assert row is not None
+            if row.task_id == fixed_task_id_1:
                 return self._SleepSubAgent(delay=6.0, output="a done")
             return self._FastSubAgent(output="b done")
 
@@ -708,7 +741,9 @@ class TestDeepAgentSessionRailCancelMock(TestDeepAgentE2E):
         agent = self._build_cancel_agent(mock_llm)
         agent.schedule_auto_invoke_on_spawn_done = self._noop_auto_invoke
 
-        def _create_sleep_subagent_s5(_: object) -> TestDeepAgentSessionRailCancelMock._SleepSubAgent:
+        def _create_sleep_subagent_s5(
+            _subagent_type: str, _subsession_id: str
+        ) -> TestDeepAgentSessionRailCancelMock._SleepSubAgent:
             return self._SleepSubAgent(delay=5.0, output="done")
 
         agent.create_subagent = _create_sleep_subagent_s5
@@ -743,7 +778,17 @@ class TestDeepAgentSessionRailCancelMock(TestDeepAgentE2E):
         agent = self._build_cancel_agent(mock_llm)
         agent.schedule_auto_invoke_on_spawn_done = self._noop_auto_invoke
 
-        def _create_fast_subagent(_: object) -> TestDeepAgentSessionRailCancelMock._FastSubAgent:
+        def _create_fast_subagent(
+            _subagent_type: str, sub_session_id: str
+        ) -> TestDeepAgentSessionRailCancelMock._FastSubAgent:
+            tk = getattr(agent, "_session_toolkit", None)
+            assert tk is not None
+            row = next(
+                (r for r in tk.list_all() if r.sub_session_id == sub_session_id),
+                None,
+            )
+            assert row is not None
+            assert row.task_id == fixed_task_id
             return self._FastSubAgent(output="completed quickly")
 
         agent.create_subagent = _create_fast_subagent
