@@ -251,7 +251,8 @@ class HTTPRequestExecutable(ComponentExecutable):
         while retry_count <= max_retries:
             # Create a new connector for each retry attempt
             # This is necessary because the connector is closed when the ClientSession exits
-            ssl_verify, ssl_cert = SslUtils.get_ssl_config("HTTP_SSL_VERIFY", "HTTP_SSL_CERT", ["false"])
+            url_is_https = url.lower().startswith("https://")
+            ssl_verify, ssl_cert = SslUtils.get_ssl_config("HTTP_SSL_VERIFY", "HTTP_SSL_CERT", ["false"], url_is_https)
             if ssl_verify and not self.request_params.advanced_options.ignore_ssl_issues:
                 ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
                 connector = aiohttp.TCPConnector(ssl=ssl_context)
