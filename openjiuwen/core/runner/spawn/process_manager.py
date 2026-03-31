@@ -273,8 +273,12 @@ class SpawnedProcessHandle:
         """
         if not self.is_alive:
             return self.exit_code if self.exit_code is not None else -1
-        
+
         await self.stop_health_check()
+
+        if self.process.stdin:
+            self.process.stdin.close()
+
         exit_code = await self.process.wait()
         
         logger.info(

@@ -81,7 +81,7 @@ class TestBasicSpawnAndCommunication:
         assert result is handle
         assert captured["agent_config"]["logging_config"] == snapshot
         assert captured["agent_config"]["session_id"] == "default_session"
-        assert handle.health_check_started is True
+        assert handle.health_check_started is False
 
     async def test_prepare_spawn_agent_config_applies_logging_snapshot(self, monkeypatch):
         snapshot = {"backend": "loguru", "defaults": {"level": "DEBUG"}}

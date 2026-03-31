@@ -222,6 +222,8 @@ async def process_message_loop(
 
     Agent execution runs in a separate task so the message loop
     remains responsive to HEALTH_CHECK and SHUTDOWN messages.
+    The loop races stdin reads against agent task completion so it
+    exits promptly once the agent finishes.
 
     Args:
         reader: Async stream reader for stdin
@@ -235,7 +237,24 @@ async def process_message_loop(
     current_inputs = inputs
 
     while not shutdown_requested:
-        message = await read_input_from_stdin(reader)
+        read_task = asyncio.create_task(read_input_from_stdin(reader))
+
+        wait_set: set[asyncio.Task] = {read_task}
+        if agent_task is not None and not agent_task.done():
+            wait_set.add(agent_task)
+
+        done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+
+        if agent_task is not None and agent_task in done:
+            if read_task not in done:
+                read_task.cancel()
+                try:
+                    await read_task
+                except asyncio.CancelledError:
+                    pass
+            break
+
+        message = read_task.result()
 
         if message is None:
             logger.info("stdin closed, exiting message loop")
@@ -287,10 +306,6 @@ async def process_message_loop(
 
         else:
             logger.warning(f"Unknown message type: {message.type}")
-
-        # Exit once the agent task finishes (success or error).
-        if agent_task is not None and agent_task.done():
-            break
 
 
 async def run_spawned_process(

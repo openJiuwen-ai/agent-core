@@ -464,7 +464,7 @@ class _RunnerImpl:
             inputs=normalized_inputs,
             config=spawn_config,
         )
-        if spawn_config is not None or spawn_config is None:
+        if spawn_config is not None:
             await handle.start_health_check()
         return handle
 
