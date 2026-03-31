@@ -63,28 +63,52 @@ from openjiuwen.core.runner.callback.models import (
 )
 
 
-def _narrow_kwargs(func: Callable, kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Return only the kwargs that *func* actually accepts.
+def _narrow_call(
+    func: Callable,
+    args: tuple,
+    kwargs: dict[str, Any],
+) -> tuple[tuple, dict[str, Any]]:
+    """Trim *args* and *kwargs* to only what *func* actually accepts.
 
-    If *func* declares **kwargs (VAR_KEYWORD), all kwargs are returned unchanged.
-    Otherwise only the kwargs whose names match declared parameters are kept.
+    Positional arguments are truncated to the number of positional-or-keyword /
+    positional-only parameters the function declares (unless it has *args).
+    Keyword arguments are filtered to declared parameter names (unless it has
+    **kwargs).
     """
     try:
         sig = inspect.signature(func)
     except (ValueError, TypeError):
-        return kwargs
+        return args, kwargs
+
+    has_var_positional = False
+    has_var_keyword = False
+    positional_count = 0
+
     for param in sig.parameters.values():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            return kwargs  # accepts **kwargs — pass everything through
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            has_var_positional = True
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:
+            has_var_keyword = True
+        elif param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional_count += 1
 
-    def should_accept(p: inspect.Parameter) -> bool:
-        return p.kind not in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        )
+    narrowed_args = args if has_var_positional else args[:positional_count]
 
-    accepted = {name for name, param in sig.parameters.items() if should_accept(param)}
-    return {k: v for k, v in kwargs.items() if k in accepted}
+    if has_var_keyword:
+        narrowed_kwargs = kwargs
+    else:
+        accepted = {
+            name
+            for name, p in sig.parameters.items()
+            if p.kind
+            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        }
+        narrowed_kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+
+    return narrowed_args, narrowed_kwargs
 
 
 class AsyncCallbackFramework:
@@ -139,11 +163,6 @@ class AsyncCallbackFramework:
         # Logging
         self.enable_logging = enable_logging
         self.logger = logging.getLogger(__name__)
-        if enable_logging:
-            logging.basicConfig(
-                level=logging.INFO,
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
 
         # Circuit breakers
         self._circuit_breakers: Dict[str, CircuitBreakerFilter] = {}
@@ -659,7 +678,8 @@ class AsyncCallbackFramework:
             return _TRANSFORM_NOOP
         result: Any = _TRANSFORM_NOOP
         for info in callbacks:
-            result = await info.callback(*args, **kwargs)
+            narrowed_args, narrowed_kwargs = _narrow_call(info.callback, args, kwargs)
+            result = await info.callback(*narrowed_args, **narrowed_kwargs)
         return result
 
     async def register(
@@ -904,7 +924,8 @@ class AsyncCallbackFramework:
                 start_time = time.time()
 
                 # Call callback (might return coroutine or async generator)
-                callback_result = callback(*final_args, **_narrow_kwargs(callback, final_kwargs))
+                narrowed_args, narrowed_kwargs = _narrow_call(callback, final_args, final_kwargs)
+                callback_result = callback(*narrowed_args, **narrowed_kwargs)
 
                 # Check if it's an async generator
                 if inspect.isasyncgen(callback_result):
@@ -1198,7 +1219,8 @@ class AsyncCallbackFramework:
                 final_kwargs = filter_result.modified_kwargs or kwargs
 
                 # Execute callback
-                result = await callback(*final_args, **final_kwargs)
+                narrowed_args, narrowed_kwargs = _narrow_call(callback, final_args, final_kwargs)
+                result = await callback(*narrowed_args, **narrowed_kwargs)
 
                 # Check condition
                 if condition(result):
@@ -1383,7 +1405,8 @@ class AsyncCallbackFramework:
 
                     # Execute callback
                     start_time = time.time()
-                    result = callback(*final_args, **final_kwargs)
+                    narrowed_args, narrowed_kwargs = _narrow_call(callback, final_args, final_kwargs)
+                    result = callback(*narrowed_args, **narrowed_kwargs)
 
                     # Check if result is an async generator function (not yet called)
                     # or an async generator object
@@ -1778,4 +1801,3 @@ class AsyncCallbackFramework:
             "history_size": len(self._event_history),
             "metrics_collected": len(self._metrics)
         }
-
