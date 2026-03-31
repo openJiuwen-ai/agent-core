@@ -241,3 +241,5 @@ openjiuwen/deepagents/tools/browser_move/.browser-profiles/
 .worktrees/
 
 memories/ace/demo_user_hotpot_ace.json
+.trae/
+.claude/
