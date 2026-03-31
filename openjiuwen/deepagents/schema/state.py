@@ -3,8 +3,8 @@
 """DeepAgent runtime-state data types."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.deepagents.schema.task import TaskPlan
 
@@ -25,6 +25,9 @@ class DeepAgentState:
     iteration: int = 0
     task_plan: Optional[TaskPlan] = None
     stop_condition_state: Optional[Dict[str, Any]] = None
+    pending_follow_ups: List[str] = field(
+        default_factory=list
+    )
 
     def to_session_dict(self) -> Dict[str, Any]:
         """Convert to a JSON-friendly dict."""
@@ -36,6 +39,9 @@ class DeepAgentState:
                 else None
             ),
             "stop_condition_state": self.stop_condition_state,
+            "pending_follow_ups": list(
+                self.pending_follow_ups
+            ),
         }
 
     @classmethod
@@ -59,5 +65,8 @@ class DeepAgentState:
             task_plan=task_plan,
             stop_condition_state=data.get(
                 "stop_condition_state"
+            ),
+            pending_follow_ups=list(
+                data.get("pending_follow_ups") or []
             ),
         )

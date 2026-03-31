@@ -1120,9 +1120,22 @@ class DeepAgent(BaseAgent):
 
             while coordinator.should_continue():
                 outer_round += 1
-                follow_ups = controller.drain_follow_up()
-                if follow_ups:
-                    current_query = follow_ups[-1]
+                # Drain new follow-ups, merge into state buffer
+                new_follow_ups = controller.drain_follow_up()
+                _state = self.load_state(session)
+                if new_follow_ups:
+                    _state.pending_follow_ups.extend(
+                        new_follow_ups
+                    )
+                # Pop first buffered follow-up as query
+                is_follow_up = bool(
+                    _state.pending_follow_ups
+                )
+                if _state.pending_follow_ups:
+                    current_query = (
+                        _state.pending_follow_ups.pop(0)
+                    )
+                    self.save_state(session, _state)
 
                 query_preview = str(current_query)[:120]
                 self._log_loop(
@@ -1131,7 +1144,8 @@ class DeepAgent(BaseAgent):
                 )
 
                 await controller.submit_round(
-                    session, current_query, is_follow_up=bool(follow_ups),
+                    session, current_query,
+                    is_follow_up=is_follow_up,
                     run_kind=modified.run_kind,
                     run_context=modified.run_context,
                 )
@@ -1160,7 +1174,10 @@ class DeepAgent(BaseAgent):
                 if coordinator.is_aborted:
                     self._log_loop(f"round={outer_round} aborted")
                     break
-                if controller.has_follow_up():
+                if (
+                    controller.has_follow_up()
+                    or _state.pending_follow_ups
+                ):
                     continue
                 if not self._has_remaining_tasks(session):
                     self._log_loop("no remaining tasks, loop finished")

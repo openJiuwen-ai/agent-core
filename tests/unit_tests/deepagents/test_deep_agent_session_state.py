@@ -60,3 +60,40 @@ def test_save_and_reload_state() -> None:
     assert loaded.task_plan.goal == "demo"
     assert len(loaded.task_plan.tasks) == 1
     assert loaded.task_plan.tasks[0].id == "t1"
+
+
+def test_pending_follow_ups_round_trip() -> None:
+    """pending_follow_ups survives save -> clear -> load."""
+    agent = _make_agent()
+    session = FakeSession()
+    state = DeepAgentState(
+        iteration=1,
+        pending_follow_ups=["msg1", "msg2", "msg3"],
+    )
+    agent.save_state(session, state)
+    agent.clear_state(session)
+
+    loaded = agent.load_state(session)
+    assert loaded.pending_follow_ups == [
+        "msg1",
+        "msg2",
+        "msg3",
+    ]
+
+
+def test_pending_follow_ups_defaults_empty() -> None:
+    """Legacy state without pending_follow_ups loads as empty list."""
+    agent = _make_agent()
+    session = FakeSession()
+    # Simulate old-format state (no pending_follow_ups key)
+    session.update_state(
+        {
+            "deepagent": {
+                "iteration": 2,
+                "task_plan": None,
+                "stop_condition_state": None,
+            }
+        }
+    )
+    loaded = agent.load_state(session)
+    assert loaded.pending_follow_ups == []

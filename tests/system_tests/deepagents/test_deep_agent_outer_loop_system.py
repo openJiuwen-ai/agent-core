@@ -192,6 +192,164 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan.tasks[0].status, TaskStatus.COMPLETED)
         self.assertEqual(plan.tasks[1].status, TaskStatus.COMPLETED)
 
+    @pytest.mark.asyncio
+    async def test_multiple_follow_ups_consumed_in_order(self):
+        """3 follow-ups arrive together -> 3 extra rounds in FIFO order."""
+        session = Session(
+            session_id=f"fifo_{uuid.uuid4().hex}"
+        )
+        plan = TaskPlan(
+            goal="fifo-test",
+            tasks=[
+                TaskItem(id="t1", title="step-1"),
+            ],
+        )
+        session.update_state(
+            {
+                "deepagent": {
+                    "iteration": 0,
+                    "task_plan": plan.to_dict(),
+                }
+            }
+        )
+
+        agent = DeepAgent(
+            AgentCard(
+                name="fifo_test",
+                description="t",
+            )
+        ).configure(
+            DeepAgentConfig(
+                enable_task_loop=True,
+                max_iterations=10,
+            )
+        )
+        fake_react = ControlledReactAgent(
+            blocked_calls={1}
+        )
+        agent.set_react_agent(
+            fake_react, initialized=True
+        )
+
+        invoke_task = asyncio.create_task(
+            agent.invoke(
+                {"query": "base"}, session=session
+            )
+        )
+
+        # Round 1 blocked -> inject 3 follow-ups
+        await fake_react.wait_call_started(1)
+        await agent.follow_up(
+            "first_fu", session=session
+        )
+        await agent.follow_up(
+            "second_fu", session=session
+        )
+        await agent.follow_up(
+            "third_fu", session=session
+        )
+        fake_react.release_call(1)
+
+        result = await asyncio.wait_for(
+            invoke_task, timeout=10.0
+        )
+
+        # 1 planned + 3 follow-up = 4 rounds
+        self.assertEqual(
+            len(fake_react.invoke_calls), 4
+        )
+        # FIFO order
+        self.assertEqual(
+            fake_react.invoke_calls[1]["inputs"][
+                "query"
+            ],
+            "first_fu",
+        )
+        self.assertEqual(
+            fake_react.invoke_calls[2]["inputs"][
+                "query"
+            ],
+            "second_fu",
+        )
+        self.assertEqual(
+            fake_react.invoke_calls[3]["inputs"][
+                "query"
+            ],
+            "third_fu",
+        )
+
+    @pytest.mark.asyncio
+    async def test_follow_ups_persisted_in_state_during_round(
+        self,
+    ):
+        """After drain, remaining follow-ups are persisted in session state."""
+        session = Session(
+            session_id=f"persist_{uuid.uuid4().hex}"
+        )
+        plan = TaskPlan(
+            goal="persist-test",
+            tasks=[
+                TaskItem(id="t1", title="step-1"),
+            ],
+        )
+        session.update_state(
+            {
+                "deepagent": {
+                    "iteration": 0,
+                    "task_plan": plan.to_dict(),
+                }
+            }
+        )
+
+        agent = DeepAgent(
+            AgentCard(
+                name="persist_test",
+                description="t",
+            )
+        ).configure(
+            DeepAgentConfig(
+                enable_task_loop=True,
+                max_iterations=10,
+            )
+        )
+        fake_react = ControlledReactAgent(
+            blocked_calls={1, 2}
+        )
+        agent.set_react_agent(
+            fake_react, initialized=True
+        )
+
+        invoke_task = asyncio.create_task(
+            agent.invoke(
+                {"query": "base"}, session=session
+            )
+        )
+
+        # Round 1 blocked -> inject 2 follow-ups
+        await fake_react.wait_call_started(1)
+        await agent.follow_up(
+            "fu_alpha", session=session
+        )
+        await agent.follow_up(
+            "fu_beta", session=session
+        )
+        fake_react.release_call(1)
+
+        # Round 2 starts (consuming "fu_alpha")
+        await fake_react.wait_call_started(2)
+        persisted = session.get_state("deepagent")
+        pending = persisted.get(
+            "pending_follow_ups", []
+        )
+        # "fu_alpha" was popped as current_query,
+        # "fu_beta" should still be in the buffer
+        self.assertEqual(pending, ["fu_beta"])
+
+        fake_react.release_call(2)
+        await asyncio.wait_for(
+            invoke_task, timeout=10.0
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
