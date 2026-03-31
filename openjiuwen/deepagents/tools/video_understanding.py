@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import mimetypes
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -34,7 +35,9 @@ def _normalize_video_url(video_path: str) -> str:
     with open(path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("utf-8")
 
-    return encoded
+    mime_type, _ = mimetypes.guess_type(str(path))
+    mime_type = mime_type or "video/mp4"
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def _extract_response_text(response: Any) -> str:
