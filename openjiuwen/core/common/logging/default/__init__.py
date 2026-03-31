@@ -12,7 +12,7 @@ Provides default logging implementation components, including:
 - ConfigManager: Configuration manager
 """
 
-from openjiuwen.core.common.logging.default.config_manager import (
+from openjiuwen.core.common.logging.config_manager import (
     ConfigManager,
     config,
 )
@@ -21,14 +21,18 @@ from openjiuwen.core.common.logging.default.default_impl import (
     DefaultLogger,
     SafeRotatingFileHandler,
 )
-from openjiuwen.core.common.logging.default.log_config import (
-    LogConfig,
-    log_config,
-)
 from openjiuwen.core.common.logging.utils import (
     get_session_id,
     set_session_id,
 )
+
+
+def __getattr__(name):
+    if name in {"LogConfig", "log_config"}:
+        from openjiuwen.core.common.logging.log_config import LogConfig, log_config
+
+        return {"LogConfig": LogConfig, "log_config": log_config}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     # Configuration management

@@ -10,28 +10,27 @@ Provides default logging implementations, including:
 - ContextFilter: Context filter (adapted for async environments)
 """
 
+
 import json
 import logging
 import os
 import sys
-from datetime import (
-    datetime,
-    timezone,
-)
+from collections.abc import Mapping
 from logging.handlers import RotatingFileHandler
 from typing import (
     Any,
     Dict,
-    List,
     Optional,
 )
 
+from openjiuwen.core.common.logging.base_impl import (
+    format_log_filename,
+    resolve_log_type_label,
+    StructuredLoggerMixin,
+)
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging.events import (
-    BaseLogEvent,
-    create_log_event,
-    LogEventType,
     LogLevel,
 )
 from openjiuwen.core.common.logging.protocol import LoggerProtocol
@@ -96,60 +95,8 @@ class SafeRotatingFileHandler(RotatingFileHandler):
             ) from e
 
     def _format_filename(self, base_filename: str, pattern: str) -> str:
-        """
-        Format filename according to pattern
-
-        Args:
-            base_filename: Base filename
-            pattern: Format pattern
-
-        Returns:
-            Formatted filename
-
-        Supported placeholders:
-        - {name}: Filename (without extension)
-        - {ext}: File extension
-        - {pid}: Process ID
-        - {timestamp}: Timestamp (YYYYMMDDHHMMSS)
-        - {date}: Date (YYYYMMDD)
-        - {time}: Time (HHMMSS)
-        - {datetime}: Datetime (YYYY-MM-DD_HH-MM-SS)
-        """
-        dir_path = os.path.dirname(base_filename)
-        file_name = os.path.basename(base_filename)
-
-        if "." in file_name:
-            name_part, ext_part = file_name.rsplit(".", 1)
-            ext = "." + ext_part
-        else:
-            name_part = file_name
-            ext = ""
-
-        now = datetime.now(tz=timezone.utc)
-        replacements = {
-            "name": name_part,
-            "ext": ext,
-            "pid": str(os.getpid()),
-            "timestamp": now.strftime("%Y%m%d%H%M%S"),
-            "date": now.strftime("%Y%m%d"),
-            "time": now.strftime("%H%M%S"),
-            "datetime": now.strftime("%Y-%m-%d_%H-%M-%S"),
-        }
-
-        try:
-            formatted_name = pattern.format(**replacements)
-
-            # If pattern doesn't have {ext} and original file has extension, append extension
-            if "{ext}" not in pattern and ext and not formatted_name.endswith(ext):
-                formatted_name = formatted_name + ext
-
-            if dir_path:
-                return os.path.join(dir_path, formatted_name)
-            else:
-                return formatted_name
-        except KeyError:
-            # If pattern has unsupported placeholder, return original filename
-            return base_filename
+        """Format filename according to pattern."""
+        return format_log_filename(base_filename, pattern)
 
     def doRollover(self) -> None:
         """
@@ -213,12 +160,65 @@ class ContextFilter(logging.Filter):
         record.trace_id = get_session_id()
 
         # Set log type, special handling for performance type
-        record.log_type = "perf" if self.log_type == "performance" else self.log_type
+        record.log_type = resolve_log_type_label(self.log_type)
 
         return True
 
 
-class DefaultLogger(LoggerProtocol):
+class DefaultStructuredLoggerMixin(StructuredLoggerMixin):
+    """Structured logging helpers specific to the stdlib backend."""
+
+    def _get_structured_output_format(self) -> str:
+        output_format = str(self.config.get("structured_output_format", "json")).lower()
+        return output_format if output_format in {"json", "text"} else "json"
+
+    def _serialize_structured_event(self, event_dict: Dict[str, Any]) -> str:
+        if self._get_structured_output_format() == "text":
+            return self._format_structured_event_as_text(event_dict)
+
+        try:
+            return json.dumps(event_dict, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return str(event_dict)
+
+    def _format_structured_event_as_text(self, event_dict: Dict[str, Any]) -> str:
+        message = self._sanitize_message(event_dict.get("message", ""))
+        key_values = []
+
+        for key, value in event_dict.items():
+            if key == "message":
+                continue
+            if value is None:
+                continue
+            if isinstance(value, str) and value == "":
+                continue
+            if isinstance(value, (dict, list, tuple, set)) and not value:
+                continue
+
+            rendered_value = str(dict(value)) if isinstance(value, Mapping) else str(value)
+            key_values.append(f"{key}={rendered_value}")
+
+        if message and key_values:
+            return f"{message}; {'; '.join(key_values)}"
+        if key_values:
+            return "; ".join(key_values)
+        return message
+
+    def _process_log_message(
+        self,
+        log_level: LogLevel,
+        msg: str,
+        event_type=None,
+        event=None,
+        **kwargs: Any,
+    ) -> str:
+        event_dict = self._build_structured_event_dict(log_level, msg, event_type, event, **kwargs)
+        if event_dict is None:
+            return self._sanitize_message(msg)
+        return self._serialize_structured_event(event_dict)
+
+
+class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
     """
     Default logger implementation
 
@@ -229,17 +229,6 @@ class DefaultLogger(LoggerProtocol):
     - Automatic caller information detection
     - Automatic context information injection
     """
-
-    # Control character mapping table for cleaning control characters in log messages
-    _CONTROL_CHAR_MAP = {
-        "\r": "\\r",
-        "\n": "\\n",
-        "\t": "\\t",
-        "\b": "\\b",
-        "\v": "\\v",
-        "\f": "\\f",
-        "\0": "\\0",
-    }
 
     def __init__(self, log_type: str, config: Dict[str, Any]) -> None:
         """
@@ -270,6 +259,7 @@ class DefaultLogger(LoggerProtocol):
             level = logging.WARNING
 
         self._logger.setLevel(level)
+        self._logger.propagate = False
 
         # Get output targets and log file path
         output = self.config.get("output", ["console"])
@@ -340,108 +330,6 @@ class DefaultLogger(LoggerProtocol):
         )
         return logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
 
-    def _sanitize_message(self, msg: Any) -> str:
-        """
-        Clean control characters in log message
-
-        Args:
-            msg: Original message (can be any type)
-
-        Returns:
-            Cleaned message string
-        """
-        if not isinstance(msg, str):
-            return str(msg)
-
-        result: List[str] = []
-        for char in msg:
-            code = ord(char)
-            if code < 32 or code == 127:
-                # Replace control characters
-                result.append(self._CONTROL_CHAR_MAP.get(char, f"\\x{code:02x}"))
-            else:
-                result.append(char)
-        return "".join(result)
-
-    def _process_log_message(
-            self,
-            log_level: LogLevel,
-            msg: str,
-            event_type: Optional[LogEventType | str] = None,
-            event: Optional[BaseLogEvent] = None,
-            **kwargs: Any,
-    ) -> str:
-        """
-        Process log message, supporting both string and structured event objects
-
-        - If event is provided, uses it directly (structured logging).
-        - If event_type is provided, creates a structured event using create_log_event (structured logging).
-        - If neither event nor event_type is provided, returns plain string message (no structured logging).
-
-        Args:
-            log_level: Log level for the message
-            msg: Log message (string)
-            event_type: Event type for creating structured event
-                (LogEventType enum or string identifier, only used when event is None)
-            event: Optional structured log event object
-            **kwargs: Additional keyword arguments for event creation
-
-        Returns:
-            Processed message string (plain string if no event_type/event, JSON format if structured logging)
-        """
-        if event is not None:
-            # If structured event is provided, use it directly
-            # Ensure log_level is set correctly
-            if event.log_level != log_level:
-                event.log_level = log_level
-
-            # BaseLogEvent always has a message field
-            # Only set message if msg is provided and not empty, otherwise keep existing message
-            if msg and msg.strip():
-                event.message = self._sanitize_message(msg)
-            elif not event.message:
-                # If event has no message and msg is empty, set empty string
-                event.message = ""
-
-            # Convert event to dictionary and then to JSON
-            event_dict = event.to_dict()
-            try:
-                return json.dumps(event_dict, ensure_ascii=False, default=str)
-            except (TypeError, ValueError):
-                # If JSON serialization fails, fall back to string representation
-                return str(event_dict)
-        else:
-            # If event_type is not provided, return plain string message (no structured logging)
-            if event_type is None:
-                return self._sanitize_message(msg)
-
-            # If event_type is provided, create a structured event using create_log_event
-            # Get trace_id from context if available and not provided in kwargs
-            if "trace_id" not in kwargs:
-                trace_id = get_session_id()
-                if trace_id != "default_trace_id":
-                    kwargs["trace_id"] = trace_id
-
-            # Set default module information if not provided
-            if "module_id" not in kwargs:
-                kwargs["module_id"] = self.log_type
-            if "module_name" not in kwargs:
-                kwargs["module_name"] = self.log_type
-
-            # Set message field (use BaseLogEvent.message field instead of metadata)
-            if "message" not in kwargs:
-                kwargs["message"] = self._sanitize_message(msg)
-
-            # Create structured event
-            event_obj = create_log_event(event_type, log_level=log_level, **kwargs)
-
-            # Convert to JSON
-            event_dict = event_obj.to_dict()
-            try:
-                return json.dumps(event_dict, ensure_ascii=False, default=str)
-            except (TypeError, ValueError):
-                return str(event_dict)
-
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """
         Log DEBUG level message
@@ -455,9 +343,9 @@ class DefaultLogger(LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
-        # Remaining kwargs are used for event creation
-        processed_msg = self._process_log_message(LogLevel.DEBUG, msg, event_type, event, **kwargs)
-        self._logger.debug(processed_msg, *args, stacklevel=stacklevel)
+        formatted_msg = self._auto_format_message(msg, args)
+        processed_msg = self._process_log_message(LogLevel.DEBUG, formatted_msg, event_type, event, **kwargs)
+        self._logger.debug(processed_msg, stacklevel=stacklevel)
 
     def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """
@@ -472,9 +360,9 @@ class DefaultLogger(LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
-        # Remaining kwargs are used for event creation
-        processed_msg = self._process_log_message(LogLevel.INFO, msg, event_type, event, **kwargs)
-        self._logger.info(processed_msg, *args, stacklevel=stacklevel)
+        formatted_msg = self._auto_format_message(msg, args)
+        processed_msg = self._process_log_message(LogLevel.INFO, formatted_msg, event_type, event, **kwargs)
+        self._logger.info(processed_msg, stacklevel=stacklevel)
 
     def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """
@@ -489,9 +377,9 @@ class DefaultLogger(LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
-        # Remaining kwargs are used for event creation
-        processed_msg = self._process_log_message(LogLevel.WARNING, msg, event_type, event, **kwargs)
-        self._logger.warning(processed_msg, *args, stacklevel=stacklevel)
+        formatted_msg = self._auto_format_message(msg, args)
+        processed_msg = self._process_log_message(LogLevel.WARNING, formatted_msg, event_type, event, **kwargs)
+        self._logger.warning(processed_msg, stacklevel=stacklevel)
 
     def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """
@@ -506,9 +394,9 @@ class DefaultLogger(LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
-        # Remaining kwargs are used for event creation
-        processed_msg = self._process_log_message(LogLevel.ERROR, msg, event_type, event, **kwargs)
-        self._logger.error(processed_msg, *args, stacklevel=stacklevel)
+        formatted_msg = self._auto_format_message(msg, args)
+        processed_msg = self._process_log_message(LogLevel.ERROR, formatted_msg, event_type, event, **kwargs)
+        self._logger.error(processed_msg, stacklevel=stacklevel)
 
     def critical(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """
@@ -523,9 +411,9 @@ class DefaultLogger(LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
-        # Remaining kwargs are used for event creation
-        processed_msg = self._process_log_message(LogLevel.CRITICAL, msg, event_type, event, **kwargs)
-        self._logger.critical(processed_msg, *args, stacklevel=stacklevel)
+        formatted_msg = self._auto_format_message(msg, args)
+        processed_msg = self._process_log_message(LogLevel.CRITICAL, formatted_msg, event_type, event, **kwargs)
+        self._logger.critical(processed_msg, stacklevel=stacklevel)
 
     def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """
@@ -552,9 +440,9 @@ class DefaultLogger(LoggerProtocol):
             except Exception:
                 pass  # If traceback capture fails, continue without it
 
-        # Remaining kwargs are used for event creation
-        processed_msg = self._process_log_message(LogLevel.ERROR, msg, event_type, event, **kwargs)
-        self._logger.exception(processed_msg, *args, stacklevel=stacklevel)
+        formatted_msg = self._auto_format_message(msg, args)
+        processed_msg = self._process_log_message(LogLevel.ERROR, formatted_msg, event_type, event, **kwargs)
+        self._logger.exception(processed_msg, stacklevel=stacklevel)
 
     def log(self, level: int, msg: str, *args: Any, **kwargs: Any) -> None:
         """
@@ -579,9 +467,9 @@ class DefaultLogger(LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
-        # Remaining kwargs are used for event creation
-        processed_msg = self._process_log_message(log_level, msg, event_type, event, **kwargs)
-        self._logger.log(level, processed_msg, *args, stacklevel=stacklevel)
+        formatted_msg = self._auto_format_message(msg, args)
+        processed_msg = self._process_log_message(log_level, formatted_msg, event_type, event, **kwargs)
+        self._logger.log(level, processed_msg, stacklevel=stacklevel)
 
     def set_level(self, level: int) -> None:
         """Set log level"""
@@ -624,3 +512,11 @@ class DefaultLogger(LoggerProtocol):
 
     def logger(self):
         return self._logger
+
+    def close(self) -> None:
+        """Release logger handlers owned by this instance."""
+        for handler in self._logger.handlers[:]:
+            try:
+                handler.close()
+            finally:
+                self._logger.removeHandler(handler)
