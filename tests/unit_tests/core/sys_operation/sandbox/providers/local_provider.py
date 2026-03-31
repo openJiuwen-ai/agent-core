@@ -63,7 +63,7 @@ class LocalFSProvider(BaseFSProvider):
 
     def __init__(self, endpoint: SandboxEndpoint, config: Optional[SandboxGatewayConfig] = None):
         super().__init__(endpoint, config)
-        self._root_dir = Path(tempfile.mkdtemp(prefix="oj_sandbox_fs_"))
+        self._root_dir = Path(tempfile.mkdtemp(prefix="oj_sandbox_fs_")).resolve()
 
     def _resolve_sandbox_path(self, path: str) -> Path:
         target = Path(path)

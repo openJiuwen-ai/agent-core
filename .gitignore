@@ -242,4 +242,6 @@ openjiuwen/deepagents/tools/browser_move/.browser-profiles/
 
 memories/ace/demo_user_hotpot_ace.json
 .trae/
+.traecli/
 .claude/
+CLAUDE.local.md

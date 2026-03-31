@@ -14,7 +14,7 @@ Usage::
 
 from openjiuwen.core.common.logging import LazyLogger
 from openjiuwen.core.common.logging.log_config import configure_log_config
-from openjiuwen.core.common.logging.loguru.constant import DEFAULT_INNER_LOG_CONFIG
+from openjiuwen.core.common.logging.default.constant import DEFAULT_INNER_LOG_CONFIG
 from openjiuwen.core.common.logging.manager import LogManager
 
 # Apply loguru backend config globally so LogManager creates LoguruLogger instances.
