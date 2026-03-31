@@ -755,7 +755,7 @@ class TestRestfulApiInvokeWithLocation:
                         "location": "body"
                     },
                     "filter": {
-                        "type": "string",
+                        "type": "array",
                         "description": "过滤条件",
                         "location": "query"
                     }
@@ -777,7 +777,8 @@ class TestRestfulApiInvokeWithLocation:
             result = await api_tool.invoke({
                 "user_id": 123,
                 "name": "张三",
-                "filter": "active"
+                "filter": ["active","pending"],
+
             })
 
             assert result.get("data") == MOCK_SUCCESS_RESPONSE

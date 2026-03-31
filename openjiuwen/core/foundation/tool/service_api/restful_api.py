@@ -227,7 +227,15 @@ class RestfulApi(Tool):
         path_params = {k: str(v) for k, v in map_results.get(APIParamLocation.PATH).items()}
         if path_params:
             url = url.format(**path_params)
-        query_params = [(k, v) for k, v in map_results.get(APIParamLocation.QUERY, {}).items()]
+        query_params = []
+        for k, v in map_results.get(APIParamLocation.QUERY, {}).items():
+            if isinstance(v, list):
+                # parse ids=[1,2,3] for ids=1&ids=2&ids=3
+                for item in v:
+                    query_params.append((k, item))
+            else:
+                query_params.append((k, v))
+
         if query_params:
             url = f'{url}?{urlencode(query_params)}'
         proxy = UrlUtils.get_global_proxy_url(url)
