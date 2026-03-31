@@ -136,3 +136,120 @@ class RLConfig(BaseModel):
         default=None,
         description="If provided, enable Ada rollout variant. Omit to use default rollout.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Verl / Hydra defaults (replaces legacy config/config.yaml overlays)
+# ---------------------------------------------------------------------------
+
+
+class VerlDataHydraOverlay(BaseModel):
+    filter_overlong_prompts: bool = False
+
+
+class VerlAlgorithmHydraOverlay(BaseModel):
+    filter_groups: bool = False
+
+
+class VerlModelHydraOverlay(BaseModel):
+    use_remove_padding: bool = False
+    enable_gradient_checkpointing: bool = True
+
+
+class VerlActorFsdpHydraOverlay(BaseModel):
+    param_offload: bool = True
+    optimizer_offload: bool = True
+
+
+class VerlActorHydraOverlay(BaseModel):
+    ppo_mini_batch_size: int = 16
+    fsdp_config: VerlActorFsdpHydraOverlay = Field(
+        default_factory=VerlActorFsdpHydraOverlay
+    )
+
+
+class VerlRefFsdpHydraOverlay(BaseModel):
+    param_offload: bool = True
+
+
+class VerlRefHydraOverlay(BaseModel):
+    fsdp_config: VerlRefFsdpHydraOverlay = Field(
+        default_factory=VerlRefFsdpHydraOverlay
+    )
+
+
+class VerlRolloutMultiTurnHydraOverlay(BaseModel):
+    format: str = "hermes"
+
+
+class VerlVllmEngineHydraKwargs(BaseModel):
+    enable_auto_tool_choice: bool = True
+    tool_call_parser: str = "hermes"
+    served_model_name: str = "agentrl"
+
+
+class VerlEngineKwargsHydraOverlay(BaseModel):
+    vllm: VerlVllmEngineHydraKwargs = Field(
+        default_factory=VerlVllmEngineHydraKwargs
+    )
+
+
+class VerlRolloutHydraOverlay(BaseModel):
+    mode: str = "async"
+    name: str = "vllm"
+    tensor_model_parallel_size: int = 1
+    enforce_eager: bool = True
+    gpu_memory_utilization: float = 0.7
+    enable_chunked_prefill: bool = False
+    multi_turn: VerlRolloutMultiTurnHydraOverlay = Field(
+        default_factory=VerlRolloutMultiTurnHydraOverlay
+    )
+    engine_kwargs: VerlEngineKwargsHydraOverlay = Field(
+        default_factory=VerlEngineKwargsHydraOverlay
+    )
+
+
+class VerlActorRolloutRefHydraOverlay(BaseModel):
+    model: VerlModelHydraOverlay = Field(default_factory=VerlModelHydraOverlay)
+    actor: VerlActorHydraOverlay = Field(default_factory=VerlActorHydraOverlay)
+    ref: VerlRefHydraOverlay = Field(default_factory=VerlRefHydraOverlay)
+    rollout: VerlRolloutHydraOverlay = Field(default_factory=VerlRolloutHydraOverlay)
+
+
+class VerlTrainerHydraOverlay(BaseModel):
+    device: str = "npu"
+    runtime_parallel_num: Optional[int] = None
+    rollout_max_round: Optional[int] = None
+
+
+class VerlRewardModelHydraOverlay(BaseModel):
+    reward_manager: str = "naive"
+
+
+class JiuwenRLHydraCustomFn(BaseModel):
+    classifier: str = "default_classify_rollouts"
+    validator: str = "default_validate_stop"
+    sampler: str = "default_sampling"
+
+
+class JiuwenRLHydraOverlay(BaseModel):
+    whole_trajectory: bool = False
+    final_keep_per_prompt: Optional[int] = None
+    custom_fn: JiuwenRLHydraCustomFn = Field(default_factory=JiuwenRLHydraCustomFn)
+
+
+class VerlHydraOverlay(BaseModel):
+    """Structured defaults merged on top of Verl's ``ppo_trainer`` Hydra config."""
+
+    data: VerlDataHydraOverlay = Field(default_factory=VerlDataHydraOverlay)
+    algorithm: VerlAlgorithmHydraOverlay = Field(
+        default_factory=VerlAlgorithmHydraOverlay
+    )
+    actor_rollout_ref: VerlActorRolloutRefHydraOverlay = Field(
+        default_factory=VerlActorRolloutRefHydraOverlay
+    )
+    trainer: VerlTrainerHydraOverlay = Field(default_factory=VerlTrainerHydraOverlay)
+    reward_model: VerlRewardModelHydraOverlay = Field(
+        default_factory=VerlRewardModelHydraOverlay
+    )
+    JiuwenRL: JiuwenRLHydraOverlay = Field(default_factory=JiuwenRLHydraOverlay)

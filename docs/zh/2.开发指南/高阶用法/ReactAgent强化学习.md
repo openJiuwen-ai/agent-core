@@ -1,16 +1,93 @@
 # ReactAgent强化学习
 
-openJiuwen 提供基于强化学习（RL）的 Agent 训练能力。通过 `openjiuwen.dev_tools.agentrl` 模块，你可以使用 GRPO、PPO 等算法对使用工具（Tools）的 Agent 进行在线强化学习训练，使 Agent 在特定任务上的表现持续提升。
+`openjiuwen.dev_tools.agentrl` 模块提供基于 VERL 强化学习框架和 OpenYuanrong 分布式计算引擎的 ReactAgent 强化训练能力。
 
-本教程以 `examples/rl_calculator` 为例，介绍如何使用强化学习模块训练一个能够借助计算器工具正确求解数学题的 Agent。
+**运行环境：** 本教程中的示例**在昇腾（NPU）上运行**。请先参考 [verl 昇腾快速开始](https://verl.readthedocs.io/en/latest/ascend_tutorial/quick_start/ascend_quick_start.html) 安装 **verl** 昇腾版及相关依赖，包括 **torch**、**torch_npu**、CANN、**vllm**、**vllm-ascend** 等；完成后再结合下文「运行环境部署」与 `examples` 下的示例目录准备数据与启动训练。
 
+本教程介绍如何使用 `agentrl` 模块训练一个借助计算器工具求解数学题的 ReactAgent；Agent 需按 `### ANSWER: <answer> ###` 格式输出最终答案。详细代码请参考 `examples/rl_calculator`。
+
+## 运行环境部署
+
+### 前置依赖
+
+| 项目 | 推荐版本 |
+|------|-----------------|
+| 硬件 | Atlas **910B4**（NPU） |
+| CANN | **8.3 RC1** |
+| Python | **3.11.10** |
+### 从源码安装vLLM、vllm-ascend和VERL
+
+vLLM和vllm-ascend和VERL都需从源码进行安装，建议将三个源码放在同一个目录下，如rl_pkgs。
+
+安装 vLLM
+
+```bash
+mkdir rl_pkgs
+git clone https://github.com/vllm-project/vllm
+cd vllm
+git checkout v0.11.0
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
+```
+
+安装vllm-ascend
+
+```bash
+git clone https://github.com/vllm-project/vllm-ascend
+cd vllm-ascend
+git checkout v0.11.0rc1
+pip install -v -e .
+cd ..
+```
+
+安装VERL 0.7.0
+
+```bash
+
+git clone https://github.com/verl-project/verl
+cd verl
+git checkout v0.7.0
+pip install -e .
+cd ..
+```
+
+### pip安装 openJiuwen 与其它 Python 依赖
+
+
+```bash
+pip install openjiuwen
+pip install triton-ascend==3.2.0rc4
+pip install transformers==4.57.6
+pip install uvicorn==0.40.0
+pip install fastapi==0.128.0
+pip install openai==2.15.0
+```
+
+### 安装元戎与ray_adapter
+下载 [元戎 OpenYuanrong 0.7.0][yuanrong-wheel] 与 [ray_adapter 0.7.1][ray-adapter-wheel] 的 wheel 包,在conda环境中离线安装：
+```bash
+pip install openyuanrong-0.7.0-cp311-cp311-manylinux_2_34_aarch64.whl
+pip install ray_adapter-0.7.1-py3-none-any.whl
+```
+下载[verl的元戎patch包][patch-url]，放在rl_pkgs目录下，将其转化为utf8格式：
+```bash
+iconv -f UTF-16 -t UTF-8 yr_v7.patch > yr_v7.patch.utf8
+```
+进入verl源码目录，安装patch文件
+```bash
+cd verl
+patch -p1 < ../yr_v7.patch.utf8
+```
+[yuanrong-wheel]: https://build-logs.openeuler.openatom.cn:38080/temp-archived/openeuler/openYuanrong/yr_release/aarch64/0.7.0/openyuanrong-0.7.0-cp311-cp311-manylinux_2_34_aarch64.whl
+[ray-adapter-wheel]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/ray_adapter/ray_adapter-0.7.1-py3-none-any.whl
+[patch-url]: https://patch-url
 ## 整体流程
 
 强化学习训练主要包含以下步骤：
 
 1. **准备配置**：构建 `RLConfig`，涵盖训练、Rollout、运行时、持久化等参数。
 2. **定义奖励函数**：实现并注册奖励函数，根据 Agent 输出与标准答案计算奖励。
-3. **注册工具**：为 Agent 提供可调用的工具（如计算器）。
+3. **注册工具**：为 Agent 提供可调用的工具（如计算器工具，可进行简单的表达式运算和方程求解）。
 4. **准备数据**：实现 `task_data_fn`，将数据集行转换为 Agent 输入格式。
 5. **启动训练**：创建 `RLOptimizer`，配置完成后调用 `train()` 启动训练。
 
@@ -69,7 +146,6 @@ config = RLConfig(
         save_rollouts=True,
         save_step_summaries=True,
     ),
-    # 多轮 + Ada 采样时取消注释：ada=AdaConfig(rollout_max_round=2, final_keep_per_prompt=8),
 )
 ```
 
@@ -85,9 +161,9 @@ config = RLConfig(
 | total_epochs | 训练总轮数 |
 | max_prompt_length / max_response_length | 输入/输出最大 token 长度 |
 | n_gpus_per_node / visible_device | GPU 数量与可见设备 ID |
-| algorithm_adv_estimator | 算法类型，如 `grpo`、`ppo` |
+| algorithm_adv_estimator | 算法类型 |
 | save_freq / test_freq | 保存 checkpoint、验证的间隔步数 |
-| project_name / experiment_name | 实验项目与名称（用于日志） |
+| project_name / experiment_name | 实验项目与名称 |
 | save_path | 模型 checkpoint 保存路径 |
 | whole_trajectory | 是否使用整条轨迹计算优势 |
 | logger | 日志后端，如 `["tensorboard"]` |
@@ -99,13 +175,6 @@ config = RLConfig(
 | rollout_n | 每个 prompt 的采样数量 |
 | actor_optimizer_lr | Actor 模型学习率 |
 | actor_clip_ratio_low / actor_clip_ratio_high | PPO clip 上下界 |
-
-**AdaConfig（可选，通过 `RLConfig.ada` 启用）**
-
-| 参数 | 说明 |
-|------|------|
-| rollout_max_round | 多轮 rollout 时 Agent 与工具交互的最大轮数（与默认单轮路径不同，需启用 Ada） |
-| final_keep_per_prompt | Ada 采样下每个 prompt 最终保留条数 |
 
 **AgentRuntimeConfig（运行时配置）**
 
@@ -166,17 +235,17 @@ from openjiuwen.core.foundation.tool import tool
     description="Perform arithmetic calculations, simplify algebraic expressions, and solve equations.",
 )
 def calculator(expression: str) -> str:
-    """Evaluate a math expression and return the result."""
-    # 实现表达式求值逻辑，支持算术、方程求解等
-    # ...
-    return str(result)
+    """Evaluate a math expre术、方程求解等
+    # ...ssion and return the result."""
+    # 实现表达式求值逻辑，支持算
+    return result
 ```
 
 训练时通过 `optimizer.set_tools([calculator])` 注册工具。
 
 ## 数据准备
 
-实现 `task_data_fn`，将数据集每行（如 parquet 中的一行）转换为 Agent 输入。数据集通常包含 `question`、`result` 等列：
+实现 `task_data_fn`，将数据集每行（如 parquet 中的一行）转换为query和ground_truth：
 
 ```python
 def task_data_fn(task_sample: dict) -> dict:
@@ -191,7 +260,7 @@ def task_data_fn(task_sample: dict) -> dict:
     }
 ```
 
-`query` 会作为用户输入传给 Agent，`ground_truth` 可在奖励函数中与 Agent 输出对比。
+`query` 会作为用户输入传给 Agent，`ground_truth` 可在奖励函数中与 Agent 输出对比以获取奖励值。
 
 ## 奖励函数
 
@@ -265,23 +334,6 @@ if __name__ == "__main__":
 
 ## 运行示例
 
-可参考项目中的 `examples/rl_calculator` 完整示例：
-
-```bash
-# 进入示例目录
-cd examples/rl_calculator
-
-# 确保数据文件存在：train.parquet、test.parquet（包含 question、result 等列）
-# 运行训练
-python train.py
-```
-
-训练日志会输出模型路径、数据路径、算法、epoch 等信息。若启用了 TensorBoard，可使用 `logger=["tensorboard"]` 查看训练曲线。
-
-## 进一步说明
-
-- **算法**：`algorithm_adv_estimator` 支持 `grpo`、`ppo` 等。
-- **多轮对话（Ada）**：在 `RLConfig` 上设置 `ada=AdaConfig(rollout_max_round=..., final_keep_per_prompt=...)`；详见 [config 文档](../../API文档/openjiuwen.dev_tools/agentrl/config.md)。
-- **持久化**：通过 `PersistenceConfig` 可将 rollout 数据保存到本地，便于调试与分析。
+可参考项目中的 `examples/rl_calculator` 完整示例以运行，训练日志会输出模型路径、数据路径、算法、epoch 等信息，若启用了 TensorBoard 可本地加载查看训练曲线。
 
 更多 API 与配置细节见 [agentrl 模块文档](../../API文档/openjiuwen.dev_tools/agentrl.README.md)。

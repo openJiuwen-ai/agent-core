@@ -11,9 +11,9 @@ import json
 import os
 from typing import Optional
 
-import ray
+import ray_adapter as ray
 from omegaconf import OmegaConf
-from ray._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
+from ray_adapter._private.runtime_env.constants import RAY_JOB_CONFIG_JSON_ENV_VAR
 from verl.single_controller.ray import RayWorkerGroup
 from verl.trainer.main_ppo import create_rl_sampler
 from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
