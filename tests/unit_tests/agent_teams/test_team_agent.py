@@ -1,0 +1,143 @@
+# coding: utf-8
+"""Tests for TeamAgent configuration and spawn payloads."""
+from __future__ import annotations
+
+import json
+
+from openjiuwen.agent_teams import create_agent_team
+from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TransportSpec
+from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+from openjiuwen.agent_teams.schema.team import (
+    TeamMemberSpec,
+    TeamRole,
+    TeamSpec,
+)
+from openjiuwen.core.runner.spawn import SpawnAgentKind
+
+
+def _dummy_agents(**overrides) -> dict[str, DeepAgentSpec]:
+    """Build a minimal agents dict for unit tests (no real LLM)."""
+    defaults = dict(overrides)
+    return {"leader": DeepAgentSpec(**defaults)}
+
+
+def test_team_agent_leader_policy_and_teammate_clone() -> None:
+    leader = create_agent_team(
+        _dummy_agents(),
+        team_name="delivery",
+        objective="Ship a feature quickly",
+    )
+
+    assert leader.role == TeamRole.LEADER
+    assert "TeamLeader" in leader.deep_config.system_prompt
+
+    teammate = leader.clone_for_member(
+        TeamMemberSpec(
+            member_id="dev-1",
+            name="Backend Expert",
+            role_type=TeamRole.TEAMMATE,
+            persona="严谨的后端架构师",
+            domain="backend",
+        )
+    )
+
+    assert teammate.role == TeamRole.TEAMMATE
+    assert "Teammate" in teammate.deep_config.system_prompt
+    assert "backend" in teammate.deep_config.system_prompt
+
+
+def test_spawn_payload_contains_member_identity() -> None:
+    leader = create_agent_team(
+        _dummy_agents(),
+        team_name="delivery",
+        objective="Ship a feature quickly",
+        transport=TransportSpec(type="pyzmq", params={
+            "team_id": "delivery-team",
+            "node_id": "leader",
+            "direct_addr": "tcp://127.0.0.1:19001",
+            "pubsub_publish_addr": "tcp://127.0.0.1:19100",
+            "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
+        }),
+    )
+    member = TeamMemberSpec(
+        member_id="fe-1",
+        name="Frontend Expert",
+        role_type=TeamRole.TEAMMATE,
+        persona="追求交互质量的前端工程师",
+        domain="frontend",
+    )
+
+    payload = leader.build_spawn_payload(
+        member,
+        initial_message="Review the design system impact.",
+    )
+
+    assert payload["coordination"]["role"] == "teammate"
+    assert payload["coordination"]["persona"] == member.persona
+    assert payload["coordination"]["domain"] == "frontend"
+    assert payload["coordination"]["transport"]["node_id"] == "fe-1"
+    assert payload["query"] == "Review the design system impact."
+
+
+def test_spawn_config_contains_serializable_team_agent_payload() -> None:
+    leader = create_agent_team(
+        _dummy_agents(workspace=None),
+        team_name="delivery",
+        objective="Ship a feature quickly",
+        transport=TransportSpec(type="pyzmq", params={
+            "team_id": "delivery-team",
+            "node_id": "leader",
+            "direct_addr": "tcp://127.0.0.1:19001",
+            "pubsub_publish_addr": "tcp://127.0.0.1:19100",
+            "pubsub_subscribe_addr": "tcp://127.0.0.1:19101",
+        }),
+    )
+    member = TeamMemberSpec(
+        member_id="be-1",
+        name="Backend Expert",
+        role_type=TeamRole.TEAMMATE,
+        persona="严谨的后端架构师",
+        domain="backend",
+    )
+
+    spawn_config = leader.build_spawn_config(member)
+
+    assert spawn_config.agent_kind == SpawnAgentKind.TEAM_AGENT
+    assert spawn_config.runner_config is not None
+    assert "spec" in spawn_config.payload
+    assert "context" in spawn_config.payload
+    assert spawn_config.payload["context"]["role"] == "teammate"
+    assert spawn_config.payload["context"]["messager_config"]["node_id"] == "be-1"
+
+    json.dumps(spawn_config.model_dump(mode="json"))
+
+    teammate = TeamAgent.from_spawn_payload(spawn_config.payload)
+
+    assert teammate.role == TeamRole.TEAMMATE
+    assert teammate.card.name == "Backend Expert"
+    assert teammate.runtime_context is not None
+    assert teammate.runtime_context.messager_config is not None
+    assert teammate.runtime_context.messager_config.node_id == "be-1"
+
+
+def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
+    leader_member = TeamMemberSpec(
+        member_id="leader-1",
+        name="Leader",
+        role_type=TeamRole.LEADER,
+        persona="pm",
+        domain="project_management",
+    )
+    context = TeamRuntimeContext(
+        role=TeamRole.LEADER,
+        member_spec=leader_member,
+        team_spec=TeamSpec(team_id="demo", name="demo", objective="test"),
+    )
+
+    restored = TeamRuntimeContext.model_validate(context.model_dump(mode="json"))
+
+    assert restored.role == TeamRole.LEADER
+    assert restored.member_id == "leader-1"
+    assert restored.persona == "pm"
+    assert restored.domain == "project_management"
