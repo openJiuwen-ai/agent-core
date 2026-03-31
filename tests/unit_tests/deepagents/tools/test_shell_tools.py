@@ -72,6 +72,28 @@ async def test_bash_tool(sys_op):
 
 
 @pytest.mark.asyncio
+async def test_bash_tool_ls_chinese_filename(sys_op, tmp_workspace):
+    import pathlib
+    bash_tool = BashTool(sys_op)
+
+    test_dir = pathlib.Path(tmp_workspace) / "test_chinese_files"
+    test_dir.mkdir(exist_ok=True)
+
+    try:
+        (test_dir / "测试文件.txt").write_text("test content", encoding="utf-8")
+        (test_dir / "中文文件 - 副本.txt").write_text("test content", encoding="utf-8")
+
+        ls_res = await bash_tool.invoke({"command": f"ls -la \"{test_dir}\""})
+        assert ls_res.success is True
+        assert ls_res.data["exit_code"] == 0
+        assert "测试文件.txt" in ls_res.data["stdout"]
+        assert "中文文件 - 副本.txt" in ls_res.data["stdout"]
+        assert ls_res.error is None
+    finally:
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_bash_tool_fail_command(sys_op):
     bash_tool = BashTool(sys_op)
 

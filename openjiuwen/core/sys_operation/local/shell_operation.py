@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import codecs
 import locale
 import os
 import platform
@@ -256,6 +257,11 @@ class ShellOperation(BaseShellOperation):
                                             data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
 
             exec_env = OperationUtils.prepare_environment(environment)
+            if os.name == "nt":
+                system_encoding = self._detect_shell_encoding()
+                if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
+                    lang_encoding = self._get_lang_encoding(system_encoding)
+                    exec_env["LANG"] = f"C.{lang_encoding}"
             proc = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
 
             encoding = (options or {}).get("encoding", self._detect_shell_encoding())
@@ -375,6 +381,11 @@ class ShellOperation(BaseShellOperation):
                 return
 
             exec_env = OperationUtils.prepare_environment(environment)
+            if os.name == "nt":
+                system_encoding = self._detect_shell_encoding()
+                if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
+                    lang_encoding = self._get_lang_encoding(system_encoding)
+                    exec_env["LANG"] = f"C.{lang_encoding}"
             process = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
 
             chunk_size = (options or {}).get("chunk_size", 1024)
@@ -617,3 +628,19 @@ class ShellOperation(BaseShellOperation):
             return encoding if encoding else "utf-8"
         except Exception:
             return "utf-8"
+
+    @staticmethod
+    def _get_lang_encoding(encoding: str) -> str:
+        """Convert encoding name to LANG-style encoding name using Python's codec registry.
+
+        Args:
+            encoding: Python encoding name (e.g., 'cp936', 'gbk', 'utf-8')
+
+        Returns:
+            LANG-style encoding name (e.g., 'GBK', 'UTF-8')
+        """
+        try:
+            info = codecs.lookup(encoding)
+            return info.name.upper()
+        except LookupError:
+            return encoding.upper()
