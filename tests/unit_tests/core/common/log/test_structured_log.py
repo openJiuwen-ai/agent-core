@@ -23,6 +23,7 @@ from openjiuwen.core.common.logging.events import (
     LLMEvent,
     LogEventType,
     ModuleType,
+    RunnerEvent,
     ToolEvent,
     WorkflowEvent,
     create_log_event,
@@ -48,6 +49,7 @@ def logger_config(temp_log_dir):  # type: ignore
     return {
         "log_file": log_file,
         "output": ["console", "file"],
+        "structured_output_format": "json",
         "level": logging.DEBUG,
         "backup_count": 5,
         "max_bytes": 10 * 1024 * 1024,
@@ -165,6 +167,228 @@ def test_event_serialization():
     parsed = json.loads(json_str)
     assert parsed["module_id"] == "agent_123"
     assert parsed["message"] == "Test message"
+
+
+def test_structured_event_logging_uses_json_by_default(temp_log_dir):  # type: ignore
+    """Structured events should remain JSON by default."""
+    log_file = os.path.join(temp_log_dir, "json.log")  # type: ignore
+    logger = DefaultLogger(
+        "test_json",
+        {
+            "log_file": log_file,
+            "output": ["file"],
+            "structured_output_format": "json",
+            "level": logging.DEBUG,
+            "backup_count": 5,
+            "max_bytes": 10 * 1024 * 1024,
+            "format": "%(message)s",
+        },
+    )
+
+    logger.info(
+        "Agent started",
+        event_type=LogEventType.AGENT_START,
+        module_id="agent_123",
+    )
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    with open(log_file, "r", encoding="utf-8") as f:
+        message = f.read().strip()
+
+    parsed = json.loads(message)
+
+    assert parsed["message"] == "Agent started"
+    assert parsed["module_id"] == "agent_123"
+    assert parsed["event_type"] == "agent_start"
+
+    safe_close_logger_handlers(logger)
+
+
+def test_structured_event_logging_can_use_text_output(temp_log_dir, capsys):  # type: ignore
+    """Structured events can be rendered as natural text."""
+    log_file = os.path.join(temp_log_dir, "text.log")  # type: ignore
+    logger = DefaultLogger(
+        "test_text",
+        {
+            "log_file": log_file,
+            "output": ["console"],
+            "structured_output_format": "text",
+            "level": logging.DEBUG,
+            "backup_count": 5,
+            "max_bytes": 10 * 1024 * 1024,
+            "format": "%(message)s",
+        },
+    )
+
+    logger.info(
+        "Tool finished",
+        event_type=LogEventType.TOOL_CALL_END,
+        module_id="tool_1",
+        tool_name="search",
+        arguments={"query": "weather"},
+        result=["ok"],
+    )
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    output = capsys.readouterr().out.strip()
+
+    assert output.startswith("Tool finished; ")
+    assert "message=Tool finished" not in output
+    assert "event_type=tool_call_end" in output
+    assert "module_id=tool_1" in output
+    assert "tool_name=search" in output
+    assert "arguments={'query': 'weather'}" in output
+    assert "result=['ok']" in output
+
+    safe_close_logger_handlers(logger)
+
+
+def test_event_object_logging_can_use_text_output(temp_log_dir, capsys):  # type: ignore
+    """Explicit event objects should also honor text output mode."""
+    log_file = os.path.join(temp_log_dir, "event_text.log")  # type: ignore
+    logger = DefaultLogger(
+        "test_event_text",
+        {
+            "log_file": log_file,
+            "output": ["console"],
+            "structured_output_format": "text",
+            "level": logging.DEBUG,
+            "backup_count": 5,
+            "max_bytes": 10 * 1024 * 1024,
+            "format": "%(message)s",
+        },
+    )
+
+    event = create_log_event(
+        LogEventType.AGENT_START,
+        module_id="agent_123",
+        message="Original message",
+        metadata={"step": 1},
+    )
+    logger.info("Replacement message", event=event)
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    output = capsys.readouterr().out.strip()
+
+    assert output.startswith("Replacement message; ")
+    assert "message=Replacement message" not in output
+    assert "event_type=agent_start" in output
+    assert "module_id=agent_123" in output
+    assert "metadata={'step': 1}" in output
+
+    safe_close_logger_handlers(logger)
+
+
+def test_text_output_skips_missing_values(temp_log_dir, capsys):  # type: ignore
+    """Text output should skip kv fields without actual values."""
+    log_file = os.path.join(temp_log_dir, "skip_missing.log")  # type: ignore
+    logger = DefaultLogger(
+        "test_skip_missing",
+        {
+            "log_file": log_file,
+            "output": ["console"],
+            "structured_output_format": "text",
+            "level": logging.DEBUG,
+            "backup_count": 5,
+            "max_bytes": 10 * 1024 * 1024,
+            "format": "%(message)s",
+        },
+    )
+
+    logger.info(
+        "Agent started",
+        event_type=LogEventType.AGENT_START,
+        module_id="agent_123",
+        trace_id="",
+        metadata={},
+    )
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    output = capsys.readouterr().out.strip()
+
+    assert output.startswith("Agent started; ")
+    assert "module_id=agent_123" in output
+    assert "trace_id=" not in output
+    assert "metadata={}" not in output
+
+    safe_close_logger_handlers(logger)
+
+
+def test_runner_event_default_values_are_not_tuples(temp_log_dir, capsys):  # type: ignore
+    """RunnerEvent defaults should remain None instead of single-item tuples."""
+    event = create_log_event(LogEventType.RUNNER_START, message="Runner started")
+
+    assert isinstance(event, RunnerEvent)
+    assert event.runner_id is None
+    assert event.inputs is None
+    assert event.outputs is None
+    assert event.chunk is None
+
+    log_file = os.path.join(temp_log_dir, "runner_text.log")  # type: ignore
+    logger = DefaultLogger(
+        "test_runner_text",
+        {
+            "log_file": log_file,
+            "output": ["console"],
+            "structured_output_format": "text",
+            "level": logging.DEBUG,
+            "backup_count": 5,
+            "max_bytes": 10 * 1024 * 1024,
+            "format": "%(message)s",
+        },
+    )
+
+    logger.info("Runner started", event=event)
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    output = capsys.readouterr().out.strip()
+
+    assert output.startswith("Runner started; ")
+    assert "event_id=" in output
+    assert "event_type=runner_start" in output
+    assert "runner_id=" not in output
+    assert "inputs=" not in output
+    assert "outputs=" not in output
+    assert "chunk=" not in output
+
+    safe_close_logger_handlers(logger)
+
+
+def test_plain_string_logging_is_not_affected_by_text_output(temp_log_dir, capsys):  # type: ignore
+    """Plain string logs should keep their original output semantics."""
+    log_file = os.path.join(temp_log_dir, "plain_text.log")  # type: ignore
+    logger = DefaultLogger(
+        "test_plain_text",
+        {
+            "log_file": log_file,
+            "output": ["console"],
+            "structured_output_format": "text",
+            "level": logging.DEBUG,
+            "backup_count": 5,
+            "max_bytes": 10 * 1024 * 1024,
+            "format": "%(message)s",
+        },
+    )
+
+    logger.info("Plain log line")
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    output = capsys.readouterr().out.strip()
+    assert output == "Plain log line"
+
+    safe_close_logger_handlers(logger)
 
 
 def test_event_with_message_and_stacktrace():
@@ -320,13 +544,15 @@ def test_log_exception_with_stacktrace(test_logger, temp_log_dir):  # type: igno
 def test_log_with_trace_id(test_logger, temp_log_dir):  # type: ignore
     """Test logging with trace_id from context"""
     set_session_id("test_trace_123")
+    try:
+        test_logger.info("Message with trace")  # type: ignore
 
-    test_logger.info("Message with trace")  # type: ignore
-
-    log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
-    with open(log_file, "r", encoding="utf-8") as f:
-        content = f.read()
-        assert "test_trace_123" in content
+        log_file = os.path.join(temp_log_dir, "test.log")  # type: ignore
+        with open(log_file, "r", encoding="utf-8") as f:
+            content = f.read()
+            assert "test_trace_123" in content
+    finally:
+        set_session_id()
 
 
 def test_log_with_custom_kwargs(test_logger, temp_log_dir):  # type: ignore

@@ -3,6 +3,10 @@
 
 logging:
   level: "INFO"
+  structured_output_format: "json"
+  loggers:
+    agent:
+      level: "DEBUG"
 
   backup_count: 20
   max_bytes: 20971520
