@@ -193,8 +193,8 @@ class TeamAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def configure(self, spec: TeamAgentSpec, context: TeamRuntimeContext) -> "TeamAgent":
-        """Satisfy BaseAgent.configure – delegate to _configure_team."""
-        return self._configure_team(spec, context)
+        """Satisfy BaseAgent.configure."""
+        return self.configure_team(spec, context)
 
     # ------------------------------------------------------------------
     # Team-specific configuration
@@ -204,7 +204,7 @@ class TeamAgent(BaseAgent):
         """Return the DeepAgentSpec for the given role, falling back to leader."""
         return spec.agents.get(role.value) or spec.agents["leader"]
 
-    def _configure_team(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> "TeamAgent":
+    def configure_team(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> "TeamAgent":
         """Configure this TeamAgent and its underlying DeepAgent."""
         self._spec = spec
         self._ctx = ctx
@@ -288,7 +288,6 @@ class TeamAgent(BaseAgent):
     ) -> List[ToolCard]:
         """Register role-appropriate team tools driven by permission sets."""
         from openjiuwen.agent_teams.tools.database import TeamDatabase
-        from openjiuwen.agent_teams.tools.team import TeamBackend
         from openjiuwen.agent_teams.tools.team_tools import create_team_tools
         from openjiuwen.agent_teams.tools.status import MemberMode
 
@@ -324,11 +323,9 @@ class TeamAgent(BaseAgent):
         # silently -- the cards are still in
         # ability_manager for schema generation.
         try:
-            from openjiuwen.core.runner import Runner
-
             Runner.resource_mgr.add_tool(team_tools)
         except Exception:
-            pass
+            team_logger.debug("Runner.resource_mgr not available, skipping tool registration")
 
         return [t.card for t in team_tools]
 
@@ -498,12 +495,12 @@ class TeamAgent(BaseAgent):
         try:
             await self._messager.unregister_direct_message_handler()
         except Exception:
-            pass
+            team_logger.debug("failed to unregister direct message handler during cleanup")
         for topic in self._subscribed_topics:
             try:
                 await self._messager.unsubscribe(topic)
             except Exception:
-                pass
+                team_logger.debug("failed to unsubscribe topic {} during cleanup", topic)
         self._subscribed_topics.clear()
 
     def _is_agent_running(self) -> bool:
@@ -649,7 +646,7 @@ class TeamAgent(BaseAgent):
             "description": f"Teammate for domain {member_spec.domain}",
         })
         teammate = TeamAgent(card)
-        teammate._configure_team(self._spec, context)
+        teammate.configure_team(self._spec, context)
         return teammate
 
     def _build_member_context(self, member_spec: TeamMemberSpec) -> TeamRuntimeContext:
@@ -745,7 +742,7 @@ class TeamAgent(BaseAgent):
             description=f"Teammate for domain {context.domain}",
         )
         agent = cls(card)
-        agent._configure_team(spec, context)
+        agent.configure_team(spec, context)
         return agent
 
     def _init_leader_member(self, member_id: str) -> None:
@@ -1004,7 +1001,7 @@ class TeamAgent(BaseAgent):
             name=context.member_spec.name if context.member_spec else "leader",
         )
         agent = cls(card)
-        agent._configure_team(spec, context)
+        agent.configure_team(spec, context)
         return agent
 
 

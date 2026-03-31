@@ -111,7 +111,8 @@ class TeamMember:
                     new_status=new_status.value
                 )),
             )
-            team_logger.debug(f"Member status changed event published: {self.member_id}, {old_status.value} -> {new_status.value}")
+            team_logger.debug(f"Member status changed event published: {self.member_id}, "
+                              f"{old_status.value} -> {new_status.value}")
         except Exception as e:
             team_logger.error(f"Failed to publish member status changed event for {self.member_id}: {e}")
 

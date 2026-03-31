@@ -17,7 +17,8 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     Team,
-    TeamMember)
+    TeamMember,
+)
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.status import (
     ExecutionStatus,
@@ -86,7 +87,7 @@ class TeamBackend:
         team_logger.info(f"AgentTeam manager initialized for {team_id}, member={member_id}")
 
     async def spawn_member(
-        self, member_id: str, name: str, agent_card: AgentCard,
+        self, member_id: str, name: str, agent_card: AgentCard, *,
         desc: Optional[str] = None, prompt: Optional[str] = None,
         status: MemberStatus = MemberStatus.UNSTARTED,
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
@@ -288,7 +289,10 @@ class TeamBackend:
             return True
 
         # Validate state transition
-        from openjiuwen.agent_teams.tools.status import is_valid_transition, MEMBER_TRANSITIONS
+        from openjiuwen.agent_teams.tools.status import (
+            is_valid_transition,
+            MEMBER_TRANSITIONS,
+        )
 
         if not is_valid_transition(current_status, MemberStatus.SHUTDOWN_REQUESTED, MEMBER_TRANSITIONS):
             team_logger.error(
@@ -356,13 +360,13 @@ class TeamBackend:
 
         # Only send cancel event if member is busy
         if current_status != MemberStatus.BUSY:
-            team_logger.info(f"Member {member_id} is not busy (status: {current_status.value}), no need to cancel execution")
+            team_logger.info(
+                f"Member {member_id} is not busy (status: {current_status.value}), no need to cancel execution")
             return True
 
         team_logger.info(f"Cancelling execution for member {member_id}")
 
         # Reset all CLAIMED tasks assigned to this member
-        from openjiuwen.agent_teams.tools.status import TaskStatus
         claimed_tasks = await self.task_manager.get_tasks_by_assignee(
             member_id=member_id,
             status=TaskStatus.CLAIMED.value
@@ -376,7 +380,8 @@ class TeamBackend:
         if reset_count > 0:
             team_logger.info(f"Reset {reset_count} tasks from member {member_id}")
 
-        success = await self.message_manager.send_message(content="当前任务有变动，请停止执行当前任务，重新尝试认领合适任务", to_member=member_id)
+        success = await self.message_manager.send_message(
+            content="当前任务有变动，请停止执行当前任务，重新尝试认领合适任务", to_member=member_id)
         if not success:
             team_logger.error(f"Failed to send cancel request message to member {member_id}")
             return False
@@ -490,7 +495,6 @@ class TeamBackend:
             return False
 
         # Check if task is already cancelled
-        from openjiuwen.agent_teams.tools.status import TaskStatus
         if task.status == TaskStatus.CANCELLED.value:
             team_logger.info(f"Task {task_id} is already cancelled")
             return True

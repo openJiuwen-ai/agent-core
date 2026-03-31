@@ -125,8 +125,6 @@ class _P2PLayer:
         while self._running and self._router is not None:
             try:
                 frames = await self._router.recv_multipart()
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 if not self._running:
                     break
@@ -319,8 +317,6 @@ class _PubSubLayer:
         while self._running and self._sub is not None:
             try:
                 topic_frame, payload_frame = await self._sub.recv_multipart()
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 if not self._running:
                     break

@@ -349,6 +349,7 @@ async def run_spawned_process(
                     self._eof = False
                     self._read_event = asyncio.Event()
                     self._read_task = None
+                    self._exception: Exception | None = None
 
                 def _read_loop(self):
                     """Background thread that continuously reads from stdin."""

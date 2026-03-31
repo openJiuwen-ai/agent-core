@@ -170,6 +170,8 @@ operator_logger = LazyLogger(lambda: LogManager.get_logger("operator"))
 # MCP protocol logger - for MCP protocol related logs
 mcp_logger = LazyLogger(lambda: LogManager.get_logger("mcp"))
 
+team_logger = LazyLogger(lambda: LogManager.get_logger("mcp"))
+
 
 __all__ = [
     # Protocol and base classes
@@ -204,6 +206,7 @@ __all__ = [
     "operator_logger",
     # Protocol and extension module loggers
     "mcp_logger",
+    "team_logger",
     # Event definitions
     "LogEventType",
     "LogLevel",

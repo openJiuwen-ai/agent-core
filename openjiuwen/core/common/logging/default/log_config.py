@@ -130,6 +130,19 @@ class LogConfig:
         base_config.update(kwargs)
         return base_config
 
+    def get_snapshot(self) -> Dict[str, Any]:
+        """Return a deep copy of the raw logging config dict."""
+        return copy.deepcopy(self._log_config)
+
+    def apply_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        """Restore logging config from a snapshot produced by get_snapshot.
+
+        Args:
+            snapshot: Dict produced by get_snapshot.
+        """
+        self._log_config = copy.deepcopy(snapshot)
+        self._log_path = self._get_log_path()
+
     def get_all_configs(self) -> Dict[str, Dict[str, Any]]:
         return {
             "common": self.get_common_config(),

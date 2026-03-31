@@ -67,12 +67,11 @@ class TeamSpec(BaseModel):
 
     def teammates_by_domain(self, domain: str) -> List[TeamMemberSpec]:
         """Return teammates whose specialty matches the given domain."""
-        return [
-            member
-            for member in self.members
-            if member.role_type == TeamRole.TEAMMATE
-            and member.domain == domain
-        ]
+        result: list[TeamMemberSpec] = []
+        for member in self.members:
+            if member.role_type == TeamRole.TEAMMATE and member.domain == domain:
+                result.append(member)
+        return result
 
 
 class TeamRuntimeContext(BaseModel):

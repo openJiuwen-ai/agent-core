@@ -60,11 +60,14 @@ def teammate_tool_guide(language: str = "cn") -> str:
 def _format_team_info(team_info: dict[str, Any], labels: dict[str, str]) -> str:
     """Format team information from database TeamInfo into a prompt section."""
     lines = [f"\n## {labels['team_info_heading']}"]
-    if name := team_info.get("name"):
+    name = team_info.get("name")
+    if name:
         lines.append(f"- {labels['team_name']}: {name}")
-    if desc := team_info.get("desc"):
+    desc = team_info.get("desc")
+    if desc:
         lines.append(f"- {labels['team_desc']}: {desc}")
-    if prompt := team_info.get("prompt"):
+    prompt = team_info.get("prompt")
+    if prompt:
         lines.append(f"- {labels['team_prompt']}: {prompt}")
     return "\n".join(lines)
 

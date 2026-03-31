@@ -100,12 +100,11 @@ def _narrow_call(
     if has_var_keyword:
         narrowed_kwargs = kwargs
     else:
-        accepted = {
-            name
-            for name, p in sig.parameters.items()
-            if p.kind
-            not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-        }
+        skip_kinds = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        accepted: set[str] = set()
+        for name, p in sig.parameters.items():
+            if p.kind not in skip_kinds:
+                accepted.add(name)
         narrowed_kwargs = {k: v for k, v in kwargs.items() if k in accepted}
 
     return narrowed_args, narrowed_kwargs

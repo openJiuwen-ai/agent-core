@@ -8,7 +8,6 @@ Provides functions to capture the current logging configuration as a
 serializable dict and to restore it in a new process.
 """
 
-import copy
 from typing import Any
 
 
@@ -16,7 +15,7 @@ def get_log_config_snapshot() -> dict[str, Any]:
     """Return a JSON-serializable snapshot of the current logging config."""
     from openjiuwen.core.common.logging.default.log_config import log_config
 
-    return copy.deepcopy(log_config._log_config)
+    return log_config.get_snapshot()
 
 
 def configure_log_config(snapshot: dict[str, Any]) -> None:
@@ -27,5 +26,4 @@ def configure_log_config(snapshot: dict[str, Any]) -> None:
     """
     from openjiuwen.core.common.logging.default.log_config import log_config
 
-    log_config._log_config = copy.deepcopy(snapshot)
-    log_config._log_path = log_config._get_log_path()
+    log_config.apply_snapshot(snapshot)

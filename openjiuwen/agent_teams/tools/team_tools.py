@@ -50,7 +50,8 @@ LEADER_ONLY_TOOLS: Set[str] = {
     "spawn_member",            # Create a new team member
     "shutdown_member",         # Shutdown a team member
     "approve_plan",            # Approve or reject a member's plan
-    "task_manager",           # Manager task (unified - supports add single/batch/priority/top task or cancel/cancel_all/update task)
+    "task_manager",            # Manager task (unified - supports:
+                               # add single/batch/priority/top task or cancel/cancel_all/update task)
 }
 
 # Tools that only members can use
@@ -86,7 +87,9 @@ class BuildTeamTool(TeamTool):
 
     def __init__(self, team: TeamBackend):
         super().__init__(
-            ToolCard(id="BuildTeamTool", name="build_team", description="组建团队，设置团队名称和协作目标。这是启动协作的第一步，必须在 spawn_member 和 add_task 之前调用")
+            ToolCard(id="BuildTeamTool", name="build_team", description="组建团队，设置团队名称和协作目标。"
+                                                                        "这是启动协作的第一步，必须在 spawn_member 和"
+                                                                        "add_task 之前调用")
         )
         self.team = team
         self.db = team.db
@@ -120,7 +123,9 @@ class CleanTeamTool(TeamTool):
 
     def __init__(self, team: TeamBackend):
         super().__init__(
-            ToolCard(id="CleanTeamTool", name="clean_team", description="解散团队并清理所有资源。前置条件：所有成员已通过 shutdown_member 关闭。在所有任务完成、结果汇总后调用")
+            ToolCard(id="CleanTeamTool", name="clean_team", description="解散团队并清理所有资源。前置条件："
+                                                                        "所有成员已通过 shutdown_member 关闭。"
+                                                                        "在所有任务完成、结果汇总后调用")
         )
         self.team = team
         self.card.input_params = {
@@ -144,7 +149,11 @@ class SpawnMemberTool(TeamTool):
 
     def __init__(self, team: TeamBackend):
         super().__init__(
-            ToolCard(id="SpawnMemberTool", name="spawn_member", description="按领域专长创建新的团队成员。每个成员应有明确的人设和专业方向，用于领取并执行匹配领域的任务。创建后成员处于未启动状态，需调用 startup_members 统一拉起")
+            ToolCard(id="SpawnMemberTool", name="spawn_member", description="按领域专长创建新的团队成员。"
+                                                                            "每个成员应有明确的人设和专业方向，"
+                                                                            "用于领取并执行匹配领域的任务。"
+                                                                            "创建后成员处于未启动状态，"
+                                                                            "需调用 startup_members 统一拉起")
         )
         self.team = team
         self.card.input_params = {
@@ -154,7 +163,8 @@ class SpawnMemberTool(TeamTool):
                 "name": {"type": "string", "description": "成员名称，体现其角色定位（如「后端开发专家」）"},
                 "desc": {"type": "string", "description": "成员的人设描述，包括专业背景、领域专长、行为风格和工作方式，用于任务匹配和角色定位"},
                 "prompt": {"type": "string", "description": "成员的启动指令。应引导成员通过 view_task 工具查看任务列表，认领任务"},
-                # "mode": {"type": "string", "enum": ["plan_mode", "build_mode"], "description": "成员模式。plan_mode: 需要leader审批任务才能完成（默认）；build_mode: 可以直接完成任务"},
+                # "mode": {"type": "string", "enum": ["plan_mode", "build_mode"], "description": "成员模式。plan_mode:
+                # 需要leader审批任务才能完成（默认）；build_mode: 可以直接完成任务"},
             },
             "required": ["member_id", "name", "desc"],
         }
@@ -190,7 +200,9 @@ class ShutdownMemberTool(TeamTool):
 
     def __init__(self, team: TeamBackend):
         super().__init__(
-            ToolCard(id="ShutdownMemberTool", name="shutdown_member", description="关闭团队成员并释放资源。在成员完成所有任务后调用；若成员持续无法交付，可强制关闭")
+            ToolCard(id="ShutdownMemberTool", name="shutdown_member", description="关闭团队成员并释放资源。"
+                                                                                  "在成员完成所有任务后调用；"
+                                                                                  "若成员持续无法交付，可强制关闭")
         )
         self.team = team
         self.card.input_params = {
@@ -218,7 +230,8 @@ class ApprovePlanTool(TeamTool):
 
     def __init__(self, team: TeamBackend):
         super().__init__(
-            ToolCard(id="ApprovePlanTool", name="approve_plan", description="审批或拒绝成员提交的执行计划。审核计划是否符合目标要求，给出反馈指导成员调整")
+            ToolCard(id="ApprovePlanTool", name="approve_plan", description="审批或拒绝成员提交的执行计划。"
+                                                                            "审核计划是否符合目标要求，给出反馈指导成员调整")
         )
         self.team = team
         self.card.input_params = {
@@ -248,7 +261,8 @@ class ListMembersTool(TeamTool):
 
     def __init__(self, team: TeamBackend):
         super().__init__(
-            ToolCard(id="ListMembersTool", name="list_members", description="列出所有团队成员及其状态，用于评估团队人员构成和是否需要创建新成员")
+            ToolCard(id="ListMembersTool", name="list_members", description="列出所有团队成员及其状态，"
+                                                                            "用于评估团队人员构成和是否需要创建新成员")
         )
         self.team = team
         self.card.input_params = {
@@ -496,7 +510,9 @@ class ClaimTaskTool(TeamTool):
 
     def __init__(self, task_manager: TeamTaskManager):
         super().__init__(
-            ToolCard(id="ClaimTaskTool", name="claim_task", description="领取一个就绪任务。只能领取 pending 状态且无人认领的任务，应选择匹配自己领域专长的任务")
+            ToolCard(id="ClaimTaskTool", name="claim_task", description="领取一个就绪任务。"
+                                                                        "只能领取 pending 状态且无人认领的任务，"
+                                                                        "应选择匹配自己领域专长的任务")
         )
         self.task_manager = task_manager
         self.card.input_params = {
@@ -520,7 +536,11 @@ class CompleteTaskTool(TeamTool):
 
     def __init__(self, task_manager: TeamTaskManager):
         super().__init__(
-            ToolCard(id="CompleteTaskTool", name="complete_task", description="标记任务完成。完成后会自动解锁依赖本任务的下游任务，使其变为 pending 可领取状态。调用后应通过 send_message 向 Leader 汇报结果摘要")
+            ToolCard(id="CompleteTaskTool", name="complete_task", description="标记任务完成。"
+                                                                              "完成后会自动解锁依赖本任务的下游任务，"
+                                                                              "使其变为 pending 可领取状态。"
+                                                                              "调用后应通过 send_message 向 Leader 汇报"
+                                                                              "结果摘要")
         )
         self.task_manager = task_manager
         self.card.input_params = {
@@ -546,7 +566,8 @@ class SendMessageTool(TeamTool):
 
     def __init__(self, message_manager: TeamMessageManager):
         super().__init__(
-            ToolCard(id="SendMessageTool", name="send_message", description="向指定成员发送点对点消息。用于通知成员领取任务、回复进度汇报、升级阻塞问题或协调成员间依赖")
+            ToolCard(id="SendMessageTool", name="send_message", description="向指定成员发送点对点消息。用于通知成员领取任务、"
+                                                                            "回复进度汇报、升级阻塞问题或协调成员间依赖")
         )
         self.message_manager = message_manager
         self.card.input_params = {
@@ -578,7 +599,9 @@ class BroadcastMessageTool(TeamTool):
         on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     ):
         super().__init__(
-            ToolCard(id="BroadcastMessageTool", name="broadcast_message", description="向所有团队成员广播消息。用于宣布全局决策、约束变更或需要所有人知晓的信息")
+            ToolCard(id="BroadcastMessageTool", name="broadcast_message", description="向所有团队成员广播消息。"
+                                                                                      "用于宣布全局决策、"
+                                                                                      "约束变更或需要所有人知晓的信息")
         )
         self.message_manager = message_manager
         self._team = team
@@ -604,7 +627,6 @@ class BroadcastMessageTool(TeamTool):
         if message_id:
             return ToolOutput(success=True)
         return ToolOutput(success=False, error="Failed to broadcast message")
-
 
 
 # ========== Tool Factory ==========

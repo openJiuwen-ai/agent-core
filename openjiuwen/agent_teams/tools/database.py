@@ -404,6 +404,7 @@ class TeamDatabase:
         name: str,
         agent_card: str,
         status: str,
+        *,
         desc: Optional[str] = None,
         execution_status: Optional[str] = None,
         mode: str = MemberMode.PLAN_MODE.value,
@@ -565,7 +566,8 @@ class TeamDatabase:
             result = await session.execute(query)
             return result.scalars().all()
 
-    async def get_tasks_by_assignee(self, team_id: str, assignee_id: str, status: Optional[str] = None) -> List[TeamTaskBase]:
+    async def get_tasks_by_assignee(self, team_id: str, assignee_id: str, status: Optional[str] = None
+                                    ) -> List[TeamTaskBase]:
         """Get tasks assigned to a specific member, optionally filtered by status
 
         Args:
@@ -885,6 +887,7 @@ class TeamDatabase:
         title: str,
         content: str,
         status: str,
+        *,
         dependencies: Optional[List[str]] = None,
         dependent_task_ids: Optional[List[str]] = None
     ) -> bool:
@@ -1410,6 +1413,7 @@ class TeamDatabase:
         team_id: str,
         from_member: str,
         content: str,
+        *,
         to_member: Optional[str] = None,
         broadcast: bool = False
     ) -> bool:
