@@ -19,4 +19,6 @@
 | [start_comp](./components/flow/start_comp.md) | Start |
 | [tool_comp](./components/tool/tool_comp.md) | ToolComponent、ToolComponentConfig |
 | [knowledge_retrieval_comp](./components/resource/knowledge_retrieval_comp.md) | ComponentKBConfig、KnowledgeRetrievalComponent、KnowledgeRetrievalCompConfig |
+| [memory_retrieval_comp](./components/resource/memory_retrieval_comp.md) | MemoryRetrievalComponent、MemoryRetrievalCompConfig |
+| [memory_write_comp](./components/resource/memory_write_comp.md) | MemoryWriteComponent、MemoryWriteCompConfig |
 | [workflow_comp](./components/flow/workflow_comp.md) | SubWorkflowComponent |

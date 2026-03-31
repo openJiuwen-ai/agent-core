@@ -1027,6 +1027,225 @@ async def main():
 asyncio.run(main())
 ```
 
+# MemoryRetrieval Component
+
+The `MemoryRetrievalComponent` is a preset component that integrates long-term memory retrieval into openJiuwen workflows. It wraps long-term memory retrieval capabilities, retrieving fragment memories and history summaries based on a query string. It supports isolating memory data by user and scope, and filters low-quality results via a similarity threshold.
+
+## Configuration
+
+Create a `MemoryRetrievalCompConfig` to configure the component. The key fields are:
+
+- `memory`: `LongTermMemory` instance used to perform memory retrieval.
+- `scope_id`: Scope ID for isolating memory data across different scenarios. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `user_id`: User ID for isolating memory data per user. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `threshold`: Similarity threshold; results below this value are filtered out. Default: `0.3`.
+
+## Input / Output
+
+**Input**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `query` | str | The query string to retrieve memories for. Must not be empty. |
+| `top_k` | int | Maximum number of results to return. Default: `5`. |
+
+**Output**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `fragment_memory_results` | List[MemResult] | List of retrieved fragment memory results. |
+| `summary_results` | List[MemResult] | List of retrieved history summary results. |
+
+## Example: Memory Retrieval Workflow (Start → MemoryRetrieval → LLM → End)
+
+The following example builds a workflow with long-term memory retrieval using the `MemoryRetrievalComponent`:
+
+```python
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.memory.long_term_memory import LongTermMemory
+from openjiuwen.core.workflow import (
+    End,
+    LLMCompConfig,
+    LLMComponent,
+    MemoryRetrievalCompConfig,
+    MemoryRetrievalComponent,
+    Start,
+    Workflow,
+    WorkflowCard,
+    create_workflow_session,
+)
+
+# 1. Build workflow
+flow = Workflow(card=WorkflowCard(name="Memory Retrieval Workflow", id="mem_ret_wf", version="1.0"))
+
+start = Start()
+
+# 2. Configure MemoryRetrieval component
+memory = LongTermMemory()  # Replace with actual initialization in production
+mr_config = MemoryRetrievalCompConfig(
+    memory=memory,
+    user_id="user_001",
+    scope_id="default_scope",
+    threshold=0.3,
+)
+mr_component = MemoryRetrievalComponent(component_config=mr_config)
+
+# 3. Configure LLM component
+llm_config = LLMCompConfig(
+    model_client_config=ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="your-api-key",
+        api_base="https://api.example.com/v1",
+        timeout=120,
+        verify_ssl=False,
+    ),
+    model_config=ModelRequestConfig(model="gpt-4", temperature=0.7),
+    template_content=[
+        {"role": "system", "content": "Answer based on the provided memory context."},
+        {"role": "user", "content": "Memory context:\n{{context}}\n\nQuestion: {{query}}\n\nAnswer:"},
+    ],
+    response_format={"type": "text"},
+    output_config={"answer": {"type": "string", "required": True}},
+)
+llm_component = LLMComponent(component_config=llm_config)
+
+end = End({"responseTemplate": "{{answer}}"})
+
+# 4. Assemble workflow graph: Start → MemoryRetrieval → LLM → End
+flow.set_start_comp("start", start, inputs_schema={"query": "${query}"})
+flow.add_workflow_comp("mr", mr_component, inputs_schema={"query": "${start.query}"})
+flow.add_workflow_comp("llm", llm_component, inputs_schema={
+    "context": "${mr.fragment_memory_results}",
+    "query": "${start.query}",
+})
+flow.set_end_comp("end", end, inputs_schema={"answer": "${llm.answer}"})
+
+flow.add_connection("start", "mr")
+flow.add_connection("mr", "llm")
+flow.add_connection("llm", "end")
+
+# 5. Execute
+import asyncio
+
+async def main():
+    session = create_workflow_session(session_id="mem_ret_session")
+    result = await flow.invoke({"query": "What did we discuss before?"}, session)
+    print(result.result)
+
+asyncio.run(main())
+```
+
+# MemoryWrite Component
+
+The `MemoryWriteComponent` is a preset component that writes conversation messages to long-term memory. It wraps long-term memory write capabilities, supporting isolation of memory data by user, scope, and session, with an option to automatically generate memory fragments.
+
+## Configuration
+
+Create a `MemoryWriteCompConfig` to configure the component. The key fields are:
+
+- `memory`: `LongTermMemory` instance used to perform memory write operations.
+- `scope_id`: Scope ID for isolating memory data across different scenarios. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `user_id`: User ID for isolating memory data per user. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `session_id`: Session ID for associating with the current session. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `agent_config`: `AgentMemoryConfig`, agent memory configuration that controls memory generation behavior. Default: `AgentMemoryConfig()`.
+- `gen_mem`: Whether to automatically generate memory fragments. Default: `True`.
+- `gen_mem_with_history_msg_num`: Number of historical messages to reference when generating memories. Default: `2`.
+
+## Input / Output
+
+**Input**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `messages` | List[BaseMessage] | List of messages to write to long-term memory. Must not be empty. |
+| `timestamp` | datetime, optional | Timestamp for the messages. Default: `None` (uses current time). |
+
+**Output**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | bool | Whether the write operation succeeded. Default: `True`. |
+
+## Example: Memory Write Workflow (Start → LLM → MemoryWrite → End)
+
+The following example builds a workflow that writes conversation messages to long-term memory using the `MemoryWriteComponent`:
+
+```python
+from openjiuwen.core.foundation.llm import BaseMessage, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.memory.long_term_memory import LongTermMemory
+from openjiuwen.core.workflow import (
+    End,
+    LLMCompConfig,
+    LLMComponent,
+    MemoryWriteCompConfig,
+    MemoryWriteComponent,
+    Start,
+    Workflow,
+    WorkflowCard,
+    create_workflow_session,
+)
+
+# 1. Build workflow
+flow = Workflow(card=WorkflowCard(name="Memory Write Workflow", id="mem_write_wf", version="1.0"))
+
+start = Start()
+
+# 2. Configure LLM component
+llm_config = LLMCompConfig(
+    model_client_config=ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="your-api-key",
+        api_base="https://api.example.com/v1",
+        timeout=120,
+        verify_ssl=False,
+    ),
+    model_config=ModelRequestConfig(model="gpt-4", temperature=0.7),
+    template_content=[
+        {"role": "system", "content": "You are an AI assistant."},
+        {"role": "user", "content": "{{query}}"},
+    ],
+    response_format={"type": "text"},
+    output_config={"reply": {"type": "string", "required": True}},
+)
+llm_component = LLMComponent(component_config=llm_config)
+
+# 3. Configure MemoryWrite component
+memory = LongTermMemory()  # Replace with actual initialization in production
+mw_config = MemoryWriteCompConfig(
+    memory=memory,
+    user_id="user_001",
+    scope_id="default_scope",
+    session_id="mem_write_session",
+    gen_mem=True,
+    gen_mem_with_history_msg_num=2,
+)
+mw_component = MemoryWriteComponent(component_config=mw_config)
+
+end = End({"responseTemplate": "{{reply}}"})
+
+# 4. Assemble workflow graph: Start → LLM → MemoryWrite → End
+flow.set_start_comp("start", start, inputs_schema={"query": "${query}"})
+flow.add_workflow_comp("llm", llm_component, inputs_schema={"query": "${start.query}"})
+flow.add_workflow_comp("mw", mw_component, inputs_schema={
+    "messages": "${llm.messages}",
+})
+flow.set_end_comp("end", end, inputs_schema={"reply": "${llm.reply}"})
+
+flow.add_connection("start", "llm")
+flow.add_connection("llm", "mw")
+flow.add_connection("llm", "end")
+
+# 5. Execute
+import asyncio
+
+async def main():
+    session = create_workflow_session(session_id="mem_write_session")
+    result = await flow.invoke({"query": "Please remember that I like hot pot"}, session)
+    print(result.result)
+
+asyncio.run(main())
+```
+
 Output result:
 
 ```

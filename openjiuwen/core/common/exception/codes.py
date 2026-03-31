@@ -149,7 +149,19 @@ class StatusCode(Enum):
         101102, "component knowledge_retrieval input parameter error, reason: {error_msg}")
     COMPONENT_KNOWLEDGE_RETRIEVAL_LLM_MODEL_INIT_ERROR = (
         101103, "component knowledge_retrieval llm_model initialization failed, reason: {error_msg}")
-    
+
+    ## MemoryWriteComponent  101150 - 101199
+    COMPONENT_MEMORY_WRITE_INPUT_PARAM_ERROR = (
+        101150, "component memory_write input parameter error, reason: {error_msg}")
+    COMPONENT_MEMORY_WRITE_INVOKE_CALL_FAILED = (
+        101151, "component memory_write invoke call failed, reason: {error_msg}")
+
+    ## MemoryRetrievalComponent  101200 - 101249
+    COMPONENT_MEMORY_RETRIEVAL_INPUT_PARAM_ERROR = (
+        101200, "component memory_retrieval input parameter error, reason: {error_msg}")
+    COMPONENT_MEMORY_RETRIEVAL_INVOKE_CALL_FAILED = (
+        101201, "component memory_retrieval invoke call failed, reason: {error_msg}")
+
     ## ToolComponent  102000 - 102019
     COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
