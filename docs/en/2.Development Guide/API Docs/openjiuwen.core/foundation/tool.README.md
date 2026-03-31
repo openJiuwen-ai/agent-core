@@ -6,6 +6,7 @@
 
 [tool.md](./tool/tool.md)
 [auth.md](./tool/auth/auth.md)
+[handler.md](tool/form_handler/form_handler.md)
 
 **Classes**:
 
@@ -32,6 +33,9 @@
 | **HeaderQueryAuthStrategy** | Custom Header and Query parameter authentication strategy. |
 | **AuthStrategyRegistry** | Authentication strategy registry. |
 | **AuthHeaderAndQueryProvider** | Custom Header and Query parameter authentication provider. |
+| **FormHandler** | Form handler abstract base class. |
+| **DefaultFormHandler** | Default form handler. |
+| **FormHandlerManager** | Form handler manager. |
 
 **Functions**:
 

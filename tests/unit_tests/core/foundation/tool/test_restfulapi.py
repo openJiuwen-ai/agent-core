@@ -1864,3 +1864,568 @@ class TestRestfulApiExceptions:
                 await restful_api.invoke({})
 
             assert exc_info.value.code == StatusCode.TOOL_RESTFUL_API_RESPONSE_ERROR.code
+
+
+class TestRestfulApiFileParams:
+    """RestfulApi FormData processing tests"""
+
+    @staticmethod
+    def _create_mock_response(status=200, content_type="application/json", url="http://example.com/api/test",
+                              reason="OK", content_bytes=None):
+        mock_response = AsyncMock()
+        mock_response.status = status
+        mock_response.headers = {"Content-Type": content_type}
+        mock_response.url = url
+        mock_response.reason = reason
+        mock_response.raise_for_status = Mock()
+
+        if content_bytes:
+            async def content_iter():
+                yield content_bytes
+
+            mock_response.content.iter_chunked = Mock(return_value=content_iter())
+        else:
+            async def empty_iterator():
+                if False:
+                    yield b""
+
+            mock_response.content.iter_chunked = Mock(return_value=empty_iterator())
+
+        return mock_response
+
+    @staticmethod
+    def _create_json_response(data, status=200, content_type="application/json",
+                              url="http://example.com/api/test", reason="OK"):
+        json_bytes = json.dumps(data).encode('utf-8')
+        response = TestRestfulApiFileParams._create_mock_response(status, content_type, url, reason, json_bytes)
+        return response
+
+    @staticmethod
+    def _create_mocked_session_context(mock_response):
+        mock_session = AsyncMock()
+
+        class MockResponseContext:
+            def __init__(self, response):
+                self.response = response
+
+            async def __aenter__(self):
+                return self.response
+
+            async def __aexit__(self, exc_type, exc_val, exc_tb):
+                pass
+
+        mock_context = MockResponseContext(mock_response)
+        mock_session.request = Mock(return_value=mock_context)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+
+        return mock_session
+
+    @staticmethod
+    @contextmanager
+    def _ssl_mock_context():
+        with (patch('openjiuwen.core.common.security.ssl_utils.SslUtils.get_ssl_config') as mock_get_ssl,
+              patch('openjiuwen.core.common.security.ssl_utils.SslUtils.create_strict_ssl_context')
+              as mock_create_ssl):
+            mock_get_ssl.return_value = (False, None)
+            mock_create_ssl.return_value = None
+            yield mock_get_ssl, mock_create_ssl
+
+    class TestProcessFormDataMethod:
+        """process_form_data() method tests"""
+
+        @pytest.mark.asyncio
+        async def test_single_form_param_processing(self):
+            """Single form parameter processing"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "username": {
+                        "type": "string",
+                        "location": "form",
+                        "description": "Username"
+                    },
+                    "age": {
+                        "type": "integer",
+                        "location": "form",
+                        "description": "User age"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="submit_form",
+                description="Submit form data",
+                url="http://example.com/api/submit",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            form_params = {
+                "username": {"form_handler_type": "default", "value": "test_user"},
+                "age": {"form_handler_type": "default", "value": 25}
+            }
+            body_params = {}
+
+            result = await api._process_form_data(form_params, body_params)
+
+            assert isinstance(result, aiohttp.FormData)
+
+        @pytest.mark.asyncio
+        async def test_form_param_with_body_params(self):
+            """Form parameter mixed with body parameters"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "file_url": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "File URL"
+                    },
+                    "title": {
+                        "type": "string",
+                        "location": "body",
+                        "description": "Document title"
+                    },
+                    "count": {
+                        "type": "integer",
+                        "location": "body",
+                        "description": "Count"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="upload_with_metadata",
+                description="Upload with metadata",
+                url="http://example.com/api/upload",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            form_params = {
+                "file_url": {"form_handler_type": "default", "value": "http://example.com/doc.pdf"}
+            }
+            body_params = {
+                "title": "Test Document",
+                "count": 5
+            }
+
+            result = await api._process_form_data(form_params, body_params)
+
+            assert isinstance(result, aiohttp.FormData)
+
+        @pytest.mark.asyncio
+        async def test_multiple_form_params_processing(self):
+            """Multiple form parameters processing"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "file1": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "File 1"
+                    },
+                    "file2": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "File 2"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="upload_multiple",
+                description="Upload multiple files",
+                url="http://example.com/api/upload",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            form_params = {
+                "file1": {"form_handler_type": "default", "value": "content1"},
+                "file2": {"form_handler_type": "default", "value": "content2"}
+            }
+            body_params = {}
+
+            result = await api._process_form_data(form_params, body_params)
+
+            assert isinstance(result, aiohttp.FormData)
+
+        @pytest.mark.asyncio
+        async def test_empty_form_params_and_body_params(self):
+            """Empty form_params and body_params"""
+            input_schema = {
+                "type": "object",
+                "properties": {}
+            }
+
+            card = RestfulApiCard(
+                name="empty_params",
+                description="Empty params",
+                url="http://example.com/api/empty",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            form_params = {}
+            body_params = {}
+
+            result = await api._process_form_data(form_params, body_params)
+
+            assert isinstance(result, aiohttp.FormData)
+
+        @pytest.mark.asyncio
+        async def test_custom_handler_type(self):
+            """Use custom handler_type"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "custom_data": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "custom",
+                        "description": "Custom data"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="custom_form",
+                description="Custom form handler",
+                url="http://example.com/api/custom",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            mock_form_data = aiohttp.FormData()
+            mock_form_data.add_field("custom_data", "processed_value")
+
+            with patch('openjiuwen.core.foundation.tool.form_handler.form_handler_manager.FormHandlerManager.get_handler') \
+                    as mock_get_handler:
+                mock_handler_instance = AsyncMock()
+                mock_handler_instance.handle = AsyncMock(return_value=mock_form_data)
+                mock_handler_class = MagicMock(return_value=mock_handler_instance)
+                mock_get_handler.return_value = mock_handler_class
+
+                form_params = {
+                    "custom_data": {"form_handler_type": "custom", "value": "test_value"}
+                }
+                body_params = {}
+
+                result = await api._process_form_data(form_params, body_params)
+
+                assert isinstance(result, aiohttp.FormData)
+                mock_get_handler.assert_called_once_with("custom")
+                mock_handler_instance.handle.assert_called_once()
+
+    class TestCompleteFormSubmissionFlow:
+        """Complete form submission flow tests"""
+
+        @pytest.mark.asyncio
+        async def test_single_form_field_submission_flow(self):
+            """Single form field submission flow"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "field": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "Form field"
+                    },
+                    "name": {
+                        "type": "string",
+                        "location": "body",
+                        "description": "Name"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="submit_single",
+                description="Submit single form field",
+                url="http://example.com/api/submit",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            mock_response = TestRestfulApiFileParams._create_json_response({"status": "success"})
+
+            with patch('aiohttp.ClientSession') as mock_session_class:
+                mock_session = TestRestfulApiFileParams._create_mocked_session_context(mock_response)
+                mock_session_class.return_value = mock_session
+
+                with TestRestfulApiFileParams._ssl_mock_context():
+                    result = await api.invoke({
+                        "field": "value",
+                        "name": "test"
+                    })
+
+                    assert result["code"] == 200
+                    call_args = mock_session.request.call_args
+                    assert "data" in call_args[1]
+                    assert isinstance(call_args[1]["data"], aiohttp.FormData)
+
+        @pytest.mark.asyncio
+        async def test_multiple_form_fields_submission_flow(self):
+            """Multiple form fields submission flow"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "field1": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "Field 1"
+                    },
+                    "field2": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "Field 2"
+                    },
+                    "description": {
+                        "type": "string",
+                        "location": "body",
+                        "description": "Description"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="submit_multiple",
+                description="Submit multiple form fields",
+                url="http://example.com/api/submit",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            mock_response = TestRestfulApiFileParams._create_json_response({"status": "success"})
+
+            with patch('aiohttp.ClientSession') as mock_session_class:
+                mock_session = TestRestfulApiFileParams._create_mocked_session_context(mock_response)
+                mock_session_class.return_value = mock_session
+
+                with TestRestfulApiFileParams._ssl_mock_context():
+                    result = await api.invoke({
+                        "field1": "v1",
+                        "field2": "v2",
+                        "description": "test"
+                    })
+
+                    assert result["code"] == 200
+                    call_args = mock_session.request.call_args
+                    assert "data" in call_args[1]
+                    assert isinstance(call_args[1]["data"], aiohttp.FormData)
+
+        @pytest.mark.asyncio
+        async def test_form_submission_with_mixed_param_types(self):
+            """Form submission mixed with other parameter types"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "integer",
+                        "location": "path",
+                        "description": "User ID"
+                    },
+                    "filter": {
+                        "type": "string",
+                        "location": "query",
+                        "description": "Filter"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "location": "header",
+                        "description": "Auth token"
+                    },
+                    "file_data": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "File data"
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "location": "body",
+                        "description": "Metadata"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="mixed_params",
+                description="Mixed parameter locations",
+                url="http://example.com/api/users/{user_id}/upload",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            mock_response = TestRestfulApiFileParams._create_json_response({"status": "uploaded"})
+
+            with patch('aiohttp.ClientSession') as mock_session_class:
+                mock_session = TestRestfulApiFileParams._create_mocked_session_context(mock_response)
+                mock_session_class.return_value = mock_session
+
+                with TestRestfulApiFileParams._ssl_mock_context():
+                    result = await api.invoke({
+                        "user_id": 123,
+                        "filter": "active",
+                        "auth_token": "token123",
+                        "file_data": "file_content",
+                        "metadata": {"key": "value"}
+                    })
+
+                    assert result["code"] == 200
+                    call_args = mock_session.request.call_args
+
+                    actual_url = call_args[0][1]
+                    assert "123" in actual_url
+                    assert "filter=active" in actual_url
+
+                    request_headers = call_args[1]["headers"]
+                    assert request_headers["auth_token"] == "token123"
+
+                    assert "data" in call_args[1]
+                    assert isinstance(call_args[1]["data"], aiohttp.FormData)
+
+    class TestExceptionAndBoundaryScenarios:
+        """Exception scenarios and boundary tests"""
+
+        @pytest.mark.asyncio
+        async def test_handler_not_registered_uses_default(self):
+            """Handler not registered"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "data": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "unknown_handler",
+                        "description": "Data"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="unknown_handler",
+                description="Unknown handler type",
+                url="http://example.com/api/upload",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            mock_response = TestRestfulApiFileParams._create_json_response({"status": "success"})
+
+            with patch('aiohttp.ClientSession') as mock_session_class:
+                mock_session = TestRestfulApiFileParams._create_mocked_session_context(mock_response)
+                mock_session_class.return_value = mock_session
+
+                with TestRestfulApiFileParams._ssl_mock_context():
+                    result = await api.invoke({
+                        "data": "test_data"
+                    })
+
+                    assert result["code"] == 200
+                    call_args = mock_session.request.call_args
+                    assert "data" in call_args[1]
+                    assert isinstance(call_args[1]["data"], aiohttp.FormData)
+
+        @pytest.mark.asyncio
+        async def test_empty_form_data_handling(self):
+            """Empty FormData handling"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "optional_field": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "Optional field"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="empty_form",
+                description="Empty form data",
+                url="http://example.com/api/upload",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            mock_response = TestRestfulApiFileParams._create_json_response({"status": "success"})
+
+            with patch('aiohttp.ClientSession') as mock_session_class:
+                mock_session = TestRestfulApiFileParams._create_mocked_session_context(mock_response)
+                mock_session_class.return_value = mock_session
+
+                with TestRestfulApiFileParams._ssl_mock_context():
+                    result = await api.invoke({})
+
+                    assert result["code"] == 200
+                    call_args = mock_session.request.call_args
+                    assert "json" in call_args[1]
+                    assert call_args[1]["json"] == {}
+
+    class TestEmptyFormParamHandling:
+        """Empty form parameter handling tests"""
+
+        @pytest.mark.asyncio
+        async def test_empty_form_param_value_succeeds(self):
+            """Empty form parameter value successfully processed"""
+            input_schema = {
+                "type": "object",
+                "properties": {
+                    "optional_file": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "Optional file"
+                    },
+                    "title": {
+                        "type": "string",
+                        "location": "body",
+                        "description": "Document title"
+                    }
+                }
+            }
+
+            card = RestfulApiCard(
+                name="upload_optional",
+                description="Upload optional file",
+                url="http://example.com/api/upload",
+                method="POST",
+                input_params=input_schema
+            )
+            api = RestfulApi(card)
+
+            mock_response = TestRestfulApiFileParams._create_json_response({"status": "success"})
+
+            with patch('aiohttp.ClientSession') as mock_session_class:
+                mock_session = TestRestfulApiFileParams._create_mocked_session_context(mock_response)
+                mock_session_class.return_value = mock_session
+
+                with TestRestfulApiFileParams._ssl_mock_context():
+                    result = await api.invoke({
+                        "title": "Document without file"
+                    })
+
+                    assert result["code"] == 200
+                    call_args = mock_session.request.call_args
+                    assert "json" in call_args[1]
+                    assert call_args[1]["json"] == {"title": "Document without file"}

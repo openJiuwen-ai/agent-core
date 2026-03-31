@@ -263,7 +263,7 @@ Send HTTP request and return response result.
 
 **Parameters**:
 
-* **inputs** (Input): Input parameters, which will be mapped to Body, Query, Path, or Header according to configuration.
+* **inputs** (Input): Input parameters, which will be mapped to Body, Query, Path, Header, or Form according to configuration.
 * **\*\*kwargs**: Optional parameters, supporting the following optional parameters:
   * **skip_inputs_validate** (bool): Whether to validate input `inputs` based on `ToolCard`'s `input_params`. Default is `True`.
   * **max_response_byte_size** (int): Maximum byte length of HTTP response, default is `RestfulApiCard`'s `max_response_byte_size` value.

@@ -112,6 +112,7 @@
         - [tool](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool.README.md)
           - [tool](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool/tool.md)
           - [auth](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool/auth/auth.md)
+          - [form_handler](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/tool/form_handler/form_handler.md)
         - [prompt](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/prompt.README.md)
         - [store](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/store.README.md)
           - [store](2.Development%20Guide/API%20Docs/openjiuwen.core/foundation/store/store.md)

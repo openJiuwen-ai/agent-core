@@ -6,6 +6,7 @@
 
 [tool.md](./tool/tool.md)
 [auth.md](./tool/auth/auth.md)
+[handler.md](tool/form_handler/form_handler.md)
 
 **Classes**：
 
@@ -32,6 +33,9 @@
 | **HeaderQueryAuthStrategy** | 自定义Header和Query参数认证策略。 |
 | **AuthStrategyRegistry** | 认证策略注册表。 |
 | **AuthHeaderAndQueryProvider** | 自定义Header和Query参数认证提供器。 |
+| **FormHandler** | 表单处理器抽象基类。 |
+| **DefaultFormHandler** | 默认表单处理器。 |
+| **FormHandlerManager** | 表单处理器管理器。 |
 
 **Functions**：
 

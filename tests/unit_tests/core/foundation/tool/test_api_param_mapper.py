@@ -134,3 +134,281 @@ def test_map_none_and_empty_string_preserve_defaults():
     # None for 'auth_token' preserves default header
     assert result[APIParamLocation.HEADER] == {"X-API-Key": "test-key", "X-User-ID": "default-user"}
     assert result[APIParamLocation.BODY] == {}
+
+
+FORM_TYPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "file": {
+            "type": "string",
+            "location": "form",
+            "form_handler_type": "file",
+            "description": "PDF file"
+        },
+        "image": {
+            "type": "string",
+            "location": "form",
+            "form_handler_type": "file",
+            "description": "Image file"
+        },
+        "name": {
+            "type": "string",
+            "location": "body",
+            "description": "File name"
+        }
+    }
+}
+
+
+class TestAPIParamMapperFormParams:
+    """APIParamMapper form parameter mapping tests"""
+
+    class TestFormParamMapping:
+        """Form parameter mapping to FORM location"""
+
+        @staticmethod
+        def test_single_form_param_mapping():
+            """Single form parameter mapping"""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "file",
+                        "description": "PDF file"
+                    }
+                }
+            }
+            mapper = APIParamMapper(schema)
+            result = mapper.map({"file": "http://example.com/document.pdf"})
+
+            assert APIParamLocation.FORM in result
+            assert "file" in result[APIParamLocation.FORM]
+            assert result[APIParamLocation.FORM]["file"]["form_handler_type"] == "file"
+            assert result[APIParamLocation.FORM]["file"]["value"] == "http://example.com/document.pdf"
+
+        @staticmethod
+        def test_multiple_form_params_mapping():
+            """Multiple form parameters mapping"""
+            mapper = APIParamMapper(FORM_TYPE_SCHEMA)
+            inputs = {
+                "file": "http://example.com/document.pdf",
+                "image": "http://example.com/image.png",
+                "name": "test_document"
+            }
+
+            result = mapper.map(inputs)
+
+            assert result[APIParamLocation.FORM] == {
+                "file": {"form_handler_type": "file", "value": "http://example.com/document.pdf"},
+                "image": {"form_handler_type": "file", "value": "http://example.com/image.png"}
+            }
+            assert result[APIParamLocation.BODY] == {"name": "test_document"}
+
+        @staticmethod
+        def test_mixed_form_and_regular_params():
+            """Mixed form and regular parameter mapping"""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "document": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "file",
+                        "description": "Document file"
+                    },
+                    "title": {
+                        "type": "string",
+                        "location": "body",
+                        "description": "Document title"
+                    },
+                    "user_id": {
+                        "type": "integer",
+                        "location": "query",
+                        "description": "User ID"
+                    },
+                    "auth_token": {
+                        "type": "string",
+                        "location": "header",
+                        "description": "Auth token"
+                    },
+                    "version": {
+                        "type": "string",
+                        "location": "path",
+                        "description": "API version"
+                    }
+                }
+            }
+
+            mapper = APIParamMapper(schema)
+            inputs = {
+                "document": "http://example.com/doc.pdf",
+                "title": "My Document",
+                "user_id": 123,
+                "auth_token": "token123",
+                "version": "v1"
+            }
+
+            result = mapper.map(inputs)
+
+            assert result[APIParamLocation.FORM] == {
+                "document": {"form_handler_type": "file", "value": "http://example.com/doc.pdf"}
+            }
+            assert result[APIParamLocation.BODY] == {"title": "My Document"}
+            assert result[APIParamLocation.QUERY] == {"user_id": 123}
+            assert result[APIParamLocation.HEADER] == {"auth_token": "token123"}
+            assert result[APIParamLocation.PATH] == {"version": "v1"}
+
+    class TestFormHandlerTypeProcessing:
+        """Form parameter form_handler_type processing"""
+
+        @staticmethod
+        def test_default_form_handler_type():
+            """Default form_handler_type"""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "location": "form",
+                        "description": "File without form_handler_type"
+                    }
+                }
+            }
+
+            mapper = APIParamMapper(schema)
+            result = mapper.map({"file": "http://example.com/file.pdf"})
+
+            assert result[APIParamLocation.FORM] == {
+                "file": {"form_handler_type": "default", "value": "http://example.com/file.pdf"}
+            }
+
+        @staticmethod
+        def test_custom_form_handler_type():
+            """Custom form_handler_type"""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "data": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "custom",
+                        "description": "Custom handler data"
+                    }
+                }
+            }
+
+            mapper = APIParamMapper(schema)
+            result = mapper.map({"data": "custom_value"})
+
+            assert result[APIParamLocation.FORM] == {
+                "data": {"form_handler_type": "custom", "value": "custom_value"}
+            }
+
+        @staticmethod
+        def test_empty_form_handler_type():
+            """Empty form_handler_type"""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "",
+                        "description": "File with empty form_handler_type"
+                    }
+                }
+            }
+
+            mapper = APIParamMapper(schema)
+            result = mapper.map({"file": "http://example.com/file.pdf"})
+
+            assert result[APIParamLocation.FORM] == {
+                "file": {"form_handler_type": "", "value": "http://example.com/file.pdf"}
+            }
+
+    class TestFormParamValueProcessing:
+        """Form parameter value processing"""
+
+        @staticmethod
+        def test_form_param_value_is_none():
+            """Form parameter value is None"""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "form_field": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "Form field"
+                    }
+                }
+            }
+
+            mapper = APIParamMapper(schema)
+            result = mapper.map({"form_field": None})
+
+            assert result[APIParamLocation.FORM] == {}
+
+        @staticmethod
+        def test_form_param_value_is_empty_string():
+            """Form parameter value is empty string"""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "form_field": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "Form field"
+                    }
+                }
+            }
+
+            mapper = APIParamMapper(schema)
+            result = mapper.map({"form_field": ""})
+
+            assert result[APIParamLocation.FORM] == {}
+
+        @staticmethod
+        def test_form_param_value_is_valid():
+            """Form parameter value is valid"""
+            schema = {
+                "type": "object",
+                "properties": {
+                    "form_field": {
+                        "type": "string",
+                        "location": "form",
+                        "form_handler_type": "default",
+                        "description": "Form field"
+                    }
+                }
+            }
+
+            mapper = APIParamMapper(schema)
+            result = mapper.map({"form_field": "test_value"})
+
+            assert result[APIParamLocation.FORM] == {
+                "form_field": {"form_handler_type": "default", "value": "test_value"}
+            }
+
+        @staticmethod
+        def test_inputs_not_contain_form_param():
+            """inputs does not contain form parameter"""
+            mapper = APIParamMapper(FORM_TYPE_SCHEMA)
+            result = mapper.map({"name": "test"})
+
+            assert result[APIParamLocation.FORM] == {}
+            assert result[APIParamLocation.BODY] == {"name": "test"}
+
+    class TestEmptySchemaProcessing:
+        """Empty schema processing"""
+
+        @staticmethod
+        def test_empty_schema_uses_default_location():
+            """Empty schema processing"""
+            mapper = APIParamMapper(schema=None)
+            result = mapper.map({"field": "value"})
+
+            assert result[APIParamLocation.BODY] == {"field": "value"}

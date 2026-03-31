@@ -263,7 +263,7 @@ async def invoke(inputs: Input, **kwargs) -> Output
 
 **参数**：
 
-* **inputs**(Input)：输入参数，将根据配置映射到 Body、Query、Path 或 Header。
+* **inputs**(Input)：输入参数，将根据配置映射到 Body、Query、Path、Header 或 Form。
 * **\*\*kwargs**：可选参数，支持可选参数如下：
   * **skip_inputs_validate** (bool)：输入`inputs`是否基于`ToolCard`的`input_params`进行校验。默认为`True`。
   * **max_response_byte_size**（int): HTTP回复最大的字节长度，默认为`RestfulApiCard`的`max_response_byte_size`值。

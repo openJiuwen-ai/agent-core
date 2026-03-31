@@ -111,6 +111,7 @@
         - [tool](2.开发指南/API文档/openjiuwen.core/foundation/tool.README.md)
           - [tool](2.开发指南/API文档/openjiuwen.core/foundation/tool/tool.md)
           - [auth](2.开发指南/API文档/openjiuwen.core/foundation/tool/auth/auth.md)
+          - [form_handler](2.开发指南/API文档/openjiuwen.core/foundation/tool/form_handler/form_handler.md)
         - [prompt](2.开发指南/API文档/openjiuwen.core/foundation/prompt/template.md)
         - [store](2.开发指南/API文档/openjiuwen.core/foundation/store.README.md)
           - [store](2.开发指南/API文档/openjiuwen.core/foundation/store/store.md)

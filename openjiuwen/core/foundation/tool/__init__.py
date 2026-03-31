@@ -15,6 +15,7 @@ from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import St
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.foundation.tool.service_api.restful_api import RestfulApi, RestfulApiCard
 from openjiuwen.core.foundation.tool.tool import tool
+from openjiuwen.core.foundation.tool.form_handler.form_handler_manager import FormHandler, FormHandlerManager
 
 __all__ = [
     # constants/alias/func
@@ -39,4 +40,7 @@ __all__ = [
     "StdioClient",
     "PlaywrightClient",
     "StreamableHttpClient",
+    # tool form handler and handler manager
+    "FormHandler",
+    "FormHandlerManager",
 ]
