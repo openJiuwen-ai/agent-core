@@ -163,10 +163,25 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
         # 2 planned rounds + 1 follow_up round.
         self.assertEqual(len(fake_react.invoke_calls), 3)
 
-        # steer is drained at next round start and injected into query.
-        second_query = fake_react.invoke_calls[1]["inputs"]["query"]
-        self.assertIn("[STEERING]", second_query)
-        self.assertIn("please format as bullet points", second_query)
+        # Steer is passed as a shared asyncio.Queue via
+        # _steering_queue in the inputs dict (no longer
+        # concatenated into the query string).
+        second_inputs = fake_react.invoke_calls[1]["inputs"]
+        second_query = second_inputs["query"]
+        self.assertNotIn("[STEERING]", second_query)
+        sq = second_inputs.get("_steering_queue")
+        self.assertIsNotNone(sq)
+        # The ControlledReactAgent does not drain the queue,
+        # so the steer message should still be pending.
+        msgs = []
+        while not sq.empty():
+            try:
+                msgs.append(sq.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        self.assertIn(
+            "please format as bullet points", msgs
+        )
 
         # Persisted TaskPlan should mark planned tasks as completed.
         persisted = session.get_state("deepagent")

@@ -124,20 +124,6 @@ class TaskLoopEventExecutor(TaskExecutor):
             meta = tasks[0].metadata or {}
             is_follow_up = bool(meta.get("is_follow_up", False))
 
-        handler = agent.event_handler
-        if handler is not None:
-            queues = getattr(
-                handler, "interaction_queues", None
-            )
-            if queues is not None:
-                steering = queues.drain_steering()
-                if steering:
-                    combined = "\n".join(steering)
-                    query = (
-                        f"{query}\n\n"
-                        f"[STEERING] {combined}"
-                    )
-
         coordinator = agent.loop_coordinator
         iteration = (
             (coordinator.current_iteration + 1)
@@ -198,6 +184,18 @@ class TaskLoopEventExecutor(TaskExecutor):
                 effective["run_kind"] = metadata.get("run_kind")
             if metadata.get("run_context") is not None:
                 effective["run_context"] = metadata.get("run_context")
+
+        # Pass steering queue reference so the inner
+        # ReAct loop can drain it before each model call.
+        handler = agent.event_handler
+        if handler is not None:
+            queues = getattr(
+                handler, "interaction_queues", None
+            )
+            if queues is not None:
+                effective["_steering_queue"] = (
+                    queues.steering
+                )
 
         try:
             result = await agent.react_agent.invoke(

@@ -498,6 +498,12 @@ class AbilityManager:
                 context=ctx.context,
                 extra=ctx.extra,
             )
+            # Propagate steering queue so after_tool_call
+            # rails can push_steering() on the same queue.
+            if ctx.steering_queue is not None:
+                tool_ctx.bind_steering_queue(
+                    ctx.steering_queue
+                )
             tool_contexts.append(tool_ctx)
             tasks.append(
                 self._railed_execute_single_tool_call(

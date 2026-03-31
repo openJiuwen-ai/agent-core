@@ -1150,6 +1150,9 @@ class ReActAgent(BaseAgent):
             ctx.extra["user_id"] = inputs.get("user_id", "")
             ctx.extra["run_kind"] = inputs.get("run_kind", "")
             ctx.extra["run_context"] = inputs.get("run_context", "")
+            _sq = inputs.get("_steering_queue")
+            if _sq is not None:
+                ctx.bind_steering_queue(_sq)
 
         try:
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
@@ -1210,6 +1213,20 @@ class ReActAgent(BaseAgent):
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
+                        # Inject pending steering messages
+                        # before the next model call.
+                        steering = ctx.drain_steering()
+                        if steering:
+                            combined = "\n".join(steering)
+                            await context.add_messages(
+                                UserMessage(
+                                    content=(
+                                        f"[STEERING] "
+                                        f"{combined}"
+                                    )
+                                )
+                            )
+
                         ai_message = await self._call_model(
                             ctx,
                             context,
@@ -1227,6 +1244,12 @@ class ReActAgent(BaseAgent):
                         )
 
                         if not ai_message.tool_calls:
+                            # If steering arrived while the
+                            # model was generating, continue
+                            # the loop so the next iteration
+                            # drains and injects it.
+                            if ctx.has_pending_steering():
+                                continue
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}
                             invoke_inputs.result = result

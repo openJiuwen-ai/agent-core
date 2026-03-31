@@ -251,6 +251,9 @@ class AgentCallbackContext:
     _force_finish_request: Optional[ForceFinishRequest] = field(
         default=None, init=False, repr=False
     )
+    _steering_queue: Optional[asyncio.Queue] = field(
+        default=None, init=False, repr=False
+    )
 
     async def fire(
         self, event: AgentCallbackEvent
@@ -305,6 +308,68 @@ class AgentCallbackContext:
     def has_force_finish_request(self) -> bool:
         """Check whether a force-finish request is pending."""
         return self._force_finish_request is not None
+
+    # ---- Steering runtime control ----
+
+    def bind_steering_queue(
+        self, queue: asyncio.Queue,
+    ) -> None:
+        """Bind an external steering queue.
+
+        Wires the same ``asyncio.Queue`` that the
+        EventHandler writes to, so the inner agent loop
+        can drain pending steering messages before each
+        model call.
+
+        Args:
+            queue: The shared asyncio.Queue instance.
+        """
+        self._steering_queue = queue
+
+    def push_steering(self, msg: str) -> None:
+        """Push a steering message into the queue.
+
+        Safe no-op if no queue is bound.
+
+        Args:
+            msg: Steering instruction text.
+        """
+        if self._steering_queue is not None:
+            self._steering_queue.put_nowait(msg)
+
+    def drain_steering(self) -> List[str]:
+        """Drain all pending steering messages.
+
+        Returns:
+            List of steering message strings,
+            empty if no queue bound or queue empty.
+        """
+        if self._steering_queue is None:
+            return []
+        msgs: List[str] = []
+        while not self._steering_queue.empty():
+            try:
+                msgs.append(
+                    self._steering_queue.get_nowait()
+                )
+            except asyncio.QueueEmpty:
+                break
+        return msgs
+
+    def has_pending_steering(self) -> bool:
+        """Check whether steering messages are pending.
+
+        Returns:
+            True if a queue is bound and non-empty.
+        """
+        if self._steering_queue is None:
+            return False
+        return not self._steering_queue.empty()
+
+    @property
+    def steering_queue(self) -> Optional[asyncio.Queue]:
+        """Return the bound steering queue, or None."""
+        return self._steering_queue
 
     @asynccontextmanager
     async def lifecycle(
