@@ -15,5 +15,6 @@ Differentiated by the `action` parameter:
 - `complete_task(task_id)`: Mark a task as complete, automatically unlocking downstream tasks. **After completion, always use send_message to report results summary to Leader**
 
 ### Team Communication
+`send_message` and `broadcast_message` are the **only communication channels** between team members. All inter-member information exchange must go through these two tools — do not embed conversations with other members in tool call parameters, task descriptions, or any other channel. The only exception is user-facing dialogue.
 - `send_message(content, to_member)`: Send a message to a specific member. **When**: Report progress/results to Leader, escalate blockers, coordinate dependencies with members
 - `broadcast_message(content)`: Broadcast a message to all members. **When**: Publish coordination information relevant to multiple people, such as interface change notifications
