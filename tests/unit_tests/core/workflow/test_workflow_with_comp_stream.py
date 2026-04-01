@@ -647,6 +647,7 @@ async def test_node_with_dual_stream_abilities_transform_and_stream():
     for chunk in stream_chunks:
         if hasattr(chunk, 'payload'):
             output_payloads.append(chunk.payload.get('output', {}))
+            logger.info(chunk)
 
     # Verify STREAM ability output from C (uses B.result=3 as input: a=3, b=3, result=6)
     stream_keys = {'a', 'op', 'b', 'result'}

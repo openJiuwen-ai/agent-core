@@ -21,10 +21,10 @@ from openjiuwen.core.workflow import LoopSetVariableComponent
 from openjiuwen.core.workflow import Start
 from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.session import InteractiveInput, InteractionOutput
+from openjiuwen.core.session import InteractiveInput, InteractionOutput, WORKFLOW_EXECUTE_TIMEOUT
 from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import create_workflow_session
-from openjiuwen.core.session.stream import BaseStreamMode, CustomSchema, TraceSchema
+from openjiuwen.core.session.stream import BaseStreamMode, CustomSchema, OutputSchema, TraceSchema
 from openjiuwen.core.workflow import Workflow, WorkflowExecutionState, WorkflowOutput
 from openjiuwen.core.workflow import ComponentAbility
 from openjiuwen.core.workflow.components.flow.loop.loop_comp import AdvancedLoopComponent
@@ -1251,7 +1251,6 @@ async def test_workflow_with_loop_component_multi_abilities():
                                     state=WorkflowExecutionState.COMPLETED)
 
 
-
 async def test_executor_single_interupt_component():
     class CustomQuesNode(WorkflowComponent):
         async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
@@ -1260,6 +1259,7 @@ async def test_executor_single_interupt_component():
             logger.info(f'result: {result}')
 
             return {"result": result, 'inputs': inputs}
+
     component = CustomQuesNode()
     session = create_workflow_session(session_id="123")
     # 3. create Vertex instance
@@ -1412,7 +1412,7 @@ async def test_sub_flow_stream_output():
     result = await flow.invoke({"inputs": {"a": 1, "b": 2}}, create_workflow_session())
     assert result.result == {
         "output": [{"result": "输出:"}, {"result": 1}, {"result": "+"}, {"result": 2}, {"result": "="},
-    {"result": 3}, {"result": ";输出1:"}, {"result": 3}]}
+                   {"result": 3}, {"result": ";输出1:"}, {"result": 3}]}
     assert result.state == WorkflowExecutionState.COMPLETED
 
 
@@ -1424,6 +1424,7 @@ async def test_single_component_execution():
 
             logger.info(f"exec_id: {exec_id}， invoke done")
             return {"result": "result"}
+
     component = CustomComponent()
     session = create_workflow_session()
     # 3. create Vertex instance
@@ -1445,10 +1446,9 @@ async def test_single_component_execution():
     assert result == {'result': 'result'}
 
 
-
 async def test_workflow_cancel():
     import asyncio
-    
+
     class CustomComponent(WorkflowComponent):
         async def invoke(self, inputs: Input, session: Session, context: ModelContext):
             await asyncio.sleep(0.1)
@@ -1492,7 +1492,7 @@ async def test_questioner_context_sharing():
         api_key="mock_key"
     )
     model_config = ModelRequestConfig(model="mock_model")
-    
+
     # Create two questioner components with chat history enabled
     questioner_config_1 = QuestionerConfig(
         model_client_config=model_client,
@@ -1502,7 +1502,7 @@ async def test_questioner_context_sharing():
         with_chat_history=True,
         chat_history_max_rounds=5
     )
-    
+
     questioner_config_2 = QuestionerConfig(
         model_client_config=model_client,
         model_config=model_config,
@@ -1511,10 +1511,10 @@ async def test_questioner_context_sharing():
         with_chat_history=True,
         chat_history_max_rounds=5
     )
-    
+
     questioner_1 = QuestionerComponent(questioner_comp_config=questioner_config_1)
     questioner_2 = QuestionerComponent(questioner_comp_config=questioner_config_2)
-    
+
     # Create workflow: Start -> Questioner1 -> Questioner2 -> End
     workflow = Workflow(card=WorkflowCard(name="test_questioner_context", id="test_ctx", version="0.0.1"))
     workflow.set_start_comp("s", Start(), inputs_schema={"query": "${query}"})
@@ -1524,33 +1524,33 @@ async def test_questioner_context_sharing():
     workflow.add_connection("s", "q1")
     workflow.add_connection("q1", "q2")
     workflow.add_connection("q2", "e")
-    
+
     # Create mock context
     context = AsyncMock(spec=ModelContext)
     messages_store = []
-    
+
     async def mock_add_messages(msgs):
         messages_store.extend(msgs)
-    
+
     async def mock_get_context_window(dialogue_round=5):
         mock_window = MagicMock()
         mock_window.get_messages.return_value = messages_store[-dialogue_round * 2:] if messages_store else []
         return mock_window
-    
+
     context.add_messages = mock_add_messages
     context.get_context_window = mock_get_context_window
-    
+
     # Create session with context
     session = create_workflow_session()
     session._context = context
-    
+
     # Verify that messages are written to context
     # After workflow execution, context should contain:
     # 1. User message from initial query
     # 2. Assistant message from questioner 1's question
     # 3. User message from questioner 1's feedback
     # 4. Assistant message from questioner 2's question
-    
+
     # Note: This is a structural test to verify the fix
     # The actual workflow execution would require mocking LLM responses
     assert True  # Placeholder - full integration test would go here
@@ -1617,3 +1617,55 @@ async def test_questioner_writes_to_context():
     await handler._write_user_message_to_context("Should not write", context)
     assert len(messages_written) == 0  # No message should be written
 
+
+class TransformNode(WorkflowComponent):
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        result = await session.interact("输入1")
+        yield {"question": result}
+
+
+class TransformNode2(WorkflowComponent):
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        result = await session.interact("输入2")
+        yield {"question": result}
+
+
+async def test_two_iterative_node_and_recover_each():
+    workflow = Workflow(card=WorkflowCard(id="test"))
+    workflow.set_start_comp("start", Start())
+    workflow.add_workflow_comp("quest1", TransformNode())
+    workflow.add_workflow_comp("quest2", TransformNode2())
+
+    workflow.set_end_comp("end", End({"response_template": "####result1={{result1}}, result2={{result2}}####"}),
+                          stream_inputs_schema={"result1": "${quest1}", "result2": "${quest2}"},
+                          response_mode="streaming")
+
+    workflow.add_connection("start", "quest1")
+    workflow.add_connection("start", "quest2")
+    workflow.add_stream_connection("quest1", "end")
+    workflow.add_stream_connection("quest2", "end")
+
+    async for chunk in workflow.stream(inputs={}, session=create_workflow_session(session_id="1",
+                                                                                  envs={WORKFLOW_EXECUTE_TIMEOUT: 10}),
+                                       stream_modes=[BaseStreamMode.OUTPUT]):
+        logger.info(f'1. ----- {chunk}')
+
+    inputs = InteractiveInput()
+    inputs.update("quest1", "aa")
+    async for chunk in workflow.stream(inputs=inputs, session=create_workflow_session(session_id="1", envs={
+        WORKFLOW_EXECUTE_TIMEOUT: 10}),
+                                       stream_modes=[BaseStreamMode.OUTPUT]):
+        logger.info(f'2. ----- {chunk}')
+
+    inputs = InteractiveInput()
+    inputs.update("quest2", "bb")
+    chunks = []
+    async for chunk in workflow.stream(inputs=inputs, session=create_workflow_session(session_id="1", envs={
+        WORKFLOW_EXECUTE_TIMEOUT: 10}), stream_modes=[BaseStreamMode.OUTPUT]):
+        chunks.append(chunk)
+    right_chunks = [
+        OutputSchema(type='end node stream', index=0, payload={'response': '####result1='}),
+        OutputSchema(type='end node stream', index=1, payload={'response': ', result2='}),
+        OutputSchema(type='end node stream', index=2, payload={'response': {'question': 'bb'}}),
+        OutputSchema(type='end node stream', index=3, payload={'response': '####'})]
+    assert chunks == right_chunks
