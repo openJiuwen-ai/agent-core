@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Tuple, Union, Optional
+from typing import List, Tuple, Union, Optional, Dict
 
 from pydantic import BaseModel
 
@@ -43,7 +43,9 @@ class ContextEngineeringRail(DeepAgentRail):
             self,
             processors: Union[
                 Tuple[str, BaseModel],
+                Tuple[str, Dict],
                 List[Tuple[str, BaseModel]],
+                List[Tuple[str, Dict]],
                 None,
             ] = None,
             preset: bool = True,
@@ -51,12 +53,13 @@ class ContextEngineeringRail(DeepAgentRail):
         """Initialize ContextEngineeringRail.
 
         Args:
-            processors: One or more (processor_key, config_obj) pairs.
+            processors: One or more (processor_key, config) pairs.
                         processor_key must match the processor's registered name
                         (e.g. "DialogueCompressor", "MessageOffloader").
-                        Config_obj must be an instance of the processor's
-                        BaseModel config class.
-                        用户配置的增量添加，相同 key 会替换预置或已有的配置。
+                        config can be either:
+                        - BaseModel: 整对象替换预置配置
+                        - dict: 字段级别合并到预置配置（只覆盖指定的字段，其他使用预置默认值）
+                        用户配置的增量添加，相同 key 会替换/合并预置或已有的配置。
             preset: 是否启用预置的默认 processor 配置。默认为 True。
         """
         super().__init__()
@@ -64,7 +67,7 @@ class ContextEngineeringRail(DeepAgentRail):
         self._ability_manager = None
 
         self._preset = preset
-        self._user_processors: List[Tuple[str, BaseModel]] = []
+        self._user_processors: List[Tuple[str, Union[BaseModel, Dict]]] = []
         if processors is not None:
             if isinstance(processors, tuple):
                 self._user_processors = [processors]
@@ -72,27 +75,82 @@ class ContextEngineeringRail(DeepAgentRail):
                 self._user_processors = list(processors)
 
     @staticmethod
-    def _merge_processors(
-            base: List[Tuple[str, BaseModel]],
-            overrides: List[Tuple[str, BaseModel]],
-    ) -> List[Tuple[str, BaseModel]]:
-        """合并两个 processor 列表，overrides 中的条目替换 base 中相同 key 的条目。
+    def _merge_config_with_overrides(
+            base_config: BaseModel,
+            overrides: Dict,
+    ) -> BaseModel:
+        """将 overrides dict 的字段合并到 base_config，保留 base 中未在 overrides 中指定的字段。
 
         Args:
-            base: 基础 processor 列表。
-            overrides: 增量配置列表，相同 key 会替换 base 中的配置。
+            base_config: 基础配置对象（Pydantic BaseModel）。
+            overrides: 要合并的 dict，只会覆盖指定的字段。
+
+        Returns:
+            合并后的配置对象。
+        """
+        if not overrides:
+            return base_config
+
+        base_dict = base_config.model_dump(exclude_none=True)
+        merged = {**base_dict, **overrides}
+
+        return type(base_config)(**merged)
+
+    @staticmethod
+    def _merge_processors(
+            base: List[Tuple[str, BaseModel]],
+            overrides: List[Tuple[str, Union[BaseModel, Dict]]],
+            model_config=None,
+            model_client_config=None,
+    ) -> List[Tuple[str, BaseModel]]:
+        """合并两个 processor 列表，overrides 中的条目替换/合并 base 中相同 key 的条目。
+
+        支持 BaseModel 对象（整对象替换）和 dict（字段级别合并）两种格式。
+
+        Args:
+            base: 基础 processor 列表（预置 processors）。
+            overrides: 增量配置列表，dict 格式会与 base 中同名 key 的配置做字段级别合并，
+                      BaseModel 格式会整对象替换。
+            model_config: 模型配置，用于需要 model 的 processor。
+            model_client_config: 模型客户端配置。
 
         Returns:
             合并后的 processor 列表。
         """
-        result = list(base)
-        for key, cfg in overrides:
-            for i, (ptype, _) in enumerate(result):
-                if ptype == key:
-                    result[i] = (key, cfg)
-                    break
-            else:
+        result: List[Tuple[str, BaseModel]] = []
+        override_keys = {key for key, _ in overrides}
+
+        for key, cfg in base:
+            if key not in override_keys:
                 result.append((key, cfg))
+
+        for key, override_cfg in overrides:
+            base_cfg = None
+            for k, c in base:
+                if k == key:
+                    base_cfg = c
+                    break
+
+            if base_cfg is not None:
+                if isinstance(override_cfg, dict):
+                    merged_cfg = ContextEngineeringRail._merge_config_with_overrides(base_cfg, override_cfg)
+                else:
+                    merged_cfg = override_cfg
+            else:
+                if isinstance(override_cfg, dict):
+                    raise ValueError(
+                        f"Processor '{key}' 在预置中不存在，无法从 dict 创建配置。"
+                        " 请确保预置中已包含此 processor，或传入完整的 BaseModel 配置对象。"
+                    )
+                merged_cfg = override_cfg
+
+            if hasattr(merged_cfg, "model") and getattr(merged_cfg, "model", None) is None:
+                merged_cfg.model = model_config
+            if hasattr(merged_cfg, "model_client") and getattr(merged_cfg, "model_client", None) is None:
+                merged_cfg.model_client = model_client_config
+
+            result.append((key, merged_cfg))
+
         return result
 
 
@@ -118,16 +176,6 @@ class ContextEngineeringRail(DeepAgentRail):
 
         presets: List[Tuple[str, BaseModel]] = [
             (
-                "DialogueCompressor",
-                DialogueCompressorConfig(
-                    messages_threshold=40,
-                    tokens_threshold=100000,
-                    keep_last_round=False,
-                    model=model_cfg,
-                    model_client=model_client_config,
-                ),
-            ),
-            (
                 "MessageOffloader",
                 MessageOffloaderConfig(
                     messages_threshold=40,
@@ -136,6 +184,16 @@ class ContextEngineeringRail(DeepAgentRail):
                     trim_size=5000,
                     offload_message_type=["tool"],
                     keep_last_round=False,
+                ),
+            ),
+            (
+                "DialogueCompressor",
+                DialogueCompressorConfig(
+                    messages_threshold=40,
+                    tokens_threshold=100000,
+                    keep_last_round=False,
+                    model=model_cfg,
+                    model_client=model_client_config,
                 ),
             ),
         ]
@@ -155,9 +213,17 @@ class ContextEngineeringRail(DeepAgentRail):
             all_processors = self._merge_processors(
                 self._build_preset_processors(model_config, model_client_config),
                 self._user_processors,
+                model_config=model_config,
+                model_client_config=model_client_config,
             )
         else:
-            all_processors = list(self._user_processors)
+            all_processors = self._merge_processors(
+                [],
+                self._user_processors,
+                model_config=model_config,
+                model_client_config=model_client_config,
+            )
+
 
         config.context_processors = all_processors
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)

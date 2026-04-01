@@ -9,6 +9,7 @@ from typing import (
     TYPE_CHECKING, Tuple, cast,
 )
 import asyncio
+from pathlib import Path
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -142,9 +143,10 @@ class DeepAgent(BaseAgent):
         # Only do this if factory hasn't already processed it
         if config.workspace is not None:
             agent_id = self.card.id or "default"
-            if f"/{agent_id}_workspace" not in config.workspace.root_path:
-                base_path = config.workspace.root_path
-                config.workspace.root_path = f"{base_path}/{agent_id}_workspace"
+            root = Path(config.workspace.root_path)
+            expected_suffix = f"{agent_id}_workspace"
+            if root.name != expected_suffix:
+                config.workspace.root_path = str(root / expected_suffix)
 
         if self._deep_config is None:
             self._initial_configure(config)

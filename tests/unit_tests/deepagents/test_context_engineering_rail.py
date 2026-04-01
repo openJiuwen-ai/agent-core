@@ -129,13 +129,13 @@ async def test_init_processors_merge(tmp_path: Path):
         (False, None, []),
         (False, [("custom", DialogueCompressorConfig(messages_threshold=25))], ["custom"]),
         (False, [("d", DialogueCompressorConfig(messages_to_keep=5))], ["d"]),
-        (True, None, ["DialogueCompressor", "MessageOffloader"]),
+        (True, None, ["MessageOffloader", "DialogueCompressor"]),
         (True, [("d", DialogueCompressorConfig(messages_threshold=99))],
-         ["DialogueCompressor", "MessageOffloader", "d"]),
+         ["MessageOffloader", "DialogueCompressor", "d"]),
         (True, [("c", DialogueCompressorConfig(messages_to_keep=5))],
-         ["DialogueCompressor", "MessageOffloader", "c"]),
+         ["MessageOffloader", "DialogueCompressor", "c"]),
         (True, [("DialogueCompressor", DialogueCompressorConfig(messages_threshold=99))],
-         ["DialogueCompressor", "MessageOffloader"]),
+         ["MessageOffloader", "DialogueCompressor"]),
     ]
     for preset, processors, expected_keys in cases:
         sys_operation = _make_sys_operation(tmp_path)
