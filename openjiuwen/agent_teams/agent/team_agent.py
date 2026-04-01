@@ -213,7 +213,8 @@ class TeamAgent(BaseAgent):
         language = agent_spec.language or "cn"
         self._role_policy = role_policy(ctx.role, language=language)
 
-        workspace_obj = agent_spec.workspace.build() if agent_spec.workspace else None
+        workspace_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
+        workspace_obj = workspace_spec.build() if workspace_spec else None
         model = agent_spec.model.build() if agent_spec.model else None
 
         messager_config = ctx.messager_config

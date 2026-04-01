@@ -142,7 +142,7 @@ class EventDispatcher:
             content = event.payload.get("content", "")
             if host.is_agent_running():
                 team_logger.info("user_input → follow_up (agent running)")
-                await host.follow_up(content)
+                await host.steer(content)
             else:
                 team_logger.info("user_input → start_agent (agent idle)")
                 await host.start_agent(content)
@@ -220,7 +220,7 @@ class EventDispatcher:
     # Message handling
     # ------------------------------------------------------------------
 
-    async def _process_unread_messages(self, member_id: str, *, use_steer: bool = False) -> None:
+    async def _process_unread_messages(self, member_id: str, *, use_steer: bool = True) -> None:
         """Read unread messages, feed to agent one by one, loop until no new messages.
 
         Args:
@@ -275,7 +275,7 @@ class EventDispatcher:
             f"[收到{msg_type}] message_id={msg.message_id}, "
             f"来自: {msg.from_member}\n"
             f"内容: {msg.content}\n"
-            f"提示: 如果对方在提问或等待回复，请务必通过 send_message 回复 {msg.from_member}"
+            f"提示: 如果对方在提问或等待回复，请务必通过 send_message 工具回复 {msg.from_member}"
         )
 
     # ------------------------------------------------------------------
