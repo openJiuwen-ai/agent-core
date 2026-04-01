@@ -419,6 +419,8 @@ class TeamBackend:
         all_shutdown = True
         members = await self.db.get_team_members(self.team_id)
         for member_data in members:
+            if member_data.member_id == self.member_id:
+                continue
             if member_data.status != MemberStatus.SHUTDOWN.value:
                 member_id = member_data.member_id
                 team_logger.info(f"Member {member_id} is not shutdown (status: {member_data.status})")

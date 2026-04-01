@@ -1,0 +1,193 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Team SQLModel definitions and dynamic model factories.
+
+Static tables: Team, TeamMember.
+Dynamic (per-session) tables: TeamTask, TeamTaskDependency, TeamMessage, MessageReadStatus.
+Configuration: DatabaseType, DatabaseConfig.
+"""
+
+import copy
+from typing import Dict, Optional, cast
+
+from sqlmodel import SQLModel, Field
+from sqlmodel.main import SQLModelMetaclass
+
+from openjiuwen.agent_teams.tools.context import get_session_id
+
+
+# ----------------- Static Table Models -----------------
+
+class Team(SQLModel, table=True):
+    """Team info table model"""
+    __tablename__ = "team_info"
+
+    team_id: str = Field(primary_key=True)
+    name: str = Field(nullable=False)
+    leader_member_id: str = Field(nullable=False)
+    desc: Optional[str] = Field(default=None, nullable=True)
+    prompt: Optional[str] = Field(default=None, nullable=True)
+    created: int = Field(nullable=False)
+
+
+class TeamMember(SQLModel, table=True):
+    """Team member table model"""
+    __tablename__ = "team_member"
+
+    member_id: str = Field(primary_key=True)
+    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    name: str = Field(nullable=False)
+    desc: Optional[str] = Field(default=None, nullable=True)
+    agent_card: str = Field(nullable=False)
+    status: str = Field(nullable=False)
+    execution_status: Optional[str] = Field(default=None, nullable=True)
+    mode: str = Field(nullable=False)
+    prompt: Optional[str] = Field(default=None, nullable=True)
+
+
+# ============== Dynamic Table Base Classes (abstract) ==============
+
+class TeamTaskBase(SQLModel):
+    """Base class for task tables (one per session)"""
+    __abstract__ = True
+
+    task_id: str = Field(primary_key=True)
+    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    title: str = Field(nullable=False)
+    content: str = Field(nullable=False)
+    status: str = Field(nullable=False, index=True)
+    assignee: Optional[str] = Field(default=None, nullable=True, index=True)
+    completed_at: Optional[int] = Field(default=None, nullable=True, index=True)
+
+    def brief(self) -> dict:
+        """Return a lightweight summary (id + title + status) for write-op responses."""
+        return {"task_id": self.task_id, "title": self.title, "status": self.status}
+
+
+class TeamTaskDependencyBase(SQLModel):
+    """Base class for task dependency tables (one per session)"""
+    __abstract__ = True
+
+    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    resolved: Optional[bool] = Field(default=False, nullable=True, index=True)
+
+
+class TeamMessageBase(SQLModel):
+    """Base class for team message table (one per session)"""
+    __abstract__ = True
+
+    message_id: str = Field(primary_key=True)
+    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    from_member: str = Field(nullable=False)
+    to_member: Optional[str] = Field(default=None, nullable=True, index=True)
+    content: str = Field(nullable=False)
+    timestamp: int = Field(nullable=False, index=True)
+    broadcast: bool = Field(nullable=False, index=True)
+    # is_read only for non-broadcast messages, indicates if the recipient has read the message
+    is_read: bool = Field(default=False, nullable=True, index=True)
+
+
+class MessageReadStatusBase(SQLModel):
+    """Base class for message read status table (one per session)
+
+    Tracks which broadcast message each member has read up to.
+    Each member has one record per team, storing the timestamp of the broadcast message they have read.
+    """
+    __abstract__ = True
+
+    member_id: str = Field(primary_key=True)
+    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    read_at: Optional[int] = Field(default=None, nullable=True, index=True)
+
+
+# ============== Dynamic Model Caches & Factories ==============
+
+_task_models: Dict[str, type[TeamTaskBase]] = {}
+_task_dependency_models: Dict[str, type[TeamTaskDependencyBase]] = {}
+_message_models: Dict[str, type[TeamMessageBase]] = {}
+_message_read_status_models: Dict[str, type[MessageReadStatusBase]] = {}
+
+
+def _get_task_model() -> type[TeamTaskBase]:
+    """Get or create dynamic task model for current session"""
+    session_id = get_session_id()
+    if session_id not in _task_models:
+        class_name = f"TeamTask_{session_id}"
+        table_name = f"team_task_{session_id}"
+
+        attrs = {
+            "__tablename__": table_name
+        }
+
+        model_cls = SQLModelMetaclass(class_name, (TeamTaskBase,), attrs, table=True)
+
+        _task_models[session_id] = cast(type[TeamTaskBase], model_cls)
+
+    return _task_models[session_id]
+
+
+def _get_task_dependency_model() -> type[TeamTaskDependencyBase]:
+    """Get or create dynamic task dependency model for current session"""
+    session_id = get_session_id()
+    if session_id not in _task_dependency_models:
+        class_name = f"TeamTaskDependency_{session_id}"
+        table_name = f"team_task_dependency_{session_id}"
+
+        attrs = {
+            "__tablename__": table_name,
+            "__annotations__": {}
+        }
+
+        attrs["__annotations__"]["task_id"] = str
+        attrs["task_id"] = Field(nullable=False, foreign_key=f"team_task_{session_id}.task_id", ondelete="CASCADE",
+                                 primary_key=True)
+
+        attrs["__annotations__"]["depends_on_task_id"] = str
+        attrs["depends_on_task_id"] = Field(nullable=False, foreign_key=f"team_task_{session_id}.task_id",
+                                            ondelete="CASCADE", primary_key=True)
+
+        model_cls = SQLModelMetaclass(class_name, (TeamTaskDependencyBase,), attrs, table=True)
+
+        _task_dependency_models[session_id] = cast(type[TeamTaskDependencyBase], model_cls)
+
+    return _task_dependency_models[session_id]
+
+
+def _get_message_model() -> type[TeamMessageBase]:
+    """Get or create dynamic message model for current session"""
+    session_id = get_session_id()
+    if session_id not in _message_models:
+        class_name = f"TeamMessage_{session_id}"
+        table_name = f"team_message_{session_id}"
+
+        attrs = {
+            "__tablename__": table_name
+        }
+
+        model_cls = SQLModelMetaclass(class_name, (TeamMessageBase,), attrs, table=True)
+
+        _message_models[session_id] = cast(type[TeamMessageBase], model_cls)
+
+    return _message_models[session_id]
+
+
+def _get_message_read_status_model() -> type[MessageReadStatusBase]:
+    """Get or create dynamic message read status model for current session"""
+    session_id = get_session_id()
+    if session_id not in _message_read_status_models:
+        class_name = f"MessageReadStatus_{session_id}"
+        table_name = f"message_read_status_{session_id}"
+
+        attrs = {
+            "__tablename__": table_name,
+            "__annotations__": dict(MessageReadStatusBase.__annotations__),
+        }
+        for field_name, field_info in MessageReadStatusBase.model_fields.items():
+            attrs[field_name] = copy.deepcopy(field_info)
+
+        model_cls = SQLModelMetaclass(class_name, (MessageReadStatusBase,), attrs, table=True)
+
+        _message_read_status_models[session_id] = cast(type[MessageReadStatusBase], model_cls)
+
+    return _message_read_status_models[session_id]
