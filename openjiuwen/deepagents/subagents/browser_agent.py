@@ -36,8 +36,7 @@ except ImportError:
         return language if language in {"cn", "en"} else "cn"
 
 if TYPE_CHECKING:
-    from openjiuwen.deepagents.schema.stop_condition import StopCondition
-    from openjiuwen.deepagents.schema.workspace import Workspace
+    from openjiuwen.deepagents.workspace.workspace import Workspace
 
 
 BROWSER_AGENT_FACTORY_NAME = "browser_agent"
@@ -105,7 +104,6 @@ def build_browser_agent_config(
     tools: Optional[List[Tool | ToolCard]] = None,
     mcps: Optional[List[McpServerConfig]] = None,
     rails: Optional[List[AgentRail]] = None,
-    stop_condition: Optional["StopCondition"] = None,
     enable_task_loop: bool = False,
     max_iterations: int = 15,
     workspace: Optional[str | "Workspace"] = None,
@@ -142,7 +140,6 @@ def build_browser_agent_config(
         language=resolved_language,
         prompt_mode=prompt_mode,
         enable_task_loop=enable_task_loop,
-        stop_condition=stop_condition,
         max_iterations=max_iterations,
         factory_name=BROWSER_AGENT_FACTORY_NAME,
         factory_kwargs={"settings": resolved_settings},
@@ -158,7 +155,6 @@ def create_browser_agent(
     mcps: Optional[List[McpServerConfig]] = None,
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
-    stop_condition: Optional["StopCondition"] = None,
     enable_task_loop: bool = False,
     max_iterations: int = 15,
     workspace: Optional[str | "Workspace"] = None,
@@ -207,7 +203,6 @@ def create_browser_agent(
         mcps=mcps,
         subagents=subagents,
         rails=final_rails,
-        stop_condition=stop_condition,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
         workspace=workspace,

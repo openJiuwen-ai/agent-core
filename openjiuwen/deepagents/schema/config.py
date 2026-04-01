@@ -160,8 +160,6 @@ class DeepAgentConfig:
             When True and subagents are configured, SessionRail is mounted instead of SubagentRail.
         add_general_purpose_agent: Add general-purpose agent.
             When True, a general-purpose agent is added as sub-agents.
-        stop_condition: Conditions to terminate the task
-            loop.
         max_iterations: Maximum ReAct iterations per
             single invoke.
         subagents: Sub-agent specifications or Sub-agent instance.
@@ -227,7 +225,6 @@ class SubAgentConfig:
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
     enable_task_loop: bool = False
-    stop_condition: Optional[StopCondition] = None
     max_iterations: Optional[int] = None
     factory_name: Optional[str] = None
     factory_kwargs: dict[str, Any] = field(default_factory=dict)
