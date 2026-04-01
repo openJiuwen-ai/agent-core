@@ -8,7 +8,7 @@ Model definitions live in models.py.
 """
 
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 from sqlalchemy import select, update, event
