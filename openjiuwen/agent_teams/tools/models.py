@@ -36,7 +36,7 @@ class TeamMember(SQLModel, table=True):
     __tablename__ = "team_member"
 
     member_id: str = Field(primary_key=True)
-    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    team_id: str = Field(primary_key=True, foreign_key="team_info.team_id", ondelete="CASCADE")
     name: str = Field(nullable=False)
     desc: Optional[str] = Field(default=None, nullable=True)
     agent_card: str = Field(nullable=False)
@@ -97,7 +97,7 @@ class MessageReadStatusBase(SQLModel):
     __abstract__ = True
 
     member_id: str = Field(primary_key=True)
-    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
+    team_id: str = Field(primary_key=True, foreign_key="team_info.team_id", ondelete="CASCADE")
     read_at: Optional[int] = Field(default=None, nullable=True, index=True)
 
 
