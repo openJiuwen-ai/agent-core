@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from openjiuwen.agent_teams.agent.coordination import (
@@ -15,6 +16,7 @@ from openjiuwen.agent_teams.tools.team_events import TeamEvent
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.schema.team import TeamSpec
     from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
     from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 
@@ -45,6 +47,10 @@ class DispatcherHost(Protocol):
 
     @property
     def task_manager(self) -> TeamTaskManager | None:
+        ...
+
+    @property
+    def team_spec(self) -> TeamSpec | None:
         ...
 
     def is_agent_ready(self) -> bool:
@@ -133,6 +139,8 @@ class EventDispatcher:
             team_logger.debug("task trigger detected, nudging idle agent: member_id={}", member_id)
             await self._nudge_idle_agent(member_id)
 
+    _MENTION_RE = re.compile(r"^@(\S+)\s+([\s\S]+)$")
+
     async def _handle_inner_event(self, event: InnerEventMessage) -> None:
         """Handle local inner events (user input, polling)."""
         host = self._host
@@ -140,6 +148,13 @@ class EventDispatcher:
 
         if event.event_type == InnerEventType.USER_INPUT:
             content = event.payload.get("content", "")
+
+            mention = self._parse_mention(content)
+            if mention is not None:
+                target, body = mention
+                await self._send_user_direct_message(target, body)
+                return
+
             if host.is_agent_running():
                 team_logger.info("user_input → follow_up (agent running)")
                 await host.steer(content)
@@ -160,6 +175,35 @@ class EventDispatcher:
             team_logger.debug("poll mailbox: member_id={}", member_id)
             if member_id and host.message_manager:
                 await self._process_unread_messages(member_id)
+
+    # ------------------------------------------------------------------
+    # User @mention helpers
+    # ------------------------------------------------------------------
+
+    def _parse_mention(self, content: str) -> tuple[str, str] | None:
+        """Parse ``@member_id message`` from user input.
+
+        Returns (member_id, message_body) when the target member exists
+        in the team spec, otherwise None (falls through to normal path).
+        """
+        m = self._MENTION_RE.match(content)
+        if m is None:
+            return None
+        target, body = m.group(1), m.group(2)
+        spec = self._host.team_spec
+        if spec is None or spec.get_member(target) is None:
+            team_logger.warning("@mention target '{}' not found in team spec, falling through", target)
+            return None
+        return target, body
+
+    async def _send_user_direct_message(self, to_member: str, content: str) -> None:
+        """Write a user→member direct message via the existing message manager."""
+        mm = self._host.message_manager
+        if mm is None:
+            team_logger.warning("message_manager unavailable, cannot send user direct message")
+            return
+        msg_id = await mm.send_message(content, to_member, from_member="user")
+        team_logger.info("user direct message sent to {}: {}", to_member, msg_id)
 
     # ------------------------------------------------------------------
     # Member events

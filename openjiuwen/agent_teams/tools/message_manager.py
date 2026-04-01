@@ -58,19 +58,22 @@ class TeamMessageManager:
         self,
         content: str,
         to_member: str,
+        from_member: str | None = None,
     ) -> Optional[str]:
         """Send a point-to-point message.
 
         Args:
             content: Message content.
             to_member: Recipient member ID.
+            from_member: Override sender ID. Defaults to self.member_id.
         """
+        sender = from_member or self.member_id
         message_id = str(uuid.uuid4())
 
         success = await self.db.create_message(
             message_id=message_id,
             team_id=self.team_id,
-            from_member=self.member_id,
+            from_member=sender,
             content=content,
             to_member=to_member,
             broadcast=False,
@@ -85,7 +88,7 @@ class TeamMessageManager:
                 message=EventMessage.from_event(MessageEvent(
                     message_id=message_id,
                     team_id=self.team_id,
-                    from_member=self.member_id,
+                    from_member=sender,
                     to_member=to_member,
                 )),
             )
@@ -93,7 +96,7 @@ class TeamMessageManager:
         except Exception as e:
             team_logger.error(f"Failed to publish message event for {message_id}: {e}")
 
-        team_logger.info(f"Message sent from {self.member_id} to {to_member}: {message_id}")
+        team_logger.info(f"Message sent from {sender} to {to_member}: {message_id}")
         return message_id
 
     async def broadcast_message(self, content: str) -> Optional[str]:

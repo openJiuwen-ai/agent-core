@@ -24,6 +24,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamSpec,
 )
+from openjiuwen.agent_teams.agent.coordination import InnerEventMessage, InnerEventType
 from openjiuwen.agent_teams.tools.team_events import (
     EventMessage,
     TeamEvent,
@@ -119,4 +120,95 @@ async def test_wake_feeds_messages_to_agent():
     await asyncio.sleep(0.1)
 
     await agent._stop_coordination()
+    agent._start_agent.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# @mention direct message tests
+# ------------------------------------------------------------------
+
+def _make_leader_with_teammate() -> TeamAgent:
+    """Create a leader with a teammate in team_spec for @mention tests."""
+    agent = _make_leader()
+    teammate = TeamMemberSpec(
+        member_id="dev-1",
+        name="Dev",
+        role_type=TeamRole.TEAMMATE,
+        persona="developer",
+        domain="backend",
+    )
+    agent._ctx.team_spec.add_member(teammate)
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_mention_routes_direct_message():
+    """@member_id pattern sends a direct message from 'user', bypassing leader agent."""
+    agent = _make_leader_with_teammate()
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock(return_value="msg-123")
+    agent._start_agent = AsyncMock()
+
+    await agent._start_coordination(session=None)
+    await agent.interact("@dev-1 请完成这个任务")
+    await asyncio.sleep(0.1)
+    await agent._stop_coordination()
+
+    agent._message_manager.send_message.assert_called_once_with(
+        "请完成这个任务", "dev-1", from_member="user",
+    )
+    agent._start_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mention_invalid_member_falls_through():
+    """@nonexistent falls through to normal leader-agent path."""
+    agent = _make_leader_with_teammate()
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock()
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+
+    await agent._start_coordination(session=None)
+    await agent.interact("@nonexistent hello")
+    await asyncio.sleep(0.1)
+    await agent._stop_coordination()
+
+    agent._message_manager.send_message.assert_not_called()
+    agent._start_agent.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_no_mention_normal_flow():
+    """Plain message without @ goes through existing leader flow."""
+    agent = _make_leader_with_teammate()
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock()
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+
+    await agent._start_coordination(session=None)
+    await agent.interact("普通消息")
+    await asyncio.sleep(0.1)
+    await agent._stop_coordination()
+
+    agent._message_manager.send_message.assert_not_called()
+    agent._start_agent.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_mention_no_body_falls_through():
+    """@member_id with no message body falls through (regex requires body)."""
+    agent = _make_leader_with_teammate()
+    agent._message_manager = MagicMock()
+    agent._message_manager.send_message = AsyncMock()
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+
+    await agent._start_coordination(session=None)
+    await agent.interact("@dev-1")
+    await asyncio.sleep(0.1)
+    await agent._stop_coordination()
+
+    agent._message_manager.send_message.assert_not_called()
     agent._start_agent.assert_called_once()
