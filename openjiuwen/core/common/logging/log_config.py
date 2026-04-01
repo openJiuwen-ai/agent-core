@@ -11,7 +11,7 @@ from openjiuwen.core.common.logging.default.config_provider import (
     build_default_logger_config,
     load_default_backend_config,
 )
-from openjiuwen.core.common.logging.loguru.constant import (
+from openjiuwen.core.common.logging.default.constant import (
     DEFAULT_INNER_LOG_CONFIG as DEFAULT_DEFAULT_LOG_CONFIG,
 )
 from openjiuwen.core.common.logging.loguru.config_provider import (

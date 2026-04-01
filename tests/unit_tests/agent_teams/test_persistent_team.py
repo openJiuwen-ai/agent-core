@@ -2,25 +2,34 @@
 
 """Unit tests for persistent team feature."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import (
+    AsyncMock,
+)
 
 import pytest
 import pytest_asyncio
 
-from openjiuwen.agent_teams.agent.coordination import CoordinationLoop, InnerEventType
+from openjiuwen.agent_teams.agent.coordination import (
+    CoordinationLoop,
+)
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
-from openjiuwen.agent_teams.tools.context import set_session_id, reset_session_id
+from openjiuwen.agent_teams.schema.team import (
+    TeamMemberSpec,
+    TeamRole,
+)
+from openjiuwen.agent_teams.tools.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.status import (
-    MemberStatus,
-    MEMBER_TRANSITIONS,
     is_valid_transition,
+    MEMBER_TRANSITIONS,
+    MemberStatus,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_events import (

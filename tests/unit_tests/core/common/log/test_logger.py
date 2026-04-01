@@ -2,13 +2,13 @@
 Test log function
 """
 
-from contextlib import contextmanager
 import importlib
 import logging
 import os
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from io import StringIO
 from typing import (
     Any,
@@ -20,9 +20,9 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import (
-    LogManager,
-    LoggerProtocol,
     get_session_id,
+    LoggerProtocol,
+    LogManager,
     set_session_id,
 )
 from openjiuwen.core.common.logging.default import DefaultLogger
@@ -968,10 +968,10 @@ class TestLogDirectoryCreation:
 
             with pytest.raises(BaseError) as exc_info:
                 DefaultLogger('test_failure', config)
-            
+
             assert exc_info.value.code == StatusCode.COMMON_LOG_PATH_INIT_FAILED.code
             assert "common log_path initialization failed" in exc_info.value.message
-    
+
     @staticmethod
     def test_create_existing_directory_no_error(temp_config_dir):
         """No error will be reported when the test directory already exists"""
@@ -1023,6 +1023,6 @@ class TestLogDirectoryCreation:
 
         with pytest.raises(BaseError) as exc_info:
             DefaultLogger('test_sensitive', config)
-        
+
         assert exc_info.value.code == StatusCode.COMMON_LOG_PATH_INVALID.code
         assert "common log_path is invalid" in exc_info.value.message.lower()

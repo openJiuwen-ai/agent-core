@@ -59,7 +59,9 @@ class LogManager:
         default_logger_class = cls._get_default_logger_class(resolved_backend)
 
         if log_config:
-            all_configs: Dict[str, Dict[str, Any]] = log_config.get_all_configs(backend=cls._selected_backend)  # type: ignore[attr-defined]
+            all_configs: Dict[str, Dict[str, Any]] = log_config.get_all_configs(  # type: ignore[attr-defined]
+                backend=cls._selected_backend
+            )
             for log_type, config in all_configs.items():  # type: ignore[misc]
                 if log_type not in cls._loggers:
                     cls._loggers[log_type] = default_logger_class(log_type, config)  # type: ignore[call-arg]
@@ -110,7 +112,9 @@ class LogManager:
             log_config = cls._get_log_config()
 
             if log_config:
-                config = log_config.get_custom_config(log_type, backend=cls._selected_backend)  # type: ignore[attr-defined]
+                config = log_config.get_custom_config(  # type: ignore[attr-defined]
+                    log_type, backend=cls._selected_backend
+                )
             else:
                 raise RuntimeError(f"LogConfig not available. Cannot create logger for '{log_type}'.")
 
@@ -148,16 +152,15 @@ class LogManager:
         cls._selected_backend = None
         try:
             from openjiuwen.core.common.logging import reset_lazy_loggers
+        except ImportError:
+            return
+        reset_lazy_loggers()
 
-            reset_lazy_loggers()
-        except Exception:
-            pass
         try:
             from openjiuwen.core.common.logging.events import reset_common_logger_cache
-
-            reset_common_logger_cache()
-        except Exception:
-            pass
+        except ImportError:
+            return
+        reset_common_logger_cache()
 
     @classmethod
     def _get_default_logger_class(cls, backend: Optional[str] = None) -> Type[LoggerProtocol]:

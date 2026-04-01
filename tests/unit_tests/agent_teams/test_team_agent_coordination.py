@@ -18,13 +18,12 @@ from openjiuwen.agent_teams.schema.blueprint import (
     LeaderSpec,
     TeamAgentSpec,
 )
-from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
+    TeamRuntimeContext,
     TeamSpec,
 )
-from openjiuwen.agent_teams.agent.coordination import InnerEventMessage, InnerEventType
 from openjiuwen.agent_teams.tools.team_events import (
     EventMessage,
     TeamEvent,
@@ -128,6 +127,7 @@ async def test_wake_feeds_messages_to_agent():
 def _make_leader_with_teammate() -> TeamAgent:
     """Create a leader with a mocked get_team_member for @mention tests."""
     agent = _make_leader()
+
     async def _has_team_member(mid: str) -> bool:
         return mid == "dev-1"
 

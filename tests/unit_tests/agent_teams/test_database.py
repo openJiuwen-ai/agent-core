@@ -8,11 +8,14 @@ import asyncio
 import pytest
 import pytest_asyncio
 
-from openjiuwen.agent_teams.tools.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.tools.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.tools.database import (
-    TeamDatabase,
     DatabaseConfig,
     DatabaseType,
+    TeamDatabase,
 )
 from openjiuwen.core.single_agent import AgentCard
 
@@ -290,7 +293,7 @@ class TestMemberOperations:
             member_id="member3",
             team_id="team6",
             name="Member Three",
-            agent_card = agent_card,
+            agent_card=agent_card,
             status="ready"
         )
 
@@ -1131,7 +1134,7 @@ class TestTaskDependencyOperations:
 
         # Verify: claimed task status is not changed
         claimed_task = await db.get_task("task_claimed")
-        assert(claimed_task.status == "claimed")
+        assert (claimed_task.status == "claimed")
 
     @pytest.mark.asyncio
     async def test_add_task_with_nonexistent_dependent_fails(self, db):

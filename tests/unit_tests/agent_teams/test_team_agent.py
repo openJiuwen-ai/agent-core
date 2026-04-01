@@ -8,11 +8,14 @@ import pytest
 
 from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TransportSpec
-from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+from openjiuwen.agent_teams.schema.blueprint import (
+    DeepAgentSpec,
+    TransportSpec,
+)
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
+    TeamRuntimeContext,
     TeamSpec,
 )
 from openjiuwen.core.runner.spawn import SpawnAgentKind

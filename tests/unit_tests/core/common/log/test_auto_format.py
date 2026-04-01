@@ -3,11 +3,11 @@
 
 import logging
 from io import StringIO
-from typing import Any, Dict
+from typing import (
+    Any,
+    Dict,
+)
 
-import pytest
-
-from tests.test_logger import logger
 from openjiuwen.core.common.logging.base_impl import StructuredLoggerMixin
 from openjiuwen.core.common.logging.default.default_impl import DefaultLogger
 from openjiuwen.core.common.logging.loguru.loguru_impl import LoguruLogger

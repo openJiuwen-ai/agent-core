@@ -12,15 +12,21 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.tools.context import set_session_id, reset_session_id
+from openjiuwen.agent_teams.tools.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
-    TeamDatabase, Team, TeamMember,
+    Team,
+    TeamDatabase,
+    TeamMember,
 )
 from openjiuwen.agent_teams.tools.status import (
     ExecutionStatus,
-    MemberStatus, TaskStatus,
+    MemberStatus,
+    TaskStatus,
 )
 from openjiuwen.agent_teams.tools.team import (
     TeamBackend,
@@ -212,7 +218,8 @@ class TestApprovePlan:
             agent_card=sample_agent_card
         )
 
-        with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock, return_value="msg123") as mock_send:
+        with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock,
+                          return_value="msg123") as mock_send:
             await agent_team.approve_plan(
                 member_id="member1",
                 approved=True,
@@ -237,7 +244,8 @@ class TestApprovePlan:
             agent_card=sample_agent_card
         )
 
-        with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock, return_value="msg123") as mock_send:
+        with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock,
+                          return_value="msg123") as mock_send:
             await agent_team.approve_plan(
                 member_id="member1",
                 approved=False,
@@ -270,7 +278,8 @@ class TestApprovePlan:
             agent_card=sample_agent_card
         )
 
-        with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock, return_value="msg123") as mock_send:
+        with patch.object(agent_team.message_manager, 'send_message', new_callable=AsyncMock,
+                          return_value="msg123") as mock_send:
             await agent_team.approve_plan(
                 member_id="member1",
                 approved=True
@@ -538,7 +547,7 @@ class TestGetMember:
         await agent_team.spawn_member(
             member_id="member1",
             name="Member One",
-                       agent_card=sample_agent_card,
+            agent_card=sample_agent_card,
             desc="Test description"
         )
 

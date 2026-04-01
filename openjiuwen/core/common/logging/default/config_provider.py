@@ -56,6 +56,7 @@ _DEFAULT_ALLOWED_ROOT_KEYS = {
     "performance_output",
     "log_file_pattern",
     "backup_file_pattern",
+    "propagate",
     "loggers",
 }
 _DEFAULT_ALLOWED_LOGGER_KEYS = {"level"}
@@ -148,7 +149,9 @@ def build_default_logger_config(logging_config: Dict[str, Any], log_type: str) -
         "backend": "default",
         "log_file": _resolve_log_file(log_path, configured_log_file),
         "output": copy.deepcopy(configured_output),
-        "level": normalize_log_level(logging_config.get("level", DEFAULT_INNER_LOG_CONFIG.get("level", WARNING)), WARNING),
+        "level": normalize_log_level(
+            logging_config.get("level", DEFAULT_INNER_LOG_CONFIG.get("level", WARNING)), WARNING
+        ),
         "structured_output_format": logging_config.get(
             "structured_output_format",
             DEFAULT_INNER_LOG_CONFIG.get("structured_output_format", "json"),

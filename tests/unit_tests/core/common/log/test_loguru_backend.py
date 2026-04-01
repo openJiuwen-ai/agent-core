@@ -187,11 +187,12 @@ def test_yaml_backend_can_bootstrap_loguru_backend(tmp_path, capsys):
         assert "common | TRACE-YAML | yaml backend active" in output
 
 
-def test_builtin_default_backend_initializes_common_with_loguru_class():
+def test_builtin_default_backend_initializes_common_with_default_class():
     LogManager.reset()
     logger = LogManager.get_logger("common")
 
-    assert isinstance(logger, _get_loguru_logger_class())
+    from openjiuwen.core.common.logging.default.default_impl import DefaultLogger
+    assert isinstance(logger, DefaultLogger)
 
 
 def test_runtime_reconfigure_rebuilds_common_and_runner_loggers(tmp_path, capsys):
@@ -308,7 +309,8 @@ def test_event_type_can_emit_event_first_json_payload(tmp_path):
     assert payload["trace_id"] == "TRACE-EVENT-FIRST"
     assert payload["message"] == "Agent started"
     assert payload["metadata"]["_log_context"]["log_type"] == "common"
-    assert payload["metadata"]["_log_context"]["source"]["function"] == "test_event_type_can_emit_event_first_json_payload"
+    assert payload["metadata"]["_log_context"]["source"][
+               "function"] == "test_event_type_can_emit_event_first_json_payload"
 
 
 def test_event_object_event_first_json_preserves_metadata_and_context(tmp_path):

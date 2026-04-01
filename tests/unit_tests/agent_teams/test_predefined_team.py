@@ -8,18 +8,26 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
-from openjiuwen.agent_teams.tools.context import set_session_id, reset_session_id
+from openjiuwen.agent_teams.schema.team import (
+    TeamMemberSpec,
+    TeamRole,
+)
+from openjiuwen.agent_teams.tools.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.status import MemberStatus, ExecutionStatus
+from openjiuwen.agent_teams.tools.status import (
+    ExecutionStatus,
+    MemberStatus,
+)
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     create_team_tools,
-    LEADER_TOOLS,
 )
 from tests.test_logger import logger
 

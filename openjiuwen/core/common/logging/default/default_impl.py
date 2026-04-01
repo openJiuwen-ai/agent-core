@@ -259,7 +259,7 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
             level = logging.WARNING
 
         self._logger.setLevel(level)
-        self._logger.propagate = False
+        self._logger.propagate = self.config.get("propagate", True)
 
         # Get output targets and log file path
         output = self.config.get("output", ["console"])

@@ -7,12 +7,15 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.tools.database import (
-    TeamDatabase,
     DatabaseConfig,
     DatabaseType,
+    TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.member import TeamMember
-from openjiuwen.agent_teams.tools.status import MemberStatus, ExecutionStatus
+from openjiuwen.agent_teams.tools.status import (
+    ExecutionStatus,
+    MemberStatus,
+)
 from openjiuwen.core.multi_agent.team_runtime.message_bus import MessageBus
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 

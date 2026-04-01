@@ -42,7 +42,8 @@ class _EventStreamSink:
         self._stream.write(message.record["extra"]["event_serialized"] + "\n")
         self._stream.flush()
 
-    def stop(self) -> None:
+    @staticmethod
+    def stop() -> None:
         return
 
 

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TransportSpec
+from openjiuwen.agent_teams.schema.blueprint import (
+    DeepAgentSpec,
+    TransportSpec,
+)
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,

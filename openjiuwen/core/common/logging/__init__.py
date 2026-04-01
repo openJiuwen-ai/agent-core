@@ -91,13 +91,17 @@ class LazyLogger:
             self._logger = current_logger
         return getattr(self._logger, name)
 
+    def reset(self) -> None:
+        """Clear the cached logger so it rebinds on next access."""
+        self._logger = None
+
 
 def reset_lazy_loggers() -> None:
     """Clear cached module-level lazy loggers so they rebind after reconfiguration."""
     global _initialized
     _initialized = False
     for lazy_logger in _lazy_loggers:
-        lazy_logger._logger = None
+        lazy_logger.reset()
 
 
 # ========== General Loggers ==========

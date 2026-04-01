@@ -127,11 +127,7 @@ class TeamAgentSpec(BaseModel):
         """Materialize a configured TeamAgent from this spec."""
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent
         from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
-        from openjiuwen.agent_teams.schema.team import (
-            TeamMemberSpec,
-            TeamRole,
-            TeamSpec,
-        )
+        from openjiuwen.agent_teams.schema.team import TeamRole, TeamSpec
         from openjiuwen.agent_teams.tools.database import DatabaseConfig as _DatabaseConfig
 
         leader_agent = self.agents.get("leader")

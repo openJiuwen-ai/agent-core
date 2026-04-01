@@ -54,7 +54,9 @@ def normalize_loguru_logging_config(logging_config: Any, default_level: int = IN
         defaults_config = {}
 
     effective_default_level = normalize_log_level(
-        defaults_config.get("level", normalized_config.get("level", DEFAULT_INNER_LOG_CONFIG["defaults"].get("level", default_level))),
+        defaults_config.get(
+            "level", normalized_config.get("level", DEFAULT_INNER_LOG_CONFIG["defaults"].get("level", default_level))
+        ),
         default_level,
     )
 

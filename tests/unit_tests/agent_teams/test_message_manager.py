@@ -9,11 +9,15 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.tools.context import set_session_id, reset_session_id
+from openjiuwen.agent_teams.tools.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
-    TeamDatabase, TeamMessageBase,
+    TeamDatabase,
+    TeamMessageBase,
 )
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.core.single_agent import AgentCard
@@ -133,6 +137,7 @@ class TestSendMessage:
             assert msg.content == f"Message {i}"
             assert msg.message_id == message_ids[i]
 
+
 # ==================== Test broadcast_message ====================
 
 class TestBroadcastMessage:
@@ -142,7 +147,7 @@ class TestBroadcastMessage:
     async def test_broadcast_message_success(self, team_messaging):
         """Test successful broadcast message sending"""
         leader_messaging = TeamMessageManager(team_messaging.team_id, member_id="leader", db=team_messaging.db,
-                                           messager=message_bus)
+                                              messager=message_bus)
 
         message_id = await leader_messaging.broadcast_message(
             content="Team meeting at 3PM",
@@ -186,6 +191,7 @@ class TestBroadcastMessage:
             assert msg.broadcast is True
             assert msg.from_member == senders[i]
             assert msg.message_id == message_ids[i]
+
 
 # ==================== Test get_messages ====================
 
@@ -252,6 +258,7 @@ class TestGetMessages:
         assert len(direct_messages) == 1
         assert direct_messages[0].broadcast is False
 
+
 # ==================== Test get_broadcast_messages ====================
 
 class TestGetBroadcastMessages:
@@ -311,6 +318,7 @@ class TestGetBroadcastMessages:
             assert msg.broadcast is True
             assert msg.to_member is None
 
+
 # ==================== Test. mark_message_read ====================
 
 class TestMarkMessageRead:
@@ -369,6 +377,7 @@ class TestMarkMessageRead:
         # is_read only for non-broadcast messages, indicates if the recipient has read the message
         assert broadcasts[0].is_read is False
         assert broadcasts[0].broadcast is True
+
 
 # ==================== Test Integration Scenarios ====================
 
