@@ -6,3 +6,4 @@ This section covers the development guide for the openJiuwen multi-agent framewo
 - [TeamRuntime and CommunicableAgent](./TeamRuntime-and-CommunicableAgent.md)
 - [BaseTeam](./BaseTeam.md)
 - [Agent as Tool](./AgentAsTool.md)
+- [AgentTeams](./AgentTeams.md)

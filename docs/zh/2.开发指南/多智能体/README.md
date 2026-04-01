@@ -6,3 +6,4 @@
 - [TeamRuntime 与 CommunicableAgent](./TeamRuntime与CommunicableAgent.md)
 - [BaseTeam 智能体团队](./BaseTeam.md)
 - [Agent as Tool](./AgentAsTool.md)
+- [AgentTeams](./AgentTeams.md)

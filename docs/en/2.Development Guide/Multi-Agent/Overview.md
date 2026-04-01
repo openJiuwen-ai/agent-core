@@ -48,10 +48,62 @@ Subscriptions support both exact matching and wildcard patterns (`*`, `?`), e.g.
 | TeamRuntime + CommunicableAgent | Lightweight runtime for directly orchestrating multi-agent collaboration |
 | BaseTeam | Team encapsulation exposing a unified invoke/stream interface |
 | Agent as Tool | Allows an Agent to be invoked as a tool by another Agent |
+| AgentTeams | Leader-Teammate collaboration framework for cross-process, persistent, and recoverable teamwork |
 
+## AgentTeams Architecture (Leader-Teammate Collaboration)
+
+AgentTeams completes complex tasks through coordinated work between a Leader and Teammates, with support for cross-process execution, persistence, and automatic recovery.
+
+### Core Concepts
+
+**Leader**
+
+- Responsible for task decomposition, assignment, and coordination
+- Manages the lifecycle of team members
+- Processes user input and routes it to the appropriate teammate
+
+**Teammate**
+
+- Executes tasks in a specific domain
+- Communicates with the Leader through the messaging system
+- Can run independently in a separate process
+
+**Architecture Components**
+
+- **Transport**: Handles inter-agent message delivery (supports `pyzmq` and `team_runtime`)
+- **Storage**: Persists team state, task lists, and messages (supports `sqlite`)
+- **CoordinationLoop**: Manages agent execution flow and event handling
+
+### Team Lifecycle
+
+| Mode | Description |
+|------|------|
+| Temporary | Automatically dissolves the team after the task is completed; suitable for one-off tasks |
+| Persistent | Preserves team state and members across sessions, supporting resume and crash recovery |
+
+### Teammate Execution Modes
+
+| Mode | Description |
+|------|------|
+| Plan Mode | A teammate must get approval from the Leader before completing a task; suitable for scenarios requiring strict control |
+| Build Mode | A teammate completes tasks directly without approval; suitable when teammates are trusted |
+
+### Advanced Features
+
+- **Health Check and Auto Recovery**: The Leader periodically checks teammate process status and automatically restarts unhealthy members
+- **Resume Support**: Supports recovering team state and members from previous sessions
+- **Cross-Process Communication**: Uses `pyzmq` to support collaboration across processes and hosts
+
+### Suitable Scenarios
+
+- Complex tasks that require cross-process collaboration
+- Long-running team projects
+- Scenarios that require persistence and recovery
+- Production environments that require health checks and automatic recovery
 
 # Related Documentation
 
+- [AgentTeams Guide](./AgentTeams.md)
 - [TeamRuntime and CommunicableAgent](./TeamRuntime-and-CommunicableAgent.md)
 - [BaseTeam](./BaseTeam.md)
 - [Agent as Tool](./AgentAsTool.md)
