@@ -457,8 +457,12 @@ class TeamAgent(BaseAgent):
         if self._coordination_loop is None:
             return
         await self._coordination_loop.stop()
+        self._close_stream()
+
+    def _close_stream(self) -> None:
+        """Send sentinel to signal stream consumers that no more data is coming."""
         if self._stream_queue is not None:
-            await self._stream_queue.put(None)
+            self._stream_queue.put_nowait(None)
 
     async def _subscribe_transport(self, team_id: str) -> None:
         """Subscribe to all TeamTopic channels on the transport."""
@@ -555,6 +559,8 @@ class TeamAgent(BaseAgent):
             await self._update_status(MemberStatus.ERROR)
         finally:
             self._agent_task = None
+            if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
+                self._close_stream()
 
     async def _execute_round(
         self,

@@ -102,11 +102,12 @@ class MessageReadStatusBase(SQLModel):
     """Base class for message read status table (one per session)
 
     Tracks which broadcast message each member has read up to.
-    Each member has one record storing the timestamp of the broadcast message they have read.
+    Each member has one record per team, storing the timestamp of the broadcast message they have read.
     """
     __abstract__ = True
 
     member_id: str = Field(primary_key=True)
+    team_id: str = Field(nullable=False, foreign_key="team_info.team_id", ondelete="CASCADE", index=True)
     read_at: Optional[int] = Field(default=None, nullable=True, index=True)
 
 
@@ -1516,24 +1517,22 @@ class TeamDatabase:
             result = await session.execute(query)
             rows = result.scalars().all()
 
-            messages = []
-            for row in rows:
-                # Check read status for this member
-                read_result = await session.execute(
-                    select(read_status_model).where(
-                        read_status_model.member_id == member_id
-                    )
+            # Fetch read status once for this member+team
+            read_result = await session.execute(
+                select(read_status_model).where(
+                    read_status_model.member_id == member_id,
+                    read_status_model.team_id == team_id,
                 )
-                read_status = read_result.scalar_one_or_none()
+            )
+            read_status = read_result.scalar_one_or_none()
 
-                if unread_only:
-                    # Only include if message is not read by this member
-                    if read_status is None or row.timestamp > read_status.read_at:
-                        messages.append(row)
-                else:
-                    messages.append(row)
+            if not unread_only:
+                return list(rows)
 
-            return messages
+            return [
+                row for row in rows
+                if read_status is None or row.timestamp > read_status.read_at
+            ]
 
     async def get_team_messages(
         self,
@@ -1597,19 +1596,19 @@ class TeamDatabase:
             if message.broadcast:
                 read_result = await session.execute(
                     select(read_status_model).where(
-                        read_status_model.member_id == member_id
+                        read_status_model.member_id == member_id,
+                        read_status_model.team_id == message.team_id,
                     )
                 )
                 read_status = read_result.scalar_one_or_none()
                 if read_status is None:
-                    # Insert new record
                     read_status = read_status_model(
                         member_id=member_id,
-                        read_at=message.timestamp
+                        team_id=message.team_id,
+                        read_at=message.timestamp,
                     )
                     session.add(read_status)
                 else:
-                    # Update existing record
                     read_status.read_at = message.timestamp
             else:
                 message.is_read = True
