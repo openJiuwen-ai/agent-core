@@ -68,6 +68,12 @@ class DispatcherHost(Protocol):
     async def cancel_agent(self) -> None:
         ...
 
+    async def pause_polls(self) -> None:
+        ...
+
+    async def resume_polls(self) -> None:
+        ...
+
     async def steer(self, content: str) -> None:
         ...
 
@@ -127,15 +133,22 @@ class EventDispatcher:
         event_type = event.event_type
         team_logger.debug("transport event: type={}, member_id={}", event_type, member_id)
 
+        if event_type == TeamEvent.STANDBY:
+            team_logger.info("[{}] received TEAM_STANDBY, pausing polls", member_id)
+            await host.pause_polls()
+            return
+
         if event_type in self._MEMBER_EVENTS:
             await self._handle_member_event(event)
             return
 
         if event_type in (TeamEvent.MESSAGE, TeamEvent.BROADCAST) and host.message_manager:
+            await host.resume_polls()
             await self._process_unread_messages(member_id)
             return
 
         if event_type in self._TASK_EVENTS and not host.is_agent_running() and host.task_manager:
+            await host.resume_polls()
             team_logger.debug("task trigger detected, nudging idle agent: member_id={}", member_id)
             await self._nudge_idle_agent(member_id)
 

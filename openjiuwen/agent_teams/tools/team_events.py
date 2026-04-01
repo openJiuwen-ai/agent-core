@@ -50,6 +50,7 @@ class TeamEvent:
     # Team lifecycle events
     CREATED = "team_created"
     CLEANED = "team_cleaned"
+    STANDBY = "team_standby"
 
     # Member lifecycle events
     MEMBER_SPAWNED = "member_spawned"
@@ -96,6 +97,11 @@ class TeamCreatedEvent(BaseEventMessage):
 
 class TeamCleanedEvent(BaseEventMessage):
     """Event published when a team is cleaned up"""
+    pass
+
+
+class TeamStandbyEvent(BaseEventMessage):
+    """Event published when a persistent team enters standby between rounds."""
     pass
 
 
@@ -182,6 +188,7 @@ class TaskUnblockedEvent(BaseEventMessage):
 _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model class
     TeamEvent.CREATED: TeamCreatedEvent,
     TeamEvent.CLEANED: TeamCleanedEvent,
+    TeamEvent.STANDBY: TeamStandbyEvent,
     TeamEvent.MEMBER_SPAWNED: MemberSpawnedEvent,
     TeamEvent.MEMBER_RESTARTED: MemberRestartedEvent,
     TeamEvent.MEMBER_STATUS_CHANGED: MemberStatusChangedEvent,

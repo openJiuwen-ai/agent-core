@@ -87,4 +87,27 @@ async def recover_agent_team(session_id: str, db_config: Optional[DatabaseConfig
     return agent
 
 
-__all__ = ["create_agent_team", "recover_agent_team"]
+async def resume_persistent_team(
+    agent: TeamAgent,
+    new_session_id: str,
+) -> TeamAgent:
+    """Resume a persistent team in a new session.
+
+    Creates a fresh session, initializes new dynamic tables for
+    tasks and messages, and returns the same agent ready for a
+    new ``invoke()`` / ``stream()`` call.
+
+    Args:
+        agent: A configured persistent-team leader that has
+            completed at least one round.
+        new_session_id: Session ID for the new round.
+    """
+    from openjiuwen.core.session.agent_team import create_agent_team_session
+
+    session = create_agent_team_session(session_id=new_session_id)
+    await session.pre_run()
+    await agent.resume_for_new_session(session)
+    return agent
+
+
+__all__ = ["create_agent_team", "recover_agent_team", "resume_persistent_team"]

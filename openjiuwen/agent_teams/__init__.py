@@ -2,7 +2,7 @@
 """AgentTeam public interfaces."""
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.factory import create_agent_team
+from openjiuwen.agent_teams.factory import create_agent_team, resume_persistent_team
 from openjiuwen.agent_teams.messager import (
     create_messager,
     TeamRuntimeMessager,
@@ -47,4 +47,5 @@ __all__ = [
     "PyZmqMessager",
     "create_messager",
     "create_agent_team",
+    "resume_persistent_team",
 ]

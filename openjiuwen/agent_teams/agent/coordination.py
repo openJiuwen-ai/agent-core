@@ -82,6 +82,7 @@ class CoordinationLoop:
         self._mailbox_poll_interval = mailbox_poll_interval
         self._task_poll_interval = task_poll_interval
         self._running = False
+        self._polls_paused = False
         self._event_queue: asyncio.Queue[CoordinationEvent] = asyncio.Queue()
         self._loop_task: Optional[asyncio.Task[None]] = None
         self._mailbox_poll_task: Optional[asyncio.Task[None]] = None
@@ -100,6 +101,11 @@ class CoordinationLoop:
     def is_running(self) -> bool:
         """Whether the background loop is active."""
         return self._running
+
+    @property
+    def polls_paused(self) -> bool:
+        """Whether periodic polling is paused."""
+        return self._polls_paused
 
     # ------------------------------------------------------
     # Lifecycle
@@ -153,6 +159,39 @@ class CoordinationLoop:
             ):
                 self._loop_task.cancel()
             self._loop_task = None
+
+    async def pause_polls(self) -> None:
+        """Stop periodic poll tasks but keep the main event loop running.
+
+        The loop can still receive transport events; only the
+        periodic mailbox/task polling is suspended.
+        """
+        if self._polls_paused:
+            return
+        team_logger.info("CoordinationLoop[{}] pausing polls", self._role.value)
+        for task in (self._mailbox_poll_task, self._task_poll_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._mailbox_poll_task = None
+        self._task_poll_task = None
+        self._polls_paused = True
+
+    async def resume_polls(self) -> None:
+        """Restart periodic poll tasks after a pause."""
+        if not self._polls_paused or not self._running:
+            return
+        team_logger.info("CoordinationLoop[{}] resuming polls", self._role.value)
+        self._mailbox_poll_task = asyncio.create_task(
+            self._poll_loop(InnerEventType.POLL_MAILBOX, self._mailbox_poll_interval),
+        )
+        self._task_poll_task = asyncio.create_task(
+            self._poll_loop(InnerEventType.POLL_TASK, self._task_poll_interval),
+        )
+        self._polls_paused = False
 
     # ------------------------------------------------------
     # Event ingress

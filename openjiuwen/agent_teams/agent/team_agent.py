@@ -182,6 +182,16 @@ class TeamAgent(BaseAgent):
         team_logger.debug("[{}] cancel_agent requested", self._member_id() or "?")
         await self._cancel_agent()
 
+    async def pause_polls(self) -> None:
+        """Pause periodic polling in the coordination loop."""
+        if self._coordination_loop:
+            await self._coordination_loop.pause_polls()
+
+    async def resume_polls(self) -> None:
+        """Resume periodic polling in the coordination loop."""
+        if self._coordination_loop:
+            await self._coordination_loop.resume_polls()
+
     async def steer(self, content: str) -> None:
         """Steer instruction into the running agent."""
         if self._deep_agent is not None:
@@ -356,9 +366,14 @@ class TeamAgent(BaseAgent):
                 last_result = chunk
             return last_result
         finally:
-            await self._stop_coordination()
-            if self._team_member:
-                await self._team_member.update_status(MemberStatus.SHUTDOWN)
+            if self.lifecycle == "persistent":
+                await self._pause_coordination()
+                if self._team_member:
+                    await self._team_member.update_status(MemberStatus.READY)
+            else:
+                await self._stop_coordination()
+                if self._team_member:
+                    await self._team_member.update_status(MemberStatus.SHUTDOWN)
             self._stream_queue = None
 
     async def stream(self, inputs, session=None, stream_modes=None):
@@ -379,9 +394,14 @@ class TeamAgent(BaseAgent):
                     break
                 yield chunk
         finally:
-            await self._stop_coordination()
-            if self._team_member:
-                await self._team_member.update_status(MemberStatus.SHUTDOWN)
+            if self.lifecycle == "persistent":
+                await self._pause_coordination()
+                if self._team_member:
+                    await self._team_member.update_status(MemberStatus.READY)
+            else:
+                await self._stop_coordination()
+                if self._team_member:
+                    await self._team_member.update_status(MemberStatus.SHUTDOWN)
             self._stream_queue = None
 
     async def interact(self, message: str) -> None:
@@ -415,10 +435,11 @@ class TeamAgent(BaseAgent):
         if session and self._spec and self.role == TeamRole.LEADER:
             self._persist_leader_config(session)
         await self._update_status(MemberStatus.READY)
-        await self._coordination_loop.start()
+        if not self._coordination_loop.is_running:
+            await self._coordination_loop.start()
         if self._messager:
             team_id = self._team_id()
-            if team_id:
+            if team_id and not self._subscribed_topics:
                 await self._subscribe_transport(team_id)
 
     async def _enqueue_mailbox_after_first_iteration(self) -> None:
@@ -446,6 +467,36 @@ class TeamAgent(BaseAgent):
                 payload={"content": query},
             )
         )
+
+    async def _pause_coordination(self) -> None:
+        """Pause coordination for persistent teams.
+
+        Publishes TEAM_STANDBY so teammates pause their polls,
+        then stops the leader's own loop without killing
+        teammate processes.
+        """
+        team_logger.info("[{}] coordination pausing (persistent)", self._member_id() or "?")
+        # Signal teammates to pause polls
+        if self._messager and self.role == TeamRole.LEADER:
+            from openjiuwen.agent_teams.tools.team_events import (
+                EventMessage,
+                TeamStandbyEvent,
+                TeamTopic,
+            )
+            from openjiuwen.agent_teams.tools.context import get_session_id
+            team_id = self._team_id()
+            if team_id:
+                try:
+                    await self._messager.publish(
+                        topic_id=TeamTopic.TEAM.build(get_session_id(), team_id),
+                        message=EventMessage.from_event(TeamStandbyEvent(team_id=team_id)),
+                    )
+                except Exception as e:
+                    team_logger.error("Failed to publish TEAM_STANDBY: {}", e)
+        await self._unsubscribe_transport()
+        if self._coordination_loop:
+            await self._coordination_loop.stop()
+        self._close_stream()
 
     async def _stop_coordination(self) -> None:
         """Stop the coordination loop, send sentinel, and unsubscribe."""
@@ -945,6 +996,26 @@ class TeamAgent(BaseAgent):
             )
         except Exception as e:
             team_logger.error("Failed to publish restart event for {}: {}", member_id, e)
+
+    async def resume_for_new_session(self, session) -> None:
+        """Prepare a persistent team for a new session.
+
+        Switches the session context, creates new dynamic tables for
+        the new session (tasks, messages), and persists leader config.
+        Existing teammate processes and DB member records are retained.
+
+        Args:
+            session: The new session to attach to.
+        """
+        from openjiuwen.agent_teams.tools.context import set_session_id
+        self._session = session
+        set_session_id(session.get_session_id())
+
+        if self._team_backend:
+            await self._team_backend.db.create_cur_session_tables()
+
+        if self._spec and self.role == TeamRole.LEADER:
+            self._persist_leader_config(session)
 
     async def recover_team(self) -> list[str]:
         """Re-launch all non-shutdown teammates from database state.
