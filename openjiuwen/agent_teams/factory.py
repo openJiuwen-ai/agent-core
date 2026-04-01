@@ -12,6 +12,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
     TeamAgentSpec,
     TransportSpec,
 )
+from openjiuwen.agent_teams.schema.team import TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 
 
@@ -23,6 +24,7 @@ def create_agent_team(
     lifecycle: str = "temporary",
     teammate_mode: str = "plan_mode",
     leader: Optional[LeaderSpec] = None,
+    predefined_members: list[TeamMemberSpec] | None = None,
     transport: Optional[TransportSpec] = None,
     storage: Optional[StorageSpec] = None,
     metadata: Optional[dict] = None,
@@ -41,6 +43,9 @@ def create_agent_team(
             "plan_mode" (require leader approval) or "build_mode"
             (complete tasks directly).
         leader: Leader identity specification (persona, domain, etc.).
+        predefined_members: Pre-configured team members. When provided,
+            leader skips ``spawn_member`` and ``build_team`` registers
+            all members automatically.
         transport: Pluggable transport layer for inter-agent messaging.
         storage: Pluggable storage layer for task/state persistence.
         metadata: Arbitrary metadata attached to the team config.
@@ -52,6 +57,7 @@ def create_agent_team(
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,
         leader=leader or LeaderSpec(),
+        predefined_members=predefined_members or [],
         transport=transport,
         storage=storage,
         metadata=metadata or {},

@@ -109,6 +109,7 @@ def build_system_prompt(
     member_id: str | None = None,
     lifecycle: str = "temporary",
     language: str = "cn",
+    predefined_team: bool = False,
 ) -> str:
     """Compose the final system prompt for one team role.
 
@@ -123,6 +124,7 @@ def build_system_prompt(
             the team members section.
         lifecycle: Team lifecycle mode ("temporary" or "persistent").
         language: Prompt language ("cn" or "en").
+        predefined_team: Whether the team uses predefined members.
     """
     labels = _I18N_LABELS.get(language, _I18N_LABELS["cn"])
 
@@ -135,6 +137,10 @@ def build_system_prompt(
 
     # Conditional sections
     member_id_section = f"{labels['member_id']}: {member_id}\n" if member_id else ""
+
+    predefined_team_section = ""
+    if predefined_team and role == TeamRole.LEADER:
+        predefined_team_section = load_template("leader_predefined_override", language).content
 
     lifecycle_section = ""
     if role == TeamRole.LEADER:
@@ -150,6 +156,7 @@ def build_system_prompt(
     return template.format({
         "member_id_section": member_id_section,
         "role_policy": role_policy_text,
+        "predefined_team_section": predefined_team_section,
         "tool_guide": tool_guide_text,
         "lifecycle_section": lifecycle_section,
         "persona_label": labels["persona"],

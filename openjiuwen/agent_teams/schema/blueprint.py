@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from openjiuwen.agent_teams.schema.team import TeamLifecycle
+from openjiuwen.agent_teams.schema.team import TeamLifecycle, TeamMemberSpec
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
@@ -121,6 +121,7 @@ class TeamAgentSpec(BaseModel):
     lifecycle: str = TeamLifecycle.TEMPORARY
     teammate_mode: str = "plan_mode"
     leader: LeaderSpec = LeaderSpec()
+    predefined_members: list[TeamMemberSpec] = []
     transport: Optional[TransportSpec] = None
     storage: Optional[StorageSpec] = None
     metadata: dict[str, Any] = {}
@@ -155,6 +156,8 @@ class TeamAgentSpec(BaseModel):
             constraints=self.constraints,
         )
         team_spec.add_member(leader_member)
+        for pm in self.predefined_members:
+            team_spec.add_member(pm)
 
         messager_config = self.transport.build() if self.transport else None
         db_config = self.storage.build() if self.storage else _DatabaseConfig()

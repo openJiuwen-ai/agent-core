@@ -239,6 +239,7 @@ class TeamAgent(BaseAgent):
             member_id=member_id,
             lifecycle=spec.lifecycle,
             language=language,
+            predefined_team=bool(spec.predefined_members),
         )
         team_logger.info("当前成员系统提示词：\n{}", system_prompt)
 
@@ -305,15 +306,18 @@ class TeamAgent(BaseAgent):
             db=db,
             messager=messager,
             teammate_mode=MemberMode(spec.teammate_mode),
+            predefined_members=spec.predefined_members or None,
         )
         self._team_backend = agent_team
         self._task_manager = agent_team.task_manager
         self._message_manager = agent_team.message_manager
 
+        exclude = {"spawn_member"} if spec.predefined_members else None
         team_tools = create_team_tools(
             role=ctx.role.value,
             agent_team=agent_team,
             on_teammate_created=self._on_teammate_created,
+            exclude_tools=exclude,
         )
 
         # Best-effort registration with Runner's

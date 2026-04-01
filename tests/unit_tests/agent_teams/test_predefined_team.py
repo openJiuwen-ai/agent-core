@@ -1,0 +1,268 @@
+# coding: utf-8
+
+"""Unit tests for predefined team feature."""
+
+from unittest.mock import AsyncMock
+
+import pytest
+import pytest_asyncio
+
+from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
+from openjiuwen.agent_teams.tools.context import set_session_id, reset_session_id
+from openjiuwen.agent_teams.tools.database import (
+    DatabaseConfig,
+    DatabaseType,
+    TeamDatabase,
+)
+from openjiuwen.agent_teams.tools.status import MemberStatus, ExecutionStatus
+from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.tools.team_tools import (
+    create_team_tools,
+    LEADER_TOOLS,
+)
+from tests.test_logger import logger
+
+
+@pytest.fixture
+def db_config():
+    return DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")
+
+
+@pytest_asyncio.fixture
+async def db(db_config):
+    token = set_session_id("session_id")
+    database = TeamDatabase(db_config)
+    try:
+        await database.initialize()
+        yield database
+    finally:
+        reset_session_id(token)
+        await database.close()
+
+
+@pytest_asyncio.fixture
+async def message_bus():
+    bus = AsyncMock(spec=Messager)
+    yield bus
+
+
+@pytest.fixture
+def predefined_members():
+    return [
+        TeamMemberSpec(
+            member_id="backend-dev",
+            name="Backend Developer",
+            persona="Senior backend engineer",
+            domain="backend",
+            prompt_hint="Check tasks and start working",
+        ),
+        TeamMemberSpec(
+            member_id="frontend-dev",
+            name="Frontend Developer",
+            persona="Senior frontend engineer",
+            domain="frontend",
+        ),
+    ]
+
+
+class TestBuildTeamWithPredefinedMembers:
+    """Test build_team writes all predefined members to DB."""
+
+    @pytest_asyncio.fixture
+    async def team_with_predefined(self, db, message_bus, predefined_members):
+        return TeamBackend(
+            team_id="predefined_team",
+            member_id="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            predefined_members=predefined_members,
+        )
+
+    @pytest.mark.asyncio
+    async def test_build_team_registers_predefined_members(self, team_with_predefined, db):
+        await team_with_predefined.build_team(
+            name="Test Team",
+            desc="A predefined team",
+            prompt="Team prompt",
+            leader_name="Leader",
+            leader_desc="PM",
+        )
+
+        members = await db.get_team_members("predefined_team")
+        member_ids = {m.member_id for m in members}
+        logger.info("Members after build_team: {}", member_ids)
+
+        assert "leader1" in member_ids
+        assert "backend-dev" in member_ids
+        assert "frontend-dev" in member_ids
+        assert len(members) == 3
+
+    @pytest.mark.asyncio
+    async def test_predefined_members_status_is_unstarted(self, team_with_predefined, db):
+        await team_with_predefined.build_team(
+            name="Test Team",
+            desc="desc",
+            prompt="prompt",
+            leader_name="Leader",
+            leader_desc="PM",
+        )
+
+        backend_dev = await db.get_member("backend-dev")
+        frontend_dev = await db.get_member("frontend-dev")
+
+        assert backend_dev.status == MemberStatus.UNSTARTED.value
+        assert frontend_dev.status == MemberStatus.UNSTARTED.value
+        assert backend_dev.execution_status == ExecutionStatus.IDLE.value
+        assert frontend_dev.execution_status == ExecutionStatus.IDLE.value
+
+    @pytest.mark.asyncio
+    async def test_predefined_members_preserve_desc_and_prompt(self, team_with_predefined, db):
+        await team_with_predefined.build_team(
+            name="Test Team",
+            desc="desc",
+            prompt="prompt",
+            leader_name="Leader",
+            leader_desc="PM",
+        )
+
+        backend_dev = await db.get_member("backend-dev")
+        frontend_dev = await db.get_member("frontend-dev")
+
+        assert backend_dev.desc == "Senior backend engineer"
+        assert backend_dev.prompt == "Check tasks and start working"
+        assert frontend_dev.desc == "Senior frontend engineer"
+        assert frontend_dev.prompt is None
+
+    @pytest.mark.asyncio
+    async def test_leader_still_registered_as_busy(self, team_with_predefined, db):
+        await team_with_predefined.build_team(
+            name="Test Team",
+            desc="desc",
+            prompt="prompt",
+            leader_name="Leader",
+            leader_desc="PM",
+        )
+
+        leader = await db.get_member("leader1")
+        assert leader.status == MemberStatus.BUSY.value
+        assert leader.execution_status == ExecutionStatus.RUNNING.value
+
+
+class TestBuildTeamWithoutPredefinedMembers:
+    """Ensure backward compatibility: empty predefined_members behaves like before."""
+
+    @pytest_asyncio.fixture
+    async def team_no_predefined(self, db, message_bus):
+        return TeamBackend(
+            team_id="auto_team",
+            member_id="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+
+    @pytest.mark.asyncio
+    async def test_build_team_only_registers_leader(self, team_no_predefined, db):
+        await team_no_predefined.build_team(
+            name="Auto Team",
+            desc="desc",
+            prompt="prompt",
+            leader_name="Leader",
+            leader_desc="PM",
+        )
+
+        members = await db.get_team_members("auto_team")
+        assert len(members) == 1
+        assert members[0].member_id == "leader1"
+
+
+class TestToolExclusion:
+    """Test spawn_member is excluded from leader tools in predefined mode."""
+
+    def test_exclude_spawn_member_when_predefined(self, predefined_members):
+        agent_team = AsyncMock()
+        agent_team.is_leader = True
+
+        tools = create_team_tools(
+            role="leader",
+            agent_team=agent_team,
+            exclude_tools={"spawn_member"},
+        )
+        tool_names = {t.card.name for t in tools}
+        logger.info("Leader tools with exclusion: {}", tool_names)
+
+        assert "spawn_member" not in tool_names
+        assert "build_team" in tool_names
+        assert "shutdown_member" in tool_names
+        assert "task_manager" in tool_names
+
+    def test_no_exclusion_without_predefined(self):
+        agent_team = AsyncMock()
+        agent_team.is_leader = True
+
+        tools = create_team_tools(
+            role="leader",
+            agent_team=agent_team,
+        )
+        tool_names = {t.card.name for t in tools}
+        logger.info("Leader tools without exclusion: {}", tool_names)
+
+        assert "spawn_member" in tool_names
+
+    def test_exclude_does_not_affect_teammate_tools(self):
+        agent_team = AsyncMock()
+        agent_team.is_leader = False
+
+        tools = create_team_tools(
+            role="teammate",
+            agent_team=agent_team,
+            exclude_tools={"spawn_member"},
+        )
+        tool_names = {t.card.name for t in tools}
+
+        assert "claim_task" in tool_names
+        assert "complete_task" in tool_names
+
+
+class TestPredefinedTeamPrompt:
+    """Test system prompt includes predefined team override."""
+
+    def test_predefined_prompt_includes_override(self):
+        from openjiuwen.agent_teams.agent.policy import build_system_prompt
+
+        prompt = build_system_prompt(
+            role=TeamRole.LEADER,
+            persona="PM",
+            domain="management",
+            predefined_team=True,
+        )
+        logger.info("Predefined prompt length: {}", len(prompt))
+
+        assert "预定义团队模式" in prompt
+        assert "spawn_member" in prompt
+
+    def test_auto_team_prompt_no_override(self):
+        from openjiuwen.agent_teams.agent.policy import build_system_prompt
+
+        prompt = build_system_prompt(
+            role=TeamRole.LEADER,
+            persona="PM",
+            domain="management",
+            predefined_team=False,
+        )
+
+        assert "预定义团队模式" not in prompt
+
+    def test_predefined_override_not_applied_to_teammate(self):
+        from openjiuwen.agent_teams.agent.policy import build_system_prompt
+
+        prompt = build_system_prompt(
+            role=TeamRole.TEAMMATE,
+            persona="Dev",
+            domain="backend",
+            predefined_team=True,
+        )
+
+        assert "预定义团队模式" not in prompt

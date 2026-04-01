@@ -14,6 +14,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.team import TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     Team,
@@ -63,6 +64,7 @@ class TeamBackend:
         db: TeamDatabase,
         messager: Messager,
         teammate_mode: MemberMode = MemberMode.PLAN_MODE,
+        predefined_members: list[TeamMemberSpec] | None = None,
     ):
         """Initialize agent team manager.
 
@@ -73,6 +75,8 @@ class TeamBackend:
             db: TeamDatabase.
             messager: Messager instance for event publishing.
             teammate_mode: Default execution mode for spawned teammates.
+            predefined_members: Pre-configured teammates to register
+                during ``build_team``.
         """
         self.team_id = team_id
         self.member_id = member_id
@@ -80,6 +84,7 @@ class TeamBackend:
         self.db = db
         self.messager = messager
         self.teammate_mode = teammate_mode
+        self.predefined_members = predefined_members or []
 
         self.task_manager = TeamTaskManager(self.team_id, member_id, self.db, messager)
         self.message_manager = TeamMessageManager(self.team_id, member_id, self.db, messager)
@@ -594,6 +599,24 @@ class TeamBackend:
             execution_status=ExecutionStatus.RUNNING,
             mode=MemberMode.BUILD_MODE,
         )
+
+        # Register predefined teammates (UNSTARTED, launched later via broadcast)
+        for member_spec in self.predefined_members:
+            member_card = AgentCard(
+                id=member_spec.member_id,
+                name=member_spec.name,
+                description=member_spec.persona,
+            )
+            await self.spawn_member(
+                member_id=member_spec.member_id,
+                name=member_spec.name,
+                agent_card=member_card,
+                desc=member_spec.persona,
+                prompt=member_spec.prompt_hint,
+                status=MemberStatus.UNSTARTED,
+                execution_status=ExecutionStatus.IDLE,
+                mode=self.teammate_mode,
+            )
 
         # Publish team created event
         session_id = get_session_id()

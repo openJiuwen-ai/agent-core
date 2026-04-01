@@ -637,12 +637,14 @@ def create_team_tools(
     role: str,
     agent_team: TeamBackend,
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
+    exclude_tools: Optional[Set[str]] = None,
 ) -> List[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
     Args:
         role: "leader" or "teammate".
         agent_team: AgentTeam instance providing task/message/db/messager.
+        exclude_tools: Tool names to exclude from the allowed set.
     """
     task_mgr = agent_team.task_manager
     msg_mgr = agent_team.message_manager
@@ -667,6 +669,8 @@ def create_team_tools(
     }
 
     allowed = LEADER_TOOLS if role == "leader" else MEMBER_TOOLS
+    if exclude_tools:
+        allowed = allowed - exclude_tools
     tools = [
         tool for name, tool in all_tools.items()
         if name in allowed
