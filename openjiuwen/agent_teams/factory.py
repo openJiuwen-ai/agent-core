@@ -20,7 +20,6 @@ def create_agent_team(
     agents: dict[str, DeepAgentSpec],
     *,
     team_name: str = "agent_team",
-    objective: str = "Coordinate a multi-agent task",
     lifecycle: str = "temporary",
     teammate_mode: str = "plan_mode",
     leader: Optional[LeaderSpec] = None,
@@ -36,7 +35,6 @@ def create_agent_team(
             ("leader", "teammate"). The "leader" key is required;
             "teammate" is optional and falls back to the leader model.
         team_name: Name of the agent team.
-        objective: High-level objective for team coordination.
         lifecycle: Team lifecycle mode — "temporary" (disband after
             completion) or "persistent" (retain team across sessions).
         teammate_mode: Default execution mode for spawned teammates —
@@ -53,7 +51,6 @@ def create_agent_team(
     spec = TeamAgentSpec(
         agents=agents,
         team_name=team_name,
-        objective=objective,
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,
         leader=leader or LeaderSpec(),

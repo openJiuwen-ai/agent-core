@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from openjiuwen.agent_teams import create_agent_team
+from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TransportSpec
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
+    TeamRuntimeContext,
 )
 
 
@@ -35,7 +37,7 @@ def test_leader_gets_management_tools():
     messaging tools."""
     leader = create_agent_team(
         _dummy_agents(),
-        team_name="test", objective="test",
+        team_name="test",
         transport=_PYZMQ_TRANSPORT,
     )
     names = _tool_names(leader)
@@ -55,18 +57,30 @@ def test_teammate_gets_execution_tools():
     messaging tools but not management-only tools."""
     leader = create_agent_team(
         _dummy_agents(),
-        team_name="test", objective="test",
+        team_name="test",
         transport=_PYZMQ_TRANSPORT,
     )
-    teammate = leader.clone_for_member(
-        TeamMemberSpec(
-            member_id="dev-1",
-            name="Dev",
-            role_type=TeamRole.TEAMMATE,
-            persona="dev",
-            domain="backend",
-        ),
+    member_spec = TeamMemberSpec(
+        member_id="dev-1",
+        name="Dev",
+        role_type=TeamRole.TEAMMATE,
+        persona="dev",
+        domain="backend",
     )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_spec=member_spec,
+        team_spec=leader._ctx.team_spec,
+        messager_config=leader._ctx.messager_config,
+        db_config=leader._ctx.db_config,
+    )
+    card = leader.card.model_copy(update={
+        "id": member_spec.member_id,
+        "name": member_spec.name,
+        "description": f"Teammate for domain {member_spec.domain}",
+    })
+    teammate = TeamAgent(card)
+    teammate.configure(leader._spec, ctx)
     names = _tool_names(teammate)
 
     # Execution tools present
@@ -90,7 +104,7 @@ def test_task_and_message_managers_are_stored():
     TeamAgent."""
     leader = create_agent_team(
         _dummy_agents(),
-        team_name="test", objective="test",
+        team_name="test",
         transport=_PYZMQ_TRANSPORT,
     )
     assert leader._task_manager is not None

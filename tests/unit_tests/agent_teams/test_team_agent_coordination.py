@@ -45,14 +45,12 @@ def _make_leader() -> TeamAgent:
     team_spec = TeamSpec(
         team_id="test-team",
         name="test-team",
-        objective="test",
+        leader_member_id="leader-1",
     )
-    team_spec.add_member(leader_member)
 
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()},
         team_name="test-team",
-        objective="test",
         leader=LeaderSpec(
             member_id="leader-1",
             name="Leader",
@@ -128,16 +126,12 @@ async def test_wake_feeds_messages_to_agent():
 # ------------------------------------------------------------------
 
 def _make_leader_with_teammate() -> TeamAgent:
-    """Create a leader with a teammate in team_spec for @mention tests."""
+    """Create a leader with a mocked get_team_member for @mention tests."""
     agent = _make_leader()
-    teammate = TeamMemberSpec(
-        member_id="dev-1",
-        name="Dev",
-        role_type=TeamRole.TEAMMATE,
-        persona="developer",
-        domain="backend",
-    )
-    agent._ctx.team_spec.add_member(teammate)
+    async def _has_team_member(mid: str) -> bool:
+        return mid == "dev-1"
+
+    agent.has_team_member = _has_team_member
     return agent
 
 

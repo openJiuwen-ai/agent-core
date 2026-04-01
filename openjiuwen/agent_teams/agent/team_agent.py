@@ -159,6 +159,12 @@ class TeamAgent(BaseAgent):
         """Return the task manager, if configured."""
         return self._task_manager
 
+    async def has_team_member(self, member_id: str) -> bool:
+        """Check whether a team member exists in the database."""
+        if self._team_backend is None:
+            return False
+        return await self._team_backend.get_member(member_id) is not None
+
     def is_agent_ready(self) -> bool:
         """Whether the agent has been fully initialized."""
         return self._deep_agent is not None
@@ -203,8 +209,17 @@ class TeamAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def configure(self, spec: TeamAgentSpec, context: TeamRuntimeContext) -> "TeamAgent":
-        """Satisfy BaseAgent.configure."""
-        return self.configure_team(spec, context)
+        """Satisfy BaseAgent.configure (sync, leader-only path)."""
+        self._setup_infra(spec, context)
+        self._setup_agent(spec, context)
+        return self
+
+    async def configure_team(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> "TeamAgent":
+        """Configure with team context fetched from DB."""
+        self._setup_infra(spec, ctx)
+        team_info, team_members = await self._fetch_team_context()
+        self._setup_agent(spec, ctx, team_info=team_info, team_members=team_members)
+        return self
 
     # ------------------------------------------------------------------
     # Team-specific configuration
@@ -214,18 +229,10 @@ class TeamAgent(BaseAgent):
         """Return the DeepAgentSpec for the given role, falling back to leader."""
         return spec.agents.get(role.value) or spec.agents["leader"]
 
-    def configure_team(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> "TeamAgent":
-        """Configure this TeamAgent and its underlying DeepAgent."""
+    def _setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
+        """Phase 1: set spec/context, create messager, register team tools."""
         self._spec = spec
         self._ctx = ctx
-        agent_spec = self._resolve_agent_spec(spec, ctx.role)
-
-        language = agent_spec.language or "cn"
-        self._role_policy = role_policy(ctx.role, language=language)
-
-        workspace_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
-        workspace_obj = workspace_spec.build() if workspace_spec else None
-        model = agent_spec.model.build() if agent_spec.model else None
 
         messager_config = ctx.messager_config
         member_id = ctx.member_id
@@ -233,7 +240,25 @@ class TeamAgent(BaseAgent):
             messager_config = messager_config.model_copy(update={"node_id": member_id})
         self._messager = create_messager(messager_config) if messager_config else None
 
-        tools = self._register_team_tools(spec, ctx, self._messager)
+        self._tool_cards = self._register_team_tools(spec, ctx, self._messager)
+
+    def _setup_agent(
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
+        *,
+        team_info: dict[str, Any] | None = None,
+        team_members: list[dict[str, str]] | None = None,
+    ) -> None:
+        """Phase 2: build prompt, create DeepAgent, set up coordination."""
+        agent_spec = self._resolve_agent_spec(spec, ctx.role)
+        language = agent_spec.language or "cn"
+        self._role_policy = role_policy(ctx.role, language=language)
+
+        workspace_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
+        workspace_obj = workspace_spec.build() if workspace_spec else None
+        model = agent_spec.model.build() if agent_spec.model else None
+        member_id = ctx.member_id
 
         from openjiuwen.agent_teams.agent.rails import FirstIterationGate
         fs_rail = FileSystemRail()
@@ -244,8 +269,8 @@ class TeamAgent(BaseAgent):
             persona=ctx.persona,
             domain=ctx.domain,
             base_prompt=agent_spec.system_prompt,
-            team_info=ctx.team_info or None,
-            team_members=ctx.team_members or None,
+            team_info=team_info,
+            team_members=team_members,
             member_id=member_id,
             lifecycle=spec.lifecycle,
             language=language,
@@ -257,7 +282,7 @@ class TeamAgent(BaseAgent):
             model=model,
             card=self.card,
             system_prompt=system_prompt,
-            tools=tools,
+            tools=self._tool_cards,
             rails=[fs_rail, self._first_iter_gate],
             workspace=workspace_obj,
             enable_task_loop=True,
@@ -284,7 +309,32 @@ class TeamAgent(BaseAgent):
             role=ctx.role,
             wake_callback=self._dispatcher.dispatch,
         )
-        return self
+
+    async def _fetch_team_context(
+        self,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, str]] | None]:
+        """Fetch team_info and team_members from DB via _team_backend."""
+        if not self._team_backend:
+            return None, None
+
+        team_info_obj = await self._team_backend.get_team_info()
+        team_info: dict[str, Any] | None = None
+        if team_info_obj:
+            team_info = {
+                "name": team_info_obj.name,
+                "desc": team_info_obj.desc or "",
+                "prompt": team_info_obj.prompt or "",
+            }
+
+        all_members = await self._team_backend.list_members()
+        team_members: list[dict[str, str]] | None = None
+        if all_members:
+            team_members = [
+                {"name": m.name, "member_id": m.member_id, "desc": m.desc or ""}
+                for m in all_members
+            ]
+
+        return team_info, team_members
 
     # ------------------------------------------------------------------
     # Role-based tool registration
@@ -697,26 +747,12 @@ class TeamAgent(BaseAgent):
             "query": initial_message or "Join the team and wait for your first assignment.",
         }
 
-    def clone_for_member(self, member_spec: TeamMemberSpec) -> "TeamAgent":
-        """Create a teammate-configured TeamAgent using the same implementation."""
-        context = self._build_member_context(member_spec)
-        card = self.card.model_copy(update={
-            "id": member_spec.member_id,
-            "name": member_spec.name,
-            "description": f"Teammate for domain {member_spec.domain}",
-        })
-        teammate = TeamAgent(card)
-        teammate.configure_team(self._spec, context)
-        return teammate
-
     def _build_member_context(self, member_spec: TeamMemberSpec) -> TeamRuntimeContext:
         """Build runtime context for one teammate from leader state."""
         return TeamRuntimeContext(
             role=member_spec.role_type,
             member_spec=member_spec,
             team_spec=self._ctx.team_spec,
-            team_info=member_spec.metadata.get("team_info", {}),
-            team_members=member_spec.metadata.get("team_members", []),
             messager_config=self._build_member_messager_config(member_spec),
             db_config=self._ctx.db_config,
         )
@@ -786,7 +822,7 @@ class TeamAgent(BaseAgent):
         return config
 
     @classmethod
-    def from_spawn_payload(cls, payload: Dict[str, Any]) -> "TeamAgent":
+    async def from_spawn_payload(cls, payload: Dict[str, Any]) -> "TeamAgent":
         """Rebuild a TeamAgent from JSON-safe spawn payload dict."""
         from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec as _Spec
         from openjiuwen.agent_teams.schema.team import TeamRuntimeContext as _Ctx
@@ -802,7 +838,7 @@ class TeamAgent(BaseAgent):
             description=f"Teammate for domain {context.domain}",
         )
         agent = cls(card)
-        agent.configure_team(spec, context)
+        await agent.configure_team(spec, context)
         return agent
 
     def _init_leader_member(self, member_id: str) -> None:
@@ -846,32 +882,12 @@ class TeamAgent(BaseAgent):
             team_logger.error("Teammate {} not found in database", member_id)
             return None, SpawnConfig()
 
-        team_info_obj = await self._team_backend.get_team_info()
-        all_members = await self._team_backend.list_members()
-
-        team_info_dict: Dict[str, Any] = {}
-        if team_info_obj:
-            team_info_dict = {
-                "name": team_info_obj.name,
-                "desc": team_info_obj.desc or "",
-                "prompt": team_info_obj.prompt or "",
-            }
-
-        team_members_info = [
-            {"name": m.name, "member_id": m.member_id, "desc": m.desc or ""}
-            for m in all_members
-        ]
-
         member_spec = TeamMemberSpec(
             member_id=teammate.member_id,
             name=teammate.name,
             persona=teammate.desc or "",
             domain=teammate.name,
             prompt_hint=teammate.prompt,
-            metadata={
-                "team_info": team_info_dict,
-                "team_members": team_members_info,
-            },
         )
         spawn_config = SpawnConfig(
             health_check_timeout=30,
@@ -1083,7 +1099,7 @@ class TeamAgent(BaseAgent):
             name=context.member_spec.name if context.member_spec else "leader",
         )
         agent = cls(card)
-        agent.configure_team(spec, context)
+        agent.configure(spec, context)
         return agent
 
 

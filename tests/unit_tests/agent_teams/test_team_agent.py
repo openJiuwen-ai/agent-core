@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TransportSpec
@@ -22,36 +24,20 @@ def _dummy_agents(**overrides) -> dict[str, DeepAgentSpec]:
     return {"leader": DeepAgentSpec(**defaults)}
 
 
-def test_team_agent_leader_policy_and_teammate_clone() -> None:
+def test_team_agent_leader_policy() -> None:
     leader = create_agent_team(
         _dummy_agents(),
         team_name="delivery",
-        objective="Ship a feature quickly",
     )
 
     assert leader.role == TeamRole.LEADER
     assert "TeamLeader" in leader.deep_config.system_prompt
-
-    teammate = leader.clone_for_member(
-        TeamMemberSpec(
-            member_id="dev-1",
-            name="Backend Expert",
-            role_type=TeamRole.TEAMMATE,
-            persona="严谨的后端架构师",
-            domain="backend",
-        )
-    )
-
-    assert teammate.role == TeamRole.TEAMMATE
-    assert "Teammate" in teammate.deep_config.system_prompt
-    assert "backend" in teammate.deep_config.system_prompt
 
 
 def test_spawn_payload_contains_member_identity() -> None:
     leader = create_agent_team(
         _dummy_agents(),
         team_name="delivery",
-        objective="Ship a feature quickly",
         transport=TransportSpec(type="pyzmq", params={
             "team_id": "delivery-team",
             "node_id": "leader",
@@ -80,11 +66,11 @@ def test_spawn_payload_contains_member_identity() -> None:
     assert payload["query"] == "Review the design system impact."
 
 
-def test_spawn_config_contains_serializable_team_agent_payload() -> None:
+@pytest.mark.asyncio
+async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
     leader = create_agent_team(
         _dummy_agents(workspace=None),
         team_name="delivery",
-        objective="Ship a feature quickly",
         transport=TransportSpec(type="pyzmq", params={
             "team_id": "delivery-team",
             "node_id": "leader",
@@ -112,7 +98,7 @@ def test_spawn_config_contains_serializable_team_agent_payload() -> None:
 
     json.dumps(spawn_config.model_dump(mode="json"))
 
-    teammate = TeamAgent.from_spawn_payload(spawn_config.payload)
+    teammate = await TeamAgent.from_spawn_payload(spawn_config.payload)
 
     assert teammate.role == TeamRole.TEAMMATE
     assert teammate.card.name == "Backend Expert"
@@ -132,7 +118,7 @@ def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
         member_spec=leader_member,
-        team_spec=TeamSpec(team_id="demo", name="demo", objective="test"),
+        team_spec=TeamSpec(team_id="demo", name="demo"),
     )
 
     restored = TeamRuntimeContext.model_validate(context.model_dump(mode="json"))

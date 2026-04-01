@@ -53,6 +53,9 @@ class DispatcherHost(Protocol):
     def team_spec(self) -> TeamSpec | None:
         ...
 
+    async def has_team_member(self, member_id: str) -> bool:
+        ...
+
     def is_agent_ready(self) -> bool:
         ...
 
@@ -162,7 +165,7 @@ class EventDispatcher:
         if event.event_type == InnerEventType.USER_INPUT:
             content = event.payload.get("content", "")
 
-            mention = self._parse_mention(content)
+            mention = await self._parse_mention(content)
             if mention is not None:
                 target, body = mention
                 await self._send_user_direct_message(target, body)
@@ -193,19 +196,18 @@ class EventDispatcher:
     # User @mention helpers
     # ------------------------------------------------------------------
 
-    def _parse_mention(self, content: str) -> tuple[str, str] | None:
+    async def _parse_mention(self, content: str) -> tuple[str, str] | None:
         """Parse ``@member_id message`` from user input.
 
         Returns (member_id, message_body) when the target member exists
-        in the team spec, otherwise None (falls through to normal path).
+        in the database, otherwise None (falls through to normal path).
         """
         m = self._MENTION_RE.match(content)
         if m is None:
             return None
         target, body = m.group(1), m.group(2)
-        spec = self._host.team_spec
-        if spec is None or spec.get_member(target) is None:
-            team_logger.warning("@mention target '{}' not found in team spec, falling through", target)
+        if not await self._host.has_team_member(target):
+            team_logger.warning("@mention target '{}' not found in database, falling through", target)
             return None
         return target, body
 

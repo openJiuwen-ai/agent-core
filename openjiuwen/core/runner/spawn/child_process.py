@@ -152,7 +152,7 @@ async def execute_agent(
     elif agent_config.agent_kind == SpawnAgentKind.TEAM_AGENT:
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
-        agent = TeamAgent.from_spawn_payload(agent_config.payload)
+        agent = await TeamAgent.from_spawn_payload(agent_config.payload)
     else:
         raise ValueError(f"Unsupported spawned agent kind: {agent_config.agent_kind}")
 

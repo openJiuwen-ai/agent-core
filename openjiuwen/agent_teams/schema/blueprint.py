@@ -115,9 +115,6 @@ class TeamAgentSpec(BaseModel):
 
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
-    objective: str = "Coordinate a multi-agent task"
-    context: str = ""
-    constraints: list[str] = []
     lifecycle: str = TeamLifecycle.TEMPORARY
     teammate_mode: str = "plan_mode"
     leader: LeaderSpec = LeaderSpec()
@@ -151,13 +148,8 @@ class TeamAgentSpec(BaseModel):
         team_spec = TeamSpec(
             team_id=self.team_name,
             name=self.team_name,
-            objective=self.objective,
-            context=self.context,
-            constraints=self.constraints,
+            leader_member_id=self.leader.member_id,
         )
-        team_spec.add_member(leader_member)
-        for pm in self.predefined_members:
-            team_spec.add_member(pm)
 
         messager_config = self.transport.build() if self.transport else None
         db_config = self.storage.build() if self.storage else _DatabaseConfig()
