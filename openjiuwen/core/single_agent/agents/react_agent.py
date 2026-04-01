@@ -37,6 +37,7 @@ from openjiuwen.core.foundation.llm import (
     SystemMessage
 )
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
@@ -61,7 +62,6 @@ from openjiuwen.core.single_agent.prompts.builder import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
-
 _IDENTITY_SECTION = "identity"
 _SKILLS_SECTION = "skills"
 _IDENTITY_SECTION_PRIORITY = 10
@@ -80,9 +80,9 @@ def _summarize_tool_call(tc: Any) -> str:
 
 
 def log_llm_request(
-    log: Any,
-    messages: Optional[List[Any]],
-    tools: Optional[List[Any]],
+        log: Any,
+        messages: Optional[List[Any]],
+        tools: Optional[List[Any]],
 ) -> None:
     """Log LLM request messages and tools."""
     msgs = messages or []
@@ -648,9 +648,9 @@ class ReActAgent(BaseAgent):
         # When KV cache release is enabled but the LLM does not support it,
         # log a one-time warning so users understand the setting is ineffective.
         if (
-            enable_kv_release
-            and not supports_kv_release
-            and not self._kv_release_warning_logged
+                enable_kv_release
+                and not supports_kv_release
+                and not self._kv_release_warning_logged
         ):
             logger.warning(
                 "ContextEngineConfig.enable_kv_cache_release is True, "
@@ -704,10 +704,10 @@ class ReActAgent(BaseAgent):
         chunk_index = 0
 
         async for chunk in llm.stream(
-            model=self._config.model_name,
-            messages=ctx.inputs.messages,
-            tools=ctx.inputs.tools or None,
-            **extra_kwargs,
+                model=self._config.model_name,
+                messages=ctx.inputs.messages,
+                tools=ctx.inputs.tools or None,
+                **extra_kwargs,
         ):
             if accumulated_chunk is None:
                 accumulated_chunk = chunk
@@ -1142,7 +1142,11 @@ class ReActAgent(BaseAgent):
             )
             await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
             need_cleanup = True
+        return await self._inner_invoke(session=session, inputs=inputs, query=query, conversation_id=conversation_id,
+                                        need_cleanup=need_cleanup, **kwargs)
 
+    @with_session()
+    async def _inner_invoke(self, session, inputs, query, need_cleanup, conversation_id, **kwargs):
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
@@ -1369,6 +1373,11 @@ class ReActAgent(BaseAgent):
             inputs=inputs if isinstance(inputs, dict) else None
         )
 
+        async for chunk in self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup):
+            yield chunk
+
+    @with_session()
+    async def _inner_stream(self, session, inputs, need_cleanup):
         async def stream_process():
             try:
                 final_result = await self.invoke(inputs, session, _streaming=True)

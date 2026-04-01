@@ -14,7 +14,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.legacy.schema import PluginSchema
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 
-from openjiuwen.core.session import Config
+from openjiuwen.core.session import Config, with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import CustomSchema
 from openjiuwen.core.foundation.tool import Tool
@@ -566,18 +566,23 @@ class ControllerAgent(BaseAgent):
                 agent_session = getattr(session, "_inner")
             else:
                 agent_session = session
-        await self.context_engine.create_context(session=agent_session)
-        try:
-            # Fully delegate to controller
-            result = await self.controller.invoke(inputs, agent_session)
-            if session is None:
-                await self.context_engine.save_contexts(agent_session)
-                await agent_session.post_run()
 
-            return result
-        except Exception as e:
-            await agent_session.post_run()
-            raise
+        @with_session(session)
+        async def _inner_invoke():
+            await self.context_engine.create_context(session=agent_session)
+            try:
+                # Fully delegate to controller
+                result = await self.controller.invoke(inputs, agent_session)
+                if session is None:
+                    await self.context_engine.save_contexts(agent_session)
+                    await agent_session.post_run()
+
+                return result
+            except Exception as e:
+                await agent_session.post_run()
+                raise
+
+        return await _inner_invoke()
 
     async def stream(self, inputs: Dict, session: Session = None) -> AsyncIterator[Any]:
         """Streaming invocation - Fully delegate to controller
@@ -625,13 +630,19 @@ class ControllerAgent(BaseAgent):
             # Sync agent's workflows to external session
             # When external session is provided, agent's workflows need to be registered
         # Store final result for send_to_agent
+        async for chunk in self._inner_stream(session=agent_session, inputs=inputs, need_cleanup=need_cleanup,
+                                              own_stream=own_stream):
+            yield chunk
+
+    @with_session()
+    async def _inner_stream(self, session, inputs, need_cleanup, own_stream):
         final_result_holder = {"result": None}
-        await self.context_engine.create_context(session=agent_session)
+        await self.context_engine.create_context(session=session)
 
         # Fully delegate to controller
         async def stream_process():
             try:
-                res = await self.controller.invoke(inputs, agent_session)
+                res = await self.controller.invoke(inputs, session)
                 final_result_holder["result"] = res
                 # Interrupt: list contains __interaction__ OutputSchema
                 # Only WorkflowController writes to session here
@@ -643,20 +654,20 @@ class ControllerAgent(BaseAgent):
                 if isinstance(res, list) and isinstance(self.controller, WorkflowController):
                     for item in res:
                         if isinstance(item, CustomSchema):
-                            await agent_session.write_custom_stream(item)
+                            await session.write_custom_stream(item)
                         else:
-                            await agent_session.write_stream(item)
+                            await session.write_stream(item)
             finally:
                 if need_cleanup:
-                    await self.context_engine.save_contexts(agent_session)
-                    await agent_session.post_run()
+                    await self.context_engine.save_contexts(session)
+                    await session.post_run()
 
         task = asyncio.create_task(stream_process())
 
         if own_stream:
             # Read from stream_iterator only when owning stream
             # External caller reads if external session provided
-            async for result in agent_session.stream_iterator():
+            async for result in session.stream_iterator():
                 yield result
 
         await task
