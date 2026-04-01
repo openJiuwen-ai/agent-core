@@ -221,3 +221,21 @@ def test_action_controller_instance_isolation() -> None:
     assert result_b["ok"] is True
     assert result_b["final"] == "from_b"
     assert seen == ["a:task-a:sa:ra", "b:task-b:sb:rb"]
+
+
+def test_browser_worker_action_context_blocks_recursive_browser_task() -> None:
+    controller.register_example_actions()
+
+    with controller.browser_worker_action_context():
+        result = _run(
+            controller.run_action(
+                "browser_task",
+                session_id="worker-session",
+                request_id="worker-request",
+                task="open baidu",
+            )
+        )
+
+    assert result["ok"] is False
+    assert result["action"] == "browser_task"
+    assert "recursive_browser_task_blocked" in str(result["error"])

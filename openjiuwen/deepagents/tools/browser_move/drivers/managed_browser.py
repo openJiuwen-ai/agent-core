@@ -173,11 +173,16 @@ class ManagedBrowserDriver:
     def __init__(self, profile: BrowserProfile) -> None:
         self.profile = profile
         self._process: Optional[subprocess.Popen] = None
+        self._owns_process: bool = False
 
     @property
     def cdp_endpoint(self) -> str:
         host = self.profile.host or "127.0.0.1"
         return f"http://{host}:{int(self.profile.debug_port)}"
+
+    @property
+    def owns_process(self) -> bool:
+        return self._owns_process
 
     def is_endpoint_ready(self) -> bool:
         return self._is_endpoint_ready()
@@ -243,6 +248,11 @@ class ManagedBrowserDriver:
             if self._is_endpoint_ready():
                 return self.cdp_endpoint
 
+        if self._is_endpoint_ready():
+            self._process = None
+            self._owns_process = False
+            return self.cdp_endpoint
+
         if kill_existing:
             user_data_dir = str(Path(self.profile.user_data_dir).expanduser())
             _kill_chrome_by_user_data_dir(user_data_dir)
@@ -258,10 +268,12 @@ class ManagedBrowserDriver:
             stdin=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0,
         )
+        self._owns_process = True
 
         deadline = time.time() + max(1.0, float(timeout_s))
         while time.time() < deadline:
             if self._process.poll() is not None:
+                self._owns_process = False
                 raise RuntimeError(
                     f"Managed browser process exited early with code {self._process.returncode}"
                 )
@@ -269,12 +281,17 @@ class ManagedBrowserDriver:
                 return self.cdp_endpoint
             time.sleep(0.25)
 
+        self._owns_process = False
         raise RuntimeError(f"Managed browser CDP endpoint not ready after {timeout_s:.1f}s: {self.cdp_endpoint}")
 
     def stop(self, wait_timeout_s: float = 5.0) -> None:
         process = self._process
         self._process = None
+        owns_process = self._owns_process
+        self._owns_process = False
         if process is None:
+            return
+        if not owns_process:
             return
         if process.poll() is not None:
             return

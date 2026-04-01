@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 from typing import Any, Awaitable, Callable, Optional
 
 import anyio
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.context_engine import DialogueCompressorConfig
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import McpServerConfig
@@ -120,6 +122,24 @@ def _looks_like_tool_call(value: Any) -> bool:
     return hasattr(value, "name")
 
 
+def _drop_none_tool_arguments(tool_call: Any) -> None:
+    calls = tool_call if isinstance(tool_call, list) else [tool_call]
+    for current_call in calls:
+        raw_arguments = getattr(current_call, "arguments", None)
+        if not isinstance(raw_arguments, str):
+            continue
+        try:
+            parsed_arguments = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            continue
+
+        cleaned_arguments = SchemaUtils.remove_none_values(parsed_arguments)
+        if cleaned_arguments is None:
+            cleaned_arguments = {}
+        if cleaned_arguments != parsed_arguments:
+            current_call.arguments = json.dumps(cleaned_arguments, ensure_ascii=False)
+
+
 def _normalize_execute_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, Any, Any, Any, dict[str, Any]]:
     """Accept both legacy and current ability_manager.execute call shapes."""
     ctx = kwargs.get("ctx")
@@ -146,7 +166,10 @@ def _normalize_execute_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tu
     return ctx, tool_call, session, tag, extra_kwargs
 
 
-def _build_browser_worker_system_prompt(screenshot_subdir: str, artifacts_subdir: str) -> str:
+def build_browser_worker_system_prompt(
+    screenshot_subdir: str = "screenshots",
+    artifacts_subdir: str = "artifacts",
+) -> str:
     return (
         "You are a browser worker agent.\n"
         "Execute browser tasks step-by-step with Playwright MCP tools only.\n"
@@ -157,6 +180,9 @@ def _build_browser_worker_system_prompt(screenshot_subdir: str, artifacts_subdir
         "For specialized operations (file upload, drag-and-drop, coordinates, etc.), "
         "call browser_list_custom_actions to discover available actions and their params, "
         "then call browser_custom_action with the matching action name and params.\n"
+        "Never call browser_custom_action with action='browser_task' or action='run_browser_task'. "
+        "Do not launch nested browser tasks from the browser worker. "
+        "If you cannot finish without recursion, return a JSON error object instead.\n"
         "IMPORTANT: Do NOT use browser_take_screenshot unless strictly necessary. "
         f"If a screenshot is needed, always save it under '{screenshot_subdir}/'. "
         "Use browser_run_code with: "
@@ -168,7 +194,8 @@ def _build_browser_worker_system_prompt(screenshot_subdir: str, artifacts_subdir
         "Final output MUST be a single JSON object with keys:\n"
         "ok (boolean), final (string), page (object with url and title), "
         "screenshot (string|null), error (string|null).\n"
-        "Return JSON only, even on failures. Do not output markdown or plain text."
+        "Return JSON only, even on failures. "
+        "Do not output markdown, code fences, or plain text outside the JSON object."
     )
 
 
@@ -238,6 +265,7 @@ def ensure_execute_signature_compat(
     async def execute_with_timeout(*args, **kwargs):
         ctx, tool_call, session, tag, extra_kwargs = _normalize_execute_call(args, kwargs)
         tool_names = _format_tool_names(tool_call)
+        _drop_none_tool_arguments(tool_call)
         call_kwargs: dict[str, Any] = {}
         if supports_ctx:
             call_kwargs["ctx"] = ctx
@@ -267,13 +295,14 @@ def ensure_execute_signature_compat(
     setattr(agent.ability_manager.execute, "_playwright_timeout_wrapped", True)
 
 
+# pylint: disable=too-many-arguments
 def build_browser_worker_agent(
     provider: str,
     api_key: str,
+    *,
     api_base: str,
     model_name: str,
     mcp_cfg: McpServerConfig,
-    *,
     max_steps: int,
     screenshot_subdir: str = "screenshots",
     artifacts_subdir: str = "artifacts",
@@ -304,7 +333,7 @@ def build_browser_worker_agent(
             [
                 {
                     "role": "system",
-                    "content": _build_browser_worker_system_prompt(screenshot_subdir, artifacts_subdir),
+                    "content": build_browser_worker_system_prompt(screenshot_subdir, artifacts_subdir),
                 }
             ]
         )
@@ -324,13 +353,14 @@ def build_browser_worker_agent(
     return agent
 
 
+# pylint: disable=too-many-arguments
 def build_main_agent(
     provider: str,
     api_key: str,
+    *,
     api_base: str,
     model_name: str,
     browser_tool_card,
-    *,
     custom_action_tool_card=None,
     list_actions_tool_card=None,
     artifacts_subdir: str = "artifacts",

@@ -350,7 +350,14 @@ def _configure_stdio_logging() -> None:
         from openjiuwen.core.common.logging.default.log_config import log_config
         from openjiuwen.core.common.logging.manager import LogManager
 
-        log_path = str((_REPO_ROOT / "logs").resolve())
+        configured = (
+            (os.getenv("PLAYWRIGHT_RUNTIME_LOG_DIR") or "").strip()
+            or (os.getenv("BROWSER_RUNTIME_LOG_DIR") or "").strip()
+        )
+        if configured:
+            log_path = str(Path(configured).expanduser().resolve())
+        else:
+            log_path = str((Path.cwd().expanduser().resolve() / "logs").resolve())
         log_config._log_config["log_path"] = log_path
         log_config._log_config["output"] = ["file"]
         log_config._log_config["interface_output"] = ["file"]

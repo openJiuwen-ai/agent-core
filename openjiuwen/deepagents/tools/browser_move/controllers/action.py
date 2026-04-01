@@ -7,6 +7,8 @@ It exposes a lightweight action registry consumed by the MCP wrapper.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import copy
 import inspect
 import json
@@ -49,6 +51,20 @@ _ACTION_SPECS: dict[str, dict[str, Any]] = {}
 _RUNTIME_RUNNER: RuntimeRunner | None = None
 _CODE_EXECUTOR: CodeExecutor | None = None
 _LOCK = asyncio.Lock()
+_ctx_browser_worker_action: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "playwright_runtime_browser_worker_action",
+    default=False,
+)
+_RECURSIVE_BROWSER_ACTIONS = frozenset({"browser_task", "run_browser_task"})
+
+
+@contextlib.contextmanager
+def browser_worker_action_context():
+    token = _ctx_browser_worker_action.set(True)
+    try:
+        yield
+    finally:
+        _ctx_browser_worker_action.reset(token)
 
 
 class ActionController(BaseController):
@@ -166,6 +182,23 @@ class ActionController(BaseController):
             f"CONTROLLER_ACTION start action={action_name} session_id={sid or '-'} "
             f"request_id={rid or '-'} param_keys={param_keys or '-'}"
         )
+
+        if _ctx_browser_worker_action.get() and action_name in _RECURSIVE_BROWSER_ACTIONS:
+            error = (
+                "recursive_browser_task_blocked: browser workers must not invoke "
+                "browser_task/run_browser_task via browser_custom_action; return a JSON error instead"
+            )
+            logger.warning(
+                f"CONTROLLER_ACTION blocked action={action_name} session_id={sid or '-'} "
+                f"request_id={rid or '-'} error={error}"
+            )
+            return {
+                "ok": False,
+                "action": action_name,
+                "session_id": sid,
+                "request_id": rid,
+                "error": error,
+            }
 
         handler = self._actions.get(action_name)
         if handler is None:
@@ -1221,6 +1254,7 @@ __all__ = [
     "register_action_spec",
     "register_builtin_actions",
     "register_example_actions",
+    "browser_worker_action_context",
     "list_actions",
     "describe_actions",
     "run_action",

@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from openjiuwen.deepagents.tools.browser_move import REPO_ROOT
 from openjiuwen.deepagents.tools.browser_move.clients.streamable_http_client import (
     BrowserMoveStreamableHttpClient,
 )
@@ -21,6 +22,7 @@ from openjiuwen.deepagents.tools.browser_move.playwright_runtime.agents import (
 from openjiuwen.deepagents.tools.browser_move.playwright_runtime.browser_tools import (
     build_browser_runtime_mcp_config,
 )
+from openjiuwen.deepagents.tools.browser_move.playwright_runtime import browser_tools as browser_tools_module
 from openjiuwen.deepagents.tools.browser_move.playwright_runtime.config import (
     DEFAULT_BROWSER_TIMEOUT_S,
     DEFAULT_MODEL_NAME,
@@ -36,17 +38,10 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def _module_launch_cwd() -> str:
-    current = Path(REPO_ROOT).expanduser().resolve()
-    for candidate in [current, *current.parents]:
-        if (candidate / "pyproject.toml").exists() and (candidate / "openjiuwen" / "__init__.py").exists():
-            return str(candidate)
-    raise RuntimeError(f"Could not resolve module launch cwd from {current}")
-
-
 class _ToolCall:
-    def __init__(self, name: str):
+    def __init__(self, name: str, arguments: str = "{}"):
         self.name = name
+        self.arguments = arguments
 
 
 class _Agent:
@@ -57,6 +52,16 @@ class _Agent:
 class _HangingAbilityManager:
     async def execute(self, ctx: Any, tool_call: Any, session: Any, tag: Any = None):
         await asyncio.sleep(1.0)
+        return [({"ok": True, "shape": "ctx"}, None)]
+
+
+class _RecordingAbilityManager:
+    def __init__(self) -> None:
+        self.seen_arguments: str | None = None
+
+    async def execute(self, ctx: Any, tool_call: Any, session: Any, tag: Any = None):
+        del ctx, session, tag
+        self.seen_arguments = tool_call.arguments
         return [({"ok": True, "shape": "ctx"}, None)]
 
 
@@ -139,7 +144,7 @@ def test_build_browser_runtime_mcp_config_stdio_defaults() -> None:
     assert cfg is not None
     assert cfg.client_type == "stdio"
     assert cfg.server_path == "stdio://playwright-runtime-wrapper"
-    assert cfg.params["cwd"] == _module_launch_cwd()
+    assert cfg.params["cwd"] == str(Path.cwd().resolve())
     args = cfg.params["args"]
     assert args[:2] == ["-m", "openjiuwen.deepagents.tools.browser_move.playwright_runtime_mcp_server"]
     assert "--transport" in args
@@ -195,6 +200,22 @@ def test_build_browser_runtime_mcp_config_stdio_passes_child_env_and_maps_openai
     assert "HTTP_PROXY" not in child_env
 
 
+def test_build_browser_runtime_mcp_config_stdio_uses_explicit_runtime_cwd() -> None:
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(
+        os.environ,
+        {
+            "PLAYWRIGHT_RUNTIME_MCP_ENABLED": "1",
+            "PLAYWRIGHT_RUNTIME_MCP_CLIENT_TYPE": "stdio",
+            "PLAYWRIGHT_RUNTIME_MCP_CWD": tmp,
+        },
+        clear=True,
+    ):
+        cfg = build_browser_runtime_mcp_config()
+
+    assert cfg is not None
+    assert cfg.params["cwd"] == str(Path(tmp).resolve())
+
+
 def test_build_browser_runtime_mcp_config_stdio_maps_openrouter_env() -> None:
     with patch.dict(
         os.environ,
@@ -245,3 +266,70 @@ def test_execute_wrapper_raises_timeout_error() -> None:
             assert "timeout_s=" in message
         else:
             raise AssertionError("expected RuntimeError")
+
+
+def test_execute_wrapper_drops_none_tool_arguments() -> None:
+    ability_manager = _RecordingAbilityManager()
+    agent = _Agent(ability_manager)
+
+    ensure_execute_signature_compat(agent)
+
+    tool_call = _ToolCall(
+        "browser_snapshot",
+        '{"filename": null, "depth": null}',
+    )
+    _run(agent.ability_manager.execute(ctx=object(), tool_call=tool_call, session=object()))
+
+    assert json.loads(ability_manager.seen_arguments or "{}") == {}
+
+
+def test_execute_wrapper_preserves_non_none_tool_arguments() -> None:
+    ability_manager = _RecordingAbilityManager()
+    agent = _Agent(ability_manager)
+
+    ensure_execute_signature_compat(agent)
+
+    tool_call = _ToolCall(
+        "browser_snapshot",
+        '{"filename": "snapshot.md", "depth": 10}',
+    )
+    _run(agent.ability_manager.execute(ctx=object(), tool_call=tool_call, session=object()))
+
+    assert json.loads(ability_manager.seen_arguments or "{}") == {
+        "filename": "snapshot.md",
+        "depth": 10,
+    }
+
+
+def test_local_browser_runtime_server_logs_are_written_under_runtime_log_dir() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        process = MagicMock()
+        process.poll.return_value = None
+        with patch.dict(os.environ, {"PLAYWRIGHT_RUNTIME_LOG_DIR": tmp}, clear=False), patch.object(
+            browser_tools_module,
+            "_server_script",
+            return_value=Path(__file__),
+        ), patch.object(
+            browser_tools_module,
+            "_build_child_env",
+            return_value={},
+        ), patch.object(
+            browser_tools_module,
+            "_wait_port_open",
+            return_value=None,
+        ), patch(
+            "openjiuwen.deepagents.tools.browser_move.playwright_runtime.browser_tools.subprocess.Popen",
+            return_value=process,
+        ) as mock_popen:
+            getattr(browser_tools_module, "_start_local_server")(
+                "streamable-http", "127.0.0.1", 8940, "/mcp"
+            )
+            stdout_log = Path(tmp) / "browser_runtime_stdout.log"
+            stderr_log = Path(tmp) / "browser_runtime_stderr.log"
+            assert stdout_log.exists()
+            assert stderr_log.exists()
+            assert Path(mock_popen.call_args.kwargs["cwd"]).resolve() == Path.cwd().resolve()
+            browser_tools_module.stop_local_browser_runtime_server()
+
+        assert getattr(browser_tools_module, "_browser_runtime_stdout_handle") is None
+        assert getattr(browser_tools_module, "_browser_runtime_stderr_handle") is None

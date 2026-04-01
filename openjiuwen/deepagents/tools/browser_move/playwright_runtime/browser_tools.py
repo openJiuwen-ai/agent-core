@@ -17,8 +17,6 @@ from urllib.parse import urlparse
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
-from .. import REPO_ROOT
-
 _DEFAULT_SERVER_ID = "playwright_runtime_wrapper"
 _DEFAULT_SERVER_NAME = "playwright-runtime-wrapper"
 _SUPPORTED_CLIENT_TYPES = {"stdio", "sse", "streamable-http", "streamable_http", "http"}
@@ -28,6 +26,10 @@ _LOCAL_SERVER_PROCESS: subprocess.Popen[str] | None = None
 _LOCAL_SERVER_URL: str | None = None
 _OPENJIUWEN_CLIENTS_PATCHED = False
 _client_registry: dict[str, Any] = {}
+_browser_runtime_stdout_handle = None
+_browser_runtime_stderr_handle = None
+_BROWSER_RUNTIME_STDOUT_LOG = "browser_runtime_stdout.log"
+_BROWSER_RUNTIME_STDERR_LOG = "browser_runtime_stderr.log"
 
 
 def get_registered_client(server_id: str) -> Any:
@@ -65,6 +67,49 @@ def _parse_args(raw: str) -> list[str]:
         return shlex.split(text, posix=(os.name != "nt"))
     except Exception:
         return text.split()
+
+
+def _runtime_logs_dir() -> Path:
+    configured = _env_first("PLAYWRIGHT_RUNTIME_LOG_DIR", "BROWSER_RUNTIME_LOG_DIR")
+    if configured:
+        path = Path(configured).expanduser()
+    else:
+        from .config import resolve_playwright_mcp_cwd
+
+        path = Path(resolve_playwright_mcp_cwd()).expanduser() / "logs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _runtime_cwd() -> Path:
+    from .config import resolve_playwright_mcp_cwd
+
+    path = Path(resolve_playwright_mcp_cwd()).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _browser_runtime_log_paths() -> tuple[Path, Path]:
+    logs_dir = _runtime_logs_dir()
+    return (
+        logs_dir / _BROWSER_RUNTIME_STDOUT_LOG,
+        logs_dir / _BROWSER_RUNTIME_STDERR_LOG,
+    )
+
+
+def _close_browser_runtime_log_handles() -> None:
+    global _browser_runtime_stdout_handle
+    global _browser_runtime_stderr_handle
+
+    for handle_name in ("_browser_runtime_stdout_handle", "_browser_runtime_stderr_handle"):
+        handle = globals().get(handle_name)
+        if handle is None:
+            continue
+        try:
+            handle.close()
+        except Exception:
+            pass
+        globals()[handle_name] = None
 
 
 def _server_script() -> Path:
@@ -219,6 +264,8 @@ def _wait_port_open(host: str, port: int, timeout_s: float = 20.0) -> None:
 def _start_local_server(transport: str, host: str, port: int, path: str) -> str:
     global _LOCAL_SERVER_PROCESS
     global _LOCAL_SERVER_URL
+    global _browser_runtime_stdout_handle
+    global _browser_runtime_stderr_handle
 
     normalized = _normalize_client_type(transport)
     if normalized not in {"sse", "streamable-http"}:
@@ -246,14 +293,25 @@ def _start_local_server(transport: str, host: str, port: int, path: str) -> str:
         path,
         "--no-banner",
     ]
-    _LOCAL_SERVER_PROCESS = subprocess.Popen(
-        cmd,
-        cwd=str(REPO_ROOT),
-        env=_build_child_env(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
+    stdout_log_path, stderr_log_path = _browser_runtime_log_paths()
+    _close_browser_runtime_log_handles()
+    stdout_handle = stdout_log_path.open("a", encoding="utf-8")
+    stderr_handle = stderr_log_path.open("a", encoding="utf-8")
+    try:
+        _LOCAL_SERVER_PROCESS = subprocess.Popen(
+            cmd,
+            cwd=str(_runtime_cwd()),
+            env=_build_child_env(),
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            text=True,
+        )
+    except Exception:
+        stdout_handle.close()
+        stderr_handle.close()
+        raise
+    _browser_runtime_stdout_handle = stdout_handle
+    _browser_runtime_stderr_handle = stderr_handle
     _wait_port_open(host, port)
     _LOCAL_SERVER_URL = f"http://{host}:{port}{path}"
     return _LOCAL_SERVER_URL
@@ -274,6 +332,7 @@ def stop_local_browser_runtime_server() -> None:
     _LOCAL_SERVER_PROCESS = None
     _LOCAL_SERVER_URL = None
     if proc is None or proc.poll() is not None:
+        _close_browser_runtime_log_handles()
         return
     try:
         proc.terminate()
@@ -284,6 +343,8 @@ def stop_local_browser_runtime_server() -> None:
             proc.wait(timeout=2)
         except Exception:
             pass
+    finally:
+        _close_browser_runtime_log_handles()
 
 
 def restart_local_browser_runtime_server() -> str | None:
@@ -463,7 +524,7 @@ def build_browser_runtime_mcp_config() -> McpServerConfig | None:
     params: dict[str, Any] = {
         "command": command,
         "args": args,
-        "cwd": str(REPO_ROOT),
+        "cwd": str(_runtime_cwd()),
     }
     timeout_raw = _env_first(
         "PLAYWRIGHT_RUNTIME_MCP_TIMEOUT_S",

@@ -102,7 +102,10 @@ def test_start_heartbeat_replaces_done_task() -> None:
 def test_check_connection_raises_when_client_not_found() -> None:
     async def _test():
         svc = _make_service()
-        with patch("playwright_runtime.browser_tools.get_registered_client", return_value=None):
+        with patch(
+            "openjiuwen.deepagents.tools.browser_move.playwright_runtime.browser_tools.get_registered_client",
+            return_value=None,
+        ):
             try:
                 await svc._check_connection()
                 assert False, "Expected RuntimeError"
@@ -117,7 +120,10 @@ def test_check_connection_raises_when_ping_fails() -> None:
         svc = _make_service()
         mock_client = MagicMock()
         mock_client.ping = AsyncMock(return_value=False)
-        with patch("playwright_runtime.browser_tools.get_registered_client", return_value=mock_client):
+        with patch(
+            "openjiuwen.deepagents.tools.browser_move.playwright_runtime.browser_tools.get_registered_client",
+            return_value=mock_client,
+        ):
             try:
                 await svc._check_connection()
                 assert False, "Expected RuntimeError"
@@ -132,7 +138,10 @@ def test_check_connection_succeeds_when_healthy() -> None:
         svc = _make_service()
         mock_client = MagicMock()
         mock_client.ping = AsyncMock(return_value=True)
-        with patch("playwright_runtime.browser_tools.get_registered_client", return_value=mock_client):
+        with patch(
+            "openjiuwen.deepagents.tools.browser_move.playwright_runtime.browser_tools.get_registered_client",
+            return_value=mock_client,
+        ):
             await svc._check_connection()  # must not raise
 
     _run(_test())
@@ -145,7 +154,10 @@ def test_check_connection_raises_when_managed_driver_not_ready() -> None:
         svc._managed_driver._is_endpoint_ready = MagicMock(return_value=False)
         mock_client = MagicMock()
         mock_client.ping = AsyncMock(return_value=True)
-        with patch("playwright_runtime.browser_tools.get_registered_client", return_value=mock_client):
+        with patch(
+            "openjiuwen.deepagents.tools.browser_move.playwright_runtime.browser_tools.get_registered_client",
+            return_value=mock_client,
+        ):
             try:
                 await svc._check_connection()
                 assert False, "Expected RuntimeError"
@@ -210,29 +222,29 @@ def test_heartbeat_loop_marks_connection_unhealthy_on_failure() -> None:
     _run(_test())
 
 
-def test_heartbeat_loop_triggers_restart_when_no_inflight_tasks() -> None:
+def test_heartbeat_loop_defers_restart_when_no_inflight_tasks() -> None:
     async def _test():
         svc = _make_service()
         svc._heartbeat_interval = 0
         assert not svc._inflight_tasks
-        restart_called = asyncio.Event()
-
-        async def fake_restart():
-            restart_called.set()
-
-        svc._restart = fake_restart
+        svc._restart = AsyncMock()
+        checked = asyncio.Event()
 
         async def mock_check():
+            checked.set()
             raise RuntimeError("down")
 
         svc._check_connection = mock_check
         task = asyncio.create_task(svc._heartbeat_loop())
-        await asyncio.wait_for(restart_called.wait(), timeout=2.0)
+        await asyncio.wait_for(checked.wait(), timeout=2.0)
+        await asyncio.sleep(0)
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
+
+        svc._restart.assert_not_awaited()
 
     _run(_test())
 

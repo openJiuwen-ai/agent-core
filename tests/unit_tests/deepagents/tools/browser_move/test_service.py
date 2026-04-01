@@ -6,22 +6,24 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from openjiuwen.deepagents.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
+from openjiuwen.deepagents.tools.browser_move.playwright_runtime.profiles import BrowserProfile
 from openjiuwen.deepagents.tools.browser_move.playwright_runtime.service import BrowserService
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 
 
-def _make_service(*, retry_once: bool = False) -> BrowserService:
+def _make_service(*, retry_once: bool = False, runtime_cwd: str | None = None) -> BrowserService:
     mcp_cfg = McpServerConfig(
         server_id="test-playwright",
         server_name="test-playwright",
         server_path="stdio://playwright",
         client_type="stdio",
-        params={"cwd": str(Path.cwd())},
+        params={"cwd": runtime_cwd or str(Path.cwd())},
     )
     return BrowserService(
         provider="openai",
@@ -177,12 +179,14 @@ def test_retryable_runtime_error_retries_once() -> None:
 
 def test_max_iteration_failure_preserves_worker_output_without_progress_summary() -> None:
     service = _make_service()
+    call_count = {"count": 0}
 
     async def fake_ensure_started() -> None:
         return None
 
     async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
         del task, session_id, request_id
+        call_count["count"] += 1
         return {
             "ok": False,
             "final": "Max iterations reached without completion",
@@ -205,6 +209,54 @@ def test_max_iteration_failure_preserves_worker_output_without_progress_summary(
         assert "Max iterations reached without completion" in result["final"]
         assert "Partial progress (recent tool steps):" not in result["final"]
         assert "Partial progress (recent tool steps):" not in str(result["failure_summary"])
+        assert call_count["count"] == 1
+
+
+def test_max_iteration_resume_requires_opt_in_guardrail() -> None:
+    service = _make_service()
+    service.guardrails.resume_on_max_iterations = True
+    observed_tasks: list[str] = []
+    call_count = {"count": 0}
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
+        del session_id, request_id
+        observed_tasks.append(task)
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            return {
+                "ok": False,
+                "final": "Max iterations reached without completion",
+                "page": {"url": "https://www.baidu.com", "title": "百度一下，你就知道"},
+                "screenshot": None,
+                "error": "max_iterations_reached",
+            }
+        return {
+            "ok": True,
+            "final": "Completed after continuation.",
+            "page": {"url": "https://www.baidu.com", "title": "百度一下，你就知道"},
+            "screenshot": None,
+            "error": None,
+        }
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ):
+        result = _run(
+            service.run_task(
+                task="Open Baidu homepage",
+                session_id="session-max-iter-resume",
+                request_id="req-max-iter-resume",
+            )
+        )
+
+    assert result["ok"] is True
+    assert result["attempt"] == 2
+    assert call_count["count"] == 2
+    assert len(observed_tasks) == 2
+    assert "Continuation context:" in observed_tasks[1]
 
 
 def test_run_task_once_uses_fresh_worker_conversation_ids() -> None:
@@ -234,3 +286,107 @@ def test_run_task_once_uses_fresh_worker_conversation_ids() -> None:
     assert seen_conversation_ids[0] != seen_conversation_ids[1]
     assert all(isinstance(value, str) and value for value in seen_conversation_ids)
     assert seen_request_ids == ["req-1", "req-1"]
+
+
+def test_ensure_managed_driver_started_reuses_healthy_existing_driver() -> None:
+    async def _test():
+        service = _make_service()
+        setattr(service, "_driver_mode", "managed")
+        healthy_driver = MagicMock()
+        healthy_driver.is_endpoint_ready.return_value = True
+        setattr(service, "_managed_driver", healthy_driver)
+
+        with patch(
+            "openjiuwen.deepagents.tools.browser_move.playwright_runtime.service.ManagedBrowserDriver"
+        ) as mock_cls:
+            await getattr(service, "_ensure_managed_driver_started")()
+
+        assert getattr(service, "_managed_driver") is healthy_driver
+        mock_cls.assert_not_called()
+
+    _run(_test())
+
+
+def test_ensure_managed_driver_started_replaces_stale_driver() -> None:
+    async def _test():
+        service = _make_service()
+        setattr(service, "_driver_mode", "managed")
+        stale_driver = MagicMock()
+        stale_driver.is_endpoint_ready.return_value = False
+        setattr(service, "_managed_driver", stale_driver)
+
+        profile = BrowserProfile(
+            name="jiuwenclaw",
+            driver_type="managed",
+            cdp_url="http://127.0.0.1:9333",
+            user_data_dir=str(Path.cwd()),
+            debug_port=9333,
+            host="127.0.0.1",
+        )
+        new_driver = MagicMock()
+        new_driver.start.return_value = "http://127.0.0.1:9333"
+        profile_store = getattr(service, "_profile_store")
+
+        with patch.object(profile_store, "get_profile", return_value=profile), patch.object(
+            profile_store,
+            "upsert_profile",
+            side_effect=lambda browser_profile, select=False: browser_profile,
+        ), patch(
+            "openjiuwen.deepagents.tools.browser_move.playwright_runtime.service.ManagedBrowserDriver",
+            return_value=new_driver,
+        ):
+            await getattr(service, "_ensure_managed_driver_started")()
+
+        assert getattr(service, "_managed_driver") is new_driver
+        new_driver.start.assert_called_once()
+
+    _run(_test())
+
+
+def test_profile_store_defaults_to_runtime_workspace() -> None:
+    expected_root = (Path.cwd() / "tmp-runtime-root").resolve()
+    service = _make_service(runtime_cwd=str(expected_root))
+    expected = expected_root / ".browser" / "profiles.json"
+    assert getattr(service, "_profile_store").path.resolve() == expected
+
+
+def test_build_managed_profile_defaults_user_data_dir_to_runtime_workspace() -> None:
+    with patch.dict(os.environ, {"BROWSER_DRIVER": "managed"}, clear=False):
+        expected_root = (Path.cwd() / "tmp-runtime-root").resolve()
+        service = _make_service(runtime_cwd=str(expected_root))
+    profile = getattr(service, "_build_managed_profile")()
+    expected = expected_root / ".browser-profiles" / getattr(service, "_profile_name")
+    assert Path(profile.user_data_dir).resolve() == expected
+
+
+def test_run_task_does_not_reset_browser_runtime_after_completion() -> None:
+    service = _make_service()
+    setattr(service, "_driver_mode", "managed")
+    managed_driver = MagicMock()
+    managed_driver.owns_process = True
+    setattr(service, "_managed_driver", managed_driver)
+    reset_calls = {"count": 0}
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
+        del task, session_id, request_id
+        return {
+            "ok": True,
+            "final": "done",
+            "page": {"url": "https://www.baidu.com", "title": "Baidu"},
+            "screenshot": None,
+            "error": None,
+        }
+
+    async def fake_reset_browser_runtime() -> None:
+        reset_calls["count"] += 1
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ), patch.object(service, "_reset_browser_runtime", fake_reset_browser_runtime):
+        result = _run(service.run_task(task="Open Baidu", session_id="keep-after-task", request_id="req-keep"))
+
+    assert result["ok"] is True
+    assert reset_calls["count"] == 0

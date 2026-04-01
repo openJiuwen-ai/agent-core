@@ -14,13 +14,13 @@ import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.request import urlopen
 
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
-from . import REPO_ROOT
 from .agents import build_browser_worker_agent
 from .config import BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
 from .profiles import BrowserProfile, BrowserProfileStore
@@ -66,6 +66,7 @@ class BrowserService:
         self._driver_mode = self._resolve_driver_mode()
         self._active_profile: Optional[BrowserProfile] = None
         self._managed_driver: Optional[ManagedBrowserDriver] = None
+        self._registered_cdp_endpoint: str = ""
         self._failure_context_by_session: Dict[str, str] = {}
         self._heartbeat_task: Optional[asyncio.Task[Any]] = None
         self._heartbeat_interval: float = 30.0
@@ -92,12 +93,25 @@ class BrowserService:
     def last_heartbeat_ok(self) -> Optional[float]:
         return self._last_heartbeat_ok
 
-    @staticmethod
-    def _resolve_profile_store_path() -> Path:
+    def _resolve_profile_store_path(self) -> Path:
         configured = (os.getenv("BROWSER_PROFILE_STORE_PATH") or "").strip()
         if configured:
             return Path(configured).expanduser()
-        return Path(REPO_ROOT).expanduser() / ".browser" / "profiles.json"
+        return self._mcp_cwd / ".browser" / "profiles.json"
+
+    @staticmethod
+    def _legacy_profile_store_path() -> Path:
+        return Path.home() / ".jiuwenclaw" / "browser-move" / ".browser" / "profiles.json"
+
+    def _iter_profile_store_paths(self) -> list[Path]:
+        primary = self._resolve_profile_store_path()
+        paths = [primary]
+        configured = (os.getenv("BROWSER_PROFILE_STORE_PATH") or "").strip()
+        if not configured:
+            legacy = self._legacy_profile_store_path()
+            if legacy.resolve() != primary.resolve():
+                paths.append(legacy)
+        return paths
 
     @staticmethod
     def _resolve_driver_mode() -> str:
@@ -140,6 +154,57 @@ class BrowserService:
             return Path(raw).expanduser()
         return Path(resolve_playwright_mcp_cwd()).expanduser()
 
+    @staticmethod
+    def _is_cdp_endpoint_ready(endpoint: str) -> bool:
+        base = str(endpoint or "").strip().rstrip("/")
+        if not base:
+            return False
+        try:
+            with urlopen(f"{base}/json/version", timeout=1.5) as response:  # nosec B310
+                payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+                if isinstance(payload, dict):
+                    return bool(payload.get("webSocketDebuggerUrl") or payload.get("Browser"))
+        except (OSError, ValueError):
+            return False
+        return False
+
+    def _resolve_existing_cdp_profile(self) -> Optional[BrowserProfile]:
+        candidates: list[BrowserProfile] = []
+        for store_path in self._iter_profile_store_paths():
+            store = BrowserProfileStore(store_path)
+            selected = store.selected_profile()
+            if selected is not None:
+                candidates.append(selected)
+            named = store.get_profile(self._profile_name)
+            if named is not None and all(named.name != item.name for item in candidates):
+                candidates.append(named)
+
+        for profile in candidates:
+            endpoint = str(profile.cdp_url or "").strip()
+            if endpoint and self._is_cdp_endpoint_ready(endpoint):
+                try:
+                    self._profile_store.upsert_profile(profile, select=True)
+                except Exception:
+                    pass
+                return profile
+        return None
+
+    def _should_replace_managed_driver(self, profile: BrowserProfile) -> bool:
+        if self._managed_driver is None:
+            return False
+        if profile.driver_type != "managed":
+            return True
+        if self._active_profile is None:
+            return True
+        current_endpoint = str(self._active_profile.cdp_url or "").strip()
+        target_endpoint = str(profile.cdp_url or "").strip()
+        return current_endpoint != target_endpoint
+
+    def _configured_cdp_endpoint(self) -> str:
+        params = getattr(self.mcp_cfg, "params", {}) or {}
+        env_map = dict(params.get("env", {}) or {})
+        return str(env_map.get("PLAYWRIGHT_MCP_CDP_ENDPOINT") or "").strip()
+
     def _build_managed_profile(self) -> BrowserProfile:
         host = (os.getenv("BROWSER_MANAGED_HOST") or "127.0.0.1").strip() or "127.0.0.1"
         port_raw = (os.getenv("BROWSER_MANAGED_PORT") or "9333").strip()
@@ -158,7 +223,7 @@ class BrowserService:
         elif kill_existing:
             user_data_dir = _default_chrome_user_data_dir()
         else:
-            user_data_dir = str(Path(REPO_ROOT).expanduser() / ".browser-profiles" / self._profile_name)
+            user_data_dir = str(self._mcp_cwd / ".browser-profiles" / self._profile_name)
         browser_binary = (os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
         extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
         cdp_url = f"http://{host}:{port}"
@@ -185,8 +250,19 @@ class BrowserService:
     async def _ensure_managed_driver_started(self) -> None:
         if self._driver_mode != "managed":
             return
-        if self._managed_driver is not None:
+        reusable_profile = self._resolve_existing_cdp_profile()
+        if reusable_profile is not None:
+            if self._should_replace_managed_driver(reusable_profile):
+                await self._stop_managed_driver()
+            self._active_profile = reusable_profile
+            self._inject_cdp_endpoint(str(reusable_profile.cdp_url or "").strip())
             return
+
+        if self._managed_driver is not None:
+            ready = await asyncio.to_thread(self._managed_driver.is_endpoint_ready)
+            if ready:
+                return
+            self._managed_driver = None
 
         profile = self._profile_store.get_profile(self._profile_name)
         if (
@@ -410,6 +486,10 @@ class BrowserService:
 
     async def ensure_started(self) -> None:
         if self.started:
+            await self._ensure_managed_driver_started()
+            configured_endpoint = self._configured_cdp_endpoint()
+            if configured_endpoint != self._registered_cdp_endpoint:
+                await self._refresh_mcp_server_binding()
             return
 
         if shutil.which("npx") is None:
@@ -443,6 +523,7 @@ class BrowserService:
             screenshot_subdir=self._screenshot_subdir,
             artifacts_subdir=self._artifacts_subdir,
         )
+        self._registered_cdp_endpoint = self._configured_cdp_endpoint()
         self.started = True
         self._start_heartbeat()
 
@@ -485,38 +566,49 @@ class BrowserService:
             except Exception as exc:
                 self._connection_healthy = False
                 _logger.warning("BrowserService heartbeat: connection unhealthy — %s", exc)
-                if not self._inflight_tasks:
-                    try:
-                        await self._restart()
-                        try:
-                            await self._check_connection()
-                        except Exception as recheck_exc:
-                            self._connection_healthy = False
-                            _logger.warning(
-                                "BrowserService heartbeat: restart completed but connection is still unhealthy - %s",
-                                recheck_exc,
-                            )
-                        else:
-                            self._connection_healthy = True
-                            self._last_heartbeat_ok = asyncio.get_event_loop().time()
-                            _logger.info("BrowserService heartbeat: connection restored after restart")
-                    except Exception as restart_exc:
-                        _logger.error("BrowserService heartbeat: restart failed — %s", restart_exc)
+                _logger.info(
+                    "BrowserService heartbeat: restart deferred until the next browser task "
+                    "to avoid reviving manually closed browsers during idle periods"
+                )
 
     async def _restart(self) -> None:
         """Tear down and reinitialize the browser service (e.g. after stdio subprocess dies)."""
-        from openjiuwen.core.common.logging import logger as _logger
-        _logger.warning("BrowserService: restarting due to broken MCP connection")
+        await self._restart_browser_runtime()
+
+    async def _remove_registered_mcp_server(self) -> None:
+        server_resource_id = (self.mcp_cfg.server_id or "").strip() or self.mcp_cfg.server_name
+        await Runner.resource_mgr.remove_mcp_server(
+            server_id=server_resource_id,
+            ignore_exception=True,
+        )
+
+    async def _refresh_mcp_server_binding(self) -> None:
+        await self._remove_registered_mcp_server()
+        register_result = await Runner.resource_mgr.add_mcp_server(self.mcp_cfg, tag="browser.service")
+        if register_result is not None and not getattr(register_result, "is_ok", lambda: False)():
+            if hasattr(register_result, "error") and callable(register_result.error):
+                error_value = register_result.error()
+            elif hasattr(register_result, "msg") and callable(register_result.msg):
+                error_value = register_result.msg()
+            else:
+                error_value = getattr(register_result, "value", register_result)
+            if "already exist" not in str(error_value):
+                raise RuntimeError(f"Failed to refresh Playwright MCP server binding: {error_value}")
+        self._registered_cdp_endpoint = self._configured_cdp_endpoint()
+
+    async def _reset_browser_runtime(self) -> None:
         try:
-            server_resource_id = (self.mcp_cfg.server_id or "").strip() or self.mcp_cfg.server_name
-            await Runner.resource_mgr.remove_mcp_server(
-                server_id=server_resource_id,
-                ignore_exception=True,
-            )
+            if self.started:
+                await self._remove_registered_mcp_server()
         except Exception:
             pass
         self.started = False
+        self._registered_cdp_endpoint = ""
         self._browser_agent = None
+        await self._stop_managed_driver()
+
+    async def _restart_browser_runtime(self) -> None:
+        await self._reset_browser_runtime()
         await self.ensure_started()
 
     @staticmethod
@@ -702,7 +794,7 @@ class BrowserService:
                 used_max_iteration_resume = False
                 next_task = self._build_task_with_failure_context(base_task, previous_failure_summary)
                 attempt_idx = 0
-                max_attempts = attempts + 1  # one extra continuation pass for max-iteration exhaustion
+                max_attempts = attempts + (1 if self.guardrails.resume_on_max_iterations else 0)
                 last_failure_final = ""
                 last_failure_page: Dict[str, Any] = {}
                 last_failure_screenshot: Any = None
@@ -717,6 +809,7 @@ class BrowserService:
                         should_resume_max_iter = (
                             (not parsed_ok)
                             and self._is_max_iteration_result(parsed)
+                            and self.guardrails.resume_on_max_iterations
                             and not used_max_iteration_resume
                         )
                         if not parsed_ok:

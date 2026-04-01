@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 from openjiuwen.core.foundation.tool import McpServerConfig
-from .. import REPO_ROOT	 
 from ..utils.env import (
     DEFAULT_BROWSER_TIMEOUT_S,
     DEFAULT_GUARDRAIL_MAX_FAILURES,
@@ -39,6 +38,7 @@ class BrowserRunGuardrails:
     max_failures: int = 2
     timeout_s: int = 180
     retry_once: bool = True
+    resume_on_max_iterations: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,10 +53,15 @@ class RuntimeSettings:
 
 def resolve_playwright_mcp_cwd() -> str:
     """Resolve MCP working directory with relocatable defaults."""
-    process_cwd = Path.cwd().expanduser()
-    if (process_cwd / "openjiuwen" / "deepagents" / "tools" / "browser_move" / "playwright_runtime").exists():
-        return str(process_cwd.resolve())
-    return str(Path(REPO_ROOT).expanduser().resolve())
+    configured = (
+        (os.getenv("PLAYWRIGHT_RUNTIME_MCP_CWD") or "").strip()
+        or (os.getenv("BROWSER_RUNTIME_MCP_CWD") or "").strip()
+        or (os.getenv("PLAYWRIGHT_RUNTIME_WORKDIR") or "").strip()
+        or (os.getenv("BROWSER_RUNTIME_WORKDIR") or "").strip()
+    )
+    if configured:
+        return str(Path(configured).expanduser().resolve())
+    return str(Path.cwd().expanduser().resolve())
 
 
 def build_browser_guardrails() -> BrowserRunGuardrails:
@@ -75,6 +80,10 @@ def build_browser_guardrails() -> BrowserRunGuardrails:
         retry_once=resolve_bool_env(
             "BROWSER_GUARDRAIL_RETRY_ONCE",
             default=DEFAULT_GUARDRAIL_RETRY_ONCE,
+        ),
+        resume_on_max_iterations=resolve_bool_env(
+            "BROWSER_GUARDRAIL_RESUME_ON_MAX_ITERATIONS",
+            default=False,
         ),
     )
 
