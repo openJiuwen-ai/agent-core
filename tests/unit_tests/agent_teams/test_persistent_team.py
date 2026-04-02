@@ -9,8 +9,8 @@ from unittest.mock import (
 import pytest
 import pytest_asyncio
 
-from openjiuwen.agent_teams.agent.coordination import (
-    CoordinationLoop,
+from openjiuwen.agent_teams.agent.coordinator import (
+    CoordinatorLoop,
 )
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.team import (
@@ -65,13 +65,13 @@ async def message_bus():
     yield bus
 
 
-# ========== CoordinationLoop pause/resume ==========
+# ========== CoordinatorLoop pause/resume ==========
 
-class TestCoordinationLoopPauseResume:
+class TestCoordinatorLoopPauseResume:
 
     @pytest.mark.asyncio
     async def test_pause_polls_stops_polling(self):
-        loop = CoordinationLoop(role=TeamRole.LEADER)
+        loop = CoordinatorLoop(role=TeamRole.LEADER)
         await loop.start()
         assert loop.is_running
         assert not loop.polls_paused
@@ -86,7 +86,7 @@ class TestCoordinationLoopPauseResume:
 
     @pytest.mark.asyncio
     async def test_resume_polls_restarts_polling(self):
-        loop = CoordinationLoop(role=TeamRole.LEADER)
+        loop = CoordinatorLoop(role=TeamRole.LEADER)
         await loop.start()
 
         await loop.pause_polls()
@@ -101,7 +101,7 @@ class TestCoordinationLoopPauseResume:
 
     @pytest.mark.asyncio
     async def test_pause_polls_idempotent(self):
-        loop = CoordinationLoop(role=TeamRole.LEADER)
+        loop = CoordinatorLoop(role=TeamRole.LEADER)
         await loop.start()
         await loop.pause_polls()
         await loop.pause_polls()  # should not raise
@@ -110,7 +110,7 @@ class TestCoordinationLoopPauseResume:
 
     @pytest.mark.asyncio
     async def test_resume_polls_noop_when_not_paused(self):
-        loop = CoordinationLoop(role=TeamRole.LEADER)
+        loop = CoordinatorLoop(role=TeamRole.LEADER)
         await loop.start()
         original_mailbox = loop._mailbox_poll_task
         await loop.resume_polls()  # should be noop

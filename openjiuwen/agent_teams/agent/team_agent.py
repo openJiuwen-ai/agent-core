@@ -11,8 +11,8 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.agent_teams.agent.coordination import (
-    CoordinationLoop,
+from openjiuwen.agent_teams.agent.coordinator import (
+    CoordinatorLoop,
     InnerEventMessage,
     InnerEventType,
 )
@@ -65,7 +65,7 @@ class TeamAgent(BaseAgent):
         self._deep_agent: Optional[DeepAgent] = None
         self._spec: Optional[TeamAgentSpec] = None
         self._ctx: Optional[TeamRuntimeContext] = None
-        self._coordination_loop: Optional[CoordinationLoop] = None
+        self._coordination_loop: Optional[CoordinatorLoop] = None
         self._role_policy: str = ""
         self._messager: Optional[Messager] = None
         self._subscribed_topics: list[str] = []
@@ -109,7 +109,7 @@ class TeamAgent(BaseAgent):
         return self._ctx
 
     @property
-    def coordination_loop(self) -> Optional[CoordinationLoop]:
+    def coordination_loop(self) -> Optional[CoordinatorLoop]:
         """Return the shared coordination loop."""
         return self._coordination_loop
 
@@ -305,7 +305,7 @@ class TeamAgent(BaseAgent):
 
         from openjiuwen.agent_teams.agent.dispatcher import EventDispatcher
         self._dispatcher = EventDispatcher(self)
-        self._coordination_loop = CoordinationLoop(
+        self._coordination_loop = CoordinatorLoop(
             role=ctx.role,
             wake_callback=self._dispatcher.dispatch,
         )
@@ -397,7 +397,7 @@ class TeamAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     async def invoke(self, inputs, session=None):
-        """Execute via CoordinationLoop-driven rounds.
+        """Execute via CoordinatorLoop-driven rounds.
 
         Feeds initial query as USER_INPUT event, collects
         all chunks, returns the last result.
@@ -427,7 +427,7 @@ class TeamAgent(BaseAgent):
             self._stream_queue = None
 
     async def stream(self, inputs, session=None, stream_modes=None):
-        """Stream via CoordinationLoop-driven rounds.
+        """Stream via CoordinatorLoop-driven rounds.
 
         Feeds initial query as USER_INPUT event, yields
         chunks from unified queue until sentinel (None).
@@ -455,7 +455,7 @@ class TeamAgent(BaseAgent):
             self._stream_queue = None
 
     async def interact(self, message: str) -> None:
-        """Inject user input into CoordinationLoop as USER_INPUT event."""
+        """Inject user input into CoordinatorLoop as USER_INPUT event."""
         if self._coordination_loop is None:
             return
         await self._coordination_loop.enqueue(

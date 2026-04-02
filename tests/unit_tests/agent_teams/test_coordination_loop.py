@@ -6,9 +6,9 @@ import asyncio
 
 import pytest
 
-from openjiuwen.agent_teams.agent.coordination import (
+from openjiuwen.agent_teams.agent.coordinator import (
     CoordinationEvent,
-    CoordinationLoop,
+    CoordinatorLoop,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.team_events import (
@@ -25,7 +25,7 @@ async def test_message_event_wakes_loop():
     async def on_wake(event: CoordinationEvent) -> None:
         woke.append(event)
 
-    loop = CoordinationLoop(
+    loop = CoordinatorLoop(
         role=TeamRole.LEADER,
         wake_callback=on_wake,
     )
@@ -51,7 +51,7 @@ async def test_task_event_wakes_loop():
     async def on_wake(event: CoordinationEvent) -> None:
         woke.append(event)
 
-    loop = CoordinationLoop(
+    loop = CoordinatorLoop(
         role=TeamRole.TEAMMATE,
         wake_callback=on_wake,
     )
@@ -77,7 +77,7 @@ async def test_multiple_events_wake_in_order():
     async def on_wake(event: CoordinationEvent) -> None:
         woke.append(event)
 
-    loop = CoordinationLoop(
+    loop = CoordinatorLoop(
         role=TeamRole.LEADER,
         wake_callback=on_wake,
     )
@@ -105,7 +105,7 @@ async def test_multiple_events_wake_in_order():
 @pytest.mark.asyncio
 async def test_no_callback_does_not_crash():
     """Loop without callback still processes events."""
-    loop = CoordinationLoop(role=TeamRole.LEADER)
+    loop = CoordinatorLoop(role=TeamRole.LEADER)
     await loop.start()
 
     await loop.enqueue(

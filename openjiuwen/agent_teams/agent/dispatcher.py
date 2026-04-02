@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.agent.coordination import (
+from openjiuwen.agent_teams.agent.coordinator import (
     CoordinationEvent,
     InnerEventMessage,
     InnerEventType,
@@ -114,7 +114,7 @@ class EventDispatcher:
         self._host = host
 
     async def dispatch(self, event: CoordinationEvent) -> None:
-        """Entry point called by CoordinationLoop on every wake-up.
+        """Entry point called by CoordinatorLoop on every wake-up.
 
         Dispatches to inner-event or transport-event handling.
         """

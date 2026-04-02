@@ -72,7 +72,7 @@ def _make_leader() -> TeamAgent:
 
 
 def test_coordination_loop_created_on_configure():
-    """configure() creates a CoordinationLoop."""
+    """configure() creates a CoordinatorLoop."""
     agent = _make_leader()
     assert agent.coordination_loop is not None
     assert agent.coordination_loop.role == TeamRole.LEADER
