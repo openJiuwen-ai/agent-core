@@ -3,7 +3,7 @@
 import asyncio
 import re
 import string
-from typing import AsyncIterator, Union, AsyncGenerator, Any
+from typing import AsyncIterator, Union, AsyncGenerator, Any, Generator
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -242,6 +242,8 @@ class End(WorkflowComponent):
         }
 
 
+
+
 class TemplateProcessor:
     def __init__(self, template: str):
         self._template = template
@@ -302,11 +304,60 @@ class TemplateProcessor:
         self._chunk_index = 0
         self._count = 0
 
+    @staticmethod
+    async def _consume_all_iterators(inputs: dict, session: Session) -> None:
+        """
+        Recursively collect and consume all iterators from inputs.
+
+        Args:
+            inputs: Input dictionary that may contain iterators
+            session: Session object for logging
+        """
+
+        # Collect all iterators from inputs recursively
+        def collect_iterators(data, path=""):
+            iterators = []
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    new_path = f"{path}.{key}" if path else key
+                    iterators.extend(collect_iterators(value, new_path))
+            elif isinstance(data, list):
+                for idx, item in enumerate(data):
+                    new_path = f"{path}[{idx}]" if path else f"[{idx}]"
+                    iterators.extend(collect_iterators(item, new_path))
+            elif isinstance(data, (AsyncGenerator, Generator)):
+                iterators.append((path, data))
+            return iterators
+
+        # Collect all iterators first
+        iterators_to_consume = collect_iterators(inputs)
+
+        # Ensure all collected iterators are fully consumed
+        for path, iterator in iterators_to_consume:
+            try:
+                if isinstance(iterator, AsyncGenerator):
+                    async for _ in iterator:
+                        pass
+                else:  # Generator
+                    for _ in iterator:
+                        pass
+            except Exception as e:
+                workflow_logger.debug(
+                    f"Error consuming iterator at {path}: {e}",
+                    event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,
+                    component_type_str="End",
+                    component_id=session.get_component_id(),
+                    exception=e
+                )
+
     async def render_stream(self, inputs: dict, session: Session, timeout: float = 0.2) -> AsyncGenerator:
         try:
             async for frame in self._render_stream(inputs, timeout, session):
                 yield frame
         finally:
+            # Ensure all iterators in inputs are fully consumed
+            await self._consume_all_iterators(inputs, session)
+
             self._count += 1
             if self._count == self._data_source_count:
                 self.reset()

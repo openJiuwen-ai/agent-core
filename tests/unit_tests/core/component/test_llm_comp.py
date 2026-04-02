@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import types
@@ -9,6 +10,7 @@ import pytest
 
 from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.session.stream import BaseStreamMode, TraceSchema
 from openjiuwen.core.single_agent.legacy import WorkflowAgentConfig, WorkflowSchema
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.llm import ModelConfig
@@ -971,3 +973,48 @@ class TestLLMStreamCacheWorkflow:
         assert "world" in output_content
         # The complete mock output should be: "Hello world! This is a streamed response."
         assert "Hello world! This is a streamed response." in output_content
+
+
+class MockLLMComponent(WorkflowComponent):
+    async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        await asyncio.sleep(1)
+        for i in range(0, 3):
+            yield {'output': f'chunk {str(i)}'}
+
+    async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        return {'output': "llm"}
+
+@pytest.mark.asyncio
+async def test_workflow_with_static_template():
+    workflow = Workflow()
+    workflow.set_start_comp("start", Start(), inputs_schema={"a": "a"})
+    workflow.add_workflow_comp("llm", MockLLMComponent())
+    workflow.set_end_comp("end", End(conf={'response_template': 'this is end result'}), response_mode="streaming",
+                          stream_inputs_schema={"a": "${llm.output}"})
+
+    workflow.add_connection("start", "llm")
+    workflow.add_stream_connection("llm", "end")
+    expect_chunks = [{'componentId': 'start', 'status': 'start', 'streamInputs': None, 'streamOutputs': None},
+                     {'componentId': 'start', 'status': 'finish', 'streamInputs': None, 'streamOutputs': []},
+                     {'componentId': 'llm', 'status': 'start', 'streamInputs': None, 'streamOutputs': None},
+                     {'componentId': 'llm', 'status': 'finish', 'streamInputs': None, 'streamOutputs': [
+                         {'output': 'chunk 0'}, {'output': 'chunk 1'}, {'output': 'chunk 2'}]},
+                     {'componentId': 'end', 'status': 'start', 'streamInputs': [
+                         {'a': 'chunk 0'}, {'a': 'chunk 1'}, {'a': 'chunk 2'}], 'streamOutputs': None},
+                     {'componentId': 'end', 'status': 'finish', 'streamInputs': [{'a': 'chunk 0'}, {'a': 'chunk 1'},
+                                                                                 {'a': 'chunk 2'}],
+                      'streamOutputs': [{'type': 'end node stream', 'index': 0,
+                                         'payload': {'response': 'this is end result'}}]}]
+
+
+    chunks = []
+    async for chunk in workflow.stream(inputs={}, session=create_workflow_session(), stream_modes=[BaseStreamMode.TRACE]):
+        if isinstance(chunk, TraceSchema):
+            if chunk.payload.get('componentId'):
+                chunks.append(dict(componentId=chunk.payload.get('componentId'),
+                                   status=chunk.payload.get('status'),
+                                   streamInputs=chunk.payload.get("streamInputs"),
+                                   streamOutputs=chunk.payload.get("streamOutputs")))
+
+
+    assert expect_chunks == chunks
