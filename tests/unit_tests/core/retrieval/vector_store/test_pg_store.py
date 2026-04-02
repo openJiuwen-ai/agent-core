@@ -9,6 +9,7 @@ import pytest
 pgvector = pytest.importorskip("pgvector", reason="PGVector not installed")
 
 from unittest.mock import (
+    ANY,
     AsyncMock,
     MagicMock,
     patch,
@@ -73,6 +74,60 @@ class TestPGVectorStore:
         store_cosine = PGVectorStore(config=config_cosine, pg_uri="uri")
         # Access exposed public property instead of protected member
         assert store_cosine.distance_metric == "cosine"
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.core.retrieval.vector_store.pg_store.create_async_engine")
+    @patch("openjiuwen.core.retrieval.vector_store.pg_store.async_sessionmaker")
+    async def test_get_or_create_table_reflects_existing_table(
+            self,
+            mock_sessionmaker,
+            mock_create_engine,
+            vector_store_config,
+            mock_session_factory
+    ):
+        """UT-002: Existing tables should be reflected through run_sync on the sync connection."""
+        mock_engine = MagicMock()
+        mock_create_engine.return_value = mock_engine
+        mock_sessionmaker.return_value = MagicMock(return_value=mock_session_factory)
+
+        store = PGVectorStore(config=vector_store_config, pg_uri="uri")
+
+        mock_conn = MagicMock()
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=None)
+        sync_conn = MagicMock(name="sync_conn")
+
+        async def run_sync(fn):
+            return fn(sync_conn)
+
+        mock_conn.run_sync = AsyncMock(side_effect=run_sync)
+        mock_engine.connect.return_value = mock_conn
+
+        inspector = MagicMock()
+        inspector.has_table.return_value = True
+        reflected_table = MagicMock(name="reflected_table")
+
+        with (
+            patch(
+                "openjiuwen.core.retrieval.vector_store.pg_store.inspect",
+                return_value=inspector,
+            ),
+            patch(
+                "openjiuwen.core.retrieval.vector_store.pg_store.Table",
+                return_value=reflected_table,
+            ) as mock_table,
+        ):
+            table = await store._get_or_create_table()
+            cached_table = await store._get_or_create_table()
+
+        assert table is reflected_table
+        assert cached_table is reflected_table
+        assert mock_conn.run_sync.await_count == 2
+        mock_table.assert_called_once_with(
+            "test_collection",
+            ANY,
+            autoload_with=sync_conn,
+        )
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.vector_store.pg_store.create_async_engine")
