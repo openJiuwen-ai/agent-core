@@ -85,7 +85,6 @@ async def main():
             ),
         },
         team_name="demo_team",
-        objective="通过团队协作完成用户请求的任务",
         teammate_mode="build_mode",
         transport=TransportSpec(type="pyzmq", params=transport_config.model_dump()),
         storage=StorageSpec(type="sqlite", params={"connection_string": "./team.db"}),
@@ -179,7 +178,12 @@ stream_task = asyncio.create_task(
 
 # 发送后续输入
 await leader.interact("补充指令")
+
+# 通过 @mention 向特定队友发送直接消息
+await leader.interact("@teammate_member_id 请专注处理数据分析部分")
 ```
+
+`@member_id message` 语法会将消息直接路由到目标队友，绕过 leader 的 agent 逻辑。发送者在消息表中记录为 `"user"`。
 
 ## 团队生命周期模式
 
@@ -197,7 +201,10 @@ leader = create_agent_team(
 
 ### Persistent（持久模式）
 - 团队状态和成员跨会话保留
-- 支持断点续传和崩溃恢复
+- `invoke()` / `stream()` 完成后团队进入待命状态，不会关闭
+- 队友进程保持存活，通过 `TEAM_STANDBY` 事件暂停轮询
+- 后续 `invoke()` 调用自动恢复协调循环
+- 支持通过 `resume_persistent_team()` 跨会话恢复
 - 适用于长期运行的团队
 
 ```python
@@ -209,7 +216,24 @@ leader = create_agent_team(
 
 ## 恢复与持久化
 
+### 恢复持久团队
+
+对于仍处于待命状态的持久团队（同一进程），使用 `resume_persistent_team()` 开始新一轮：
+
+```python
+from openjiuwen.agent_teams import resume_persistent_team
+
+# 在新会话中恢复（团队进程仍然存活）
+leader = await resume_persistent_team(leader, new_session_id="round_2")
+
+# 运行下一轮
+async for chunk in leader.stream(inputs={"query": "下一个任务"}):
+    print(chunk)
+```
+
 ### 从会话恢复
+
+用于崩溃恢复或跨进程还原，使用 `recover_agent_team()`：
 
 ```python
 from openjiuwen.agent_teams.factory import recover_agent_team
@@ -247,6 +271,37 @@ leader = create_agent_team(
 leader = create_agent_team(
     ...,
     teammate_mode="build_mode",
+)
+```
+
+## 预定义团队成员
+
+可以预配置团队成员，跳过动态 `spawn_member` 步骤。提供 `predefined_members` 后，所有成员自动注册到数据库，leader 使用简化的工作流，不包含 `spawn_member` 工具。
+
+```python
+from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
+
+leader = create_agent_team(
+    agents={...},
+    team_name="my_team",
+    predefined_members=[
+        TeamMemberSpec(
+            member_id="analyst",
+            name="DataAnalyst",
+            role_type=TeamRole.TEAMMATE,
+            persona="数据分析专家",
+            domain="data_analysis",
+        ),
+        TeamMemberSpec(
+            member_id="writer",
+            name="ReportWriter",
+            role_type=TeamRole.TEAMMATE,
+            persona="技术写作专家",
+            domain="report_writing",
+        ),
+    ],
+    transport=TransportSpec(...),
+    storage=StorageSpec(...),
 )
 ```
 

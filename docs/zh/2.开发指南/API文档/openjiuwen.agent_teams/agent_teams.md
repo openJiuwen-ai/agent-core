@@ -4,13 +4,13 @@
 
 ```python
 create_agent_team(
-    agents: dict[str，DeepAgentSpec],
+    agents: dict[str, DeepAgentSpec],
     *,
     team_name: str = "agent_team",
-    objective: str = "Coordinate a multi-agent task",
     lifecycle: str = "temporary",
     teammate_mode: str = "plan_mode",
     leader: Optional[LeaderSpec] = None,
+    predefined_members: list[TeamMemberSpec] | None = None,
     transport: Optional[TransportSpec] = None,
     storage: Optional[StorageSpec] = None,
     metadata: Optional[dict] = None,
@@ -23,10 +23,10 @@ create_agent_team(
 
 - **agents**(dict[str, [DeepAgentSpec](#class-openjiuwenagent_teamsdeepagentspec)]): 按角色配置的[DeepAgentSpec](#class-openjiuwenagent_teamsdeepagentspec)，必须包含 "leader" 键，"teammate" 为可选。
 - **team_name**(str，可选): 团队名称，默认值：`agent_team`。
-- **objective**(str，可选): 团队的高层目标，默认值：`Coordinate a multi-agent task`。
 - **lifecycle**(str，可选): 团队生命周期模式，`temporary` 或 `persistent`，默认值：`temporary`。
 - **teammate_mode**(str，可选): 队友默认执行模式，`plan_mode` 或 `build_mode`，默认值：`plan_mode`。
 - **leader**([LeaderSpec](#class-openjiuwenagent_teamsleaderspec)，可选): Leader 身份配置，默认值：`None`。
+- **predefined_members**(list[TeamMemberSpec] | None，可选): 预配置的团队成员。提供时 leader 跳过 `spawn_member`，`build_team` 自动注册所有成员，默认值：`None`。
 - **transport**([TransportSpec](#class-openjiuwenagent_teamstransportspec)，可选): 传输层配置，默认值：`None`。
 - **storage**([StorageSpec](#class-openjiuwenagent_teamsstoragespec)，可选): 存储层配置，默认值：`None`。
 - **metadata**(dict，可选): 附加元数据，默认值：`None`。
@@ -34,6 +34,28 @@ create_agent_team(
 **返回**：
 
 **TeamAgent**：配置好的 Leader 实例
+
+## function openjiuwen.agent_teams.resume_persistent_team
+
+```python
+async resume_persistent_team(
+    agent: TeamAgent,
+    new_session_id: str,
+) -> TeamAgent
+```
+
+在新会话中恢复持久团队。
+
+创建新会话，初始化任务和消息的动态表，返回同一 agent 实例，可直接进行下一轮 `invoke()` / `stream()` 调用。
+
+**参数**：
+
+- **agent**(TeamAgent): 已完成至少一轮的持久团队 leader 实例。
+- **new_session_id**(str): 新一轮的会话 ID。
+
+**返回**：
+
+**TeamAgent**：同一 leader 实例，已就绪进入下一轮。
 
 ## class openjiuwen.agent_teams.DeepAgentSpec
 

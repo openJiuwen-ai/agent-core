@@ -88,7 +88,6 @@ async def main():
             ),
         },
         team_name="demo_team",
-        objective="Complete the user's request through team collaboration",
         teammate_mode="build_mode",
         transport=TransportSpec(type="pyzmq", params=transport_config.model_dump()),
         storage=StorageSpec(type="sqlite", params={"connection_string": "./team.db"}),
@@ -183,7 +182,12 @@ stream_task = asyncio.create_task(
 
 # Send follow-up input
 await leader.interact("Additional instruction")
+
+# Send a direct message to a specific teammate via @mention
+await leader.interact("@teammate_member_id Please focus on the data analysis part")
 ```
+
+The `@member_id message` syntax routes the message directly to the target teammate, bypassing the leader's agent logic. The sender is recorded as `"user"` in the message table.
 
 ## Team Lifecycle Modes
 
@@ -203,7 +207,10 @@ leader = create_agent_team(
 ### Persistent
 
 - Team state and members persist across sessions
-- Supports resume and crash recovery
+- After `invoke()` / `stream()` completes, the team enters standby instead of shutting down
+- Teammate processes stay alive with polls paused via `TEAM_STANDBY` event
+- Subsequent `invoke()` calls automatically resume the coordination loop
+- Supports cross-session resume via `resume_persistent_team()`
 - Suitable for long-running teams
 
 ```python
@@ -215,7 +222,24 @@ leader = create_agent_team(
 
 ## Recovery and Persistence
 
+### Resume a Persistent Team
+
+For persistent teams that are still in standby (same process), use `resume_persistent_team()` to start a new round:
+
+```python
+from openjiuwen.agent_teams import resume_persistent_team
+
+# Resume in a new session (team processes are still alive)
+leader = await resume_persistent_team(leader, new_session_id="round_2")
+
+# Run the next round
+async for chunk in leader.stream(inputs={"query": "Next task"}):
+    print(chunk)
+```
+
 ### Recover from a Session
+
+For crash recovery or cross-process restore, use `recover_agent_team()`:
 
 ```python
 from openjiuwen.agent_teams.factory import recover_agent_team
@@ -255,6 +279,37 @@ leader = create_agent_team(
 leader = create_agent_team(
     ...,
     teammate_mode="build_mode",
+)
+```
+
+## Predefined Team Members
+
+You can pre-configure team members to skip the dynamic `spawn_member` step. When `predefined_members` is provided, all members are automatically registered in the database and the leader uses a simplified workflow without the `spawn_member` tool.
+
+```python
+from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
+
+leader = create_agent_team(
+    agents={...},
+    team_name="my_team",
+    predefined_members=[
+        TeamMemberSpec(
+            member_id="analyst",
+            name="DataAnalyst",
+            role_type=TeamRole.TEAMMATE,
+            persona="Expert data analyst",
+            domain="data_analysis",
+        ),
+        TeamMemberSpec(
+            member_id="writer",
+            name="ReportWriter",
+            role_type=TeamRole.TEAMMATE,
+            persona="Technical writer",
+            domain="report_writing",
+        ),
+    ],
+    transport=TransportSpec(...),
+    storage=StorageSpec(...),
 )
 ```
 

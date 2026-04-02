@@ -91,7 +91,10 @@ AgentTeams completes complex tasks through coordinated work between a Leader and
 ### Advanced Features
 
 - **Health Check and Auto Recovery**: The Leader periodically checks teammate process status and automatically restarts unhealthy members
-- **Resume Support**: Supports recovering team state and members from previous sessions
+- **Persistent Standby**: Persistent teams enter standby after each round; teammate processes stay alive and resume automatically on the next `invoke()`
+- **Resume Support**: Supports recovering team state via `resume_persistent_team()` (same process) or `recover_agent_team()` (crash recovery)
+- **User @mention**: Users can send direct messages to specific teammates via `@member_id message` syntax, bypassing the leader
+- **Predefined Members**: Pre-configure team members to skip dynamic spawning, with automatic DB registration
 - **Cross-Process Communication**: Uses `pyzmq` to support collaboration across processes and hosts
 
 ### Suitable Scenarios

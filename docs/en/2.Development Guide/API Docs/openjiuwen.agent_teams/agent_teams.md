@@ -7,10 +7,10 @@ create_agent_team(
     agents: dict[str, DeepAgentSpec],
     *,
     team_name: str = "agent_team",
-    objective: str = "Coordinate a multi-agent task",
     lifecycle: str = "temporary",
     teammate_mode: str = "plan_mode",
     leader: Optional[LeaderSpec] = None,
+    predefined_members: list[TeamMemberSpec] | None = None,
     transport: Optional[TransportSpec] = None,
     storage: Optional[StorageSpec] = None,
     metadata: Optional[dict] = None,
@@ -23,10 +23,10 @@ Creates and configures a team Leader.
 
 - **agents** (dict[str, [DeepAgentSpec](#class-openjiuwenagent_teamsdeepagentspec)]): Role-based [DeepAgentSpec](#class-openjiuwenagent_teamsdeepagentspec) configuration. Must contain the `"leader"` key; `"teammate"` is optional.
 - **team_name** (str, optional): Team name. Default: `agent_team`.
-- **objective** (str, optional): High-level objective of the team. Default: `Coordinate a multi-agent task`.
 - **lifecycle** (str, optional): Team lifecycle mode, either `temporary` or `persistent`. Default: `temporary`.
 - **teammate_mode** (str, optional): Default execution mode for teammates, either `plan_mode` or `build_mode`. Default: `plan_mode`.
 - **leader** ([LeaderSpec](#class-openjiuwenagent_teamsleaderspec), optional): Leader identity configuration. Default: `None`.
+- **predefined_members** (list[TeamMemberSpec] | None, optional): Pre-configured team members. When provided, leader skips `spawn_member` and `build_team` registers all members automatically. Default: `None`.
 - **transport** ([TransportSpec](#class-openjiuwenagent_teamstransportspec), optional): Transport layer configuration. Default: `None`.
 - **storage** ([StorageSpec](#class-openjiuwenagent_teamsstoragespec), optional): Storage layer configuration. Default: `None`.
 - **metadata** (dict, optional): Additional metadata. Default: `None`.
@@ -34,6 +34,28 @@ Creates and configures a team Leader.
 **Returns**:
 
 **TeamAgent**: A configured Leader instance.
+
+## function openjiuwen.agent_teams.resume_persistent_team
+
+```python
+async resume_persistent_team(
+    agent: TeamAgent,
+    new_session_id: str,
+) -> TeamAgent
+```
+
+Resume a persistent team in a new session.
+
+Creates a fresh session, initializes new dynamic tables for tasks and messages, and returns the same agent ready for a new `invoke()` / `stream()` call.
+
+**Parameters**:
+
+- **agent** (TeamAgent): A configured persistent-team leader that has completed at least one round.
+- **new_session_id** (str): Session ID for the new round.
+
+**Returns**:
+
+**TeamAgent**: The same leader instance, ready for the next round.
 
 ## class openjiuwen.agent_teams.DeepAgentSpec
 
