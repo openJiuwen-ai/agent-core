@@ -46,7 +46,7 @@ async def _read_context_file(
     Args:
         sys_operation: SysOperation instance.
         workspace_root: Root path of the workspace.
-        file_key: File identifier (e.g. "Agent.md").
+        file_key: File identifier (e.g. "AGENT.md").
 
     Returns:
         File content string, or None if file doesn't exist or read fails.

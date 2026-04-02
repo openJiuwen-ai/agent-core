@@ -246,7 +246,7 @@ class MemoryIndexManager:
     def _resolve_db_path(self) -> str:
         """Resolve database path.
 
-        确保向量数据库索引文件存放在与 Memory.md 同目录 (workspace/agent/memory/)
+        确保向量数据库索引文件存放在与 MEMORY.md 同目录 (workspace/agent/memory/)
         """
         store_path = self.settings.store.get("path", "memory.db")
         if os.path.isabs(store_path):
@@ -851,7 +851,7 @@ class MemoryIndexManager:
     ) -> List[Dict[str, Any]]:
         """Search memory for relevant content.
 
-        Note: Excludes Memory.md and recent (today/yesterday) memory files
+        Note: Excludes MEMORY.md and recent (today/yesterday) memory files
         as they are already loaded in the system prompt.
         """
         opts = opts or {}

@@ -115,11 +115,11 @@ def test_workspace_default_schema_has_required_directories():
     workspace = Workspace(root_path="./default")
     names = {node.get("name") for node in workspace.directories}
 
-    assert "Agent.md" in names
-    assert "Soul.md" in names
-    assert "HeartBeat.md" in names
-    assert "Identity.md" in names
-    assert "User.md" in names
+    assert "AGENT.md" in names
+    assert "SOUL.md" in names
+    assert "HEARTBEAT.md" in names
+    assert "IDENTITY.md" in names
+    assert "USER.md" in names
     assert "memory" in names
     assert "todo" in names
     assert "messages" in names
@@ -149,15 +149,15 @@ def test_workspace_missing_defaults_supplemented():
     names = {node.get("name") for node in workspace.directories}
 
     assert "custom" in names
-    assert "Agent.md" in names
-    assert "User.md" in names
+    assert "AGENT.md" in names
+    assert "USER.md" in names
 
 
 def test_workspace_get_directory_returns_path():
     """Test get_directory returns correct path."""
     workspace = Workspace(root_path="./")
-    assert workspace.get_directory("Agent.md") == "Agent.md"
-    assert workspace.get_directory("User.md") == "User.md"
+    assert workspace.get_directory("AGENT.md") == "AGENT.md"
+    assert workspace.get_directory("USER.md") == "USER.md"
     assert workspace.get_directory("nonexistent") is None
 
 
@@ -201,17 +201,17 @@ def test_workspace_get_directory_with_enum():
 
     workspace = Workspace(root_path="./test")
 
-    assert workspace.get_directory(WorkspaceNode.USER_MD) == "User.md"
+    assert workspace.get_directory(WorkspaceNode.USER_MD) == "USER.md"
     assert workspace.get_directory(WorkspaceNode.SKILLS) == "skills"
     assert workspace.get_directory(WorkspaceNode.MEMORY) == "memory"
     assert workspace.get_directory(WorkspaceNode.TODO) == "todo"
     assert workspace.get_directory(WorkspaceNode.MESSAGES) == "messages"
     assert workspace.get_directory(WorkspaceNode.AGENTS) == "agents"
-    assert workspace.get_directory(WorkspaceNode.AGENT_MD) == "Agent.md"
-    assert workspace.get_directory(WorkspaceNode.SOUL_MD) == "Soul.md"
-    assert workspace.get_directory(WorkspaceNode.HEARTBEAT_MD) == "HeartBeat.md"
-    assert workspace.get_directory(WorkspaceNode.IDENTITY_MD) == "Identity.md"
-    assert workspace.get_directory(WorkspaceNode.MEMORY_MD) == "Memory.md"
+    assert workspace.get_directory(WorkspaceNode.AGENT_MD) == "AGENT.md"
+    assert workspace.get_directory(WorkspaceNode.SOUL_MD) == "SOUL.md"
+    assert workspace.get_directory(WorkspaceNode.HEARTBEAT_MD) == "HEARTBEAT.md"
+    assert workspace.get_directory(WorkspaceNode.IDENTITY_MD) == "IDENTITY.md"
+    assert workspace.get_directory(WorkspaceNode.MEMORY_MD) == "MEMORY.md"
     assert workspace.get_directory(WorkspaceNode.DAILY_MEMORY) == "daily_memory"
 
 
@@ -219,9 +219,9 @@ def test_workspace_get_directory_with_string_still_works():
     """Test get_directory still works with string arguments."""
     workspace = Workspace(root_path="./test")
 
-    assert workspace.get_directory("User.md") == "User.md"
+    assert workspace.get_directory("USER.md") == "USER.md"
     assert workspace.get_directory("skills") == "skills"
-    assert workspace.get_directory("Agent.md") == "Agent.md"
+    assert workspace.get_directory("AGENT.md") == "AGENT.md"
 
 
 def test_workspace_get_directory_enum_and_string_equivalent():
@@ -230,10 +230,10 @@ def test_workspace_get_directory_enum_and_string_equivalent():
 
     workspace = Workspace(root_path="./test")
 
-    assert workspace.get_directory(WorkspaceNode.USER_MD) == workspace.get_directory("User.md")
+    assert workspace.get_directory(WorkspaceNode.USER_MD) == workspace.get_directory("USER.md")
     assert workspace.get_directory(WorkspaceNode.SKILLS) == workspace.get_directory("skills")
     assert workspace.get_directory(WorkspaceNode.MEMORY) == workspace.get_directory("memory")
-    assert workspace.get_directory(WorkspaceNode.AGENT_MD) == workspace.get_directory("Agent.md")
+    assert workspace.get_directory(WorkspaceNode.AGENT_MD) == workspace.get_directory("AGENT.md")
 
 
 def test_workspace_get_directory_nonexistent_with_enum():
@@ -255,7 +255,7 @@ def test_workspace_default_language_is_chinese():
     """Test that default workspace language is Chinese."""
     workspace = Workspace(root_path="./test")
     assert workspace.language == "cn"
-    agent_node = next((n for n in workspace.directories if n.get("name") == "Agent.md"), None)
+    agent_node = next((n for n in workspace.directories if n.get("name") == "AGENT.md"), None)
     assert agent_node is not None
     assert "基础配置和能力" in agent_node.get("description", "")
 
@@ -264,7 +264,7 @@ def test_workspace_english_schema():
     """Test that English workspace uses English descriptions."""
     workspace = Workspace(root_path="./test", language="en")
     assert workspace.language == "en"
-    agent_node = next((n for n in workspace.directories if n.get("name") == "Agent.md"), None)
+    agent_node = next((n for n in workspace.directories if n.get("name") == "AGENT.md"), None)
     assert agent_node is not None
     assert "智能体" not in agent_node.get("description", "")
     assert "Basic" in agent_node.get("description", "")
@@ -273,7 +273,7 @@ def test_workspace_english_schema():
 def test_workspace_english_default_content():
     """Test that English workspace has English default content."""
     workspace = Workspace(root_path="./test", language="en")
-    agent_node = next((n for n in workspace.directories if n.get("name") == "Agent.md"), None)
+    agent_node = next((n for n in workspace.directories if n.get("name") == "AGENT.md"), None)
     assert agent_node is not None
     content = agent_node.get("default_content", "")
     assert "This folder is home" in content
@@ -282,7 +282,7 @@ def test_workspace_english_default_content():
 def test_workspace_chinese_default_content():
     """Test that Chinese workspace has Chinese default content."""
     workspace = Workspace(root_path="./test", language="cn")
-    agent_node = next((n for n in workspace.directories if n.get("name") == "Agent.md"), None)
+    agent_node = next((n for n in workspace.directories if n.get("name") == "AGENT.md"), None)
     assert agent_node is not None
     content = agent_node.get("default_content", "")
     assert "智能体" in content
@@ -295,8 +295,8 @@ def test_get_workspace_schema_returns_correct_language():
     schema_cn = get_workspace_schema("cn")
     schema_en = get_workspace_schema("en")
 
-    cn_agent = next((n for n in schema_cn if n.get("name") == "Agent.md"), None)
-    en_agent = next((n for n in schema_en if n.get("name") == "Agent.md"), None)
+    cn_agent = next((n for n in schema_cn if n.get("name") == "AGENT.md"), None)
+    en_agent = next((n for n in schema_en if n.get("name") == "AGENT.md"), None)
 
     assert cn_agent is not None
     assert en_agent is not None
@@ -310,8 +310,8 @@ def test_get_default_directory_with_language():
     schema_cn = Workspace.get_default_directory(language="cn")
     schema_en = Workspace.get_default_directory(language="en")
 
-    cn_agent = next((n for n in schema_cn if n.get("name") == "Agent.md"), None)
-    en_agent = next((n for n in schema_en if n.get("name") == "Agent.md"), None)
+    cn_agent = next((n for n in schema_cn if n.get("name") == "AGENT.md"), None)
+    en_agent = next((n for n in schema_en if n.get("name") == "AGENT.md"), None)
 
     assert cn_agent is not None
     assert en_agent is not None
@@ -323,8 +323,8 @@ def test_workspace_instance_independent_schemas():
     workspace_cn = Workspace(root_path="./test", language="cn")
     workspace_en = Workspace(root_path="./test", language="en")
 
-    cn_agent = next((n for n in workspace_cn.directories if n.get("name") == "Agent.md"), None)
-    en_agent = next((n for n in workspace_en.directories if n.get("name") == "Agent.md"), None)
+    cn_agent = next((n for n in workspace_cn.directories if n.get("name") == "AGENT.md"), None)
+    en_agent = next((n for n in workspace_en.directories if n.get("name") == "AGENT.md"), None)
 
     assert cn_agent is not None
     assert en_agent is not None
@@ -418,12 +418,12 @@ async def test_init_workspace_creates_directories(tmp_path: Path):
     await agent.init_workspace()
     workspace_root = tmp_path / f"{card.id}_workspace"
 
-    expected_files = ["Agent.md", "Soul.md", "HeartBeat.md", "Identity.md"]
+    expected_files = ["AGENT.md", "SOUL.md", "HEARTBEAT.md", "IDENTITY.md"]
     for file_name in expected_files:
         file_path = workspace_root / file_name
         assert file_path.exists(), f"Missing file: {file_name}"
 
-    assert (workspace_root / "memory" / "Memory.md").exists()
+    assert (workspace_root / "memory" / "MEMORY.md").exists()
     assert (workspace_root / "memory" / "daily_memory" / ".workspace").exists()
 
 
@@ -593,7 +593,7 @@ async def test_deep_agent_invoke_triggers_workspace_init(tmp_path: Path):
     expected_dirs = ["memory", "todo", "messages", "skills", "agents"]
     for dir_name in expected_dirs:
         assert (workspace_root / dir_name / ".workspace").exists()
-    expected_files = ["Agent.md", "Soul.md", "HeartBeat.md", "Identity.md", "User.md"]
+    expected_files = ["AGENT.md", "SOUL.md", "HEARTBEAT.md", "IDENTITY.md", "USER.md"]
     for file_name in expected_files:
         assert (workspace_root / file_name).exists()
 
@@ -626,7 +626,7 @@ async def test_workspace_agent_id_naming(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_workspace_creates_files_not_directories(tmp_path: Path):
-    """Test that files (e.g. Agent.md) are created as files, not directories."""
+    """Test that files (e.g. AGENT.md) are created as files, not directories."""
     sys_op = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     config = DeepAgentConfig(
@@ -642,7 +642,7 @@ async def test_workspace_creates_files_not_directories(tmp_path: Path):
     await agent.init_workspace()
 
     workspace_root = tmp_path / f"{card.id}_workspace"
-    md_files = ["Agent.md", "Soul.md", "HeartBeat.md", "Identity.md", "memory/Memory.md"]
+    md_files = ["AGENT.md", "SOUL.md", "HEARTBEAT.md", "IDENTITY.md", "memory/MEMORY.md"]
     for file_path in md_files:
         full_path = workspace_root / file_path
         assert full_path.exists(), f"Missing file: {file_path}"
@@ -674,8 +674,8 @@ async def test_workspace_memory_subdirectory_structure(tmp_path: Path):
     assert (workspace_root / "memory").exists()
     assert (workspace_root / "memory" / ".workspace").exists()
 
-    assert (workspace_root / "memory" / "Memory.md").exists()
-    assert (workspace_root / "memory" / "Memory.md").is_file()
+    assert (workspace_root / "memory" / "MEMORY.md").exists()
+    assert (workspace_root / "memory" / "MEMORY.md").is_file()
 
     assert (workspace_root / "memory" / "daily_memory").exists()
     assert (workspace_root / "memory" / "daily_memory" / ".workspace").exists()
@@ -736,13 +736,13 @@ async def test_init_workspace_writes_default_content_to_md_files(tmp_path: Path)
     await agent.init_workspace()
     workspace_root = tmp_path / f"{card.id}_workspace"
 
-    md_files = ["Agent.md", "Soul.md", "HeartBeat.md", "Identity.md", "memory/Memory.md"]
+    md_files = ["AGENT.md", "SOUL.md", "HEARTBEAT.md", "IDENTITY.md", "memory/MEMORY.md"]
     for file_path in md_files:
         full_path = workspace_root / file_path
         assert full_path.exists(), f"Missing file: {file_path}"
         content = full_path.read_text(encoding="utf-8")
         assert len(content) > 0, f"File {file_path} should not be empty"
-        agent_md = workspace_root / "Agent.md"
+        agent_md = workspace_root / "AGENT.md"
         content = agent_md.read_text(encoding="utf-8")
         assert "智能体" in content
         assert "首次运行" in content or "会话启动" in content
@@ -801,7 +801,7 @@ async def test_directory_builder_without_default_content_creates_empty_file(tmp_
 
 @pytest.mark.asyncio
 async def test_init_workspace_english_soul_md_has_english_content(tmp_path: Path):
-    """Test that English workspace Soul.md contains English default content."""
+    """Test that English workspace SOUL.md contains English default content."""
     sys_op = _make_sys_operation(tmp_path)
     card = AgentCard(name="test_en_soul", description="test")
     workspace = Workspace(root_path=str(tmp_path), language="en")
@@ -817,10 +817,10 @@ async def test_init_workspace_english_soul_md_has_english_content(tmp_path: Path
     await agent.init_workspace()
     workspace_root = tmp_path / f"{card.id}_workspace"
 
-    soul_md = workspace_root / "Soul.md"
+    soul_md = workspace_root / "SOUL.md"
     assert soul_md.exists()
     content = soul_md.read_text(encoding="utf-8")
-    assert "Soul" in content
+    assert "SOUL" in content
     assert "genuinely helpful" in content or "Have opinions" in content
     assert "灵魂" not in content
 
@@ -848,11 +848,11 @@ def test_get_node_path_with_string_name():
     assert skills_path == Path("/workspace/test_agent_workspace/skills")
 
     # Test top-level files
-    agent_md_path = workspace.get_node_path("Agent.md")
-    assert agent_md_path == Path("/workspace/test_agent_workspace/Agent.md")
+    agent_md_path = workspace.get_node_path("AGENT.md")
+    assert agent_md_path == Path("/workspace/test_agent_workspace/AGENT.md")
 
-    soul_md_path = workspace.get_node_path("Soul.md")
-    assert soul_md_path == Path("/workspace/test_agent_workspace/Soul.md")
+    soul_md_path = workspace.get_node_path("SOUL.md")
+    assert soul_md_path == Path("/workspace/test_agent_workspace/SOUL.md")
 
 
 def test_get_node_path_with_workspace_node_enum():
@@ -872,7 +872,7 @@ def test_get_node_path_with_workspace_node_enum():
         "/workspace/test_agent_workspace/skills"
     )
     assert workspace.get_node_path(WorkspaceNode.AGENT_MD) == Path(
-        "/workspace/test_agent_workspace/Agent.md"
+        "/workspace/test_agent_workspace/AGENT.md"
     )
 
 
@@ -882,7 +882,7 @@ def test_get_node_path_returns_none_for_nested_nodes():
     workspace.root_path = "/workspace/test_agent_workspace"
 
     # Nested nodes (children of top-level nodes) are not supported
-    memory_md_path = workspace.get_node_path("Memory.md")
+    memory_md_path = workspace.get_node_path("MEMORY.md")
     assert memory_md_path is None
 
     daily_memory_path = workspace.get_node_path("daily_memory")
@@ -919,5 +919,5 @@ def test_get_node_path_after_deep_agent_configure(tmp_path: Path):
     memory_path = agent.deep_config.workspace.get_node_path("memory")
     assert memory_path == expected_root / "memory"
 
-    agent_md_path = agent.deep_config.workspace.get_node_path("Agent.md")
-    assert agent_md_path == expected_root / "Agent.md"
+    agent_md_path = agent.deep_config.workspace.get_node_path("AGENT.md")
+    assert agent_md_path == expected_root / "AGENT.md"

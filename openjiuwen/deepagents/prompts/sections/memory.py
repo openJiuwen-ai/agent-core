@@ -19,15 +19,15 @@ MEMORY_PROMPT_CN_READ_ONLY = """## 持久化存储体系（只读模式）
 ### 存储层级划分
 
 - **会话日志：** `YYYY-MM-DD.md`（存储当日的所有交互记录，包括对话内容、情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）
-- **用户画像：** `User.md`（稳定的身份属性与偏好信息）
-- **知识沉淀：** `Memory.md`（经筛选提炼的长期背景知识，非原始流水账）
+- **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
+- **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
 
 #### 历史检索机制
 
 **响应任何消息前，建议执行：**
-1. **身份确认** — 读取 `User.md` 确认服务对象
+1. **身份确认** — 读取 `USER.md` 确认服务对象
 2. **上下文获取** — 读取 `YYYY-MM-DD.md`（当日 + 前一日）
-3. **长期记忆加载** — **仅限主会话：** 读取 `Memory.md`
+3. **长期记忆加载** — **仅限主会话：** 读取 `MEMORY.md`
 4. **历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
    - 如果搜索结果不足，尝试用不同的关键词再次搜索
@@ -39,15 +39,15 @@ MEMORY_PROMPT_EN_READ_ONLY = """## Persistent Storage System (Read-Only Mode)
 ### Storage Hierarchy
 
 - **Session Log:** `YYYY-MM-DD.md` (All interaction records for the day, including conversation content, episodic memory, and task instructions. Supports incremental appending to ensure every operation, user instruction, and contextual change is recorded.)
-- **User Profile:** `User.md` (Stable identity attributes and preference information.)
-- **Knowledge Repository:** `Memory.md` (Filtered and refined long-term background knowledge, not raw logs.)
+- **User Profile:** `USER.md` (Stable identity attributes and preference information.)
+- **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge, not raw logs.)
 
 #### History Retrieval Mechanism
 
 **Before responding to any message, it is recommended to execute:**
-1. Read `User.md` — Confirm the user being served
+1. Read `USER.md` — Confirm the user being served
 2. Read `YYYY-MM-DD.md` (today + previous day) to get context
-3. **Main session only:** Read `Memory.md`
+3. **Main session only:** Read `MEMORY.md`
 4. **Before answering questions about historical events:** Must first call `memory_search` tool to retrieve historical memories
 
 **Note:** In cron job mode, only reading and searching memories is supported. Writing or modifying memory files is not allowed.
@@ -60,14 +60,14 @@ MEMORY_PROMPT_CN = """## 持久化存储体系
 ### 存储层级划分
 
 - **会话日志：** `YYYY-MM-DD.md`（存储当日的所有交互记录，包括对话内容、情景记忆和任务指令。支持增量追加，确保每次操作、用户指令和情景变化都被记录。）
-- **用户画像：** `User.md`（稳定的身份属性与偏好信息）
-- **知识沉淀：** `Memory.md`（经筛选提炼的长期背景知识，非原始流水账）
+- **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
+- **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
 
 ### 核心操作规范
 
 - 会话本身不具备记忆能力，文件系统是唯一的信息载体。需持久化的内容务必写入文件
 - **路径限制：** 记忆工具（write_memory/edit_memory/read_memory）操作文件时，直接给出文件名
-- 更新 User.md 或 Memory.md 时，必须先读取现有内容再执行修改
+- 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改
 - **字段唯一性约束：** 每个字段仅允许出现一次。已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加
 
 ### 信息采集、存储操作与记录
@@ -75,13 +75,13 @@ MEMORY_PROMPT_CN = """## 持久化存储体系
 对话过程中，发现有价值的信息时，应该立即进行分类、存储，并及时记录，确保不拖延记录过程：
 
 1. **用户画像信息（user_profile）**：记录用户的身份信息、偏好、习惯等稳定属性，比如用户的职业、兴趣、工作模式、喜好、不满等。
-   - **存储**：写入 `User.md`。
+   - **存储**：写入 `USER.md`。
 
 2. **情景记忆信息（episodic_memory）**：记录用户经历的具体事件或重要决策，比如用户要求完成的任务、描述的项目进展、某次事件等。
    - **存储**：写入 `YYYY-MM-DD.md`。
 
 3. **语义记忆信息（semantic_memory）**：存储背景知识、技术细节、工具相关的本地配置（SSH、摄像头等）等长期有效信息，比如项目技术栈、工具的配置等。
-   - **存储**：写入 `Memory.md`。
+   - **存储**：写入 `MEMORY.md`。
 
 4. **摘要记忆（summary_memory）**：提炼对话中的关键信息，帮助后续快速回顾，比如对话中形成的重要决策、核心结论、讨论的要点等。
    - **存储**：写入 `YYYY-MM-DD.md`。
@@ -102,9 +102,9 @@ MEMORY_PROMPT_CN = """## 持久化存储体系
 #### 历史检索机制
 
 **响应任何消息前，建议执行：**
-1. **身份确认** — 读取 `User.md` 确认服务对象
+1. **身份确认** — 读取 `USER.md` 确认服务对象
 2. **上下文获取** — 读取 `YYYY-MM-DD.md`（当日 + 前一日）
-3. **长期记忆加载** — **仅限主会话：** 读取 `Memory.md`
+3. **长期记忆加载** — **仅限主会话：** 读取 `MEMORY.md`
 4. **历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
    - 如果搜索结果不足，尝试用不同的关键词再次搜索
@@ -124,14 +124,14 @@ Each conversation session starts from a blank state. Cross-session information p
 ### Storage Hierarchy
 
 - **Session Log:** `YYYY-MM-DD.md` (All interaction records for the day, including conversation content, episodic memory, and task instructions. Supports incremental appending to ensure every operation, user instruction, and contextual change is recorded.)
-- **User Profile:** `User.md` (Stable identity attributes and preference information.)
-- **Knowledge Repository:** `Memory.md` (Filtered and refined long-term background knowledge, not raw logs.)
+- **User Profile:** `USER.md` (Stable identity attributes and preference information.)
+- **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge, not raw logs.)
 
 ### Core Operation Guidelines
 
  - The session itself has no memory; the file system is the only carrier. Content requiring persistence must be written to files.	 
  - **Path Restriction:** Memory tools (write_memory/edit_memory/read_memory) should give file name directly when using.
- - When updating User.md or Memory.md, existing content must be read first before making modifications.	 
+ - When updating USER.md or MEMORY.md, existing content must be read first before making modifications.	 
  - **Field Uniqueness Constraint:** Each field can appear only once. Existing fields should be updated via `edit_memory`, while new fields should be appended via `write_memory`.
 
 ### Information Collection, Storage Operations, and Recording
@@ -139,13 +139,13 @@ Each conversation session starts from a blank state. Cross-session information p
 When valuable information appears during the conversation, classify it and store it immediately. Do not delay recording:
 
 1. **User Profile Information (`user_profile`)**: Stable user attributes such as identity, preferences, habits, work style, likes/dislikes.
-   - **Storage**: Write to `User.md`.
+   - **Storage**: Write to `USER.md`.
 
 2. **Episodic Memory (`episodic_memory`)**: Specific events or important decisions, such as assigned tasks, project progress, or notable incidents.
    - **Storage**: Write to `YYYY-MM-DD.md`.
 
 3. **Semantic Memory (`semantic_memory`)**: Long-term background knowledge, technical details, and tool-related local configs (SSH, camera, etc.).
-   - **Storage**: Write to `Memory.md`.
+   - **Storage**: Write to `MEMORY.md`.
 
 4. **Summary Memory (`summary_memory`)**: Distilled key points from the conversation (important decisions, core conclusions, discussion highlights).
    - **Storage**: Write to `YYYY-MM-DD.md`.
@@ -163,9 +163,9 @@ When valuable information appears during the conversation, classify it and store
 #### History Retrieval Mechanism
 
 **Before responding to any message, it is recommended to execute:**
-1. Read `User.md` — Confirm the user being served
+1. Read `USER.md` — Confirm the user being served
 2. Read `YYYY-MM-DD.md` (today + previous day) to get context
-3. **Main session only:** Read `Memory.md`
+3. **Main session only:** Read `MEMORY.md`
 4. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
    - Search query should include key information from the question (names, dates, event keywords)
    - If results are insufficient, retry with different keywords
@@ -183,8 +183,8 @@ MEMORY_MGMT_PROMPT_CN = """### 存储管理规范
 #### 更新规则
 1. 更新前必须先读取现有内容
 2. 合并新信息，避免全量覆盖
-3. Memory.md 条目仅记录精炼事实，不含日期/时间戳
-4. **User.md 字段去重：** 已存在字段通过 `edit_memory` 更新，不存在字段通过 `write_memory` 追加
+3. MEMORY.md 条目仅记录精炼事实，不含日期/时间戳
+4. **USER.md 字段去重：** 已存在字段通过 `edit_memory` 更新，不存在字段通过 `write_memory` 追加
 """
 
 MEMORY_MGMT_PROMPT_EN = """### Storage Management Guidelines
@@ -192,8 +192,8 @@ MEMORY_MGMT_PROMPT_EN = """### Storage Management Guidelines
 #### Update Rules
 1. Must read existing content before updating
 2. Merge new information, avoid full overwrites
-3. Memory.md entries should only record refined facts, without dates/timestamps
-4. **User.md Field Deduplication:** Existing fields should be updated via `edit_memory`, non-existing fields should be appended via `write_memory`
+3. MEMORY.md entries should only record refined facts, without dates/timestamps
+4. **USER.md Field Deduplication:** Existing fields should be updated via `edit_memory`, non-existing fields should be appended via `write_memory`
 """
 
 MEMORY_DATE_PROMPT_CN = """## 当前日期

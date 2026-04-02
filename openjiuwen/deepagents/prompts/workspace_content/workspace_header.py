@@ -33,21 +33,21 @@ CONTEXT_HEADER: Dict[str, str] = {
 # Context file titles
 # ---------------------------------------------------------------------------
 CONTEXT_FILE_TITLES_CN: Dict[str, str] = {
-    "Agent.md": "## Agent.md - 智能体配置",
-    "Soul.md": "## Soul.md - 灵魂与价值观",
-    "HeartBeat.md": "## HeartBeat.md - 心跳任务",
-    "User.md": "## User.md - 用户信息",
-    "Identity.md": "## Identity.md - 身份凭证",
-    "Memory.md": "## Memory.md - 长期记忆",
+    "AGENT.md": "## AGENT.md - 智能体配置",
+    "SOUL.md": "## SOUL.md - 灵魂与价值观",
+    "HEARTBEAT.md": "## HEARTBEAT.md - 心跳任务",
+    "USER.md": "## USER.md - 用户信息",
+    "IDENTITY.md": "## IDENTITY.md - 身份凭证",
+    "MEMORY.md": "## MEMORY.md - 长期记忆",
 }
 
 CONTEXT_FILE_TITLES_EN: Dict[str, str] = {
-    "Agent.md": "## Agent.md - Agent Configuration",
-    "Soul.md": "## Soul.md - Soul & Values",
-    "HeartBeat.md": "## HeartBeat.md - Heartbeat Tasks",
-    "User.md": "## User.md - User Information",
-    "Identity.md": "## Identity.md - Identity Credentials",
-    "Memory.md": "## Memory.md - Long-term Memory",
+    "AGENT.md": "## AGENT.md - Agent Configuration",
+    "SOUL.md": "## SOUL.md - Soul & Values",
+    "HEARTBEAT.md": "## HEARTBEAT.md - Heartbeat Tasks",
+    "USER.md": "## USER.md - User Information",
+    "IDENTITY.md": "## IDENTITY.md - Identity Credentials",
+    "MEMORY.md": "## MEMORY.md - Long-term Memory",
 }
 
 CONTEXT_FILE_TITLES: Dict[str, Dict[str, str]] = {
@@ -72,35 +72,33 @@ DAILY_MEMORY_TITLE: Dict[str, str] = {
 # Directory/file descriptions
 # ---------------------------------------------------------------------------
 DIRECTORY_DESCRIPTIONS_CN: Dict[str, str] = {
-    "Agent.md": "智能体配置",
-    "Soul.md": "灵魂与价值观",
-    "HeartBeat.md": "心跳任务",
-    "User.md": "用户信息",
-    "Identity.md": "身份凭证",
-    "Memory.md": "长期记忆",
+    "AGENT.md": "智能体配置",
+    "SOUL.md": "灵魂与价值观",
+    "HEARTBEAT.md": "心跳任务",
+    "USER.md": "用户信息",
+    "IDENTITY.md": "身份凭证",
+    "MEMORY.md": "长期记忆",
     "memory": "记忆核心模块",
     "daily_memory": "每日结构化记忆",
     "todo": "待办事项",
     "messages": "消息历史",
     "skills": "技能库",
     "agents": "子智能体",
-    "user": "用户数据",
 }
 
 DIRECTORY_DESCRIPTIONS_EN: Dict[str, str] = {
-    "Agent.md": "Agent configuration",
-    "Soul.md": "Soul & values",
-    "HeartBeat.md": "Heartbeat tasks",
-    "User.md": "User information",
-    "Identity.md": "Identity credentials",
-    "Memory.md": "Long-term memory",
+    "AGENT.md": "Agent configuration",
+    "SOUL.md": "Soul & values",
+    "HEARTBEAT.md": "Heartbeat tasks",
+    "USER.md": "User information",
+    "IDENTITY.md": "Identity credentials",
+    "MEMORY.md": "Long-term memory",
     "memory": "Memory core module",
     "daily_memory": "Daily structured memory",
     "todo": "Todo items",
     "messages": "Message history",
     "skills": "Skills library",
     "agents": "Sub-agents",
-    "user": "User data",
 }
 
 DIRECTORY_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
@@ -113,10 +111,10 @@ DIRECTORY_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
 # Fixed context files
 # ---------------------------------------------------------------------------
 CONTEXT_FILES = [
-    "Agent.md",
-    "Soul.md",
-    "HeartBeat.md",
-    "User.md",
-    "Identity.md",
-    "Memory.md",
+    "AGENT.md",
+    "SOUL.md",
+    "HEARTBEAT.md",
+    "USER.md",
+    "IDENTITY.md",
+    "MEMORY.md",
 ]

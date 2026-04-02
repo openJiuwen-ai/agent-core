@@ -40,10 +40,10 @@ def _validate_memory_path(path: str) -> tuple[bool, str]:
     basename = os.path.basename(path)
     memory_dir = _global_workspace.get_node_path("memory")
 
-    if basename == "User.md":
-        resolved_path = _global_workspace.get_node_path("User.md")
-    elif basename == "Memory.md":
-        memory_rel = _global_workspace.get_directory("Memory.md")
+    if basename == "USER.md":
+        resolved_path = _global_workspace.get_node_path("USER.md")
+    elif basename == "MEMORY.md":
+        memory_rel = _global_workspace.get_directory("MEMORY.md")
         resolved_path = os.path.join(memory_dir, memory_rel) if memory_dir and memory_rel else None
     elif re.match(r'^\d{4}-\d{2}-\d{2}\.md$', basename):
         daily_rel = _global_workspace.get_directory("daily_memory")
@@ -291,11 +291,11 @@ async def write_memory(
     content: str,
     append: bool = False
 ) -> Dict[str, Any]:
-    """在 memory 目录下创建或更新记忆文件。仅用于写入记忆相关内容，如 User.md、Memory.md 或 memory/*.md 文件。
+    """在 memory 目录下创建或更新记忆文件。仅用于写入记忆相关内容，如 USER.md、MEMORY.md 或 memory/*.md 文件。
     禁止用于创建代码文件、配置文件或其他非记忆类文件。
 
     Args:
-        path: 文件路径，仅允许 memory/ 目录下的文件（如 "memory/xxx.md" 或 "User.md"）
+        path: 文件路径，仅允许 memory/ 目录下的文件（如 "memory/xxx.md" 或 "USER.md"）
         content: 要写入的内容
         append: 是否追加模式 (默认覆盖)
 
@@ -350,7 +350,7 @@ async def edit_memory(
     old_text: str,
     new_text: str
 ) -> Dict[str, Any]:
-    """精确编辑 memory 目录下的文件内容。仅用于更新记忆文件（如 User.md、Memory.md）。
+    """精确编辑 memory 目录下的文件内容。仅用于更新记忆文件（如 USER.md、MEMORY.md）。
     old_text 必须完全匹配文件中的内容。如果 old_text 出现多次，需要更具体地指定。
 
     Args:
@@ -432,7 +432,7 @@ async def read_memory(
     offset: Optional[int] = None,
     limit: Optional[int] = None
 ) -> Dict[str, Any]:
-    """读取 memory 目录下的文件内容。仅用于读取记忆文件（如 User.md、Memory.md 或 memory/*.md）。
+    """读取 memory 目录下的文件内容。仅用于读取记忆文件（如 USER.md、MEMORY.md 或 memory/*.md）。
 
     Args:
         path: 文件路径，仅允许 memory/ 目录下的文件

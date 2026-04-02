@@ -26,7 +26,7 @@ def _load_default_content(language: str, file_path: str) -> str:
 
     Args:
         language: 'cn' for Chinese, 'en' for English.
-        file_path: Relative path to the content file (e.g., "Agent.md" or "memory/Memory.md").
+        file_path: Relative path to the content file (e.g., "AGENT.md" or "memory/MEMORY.md").
 
     Returns:
         The file content as string, or empty string if file doesn't exist.
@@ -51,17 +51,17 @@ class WorkspaceNode(Enum):
 
     Provides type-safe access to standard workspace directories.
     """
-    AGENT_MD = "Agent.md"
-    SOUL_MD = "Soul.md"
-    HEARTBEAT_MD = "HeartBeat.md"
-    IDENTITY_MD = "Identity.md"
-    USER_MD = "User.md"
+    AGENT_MD = "AGENT.md"
+    SOUL_MD = "SOUL.md"
+    HEARTBEAT_MD = "HEARTBEAT.md"
+    IDENTITY_MD = "IDENTITY.md"
+    USER_MD = "USER.md"
     MEMORY = "memory"
     TODO = "todo"
     MESSAGES = "messages"
     SKILLS = "skills"
     AGENTS = "agents"
-    MEMORY_MD = "Memory.md"
+    MEMORY_MD = "MEMORY.md"
     DAILY_MEMORY = "daily_memory"
 
 
@@ -123,7 +123,7 @@ class Workspace:
         Nested nodes (children of top-level nodes) are not supported.
 
         Args:
-            node: Node name as string (e.g., "memory", "Agent.md") or WorkspaceNode enum.
+            node: Node name as string (e.g., "memory", "AGENT.md") or WorkspaceNode enum.
 
         Returns:
             Path object with the full absolute path to the node.
@@ -213,41 +213,41 @@ class Workspace:
 
 DEFAULT_WORKSPACE_SCHEMA: List[DirectoryNode] = [
     {
-        "name": "Agent.md",
+        "name": "AGENT.md",
         "description": "基础配置和能力",
-        "path": "Agent.md",
+        "path": "AGENT.md",
         "children": [],
         "is_file": True,
-        "default_content": _load_default_content("cn", "Agent.md"),
+        "default_content": _load_default_content("cn", "AGENT.md"),
     },
     {
-        "name": "Soul.md",
+        "name": "SOUL.md",
         "description": "人格、性格和价值观",
-        "path": "Soul.md",
+        "path": "SOUL.md",
         "children": [],
         "is_file": True,
-        "default_content": _load_default_content("cn", "Soul.md"),
+        "default_content": _load_default_content("cn", "SOUL.md"),
     },
     {
-        "name": "HeartBeat.md",
+        "name": "HEARTBEAT.md",
         "description": "心跳日志和状态记录",
-        "path": "HeartBeat.md",
+        "path": "HEARTBEAT.md",
         "children": [],
         "is_file": True,
-        "default_content": _load_default_content("cn", "HeartBeat.md"),
+        "default_content": _load_default_content("cn", "HEARTBEAT.md"),
     },
     {
-        "name": "Identity.md",
+        "name": "IDENTITY.md",
         "description": "身份凭证和权限",
-        "path": "Identity.md",
+        "path": "IDENTITY.md",
         "children": [],
         "is_file": True,
-        "default_content": _load_default_content("cn", "Identity.md"),
+        "default_content": _load_default_content("cn", "IDENTITY.md"),
     },
     {
-        "name": "User.md",
+        "name": "USER.md",
         "description": "用户数据目录",
-        "path": "User.md",
+        "path": "USER.md",
         "children": [],
         "is_file": True,
         "default_content": "",
@@ -258,12 +258,12 @@ DEFAULT_WORKSPACE_SCHEMA: List[DirectoryNode] = [
         "path": "memory",
         "children": [
             {
-                "name": "Memory.md",
+                "name": "MEMORY.md",
                 "description": "长期记忆索引和摘要",
-                "path": "Memory.md",
+                "path": "MEMORY.md",
                 "children": [],
                 "is_file": True,
-                "default_content": _load_default_content("cn", "memory/Memory.md"),
+                "default_content": _load_default_content("cn", "memory/MEMORY.md"),
             },
             {
                 "name": "daily_memory",
@@ -365,41 +365,41 @@ def _validate_directory_node(node: DirectoryNode) -> None:
 # =============================================================================
 DEFAULT_WORKSPACE_SCHEMA_EN: List[DirectoryNode] = [
     {
-        "name": "Agent.md",
+        "name": "AGENT.md",
         "description": "Basic agent configuration and capabilities",
-        "path": "Agent.md",
+        "path": "AGENT.md",
         "children": [],
         "is_file": True,
-        "default_content": _load_default_content("en", "Agent.md"),
+        "default_content": _load_default_content("en", "AGENT.md"),
     },
     {
-        "name": "Soul.md",
+        "name": "SOUL.md",
         "description": "Agent personality, character, values, and behavioral guidelines",
-        "path": "Soul.md",
+        "path": "SOUL.md",
         "children": [],
         "is_file": True,
-        "default_content": _load_default_content("en", "Soul.md"),
+        "default_content": _load_default_content("en", "SOUL.md"),
     },
     {
-        "name": "HeartBeat.md",
+        "name": "HEARTBEAT.md",
         "description": "Heartbeat log / status recording",
-        "path": "HeartBeat.md",
+        "path": "HEARTBEAT.md",
         "children": [],
         "is_file": True,
-        "default_content": _load_default_content("en", "HeartBeat.md"),
+        "default_content": _load_default_content("en", "HEARTBEAT.md"),
     },
     {
-        "name": "Identity.md",
+        "name": "IDENTITY.md",
         "description": "Identity credentials, unique identifier, and permission information",
-        "path": "Identity.md",
+        "path": "IDENTITY.md",
         "children": [],
         "is_file": True,
-        "default_content": _load_default_content("en", "Identity.md"),
+        "default_content": _load_default_content("en", "IDENTITY.md"),
     },
     {
-        "name": "User.md",
+        "name": "USER.md",
         "description": "User data directory",
-        "path": "User.md",
+        "path": "USER.md",
         "children": [],
         "is_file": True,
         "default_content":"",
@@ -410,12 +410,12 @@ DEFAULT_WORKSPACE_SCHEMA_EN: List[DirectoryNode] = [
         "path": "memory",
         "children": [
             {
-                "name": "Memory.md",
+                "name": "MEMORY.md",
                 "description": "Memory overview, index, and important memory summaries",
-                "path": "Memory.md",
+                "path": "MEMORY.md",
                 "children": [],
                 "is_file": True,
-                "default_content": _load_default_content("en", "memory/Memory.md"),
+                "default_content": _load_default_content("en", "memory/MEMORY.md"),
             },
             {
                 "name": "daily_memory",

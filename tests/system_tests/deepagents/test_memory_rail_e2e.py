@@ -157,7 +157,7 @@ async def test_01_memory_rail_basic_invoke(memory_test_env):
 @pytest.mark.asyncio
 @pytest.mark.skip("need llm and embedding")
 async def test_02_write_memory_tool(memory_test_env):
-    """测试 write_memory 工具：写入 User.md 和会话日志。"""
+    """测试 write_memory 工具：写入 USER.md 和会话日志。"""
     _require_api_config()
 
     llm_model = _create_llm_model()
@@ -224,7 +224,7 @@ async def test_03_memory_search_tool(memory_test_env):
 @pytest.mark.asyncio
 @pytest.mark.skip("need llm and embedding")
 async def test_04_read_memory_tool(memory_test_env):
-    """测试 read_memory 工具：读取 User.md 文件。"""
+    """测试 read_memory 工具：读取 USER.md 文件。"""
     _require_api_config()
 
     llm_model = _create_llm_model()
@@ -239,7 +239,7 @@ async def test_04_read_memory_tool(memory_test_env):
         max_iterations=15,
         system_prompt=(
             "你是一个智能助手，可以使用记忆工具来存储和检索信息。"
-            "当需要查看用户资料时，请使用 read_memory 工具读取 User.md。"
+            "当需要查看用户资料时，请使用 read_memory 工具读取 USER.md。"
         ),
         auto_create_workspace=False
     )
@@ -373,7 +373,7 @@ async def test_07_write_memory_append_mode(memory_test_env):
 @pytest.mark.asyncio
 @pytest.mark.skip("need llm and embedding")
 async def test_08_update_user_profile(memory_test_env):
-    """测试更新 User.md 用户画像。"""
+    """测试更新 USER.md 用户画像。"""
     _require_api_config()
 
     llm_model = _create_llm_model()
@@ -388,7 +388,7 @@ async def test_08_update_user_profile(memory_test_env):
         max_iterations=15,
         system_prompt=(
             "你是一个智能助手，可以使用记忆工具来存储和检索信息。"
-            "当用户透露个人信息时，请更新 User.md 文件。"
+            "当用户透露个人信息时，请更新 USER.md 文件。"
         ),
         auto_create_workspace=False
     )
@@ -409,7 +409,7 @@ async def test_08_update_user_profile(memory_test_env):
 @pytest.mark.asyncio
 @pytest.mark.skip("need llm and embedding")
 async def test_09_write_memory_md_file(memory_test_env):
-    """测试写入 Memory.md 长期记忆文件。"""
+    """测试写入 MEMORY.md 长期记忆文件。"""
     _require_api_config()
 
     llm_model = _create_llm_model()
@@ -424,7 +424,7 @@ async def test_09_write_memory_md_file(memory_test_env):
         max_iterations=15,
         system_prompt=(
             "你是一个智能助手，可以使用记忆工具来存储和检索信息。"
-            "当用户要求记录长期知识时，请写入 Memory.md 文件。"
+            "当用户要求记录长期知识时，请写入 MEMORY.md 文件。"
         ),
         auto_create_workspace=False
     )

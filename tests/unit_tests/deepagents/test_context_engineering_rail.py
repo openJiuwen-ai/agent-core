@@ -200,8 +200,8 @@ async def test_build_workspace_section_returns_none_when_workspace_is_none():
 async def test_build_context_section(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-    await sys_operation.fs().write_file(f"{tmp_path}/Agent.md", "# Agent Config")
-    await sys_operation.fs().write_file(f"{tmp_path}/Soul.md", "# Soul Content")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config")
+    await sys_operation.fs().write_file(f"{tmp_path}/SOUL.md", "# Soul Content")
     await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/{date}.md", "# Today")
 
     workspace = Workspace(root_path=str(tmp_path))
@@ -210,17 +210,17 @@ async def test_build_context_section(tmp_path: Path):
     )
     assert section_cn.priority == 96
     cn_content = section_cn.render("cn")
-    assert "## Agent.md - 智能体配置" in cn_content
+    assert "## AGENT.md - 智能体配置" in cn_content
     assert "### 文件内容" in cn_content
     assert "# Agent Config" in cn_content
-    assert "## Soul.md" in cn_content
+    assert "## SOUL.md" in cn_content
     assert "## daily_memory/" in cn_content
 
     section_en = await build_context_section(
         sys_operation, workspace, "en", timezone="Asia/Shanghai"
     )
     en_content = section_en.render("en")
-    assert "## Agent.md - Agent Configuration" in en_content
+    assert "## AGENT.md - Agent Configuration" in en_content
     assert "### File Contents" in en_content
 
 
@@ -296,7 +296,7 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
 async def test_build_context_section_without_tools(tmp_path: Path):
     """build_context_section without tools_content should not include tools section."""
     sys_operation = _make_sys_operation(tmp_path)
-    await sys_operation.fs().write_file(f"{tmp_path}/Agent.md", "# Agent")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# AGENT")
     workspace = Workspace(root_path=str(tmp_path))
     section = await build_context_section(
         sys_operation,
@@ -306,7 +306,7 @@ async def test_build_context_section_without_tools(tmp_path: Path):
         timezone="Asia/Shanghai"
     )
     content = section.render("cn")
-    assert "## Agent.md" in content
+    assert "## AGENT.md" in content
     assert "## 可用工具" not in content
     assert "## Available Tools" not in content
 
@@ -343,7 +343,7 @@ async def test_before_model_call_injects_sections(tmp_path: Path):
     assert ws is not None
     assert ctx_section is not None
     assert "## 工作空间" in ws.render("cn")
-    assert "## Agent.md" in ctx_section.render("cn")
+    assert "## AGENT.md" in ctx_section.render("cn")
     assert "## 可用工具" not in ctx_section.render("cn")  # no tools
 
 
