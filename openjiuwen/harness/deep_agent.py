@@ -224,6 +224,16 @@ class DeepAgent(BaseAgent):
             new_react_config.model_config_obj = config.model.model_config
             if config.model.model_config is not None and config.model.model_config.model_name:
                 new_react_config.model_name = config.model.model_config.model_name
+            # Sync direct fields so configure()'s LLM-reset condition fires correctly.
+            if config.model.model_client_config is not None:
+                client_cfg = config.model.model_client_config
+                new_react_config.api_base = client_cfg.api_base
+                new_react_config.api_key = client_cfg.api_key
+                new_react_config.model_provider = str(
+                    client_cfg.client_provider.value
+                    if hasattr(client_cfg.client_provider, "value")
+                    else client_cfg.client_provider
+                )
         new_react_config.max_iterations = (
             sys.maxsize if config.enable_task_loop else config.max_iterations
         )
