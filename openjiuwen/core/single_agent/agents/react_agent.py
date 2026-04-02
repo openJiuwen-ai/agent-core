@@ -1369,9 +1369,13 @@ class ReActAgent(BaseAgent):
             )
             need_cleanup = True
 
-        await session.pre_run(
-            inputs=inputs if isinstance(inputs, dict) else None
-        )
+        # Only call pre_run/post_run for agent sessions, not workflow sessions
+        self.is_agent_session = hasattr(session, "pre_run") and hasattr(session, "post_run")
+        # self.is_agent_session = isinstance(session, AgentSession)
+        if self.is_agent_session:
+            await session.pre_run(
+                inputs=inputs if isinstance(inputs, dict) else None
+            )
 
         async for chunk in self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup):
             yield chunk
@@ -1393,14 +1397,21 @@ class ReActAgent(BaseAgent):
             finally:
                 if need_cleanup:
                     await self.context_engine.save_contexts(session)
-                await session.post_run()
+                if self.is_agent_session:
+                    await session.post_run()
 
-        task = asyncio.create_task(stream_process())
+        if self.is_agent_session:
+            # Agent sessions use stream_iterator for consuming output
+            task = asyncio.create_task(stream_process())
 
-        async for result in session.stream_iterator():
-            yield result
+            async for result in session.stream_iterator():
+                yield result
 
-        await task
+            await task
+        else:
+            # Workflow sessions: just run stream_process, output goes to session.write_stream()
+            # The workflow graph consumes from session.write_stream() via StreamWriterManager
+            await stream_process()
 
     async def clear_session(self, session_id: str = "default_session"):
         """Release session resources and clear context cache."""

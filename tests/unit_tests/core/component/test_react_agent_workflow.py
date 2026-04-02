@@ -7,6 +7,9 @@ import pytest
 from openjiuwen.core.workflow.components.llm.react import ReActAgentComp, ReActAgentCompConfig
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.workflow import Workflow, Start, End, create_workflow_session, WorkflowCard
+from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
+from openjiuwen.core.runner import Runner
 
 
 API_BASE = os.getenv("API_BASE", "https://api.openai.com/v1")
@@ -58,8 +61,6 @@ async def test_react_agent_in_workflow():
     Note: This test uses real LLM API and is skipped by default.
     Set environment variables and remove @unittest.skip to run.
     """
-    from openjiuwen.core.workflow import Workflow, Start, End, create_workflow_session
-
     # Store original environment variable value to restore later
     original_ssl_verify = os.environ.get("HTTP_SSL_VERIFY")
 
@@ -135,10 +136,6 @@ async def test_react_agent_with_add_tool_in_workflow():
     Note: This test uses real LLM API and is skipped by default.
     Set environment variables and remove @unittest.skip to run.
     """
-    from openjiuwen.core.workflow import Workflow, Start, End, create_workflow_session
-    from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
-    from openjiuwen.core.runner import Runner
-
     # Store original environment variable value to restore later
     original_ssl_verify = os.environ.get("HTTP_SSL_VERIFY")
     os.environ["HTTP_SSL_VERIFY"] = "false"
@@ -247,10 +244,6 @@ async def test_react_agent_stream_with_add_tool_in_workflow():
     Note: This test uses real LLM API and is skipped by default.
     Set environment variables and remove @unittest.skip to run.
     """
-    from openjiuwen.core.workflow import Workflow, Start, End, create_workflow_session
-    from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
-    from openjiuwen.core.runner import Runner
-
     # Store original environment variable value to restore later
     original_ssl_verify = os.environ.get("HTTP_SSL_VERIFY")
     os.environ["HTTP_SSL_VERIFY"] = "false"
@@ -386,3 +379,44 @@ async def test_react_agent_stream_with_add_tool_in_workflow():
         else:
             if "HTTP_SSL_VERIFY" in os.environ:
                 del os.environ["HTTP_SSL_VERIFY"]
+
+
+@unittest.skip("skip system test")
+@pytest.mark.asyncio
+async def test_react_agent_comp_stream():
+    model_client = ModelClientConfig(
+        client_id="demo1",
+        client_provider="SiliconFlow",
+        api_key="sk",
+        api_base="http://127.0.0.1:8088/v1/chat/completions",
+        timeout=30,
+        verify_ssl=False
+    )
+    model_config = ModelRequestConfig(
+        model="qwen-plus",
+        temperature=0.7,
+        top_p=0.9
+    )
+
+    config = ReActAgentCompConfig(
+        model_client_config=model_client,
+        model_config_obj=model_config,
+        max_iterations=5
+    )  
+    react_component = ReActAgentComp(config=config)
+
+    flow = Workflow(card=WorkflowCard(name="test_react_agent_comp_003", id="react_agent_comp_001", version="1.0"))
+    start_component = Start()
+    end_component = End({"responseTemplate": "{{output}}"})
+
+    flow.set_start_comp("s", start_component, inputs_schema={"query": "${query}"})
+    flow.set_end_comp("e", end_component, stream_inputs_schema={"output": "${react}"})
+    flow.add_workflow_comp("react", react_component, inputs_schema={"query": "${s.query}"})
+
+    flow.add_connection("s", "react")
+    flow.add_stream_connection("react", "e")
+
+    context = create_workflow_session()
+
+    result = await flow.invoke(inputs={"query": "生成一句关于月亮的诗句"}, session=context)
+    logger.info(f"Workflow invoke result: {result}")
