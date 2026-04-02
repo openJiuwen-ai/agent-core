@@ -1097,3 +1097,1034 @@ Checks if this is a publish-subscribe (Pub-Sub) message.
 **Returns**:
 
 **bool**: `True` if `topic_id` is not `None`.
+
+---
+
+## function openjiuwen.core.multi_agent.teams.make_team_session
+
+```python
+make_team_session(
+    card: TeamCard,
+    message: Any
+) -> Session
+```
+
+Creates a fresh `AgentTeam` session. Reuses the `conversation_id` from `message` when it is a dict containing that key; otherwise generates a new UUID.
+
+**Parameters**:
+
+- **card** (TeamCard): The owning team's identity card; provides `team_id`.
+- **message** (Any): User input — dict or str.
+
+**Returns**:
+
+**Session**: A new session bound to the team.
+
+---
+
+## function openjiuwen.core.multi_agent.teams.standalone_invoke_context
+
+```python
+@asynccontextmanager
+async def standalone_invoke_context(
+    runtime: TeamRuntime,
+    card: TeamCard,
+    message: Any,
+    session: Optional[Session] = None
+) -> AsyncIterator[Tuple[Session, str]]
+```
+
+Async context manager that owns the complete session lifecycle for `invoke()`.
+
+- **Standalone mode** (`session=None`): Creates a session, calls `pre_run()`, binds it to the runtime; on exit, unbinds and calls `post_run()`.
+- **Runner mode** (existing `Session` supplied): Acts as a transparent passthrough with no lifecycle side-effects.
+
+**Parameters**:
+
+- **runtime** (TeamRuntime): The owning team's runtime instance.
+- **card** (TeamCard): The owning team's identity card.
+- **message** (Any): User input — dict or str.
+- **session** (Session, optional): Externally supplied session from Runner; `None` enables standalone mode.
+
+**Yields**:
+
+**Tuple[Session, str]**: `(team_session, session_id)` tuple.
+
+---
+
+## function openjiuwen.core.multi_agent.teams.standalone_stream_context
+
+```python
+async def standalone_stream_context(
+    runtime: TeamRuntime,
+    card: TeamCard,
+    message: Any,
+    run_coro: Callable[[Session, str], Awaitable[None]],
+    session: Optional[Session] = None
+) -> AsyncIterator[Any]
+```
+
+Async generator that owns the complete session lifecycle for `stream()`. Runs `run_coro` in a background Task while yielding stream chunks to the caller concurrently.
+
+- **Standalone mode** (`session=None`): Creates and binds a session; the background Task unbinds and calls `post_run()` on completion.
+- **Runner mode** (existing `Session` supplied): The background Task calls `session.close_stream()` on completion to signal end-of-stream.
+
+**Parameters**:
+
+- **runtime** (TeamRuntime): The owning team's runtime instance.
+- **card** (TeamCard): The owning team's identity card.
+- **message** (Any): User input — dict or str.
+- **run_coro** (Callable[[Session, str], Awaitable[None]]): The team's actual work coroutine; signature `async (session, session_id) -> None`.
+- **session** (Session, optional): Externally supplied session from Runner; `None` enables standalone mode.
+
+**Yields**:
+
+**Any**: Output chunks written to the stream by `run_coro`.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.HandoffRoute
+
+```python
+@dataclass(frozen=True)
+class openjiuwen.core.multi_agent.teams.handoff.HandoffRoute(
+    source: str,
+    target: str
+)
+```
+
+Immutable routing rule declaring that the `source` agent may hand off to the `target` agent (`frozen=True`).
+
+**Attributes**:
+
+- **source** (str): Source agent ID.
+- **target** (str): Target agent ID.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.HandoffConfig
+
+```python
+@dataclass
+class openjiuwen.core.multi_agent.teams.handoff.HandoffConfig(
+    start_agent: Optional[AgentCard] = None,
+    max_handoffs: int = 10,
+    routes: List[HandoffRoute] = field(default_factory=list),
+    termination_condition: Optional[Callable] = None
+)
+```
+
+Orchestration parameters for `HandoffTeam`.
+
+**Attributes**:
+
+- **start_agent** (AgentCard, optional): `AgentCard` of the first agent to run. Default: `None`; uses the first agent added via `add_agent()` when not provided.
+- **max_handoffs** (int): Maximum number of handoff transfers after the initial hop. For example, `max_handoffs=2` allows A→B→C but blocks a 4th hop. Default: `10`.
+- **routes** (List[HandoffRoute]): Explicit routing rules. When empty, any agent may hand off to any other (full-mesh), and this also controls which `HandoffTool` instances are injected. Default: `[]`.
+- **termination_condition** (Callable, optional): Optional condition with signature `(HandoffOrchestrator) -> bool`; supports sync or async. Triggers early termination when it returns `True`. Default: `None`.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.HandoffTeamConfig
+
+```python
+class openjiuwen.core.multi_agent.teams.handoff.HandoffTeamConfig(
+    handoff: HandoffConfig = HandoffConfig(),
+    max_agents: int = 10,
+    max_concurrent_messages: int = 100,
+    message_timeout: float = 30.0
+)
+```
+
+Full configuration for `HandoffTeam`. Extends `TeamConfig` with handoff-specific orchestration parameters. Allows extra fields (`extra='allow'`) and arbitrary types (`arbitrary_types_allowed=True`).
+
+**Attributes**:
+
+- **handoff** (HandoffConfig): Handoff orchestration configuration. Default: `HandoffConfig()`.
+- Inherits all `TeamConfig` attributes (`max_agents`, `max_concurrent_messages`, `message_timeout`) and their chaining configuration methods.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.HandoffTeam
+
+```python
+class openjiuwen.core.multi_agent.teams.handoff.HandoffTeam(
+    card: TeamCard,
+    config: Optional[HandoffTeamConfig] = None
+)
+```
+
+Event-driven handoff multi-agent team, inheriting from `BaseTeam`. Agents collaborate via sequential handoffs: the LLM in each agent decides whether to complete the task or transfer control by calling an injected `transfer_to_{agent}` tool.
+
+**Parameters**:
+
+- **card** (TeamCard): Team identity card.
+- **config** (HandoffTeamConfig, optional): Team configuration. Uses `HandoffTeamConfig()` defaults when not provided.
+
+---
+
+### add_agent
+
+```python
+add_agent(
+    self,
+    card: AgentCard,
+    provider: AgentProvider
+) -> HandoffTeam
+```
+
+Registers an agent into the team. Silently skips if the agent ID already exists. Resets the internal initialization state so handoff routes are reconfigured on next invocation.
+
+**Parameters**:
+
+- **card** (AgentCard): Agent identity card.
+- **provider** (AgentProvider): Factory callable for lazy agent instance creation.
+
+**Returns**:
+
+**HandoffTeam**: The current team instance (supports chaining).
+
+**Exceptions**:
+
+- Raises `AGENT_TEAM_ADD_RUNTIME_ERROR` when `max_agents` is exceeded.
+
+---
+
+### invoke
+
+```python
+async invoke(
+    self,
+    message: Any,
+    session: Optional[Session] = None
+) -> Any
+```
+
+Runs the handoff chain in batch mode and returns the final result.
+
+**Parameters**:
+
+- **message** (Any): User input — dict or str.
+- **session** (Session, optional): Session from Runner; creates a standalone session when `None`.
+
+**Returns**:
+
+**Any**: Final result produced by the last agent in the handoff chain.
+
+---
+
+### stream
+
+```python
+async stream(
+    self,
+    message: Any,
+    session: Optional[Session] = None
+) -> AsyncIterator[Any]
+```
+
+Runs the handoff chain in streaming mode, yielding output chunks in real time.
+
+**Parameters**:
+
+- **message** (Any): User input — dict or str.
+- **session** (Session, optional): Session from Runner; creates a standalone session when `None`.
+
+**Yields**:
+
+**Any**: Output chunks emitted by agents during the handoff chain.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.HandoffOrchestrator
+
+```python
+class openjiuwen.core.multi_agent.teams.handoff.HandoffOrchestrator(
+    start_agent_id: str,
+    registered_agents: List[str],
+    config: Optional[HandoffConfig] = None
+)
+```
+
+Per-invocation handoff state coordinator, created and owned by `HandoffTeam`. Tracks the current agent, counts handoff transfers, makes routing decisions, and delivers the final result via `done_future`. Use `restore_from_session` to resume an interrupted session.
+
+**Parameters**:
+
+- **start_agent_id** (str): ID of the first agent to run.
+- **registered_agents** (List[str]): List of all registered agent IDs in the team.
+- **config** (HandoffConfig, optional): Configuration carrying routes, `max_handoffs`, and `termination_condition`. Uses defaults when `None`.
+
+**Attributes**:
+
+- **handoff_count** (int, read-only): Number of handoff transfers completed in this session.
+- **current_agent_id** (str, read-only): ID of the agent that will execute the next hop.
+- **done_future** (asyncio.Future, read-only): Completion future for the handoff chain; created lazily inside the running event loop.
+
+---
+
+### build_route_graph
+
+```python
+@staticmethod
+build_route_graph(
+    agents: List[str],
+    routes: List[HandoffRoute]
+) -> Dict[str, Set[str]]
+```
+
+Builds an adjacency graph of allowed handoff routes.
+
+**Parameters**:
+
+- **agents** (List[str]): List of all agent IDs in the team.
+- **routes** (List[HandoffRoute]): Explicit routing rules. An empty list generates full-mesh (any agent may hand off to any other).
+
+**Returns**:
+
+**Dict[str, Set[str]]**: Dict mapping each agent ID to the set of agent IDs it may hand off to.
+
+---
+
+### request_handoff
+
+```python
+async request_handoff(
+    self,
+    target_id: str,
+    reason: Optional[str] = None
+) -> bool
+```
+
+Attempts to approve a handoff to `target_id`. Updates internal state on approval; does not update state on rejection (limit reached, termination condition triggered, or route not allowed).
+
+**Parameters**:
+
+- **target_id** (str): Target agent ID.
+- **reason** (str, optional): Optional reason string for logging.
+
+**Returns**:
+
+**bool**: `True` if the handoff is approved; `False` if rejected.
+
+---
+
+### complete
+
+```python
+async complete(self, result: Any) -> None
+```
+
+Resolves `done_future` with `result`, ending the handoff chain. Idempotent — first call wins.
+
+**Parameters**:
+
+- **result** (Any): Final result to return to the caller.
+
+---
+
+### error
+
+```python
+async error(self, exception: Exception) -> None
+```
+
+Rejects `done_future` with `exception`, propagating the error to the caller. Idempotent — first call wins.
+
+**Parameters**:
+
+- **exception** (Exception): Exception to raise at the `await` site.
+
+---
+
+### save_to_session
+
+```python
+save_to_session(self, session: Session) -> None
+```
+
+Persists coordinator state to `session` for interrupt/resume support.
+
+**Parameters**:
+
+- **session** (Session): Team session to write state into.
+
+---
+
+### restore_from_session
+
+```python
+@classmethod
+restore_from_session(
+    cls,
+    session: Session,
+    start_agent_id: str,
+    registered_agents: List[str],
+    config: Optional[HandoffConfig] = None
+) -> HandoffOrchestrator
+```
+
+Creates an orchestrator restoring state from a previous interrupted session. Returns a fresh orchestrator starting at `start_agent_id` when no prior state exists.
+
+**Parameters**:
+
+- **session** (Session): Team session to read state from.
+- **start_agent_id** (str): Starting agent ID used when no prior state exists.
+- **registered_agents** (List[str]): List of all agent IDs in the team.
+- **config** (HandoffConfig, optional): Configuration carrying routes, `max_handoffs`, and `termination_condition`.
+
+**Returns**:
+
+**HandoffOrchestrator**: Orchestrator restored from session state, or a freshly created one.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.HandoffSignal
+
+```python
+@dataclass(frozen=True)
+class openjiuwen.core.multi_agent.teams.handoff.HandoffSignal(
+    target: str,
+    message: Optional[str] = None,
+    reason: Optional[str] = None
+)
+```
+
+Immutable handoff directive produced by `extract_handoff_signal` (`frozen=True`).
+
+**Attributes**:
+
+- **target** (str): Target agent ID.
+- **message** (str, optional): Context message forwarded to the target agent. Set to `None` when the value is an empty string.
+- **reason** (str, optional): Human-readable reason for the handoff. Set to `None` when the value is an empty string.
+
+---
+
+## function openjiuwen.core.multi_agent.teams.handoff.extract_handoff_signal
+
+```python
+extract_handoff_signal(result: Any) -> Optional[HandoffSignal]
+```
+
+Returns a `HandoffSignal` if `result` contains a handoff directive; otherwise returns `None`.
+
+Searches for the `__handoff_to__` key in `result` itself or in its `output`, `result`, or `content` sub-key. The target value must be a non-empty string, otherwise `None` is returned.
+
+**Parameters**:
+
+- **result** (Any): Agent return value to inspect.
+
+**Returns**:
+
+**Optional[HandoffSignal]**: `HandoffSignal` when a valid handoff directive is found; `None` otherwise.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.TeamInterruptSignal
+
+```python
+@dataclass
+class openjiuwen.core.multi_agent.teams.handoff.TeamInterruptSignal(
+    result: Any,
+    message: Optional[str] = None
+)
+```
+
+Signal that pauses the handoff chain and persists state for later resumption.
+
+**Attributes**:
+
+- **result** (Any): Interrupt payload returned to the caller; must have `result_type='interrupt'`.
+- **message** (str, optional): Optional human-readable description of the interrupt reason.
+
+---
+
+## function openjiuwen.core.multi_agent.teams.handoff.extract_interrupt_signal
+
+```python
+extract_interrupt_signal(
+    result: Any = None,
+    exc: Optional[Exception] = None
+) -> Optional[TeamInterruptSignal]
+```
+
+Extracts a `TeamInterruptSignal` from an agent result or exception.
+
+- Recognised from `result` when it is a dict and `result.get('result_type') == 'interrupt'`.
+- Recognised from `exc` when it is an `AgentInterrupt` instance.
+- `result` takes priority over `exc`: `exc` is only checked when `result` is not an interrupt.
+
+**Parameters**:
+
+- **result** (Any, optional): Agent return value to inspect.
+- **exc** (Exception, optional): Exception to inspect.
+
+**Returns**:
+
+**Optional[TeamInterruptSignal]**: `TeamInterruptSignal` when an interrupt is detected; `None` otherwise.
+
+---
+
+## function openjiuwen.core.multi_agent.teams.handoff.flush_team_session
+
+```python
+async flush_team_session(session: Optional[Session]) -> None
+```
+
+Calls `post_run()` on the team session after an interrupt as a best-effort cleanup. Flush failures are logged as warnings and never propagated, so that interrupt delivery to the caller is never blocked.
+
+**Parameters**:
+
+- **session** (Session, optional): Team session to flush. No-op when `None`.
+
+---
+
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.HandoffTool
+
+```python
+class openjiuwen.core.multi_agent.teams.handoff.HandoffTool(
+    target_id: str,
+    target_description: str = ""
+)
+```
+
+Handoff tool automatically injected by `HandoffTeam` into every agent's `AbilityManager` to signal agent-to-agent control transfers. The tool name exposed to the LLM is `transfer_to_{target_id}`. Inherits from `Tool`.
+
+**Parameters**:
+
+- **target_id** (str): ID of the target agent.
+- **target_description** (str, optional): Description of the target agent, appended to the tool description shown to the LLM. Default: `""`.
+
+---
+
+### invoke
+
+```python
+async invoke(self, inputs: Any, **kwargs: Any) -> dict
+```
+
+Returns a handoff signal payload dict consumed by `extract_handoff_signal`.
+
+**Parameters**:
+
+- **inputs** (Any): Tool arguments from the LLM; accepts a dict or JSON string with `reason` / `message` keys.
+
+**Returns**:
+
+**dict**: Dict containing `__handoff_to__`, `__handoff_message__`, and `__handoff_reason__` keys.
+
+---
+
+### stream
+
+```python
+async stream(self, inputs: Any, **kwargs: Any) -> AsyncIterator[dict]
+```
+
+Streaming variant that yields the single `invoke()` result.
+
+**Parameters**:
+
+- **inputs** (Any): Tool arguments from the LLM.
+
+**Yields**:
+
+**dict**: The same handoff signal payload dict as `invoke()`.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.ContainerAgent
+
+```python
+class openjiuwen.core.multi_agent.teams.handoff.ContainerAgent(
+    target_card: AgentCard,
+    target_provider: Callable[[], BaseAgent],
+    allowed_targets: List[str],
+    coordinator_lookup: Optional[Callable[[str], HandoffOrchestrator]] = None
+)
+```
+
+Per-agent wrapper automatically created by `HandoffTeam` for each registered agent. Responsible for lazy-loading the target agent instance, injecting `HandoffTool`, writing execution history to the team session context, and handling handoff and interrupt signals. Inherits from `CommunicableAgent` and `BaseAgent`.
+
+**Parameters**:
+
+- **target_card** (AgentCard): Identity card of the wrapped agent.
+- **target_provider** (Callable[[], BaseAgent]): Lazy factory; called once on first use to create the target agent instance.
+- **allowed_targets** (List[str]): List of agent IDs that this agent is allowed to hand off to; used to inject the corresponding `HandoffTool` instances.
+- **coordinator_lookup** (Callable[[str], HandoffOrchestrator], optional): Callback that resolves a `HandoffOrchestrator` from a `session_id`.
+
+---
+
+### invoke
+
+```python
+async invoke(self, inputs: HandoffRequest, session: Optional[Session] = None) -> dict
+```
+
+Runs the target agent and processes its output. Decides whether to complete the orchestration, initiate the next handoff hop, or propagate an interrupt signal.
+
+**Parameters**:
+
+- **inputs** (HandoffRequest): Drive message containing the user input, accumulated history, and team session.
+- **session** (Session, optional): Current agent session; not normally passed directly.
+
+**Returns**:
+
+**dict**: Always returns an empty dict `{}`; orchestration results are delivered via `HandoffOrchestrator`.
+
+**Exceptions**:
+
+- Silently returns `{}` when `inputs` is not a `HandoffRequest` instance.
+- Raises `AGENT_TEAM_EXECUTION_ERROR` when `coordinator_lookup` returns `None`.
+- Raises `AGENT_TEAM_EXECUTION_ERROR` when the target agent raises a non-interrupt exception.
+
+---
+
+### stream
+
+```python
+async stream(self, inputs: HandoffRequest, session: Optional[Session] = None, **kwargs) -> AsyncIterator[dict]
+```
+
+Streaming variant; internally calls `invoke()` and yields its result.
+
+**Parameters**:
+
+- **inputs** (HandoffRequest): Drive message.
+- **session** (Session, optional): Current agent session.
+
+**Yields**:
+
+**dict**: The return value of `invoke()` (always `{}`).
+
+---
+
+## class openjiuwen.core.multi_agent.teams.handoff.HandoffRequest
+
+```python
+@dataclass
+class openjiuwen.core.multi_agent.teams.handoff.HandoffRequest(
+    input_message: Any,
+    history: List[dict] = field(default_factory=list),
+    session: Optional[Session] = None
+)
+```
+
+Internal drive message published to `container_{agent_id}` topics by `HandoffTeam` to orchestrate cross-agent handoffs. Each hop carries the accumulated history and a reference to the team session.
+
+**Attributes**:
+
+- **input_message** (Any): User or intermediate input forwarded to the next agent.
+- **history** (List[dict]): Accumulated handoff history across hops; each entry contains `agent` and `output` keys. Default: `[]`.
+- **session** (Session, optional): Team session for stream I/O. `None` in unit-test scenarios.
+
+---
+
+### session_id
+
+```python
+@property
+session_id(self) -> str
+```
+
+Session ID derived from the attached session; returns an empty string when no session is attached.
+
+**Returns**:
+
+**str**: Session ID string, or `""` when no session is attached.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.hierarchical_tools.HierarchicalTeamConfig
+
+```python
+class openjiuwen.core.multi_agent.teams.hierarchical_tools.HierarchicalTeamConfig(
+    root_agent: AgentCard,
+    max_agents: int = 10,
+    max_concurrent_messages: int = 100,
+    message_timeout: float = 30.0
+)
+```
+
+Configuration for `HierarchicalTeam` (Agents-as-Tools mode), inheriting from `TeamConfig`.
+
+**Attributes**:
+
+- **root_agent** (AgentCard): `AgentCard` of the top-level entry agent; required.
+- Inherits all `TeamConfig` attributes (`max_agents`, `max_concurrent_messages`, `message_timeout`) and their chaining configuration methods.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.hierarchical_tools.HierarchicalTeam
+
+```python
+class openjiuwen.core.multi_agent.teams.hierarchical_tools.HierarchicalTeam(
+    card: TeamCard,
+    config: HierarchicalTeamConfig,
+    runtime: Optional[TeamRuntime] = None
+)
+```
+
+Agents-as-Tools hierarchical multi-agent team, inheriting from `BaseTeam`. Agents are composed hierarchically through each agent's `ability_manager`, with the root agent as the execution entry point.
+
+**Parameters**:
+
+- **card** (TeamCard): Team identity card.
+- **config** (HierarchicalTeamConfig): Team configuration; must include `root_agent`.
+- **runtime** (TeamRuntime, optional): Team runtime instance; created automatically when not provided.
+
+---
+
+### add_agent
+
+```python
+add_agent(
+    self,
+    card: AgentCard,
+    provider: AgentProvider,
+    parent_agent_id: Optional[str] = None
+) -> HierarchicalTeam
+```
+
+Adds an agent to the team. When `parent_agent_id` is provided, queues the agent's card to be registered as a tool under the parent's `ability_manager` before the first run.
+
+**Parameters**:
+
+- **card** (AgentCard): Agent identity card.
+- **provider** (AgentProvider): Factory callable for lazy agent instance creation.
+- **parent_agent_id** (str, optional): Parent agent ID; when provided, registers the current agent as a child tool of that parent.
+
+**Returns**:
+
+**HierarchicalTeam**: The current team instance (supports chaining).
+
+**Exceptions**:
+
+- Raises `AGENT_TEAM_ADD_RUNTIME_ERROR` when `max_agents` is exceeded.
+
+---
+
+### invoke
+
+```python
+async invoke(
+    self,
+    inputs: Any,
+    session: Optional[Session] = None
+) -> Any
+```
+
+Runs the team from the root agent and returns the final result.
+
+**Parameters**:
+
+- **inputs** (Any): Input message or dict.
+- **session** (Session, optional): External `AgentTeamSession`; creates a standalone session when `None`.
+
+**Returns**:
+
+**Any**: Final result from the root agent.
+
+**Exceptions**:
+
+- Raises `AGENT_TEAM_EXECUTION_ERROR` when the root agent is not registered in the runtime.
+
+---
+
+### stream
+
+```python
+async stream(
+    self,
+    inputs: Any,
+    session: Optional[Session] = None
+) -> AsyncGenerator[Any, None]
+```
+
+Runs the team from the root agent and yields streaming output chunks.
+
+**Parameters**:
+
+- **inputs** (Any): Input message or dict.
+- **session** (Session, optional): External `AgentTeamSession`; creates a standalone session when `None`.
+
+**Yields**:
+
+**Any**: Streaming output chunks.
+
+**Exceptions**:
+
+- Raises `AGENT_TEAM_EXECUTION_ERROR` when the root agent is not registered in the runtime.
+
+
+---
+
+## class openjiuwen.core.multi_agent.teams.hierarchical_msgbus.HierarchicalTeamConfig
+
+```python
+class openjiuwen.core.multi_agent.teams.hierarchical_msgbus.HierarchicalTeamConfig(
+    supervisor_agent: AgentCard,
+    max_agents: int = 10,
+    max_concurrent_messages: int = 100,
+    message_timeout: float = 30.0
+)
+```
+
+Configuration for HierarchicalTeam (P2P MessageBus mode), inheriting from TeamConfig.
+
+**Attributes**:
+
+- **supervisor_agent** (AgentCard): AgentCard of the top-level supervisor agent; required.
+- Inherits all TeamConfig attributes (max_agents, max_concurrent_messages, message_timeout) and their chaining configuration methods.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.hierarchical_msgbus.HierarchicalTeam
+
+```python
+class openjiuwen.core.multi_agent.teams.hierarchical_msgbus.HierarchicalTeam(
+    card: TeamCard,
+    config: HierarchicalTeamConfig
+)
+```
+
+Supervisor-driven hierarchical multi-agent team, inheriting from BaseTeam. The supervisor dispatches tasks to sub-agents via P2PAbilityManager over the message bus.
+
+**Parameters**:
+
+- **card** (TeamCard): Team identity card.
+- **config** (HierarchicalTeamConfig): Team configuration; must include supervisor_agent.
+
+---
+
+### add_agent
+
+```python
+add_agent(
+    self,
+    card: AgentCard,
+    provider: AgentProvider
+) -> HierarchicalTeam
+```
+
+Registers an agent (supervisor or sub-agent) into the team runtime. Logs an info message when the supervisor card is registered.
+
+**Parameters**:
+
+- **card** (AgentCard): Agent identity card.
+- **provider** (AgentProvider): Factory callable for lazy agent instance creation.
+
+**Returns**:
+
+**HierarchicalTeam**: The current team instance (supports chaining).
+
+---
+
+### invoke
+
+```python
+async invoke(
+    self,
+    message: Any,
+    session: Optional[Session] = None
+) -> Any
+```
+
+Runs the supervisor agent and returns the final result.
+
+**Parameters**:
+
+- **message** (Any): User input - dict or str.
+- **session** (Session, optional): Session from Runner; creates a standalone session when None.
+
+**Returns**:
+
+**Any**: Final result returned by the supervisor agent.
+
+**Exceptions**:
+
+- Raises AGENT_TEAM_EXECUTION_ERROR when the supervisor is not registered in the runtime.
+
+---
+
+### stream
+
+```python
+async stream(
+    self,
+    message: Any,
+    session: Optional[Session] = None
+) -> AsyncIterator[Any]
+```
+
+Runs the supervisor agent and yields streaming output chunks.
+
+**Parameters**:
+
+- **message** (Any): User input - dict or str.
+- **session** (Session, optional): Session from Runner; creates a standalone session when None.
+
+**Yields**:
+
+**Any**: Chunks emitted by the supervisor or sub-agents during execution.
+
+**Exceptions**:
+
+- Raises AGENT_TEAM_EXECUTION_ERROR when the supervisor is not registered in the runtime.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.hierarchical_msgbus.SupervisorAgent
+
+```python
+class openjiuwen.core.multi_agent.teams.hierarchical_msgbus.SupervisorAgent(
+    card: AgentCard,
+    config: Optional[ReActAgentConfig] = None,
+    max_parallel_sub_agents: int = 10
+)
+```
+
+Default built-in supervisor agent for HierarchicalTeam (P2P MessageBus mode). Inherits both CommunicableAgent (P2P send/publish) and ReActAgent (ReAct loop). AgentCard tool calls are routed via P2PAbilityManager; all other ability types execute normally.
+
+**Parameters**:
+
+- **card** (AgentCard): Supervisor agent identity card.
+- **config** (ReActAgentConfig, optional): ReAct agent configuration; uses defaults when not provided.
+- **max_parallel_sub_agents** (int): Maximum concurrent sub-agent dispatches. Default: 10.
+
+---
+
+### register_sub_agent_card
+
+```python
+register_sub_agent_card(self, card: AgentCard) -> None
+```
+
+Exposes a sub-agent card to the LLM as a callable tool.
+
+**Parameters**:
+
+- **card** (AgentCard): Sub-agent identity card.
+
+---
+
+### configure
+
+```python
+configure(self, config: Any) -> SupervisorAgent
+```
+
+Applies a ReActAgentConfig; no-op for other config types. Always returns self.
+
+**Parameters**:
+
+- **config** (Any): Configuration object. Takes effect when a ReActAgentConfig is supplied; ignored otherwise.
+
+**Returns**:
+
+**SupervisorAgent**: The current instance (supports chaining).
+
+---
+
+### create
+
+```python
+@classmethod
+create(
+    cls,
+    agents: List[AgentCard],
+    *,
+    model_client_config: Any,
+    model_request_config: Any,
+    agent_card: AgentCard,
+    system_prompt: str,
+    max_iterations: int = 5,
+    max_parallel_sub_agents: int = 10
+) -> Tuple[AgentCard, AgentProvider]
+```
+
+Creates a SupervisorAgent pre-loaded with sub-agent cards. Returns (agent_card, provider) compatible with HierarchicalTeam.add_agent().
+
+**Parameters**:
+
+- **agents** (List[AgentCard]): Sub-agent cards visible to this supervisor; must not be empty.
+- **model_client_config** (Any): LLM client configuration.
+- **model_request_config** (Any): LLM model and request configuration.
+- **agent_card** (AgentCard): Supervisor agent identity card.
+- **system_prompt** (str): Supervisor system prompt.
+- **max_iterations** (int): Maximum ReAct iterations. Default: 5.
+- **max_parallel_sub_agents** (int): Maximum concurrent sub-agent dispatches. Default: 10.
+
+**Returns**:
+
+**Tuple[AgentCard, AgentProvider]**: (agent_card, provider) where provider lazily constructs the supervisor instance.
+
+**Exceptions**:
+
+- Raises AGENT_TEAM_CREATE_RUNTIME_ERROR when `agents` is empty.
+- Raises AGENT_TEAM_CREATE_RUNTIME_ERROR when any entry in `agents` is not an AgentCard.
+
+---
+
+## class openjiuwen.core.multi_agent.teams.hierarchical_msgbus.P2PAbilityManager
+
+```python
+class openjiuwen.core.multi_agent.teams.hierarchical_msgbus.P2PAbilityManager(
+    supervisor: CommunicableAgent,
+    max_parallel_sub_agents: int = 10
+)
+```
+
+AbilityManager that routes AgentCard tool calls via TeamRuntime P2P send(). AgentCard calls are dispatched in parallel, bounded by max_parallel_sub_agents. All other ability types are forwarded to the base class execute() unchanged.
+
+**Parameters**:
+
+- **supervisor** (CommunicableAgent): The supervisor agent whose send() is used for P2P dispatch.
+- **max_parallel_sub_agents** (int): Maximum concurrent AgentCard dispatches per execute() call; clamped to a minimum of 1. Default: 10.
+
+---
+
+### add
+
+```python
+add(self, card: AgentCard) -> AddAbilityResult
+```
+
+Registers a sub-agent card as a dispatchable tool.
+
+**Parameters**:
+
+- **card** (AgentCard): Sub-agent identity card.
+
+**Returns**:
+
+**AddAbilityResult**: Registration result; `added=True` for new registrations, `added=False` for duplicates (no-op).
+
+---
+
+### execute
+
+```python
+async execute(
+    self,
+    ctx: AgentCallbackContext,
+    tool_call: Union[ToolCall, List[ToolCall]],
+    session: Session,
+    tag: Any = None
+) -> List[Tuple[Any, ToolMessage]]
+```
+
+Executes tool calls: dispatches AgentCard calls concurrently via P2P and delegates other calls to the base class. Results are returned in the original call order.
+
+**Parameters**:
+
+- **ctx** (AgentCallbackContext): Callback context for tool-call lifecycle hooks.
+- **tool_call** (ToolCall | List[ToolCall]): Single or list of ToolCall objects from the LLM.
+- **session** (Session): Current agent session.
+- **tag** (Any, optional): Optional resource tag forwarded to the base class.
+
+**Returns**:
+
+**List[Tuple[Any, ToolMessage]]**: List of (result, ToolMessage) tuples in the original call order. Failed AgentCard dispatches return (None, error_ToolMessage).
