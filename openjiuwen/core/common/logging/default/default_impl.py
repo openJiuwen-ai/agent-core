@@ -330,90 +330,28 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         )
         return logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
 
-    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Log DEBUG level message
-
-        Args:
-            msg: Log message (string)
-            *args: Additional positional arguments
-            **kwargs: Additional keyword arguments (can include event_type, event for structured logging)
-        """
-        # Extract event_type, event, and stacklevel from kwargs
+    def _emit(self, level: str, log_level: LogLevel, msg: str, *args: Any, **kwargs: Any) -> None:
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
-        stacklevel = kwargs.pop("stacklevel", 2)
+        stacklevel = kwargs.pop("stacklevel", 3)
         formatted_msg = self._auto_format_message(msg, args)
-        processed_msg = self._process_log_message(LogLevel.DEBUG, formatted_msg, event_type, event, **kwargs)
-        self._logger.debug(processed_msg, stacklevel=stacklevel)
+        processed_msg = self._process_log_message(log_level, formatted_msg, event_type, event, **kwargs)
+        getattr(self._logger, level)(processed_msg, stacklevel=stacklevel)
+
+    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("debug", LogLevel.DEBUG, msg, *args, **kwargs)
 
     def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Log INFO level message
-
-        Args:
-            msg: Log message (string)
-            *args: Additional positional arguments
-            **kwargs: Additional keyword arguments (can include event_type, event for structured logging)
-        """
-        # Extract event_type, event, and stacklevel from kwargs
-        event_type = kwargs.pop("event_type", None)
-        event = kwargs.pop("event", None)
-        stacklevel = kwargs.pop("stacklevel", 2)
-        formatted_msg = self._auto_format_message(msg, args)
-        processed_msg = self._process_log_message(LogLevel.INFO, formatted_msg, event_type, event, **kwargs)
-        self._logger.info(processed_msg, stacklevel=stacklevel)
+        self._emit("info", LogLevel.INFO, msg, *args, **kwargs)
 
     def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Log WARNING level message
-
-        Args:
-            msg: Log message (string)
-            *args: Additional positional arguments
-            **kwargs: Additional keyword arguments (can include event_type, event for structured logging)
-        """
-        # Extract event_type, event, and stacklevel from kwargs
-        event_type = kwargs.pop("event_type", None)
-        event = kwargs.pop("event", None)
-        stacklevel = kwargs.pop("stacklevel", 2)
-        formatted_msg = self._auto_format_message(msg, args)
-        processed_msg = self._process_log_message(LogLevel.WARNING, formatted_msg, event_type, event, **kwargs)
-        self._logger.warning(processed_msg, stacklevel=stacklevel)
+        self._emit("warning", LogLevel.WARNING, msg, *args, **kwargs)
 
     def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Log ERROR level message
-
-        Args:
-            msg: Log message (string)
-            *args: Additional positional arguments
-            **kwargs: Additional keyword arguments (can include event_type, event for structured logging)
-        """
-        # Extract event_type, event, and stacklevel from kwargs
-        event_type = kwargs.pop("event_type", None)
-        event = kwargs.pop("event", None)
-        stacklevel = kwargs.pop("stacklevel", 2)
-        formatted_msg = self._auto_format_message(msg, args)
-        processed_msg = self._process_log_message(LogLevel.ERROR, formatted_msg, event_type, event, **kwargs)
-        self._logger.error(processed_msg, stacklevel=stacklevel)
+        self._emit("error", LogLevel.ERROR, msg, *args, **kwargs)
 
     def critical(self, msg: str, *args: Any, **kwargs: Any) -> None:
-        """
-        Log CRITICAL level message
-
-        Args:
-            msg: Log message (string)
-            *args: Additional positional arguments
-            **kwargs: Additional keyword arguments (can include event_type, event for structured logging)
-        """
-        # Extract event_type, event, and stacklevel from kwargs
-        event_type = kwargs.pop("event_type", None)
-        event = kwargs.pop("event", None)
-        stacklevel = kwargs.pop("stacklevel", 2)
-        formatted_msg = self._auto_format_message(msg, args)
-        processed_msg = self._process_log_message(LogLevel.CRITICAL, formatted_msg, event_type, event, **kwargs)
-        self._logger.critical(processed_msg, stacklevel=stacklevel)
+        self._emit("critical", LogLevel.CRITICAL, msg, *args, **kwargs)
 
     def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
         """
