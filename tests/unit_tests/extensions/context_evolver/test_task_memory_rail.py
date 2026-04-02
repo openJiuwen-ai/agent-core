@@ -43,7 +43,7 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.deepagents.rails.task_memory_rail import (
+from openjiuwen.harness.rails.task_memory_rail import (
     TaskMemoryRail,
 )
 from openjiuwen.extensions.context_evolver.service import (
@@ -515,7 +515,7 @@ class TestAutoSummarize:
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=False))
         with patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")
@@ -531,10 +531,10 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: test\nTHOUGHT: ok")
         with patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._evaluate_trial",
+            "openjiuwen.harness.rails.task_memory_rail._evaluate_trial",
             return_value=("success", 1),
         ), patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             ctx = _make_ctx(query="my question")
@@ -554,10 +554,10 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: test\nTHOUGHT: ok")
         with patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._evaluate_trial",
+            "openjiuwen.harness.rails.task_memory_rail._evaluate_trial",
             return_value=("success", 1),
         ), patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             for i in range(2):
@@ -574,10 +574,10 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value="USER: q\nTHOUGHT: a")
         with patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._evaluate_trial",
+            "openjiuwen.harness.rails.task_memory_rail._evaluate_trial",
             return_value=("failure", 0),
         ) as mock_eval, patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
             new=AsyncMock(return_value={"memory": []}),
         ) as mock_summ:
             ctx = _make_ctx(query="q")
@@ -597,7 +597,7 @@ class TestAutoSummarize:
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         mw.extract_trajectory = MagicMock(return_value=None)
         with patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")
@@ -612,7 +612,7 @@ class TestAutoSummarize:
         svc = _make_memory_service()
         mw = _make_middleware(memory_service=svc, summarize_cfg=_SummarizeCfg(enabled=True))
         with patch(
-            "openjiuwen.deepagents.rails.task_memory_rail._summarize_trajectories",
+            "openjiuwen.harness.rails.task_memory_rail._summarize_trajectories",
             new=AsyncMock(),
         ) as mock_summ:
             ctx = _make_ctx(query="test")

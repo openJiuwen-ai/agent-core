@@ -11,7 +11,7 @@ settings, and `Makefile` defines the common lint/test entry points.
 
 - `openjiuwen/core/`: public SDK/runtime for agents, workflows, sessions,
   memory, retrieval, security, and system operations.
-- `openjiuwen/deepagents/`: coding-agent framework built on core
+- `openjiuwen/harness/`: coding-agent framework built on core
   primitives; includes prompts, rails, tools, subagents, task loop, and
   workspace handling.
 - `openjiuwen/extensions/`: optional integrations such as storage,
@@ -75,7 +75,7 @@ settings, and `Makefile` defines the common lint/test entry points.
   hooks.
 - `openjiuwen/core/memory/`, `context_engine/`, `retrieval/`, `security/`,
   and `sys_operation/`: supporting subsystems with broad downstream impact.
-- `openjiuwen/deepagents/`: `DeepAgent`, subagents, task loop, rails,
+- `openjiuwen/harness/`: `DeepAgent`, subagents, task loop, rails,
   tools, workspace, and prompt assembly.
 
 ## Change Rules By Area
@@ -91,9 +91,9 @@ settings, and `Makefile` defines the common lint/test entry points.
 
 ### DeepAgents
 
-- Start from `openjiuwen/deepagents/factory.py`,
-  `openjiuwen/deepagents/schema/config.py`, and
-  `openjiuwen/deepagents/deep_agent.py`.
+- Start from `openjiuwen/harness/factory.py`,
+  `openjiuwen/harness/schema/config.py`, and
+  `openjiuwen/harness/deep_agent.py`.
 - If you add or remove prompt variables, tool descriptions, or rails,
   inspect prompt-builder and tool-description tests.
 - If you change workspace or subagent behavior, inspect

@@ -48,9 +48,9 @@ from openjiuwen.core.runner.spawn.process_manager import (
 )
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import AgentRail
-from openjiuwen.deepagents import create_deep_agent
-from openjiuwen.deepagents.deep_agent import DeepAgent
-from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness import create_deep_agent
+from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 
 
 class TeamAgent(BaseAgent):

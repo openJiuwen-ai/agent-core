@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional, TYPE_CHECKING
 from .types import MemoryChunk
 
 if TYPE_CHECKING:
-    from openjiuwen.deepagents.workspace.workspace import Workspace
+    from openjiuwen.harness.workspace.workspace import Workspace
 
 
 def estimate_tokens(text: str) -> int:

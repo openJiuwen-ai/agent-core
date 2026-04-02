@@ -31,7 +31,7 @@ from openjiuwen.core.foundation.tool.base import (
     Tool,
     ToolCard,
 )
-from openjiuwen.deepagents.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 class TeamTool(Tool, ABC):

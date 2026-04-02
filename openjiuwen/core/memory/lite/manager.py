@@ -14,7 +14,7 @@ from openjiuwen.core.common.logging import memory_logger as logger
 
 if TYPE_CHECKING:
     from openjiuwen.core.sys_operation.sys_operation import SysOperation
-    from openjiuwen.deepagents.workspace.workspace import Workspace
+    from openjiuwen.harness.workspace.workspace import Workspace
 
 from .types import MemoryChunk
 from .internal import (

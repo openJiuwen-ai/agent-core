@@ -10,7 +10,7 @@ import pytest
 from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata, ToolCall
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
-from openjiuwen.deepagents.rails.interrupt.confirm_rail import ConfirmInterruptRail
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 from tests.unit_tests.agent.react_agent.interrupt.test_base import (

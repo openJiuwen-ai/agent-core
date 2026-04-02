@@ -9,7 +9,7 @@ import pytest
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.deepagents.rails.interrupt.confirm_rail import ConfirmInterruptRail
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from tests.system_tests.agent.react_agent.interrupt.test_base import (
     AgentWithToolsConfig,
     create_agent_with_tools,

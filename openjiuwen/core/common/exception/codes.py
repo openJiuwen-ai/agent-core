@@ -833,7 +833,7 @@ class StatusCode(Enum):
     # 4. openapi tool 182400 - 182499
     TOOL_OPENAPI_CLIENT_EXECUTION_ERROR = (182400, "openapi client execute error, error='{reason}'")
 
-    # 5. deepagents tool 182500 - 182699
+    # 5. harness tool 182500 - 182699
     TOOL_TODOS_LOAD_FAILED = (182500, "todo tool loads failed, error='{reason}'")
     TOOL_TODOS_SAVE_FAILED = (182501, "todo tool saves failed, error='{reason}'")
     TOOL_TODOS_CLEAR_FAILED = (182502, "todo tool clears failed, error='{reason}'")

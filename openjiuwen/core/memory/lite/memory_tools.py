@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, List, TYPE_CHECKING
 from openjiuwen.core.foundation.tool.tool import tool
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.common.logging import memory_logger as logger
-from openjiuwen.deepagents.workspace.workspace import WorkspaceNode, Workspace
+from openjiuwen.harness.workspace.workspace import WorkspaceNode, Workspace
 
 from .manager import MemoryIndexManager
 from .config import MemorySettings, create_memory_settings, is_memory_enabled

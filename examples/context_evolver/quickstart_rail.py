@@ -37,13 +37,13 @@ from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.extensions.context_evolver.core import config as app_config
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.deepagents import create_deep_agent
+from openjiuwen.harness import create_deep_agent
 from openjiuwen.core.runner import Runner
 from openjiuwen.extensions.context_evolver import (
     TaskMemoryService,
     AddMemoryRequest,
 )
-from openjiuwen.deepagents.rails import TaskMemoryRail
+from openjiuwen.harness.rails import TaskMemoryRail
 
 # ---------------------------------------------------------------------------
 # Environment variables — edit these if you don't have a .env file

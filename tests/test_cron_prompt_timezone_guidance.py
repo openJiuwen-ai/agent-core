@@ -1,11 +1,11 @@
 import unittest
 
-from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
-from openjiuwen.deepagents.prompts.sections.tools.cron import (
+from openjiuwen.harness.prompts.sections.tools import build_tool_card
+from openjiuwen.harness.prompts.sections.tools.cron import (
     DESCRIPTION,
     FIELD_DESCRIPTIONS,
 )
-from openjiuwen.deepagents.tools.cron import (
+from openjiuwen.harness.tools.cron import (
     CronToolContext,
     create_cron_tools,
 )

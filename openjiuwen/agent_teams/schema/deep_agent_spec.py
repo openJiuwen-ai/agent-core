@@ -24,7 +24,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
 from openjiuwen.core.sys_operation.sys_operation import SysOperationCard
-from openjiuwen.deepagents.schema.config import (
+from openjiuwen.harness.schema.config import (
     DEFAULT_ACR_BASE_URL,
     DEFAULT_AUDIO_HTTP_TIMEOUT,
     DEFAULT_MAX_AUDIO_BYTES,
@@ -36,7 +36,7 @@ from openjiuwen.deepagents.schema.config import (
     SubAgentConfig,
     VisionModelConfig,
 )
-from openjiuwen.deepagents.workspace.workspace import Workspace
+from openjiuwen.harness.workspace.workspace import Workspace
 
 # ---------------------------------------------------------------------------
 # Rail type registry
@@ -54,7 +54,7 @@ def _ensure_builtin_rails_registered() -> None:
     """Lazily populate the registry with built-in DeepAgent rails."""
     if _RAIL_TYPE_REGISTRY:
         return
-    from openjiuwen.deepagents.rails import (
+    from openjiuwen.harness.rails import (
         TaskPlanningRail,
         SkillUseRail,
         SubagentRail,
@@ -243,8 +243,8 @@ class DeepAgentSpec(BaseModel):
     def build(self) -> "DeepAgent":
         """Materialize a live DeepAgent from this spec."""
         from openjiuwen.core.runner.runner import Runner
-        from openjiuwen.deepagents.factory import create_deep_agent
-        from openjiuwen.deepagents.prompts import resolve_language
+        from openjiuwen.harness.factory import create_deep_agent
+        from openjiuwen.harness.prompts import resolve_language
 
         llm_model = self.model.build() if self.model else None
         language = resolve_language(self.language)
