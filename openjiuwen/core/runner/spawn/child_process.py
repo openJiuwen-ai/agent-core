@@ -378,7 +378,7 @@ async def run_spawned_process(
                     """Read until newline, returns bytes."""
                     self._start_reading()
                     while True:
-                        if hasattr(self, "_exception"):
+                        if self._exception is not None:
                             raise self._exception
                         newline_pos = self._buffer.find(b"\n")
                         if newline_pos >= 0:
