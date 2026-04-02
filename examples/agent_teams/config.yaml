@@ -1,0 +1,75 @@
+# Agent Team E2E configuration
+# Structure mirrors TeamAgentSpec fields for direct deserialization.
+# Sensitive values (api_key) should be overridden via environment variables:
+#   API_BASE, API_KEY, MODEL_NAME, MODEL_PROVIDER, MODEL_TIMEOUT
+
+team_name: e2e_test_team
+lifecycle: temporary
+teammate_mode: build_mode
+
+leader:
+  member_id: team_leader
+  name: TeamLeader
+  persona: "天才项目管理专家"
+  domain: project_management
+
+agents:
+  leader:
+    model:
+      model_client_config:
+        client_provider: OpenAI
+        api_base: https://api.modelarts-maas.com/openai/v1
+        api_key: "${API_KEY}"
+        timeout: 120
+        verify_ssl: false
+      model_request_config:
+        model: glm-5
+        temperature: 0.2
+        top_p: 0.9
+    workspace:
+      root_path: ./workspace
+    max_iterations: 200
+    completion_timeout: 600.0
+
+  teammate:
+    model:
+      model_client_config:
+        client_provider: OpenRouter
+        api_base: https://openrouter.ai/api/v1
+        api_key: "${TEAMMATE_API_KEY}"
+        timeout: 120
+        verify_ssl: false
+      model_request_config:
+        model: minimax/minimax-m2.5
+        temperature: 0.2
+        top_p: 0.9
+    workspace:
+      root_path: ./workspace
+    max_iterations: 200
+    completion_timeout: 600.0
+
+transport:
+  type: pyzmq
+  params:
+    backend: pyzmq
+    team_id: e2e_team
+    node_id: team_leader
+    direct_addr: tcp://127.0.0.1:15555
+    pubsub_publish_addr: tcp://127.0.0.1:15556
+    pubsub_subscribe_addr: tcp://127.0.0.1:15557
+    metadata:
+      pubsub_bind: true
+
+storage:
+  type: sqlite
+  params:
+    connection_string: ./team_data/team.db
+
+metadata:
+  teammate_base_port: 16000
+  teammate_port_offset: 10
+
+# Runtime settings (not part of TeamAgentSpec, used by the e2e script)
+runtime:
+  session_id: agent_team_session
+  initial_query: "建立一个3人团队每人发言一次"
