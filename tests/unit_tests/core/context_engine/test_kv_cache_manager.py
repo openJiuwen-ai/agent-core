@@ -39,6 +39,21 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 
 pytestmark = pytest.mark.asyncio
 
+_DIALOGUE_BENEFIT_PATCH = (
+    "openjiuwen.core.context_engine.processor.compressor."
+    "dialogue_compressor.DialogueCompressor._has_compression_benefit"
+)
+
+
+@pytest.fixture(autouse=True)
+def _disable_runner_callbacks():
+    """Keep context-layer tests isolated from runner callback imports and optional deps."""
+    with patch(
+        "openjiuwen.core.runner.callback.decorator._do_trigger",
+        new=AsyncMock(return_value=None),
+    ):
+        yield
+
 
 def create_tool_call_list(ids: List[str]) -> List[ToolCall]:
     return [ToolCall(id=tc, name="test-tool", type="function", arguments="") for tc in ids]
@@ -168,11 +183,22 @@ class TestKVCacheManager:
         """
         # Mock the compression model response
         mock_response = MagicMock()
-        mock_response.parser_content = {"summary": "Through test-tool, obtained: summarized result."}
+        mock_response.parser_content = {
+            "blocks": [
+                {
+                    "block_id": "react_1",
+                    "summary": "User Requirements:\n- Call the tool.\n\nFinal Result:\n- summarized result.",
+                }
+            ]
+        }
+        mock_response.content = ""
 
         with patch(
             "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
-        ) as mock_model_cls:
+        ) as mock_model_cls, patch(
+            _DIALOGUE_BENEFIT_PATCH,
+            return_value=True,
+        ):
             mock_model = MagicMock()
             mock_model.invoke = AsyncMock(return_value=mock_response)
             mock_model_cls.return_value = mock_model
@@ -186,15 +212,15 @@ class TestKVCacheManager:
 
             # DialogueCompressor config - low threshold to trigger compression
             compressor_config = DialogueCompressorConfig(
-                messages_threshold=2,
+                messages_threshold=6,
                 tokens_threshold=100000,
                 keep_last_round=False,
+                offload_writeback_enabled=False,
             )
 
             # Create mock model for release tracking
             fake_model = _FakeInferenceAffinityModel(model_name="test-model")
 
-            # Initial messages (before compression)
             initial_messages = [
                 UserMessage(content="Call the tool"),
                 AssistantMessage(
@@ -214,17 +240,19 @@ class TestKVCacheManager:
                 token_counter=None,
             )
 
-            # First get_context_window - triggers compression via add_messages
-            # This snapshots the window, no release should happen yet
+            # First get_context_window only snapshots the uncompressed window.
             window1 = await context.get_context_window(model=fake_model)
             assert fake_model.release_calls == [], "First get_context_window should not trigger release"
 
-            # Now the context has been compressed (messages modified)
-            # Get messages to verify compression happened
-            compressed_messages = context.get_messages()
+            await context.add_messages([
+                UserMessage(content="Follow up request"),
+                AssistantMessage(content="", tool_calls=create_tool_call_list(["tc-2"])),
+                ToolMessage(content="Follow up tool result", tool_call_id="tc-2"),
+                AssistantMessage(content="Follow up final answer."),
+            ])
 
-            # Add a new user message to simulate continued conversation
-            await context.add_messages(UserMessage(content="Follow up question"))
+            compressed_messages = context.get_messages()
+            assert any("DIALOGUE_MEMORY_BLOCK" in getattr(message, "content", "") for message in compressed_messages)
 
             # Second get_context_window - should detect message change and trigger release
             window2 = await context.get_context_window(model=fake_model)
@@ -239,11 +267,22 @@ class TestKVCacheManager:
         across multiple compression rounds.
         """
         mock_response = MagicMock()
-        mock_response.parser_content = {"summary": "Compressed round content."}
+        mock_response.parser_content = {
+            "blocks": [
+                {
+                    "block_id": "react_1",
+                    "summary": "User Requirements:\n- Round request.\n\nFinal Result:\n- Compressed round content.",
+                }
+            ]
+        }
+        mock_response.content = ""
 
         with patch(
             "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
-        ) as mock_model_cls:
+        ) as mock_model_cls, patch(
+            _DIALOGUE_BENEFIT_PATCH,
+            return_value=True,
+        ):
             mock_model = MagicMock()
             mock_model.invoke = AsyncMock(return_value=mock_response)
             mock_model_cls.return_value = mock_model
@@ -259,6 +298,7 @@ class TestKVCacheManager:
                 tokens_threshold=100000,
                 messages_to_keep=4,
                 keep_last_round=True,
+                offload_writeback_enabled=False,
             )
 
             fake_model = _FakeInferenceAffinityModel(model_name="test-model")
@@ -331,6 +371,7 @@ class TestKVCacheManager:
                 messages_threshold=2,
                 tokens_threshold=100000,
                 keep_last_round=False,
+                offload_writeback_enabled=False,
             )
 
             fake_model = _FakeInferenceAffinityModel(model_name="test-model")
