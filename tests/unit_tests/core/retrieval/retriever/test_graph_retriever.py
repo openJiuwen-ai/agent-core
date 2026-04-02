@@ -3,6 +3,7 @@
 Graph retriever test cases
 """
 
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,6 +12,17 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import GraphRetriever, RetrievalResult
 from openjiuwen.core.retrieval.common.triple_beam import TripleBeam
 from openjiuwen.core.retrieval.retriever.graph_retriever import TripleBeamSearch
+from openjiuwen.core.retrieval.retriever.hybrid_retriever import HybridRetriever
+
+
+class _RetrieverStubNoIndexType:
+    """Like HybridRetriever: has retrieve/embed_model; index_type optional (AsyncMock would fake index_type)."""
+
+    def __init__(self, index_type: Optional[str] = None) -> None:
+        self.embed_model = AsyncMock()
+        self.retrieve = AsyncMock(return_value=[])
+        if index_type is not None:
+            self.index_type = index_type
 
 
 @pytest.fixture
@@ -287,3 +299,166 @@ class TestTripleBeamSearch:
 
         _, kwargs = mock_retriever_with_embed.retrieve.call_args
         assert kwargs["mode"] == "hybrid"
+
+    @pytest.mark.asyncio
+    async def test_search_candidates_uses_retrieve_mode_when_no_index_type(self):
+        """When nested retriever has no index_type, retrieve_mode from GraphRetriever must be used."""
+        stub = _RetrieverStubNoIndexType()
+        assert not hasattr(stub, "index_type")
+        search = TripleBeamSearch(
+            retriever=stub,
+            retrieve_mode="hybrid",
+            num_candidates_per_beam=7,
+        )
+        beam = TripleBeam(
+            [
+                RetrievalResult(
+                    text="entity1 relation entity2",
+                    score=0.9,
+                    metadata={"triple": '["entity1", "relation", "entity2"]'},
+                )
+            ],
+            0.9,
+        )
+
+        await search._search_candidates(beam)  # pylint: disable=protected-access
+
+        stub.retrieve.assert_called_once()
+        _, kwargs = stub.retrieve.call_args
+        assert kwargs["mode"] == "hybrid"
+        assert kwargs["top_k"] == 7
+
+    @pytest.mark.asyncio
+    async def test_search_candidates_retrieve_mode_vector_when_no_index_type(self):
+        stub = _RetrieverStubNoIndexType()
+        search = TripleBeamSearch(
+            retriever=stub,
+            retrieve_mode="vector",
+            num_candidates_per_beam=3,
+        )
+        beam = TripleBeam(
+            [
+                RetrievalResult(
+                    text="x rel y",
+                    score=1.0,
+                    metadata={"triple": '["x", "rel", "y"]'},
+                )
+            ],
+            1.0,
+        )
+
+        await search._search_candidates(beam)  # pylint: disable=protected-access
+
+        assert stub.retrieve.call_args.kwargs["mode"] == "vector"
+
+    @pytest.mark.asyncio
+    async def test_search_candidates_defaults_hybrid_without_index_type_or_retrieve_mode(self):
+        """Regression: getattr(..., None) + default hybrid avoids AttributeError on HybridRetriever."""
+        stub = _RetrieverStubNoIndexType()
+        search = TripleBeamSearch(retriever=stub, num_candidates_per_beam=5)
+        assert search.retrieve_mode is None
+        beam = TripleBeam(
+            [
+                RetrievalResult(
+                    text="a rel b",
+                    score=1.0,
+                    metadata={"triple": '["a", "rel", "b"]'},
+                )
+            ],
+            1.0,
+        )
+
+        await search._search_candidates(beam)  # pylint: disable=protected-access
+
+        assert stub.retrieve.call_args.kwargs["mode"] == "hybrid"
+
+    @pytest.mark.asyncio
+    async def test_search_candidates_retriever_index_type_overrides_retrieve_mode(self):
+        """Explicit index_type on retriever wins over retrieve_mode."""
+        stub = _RetrieverStubNoIndexType(index_type="vector")
+        search = TripleBeamSearch(
+            retriever=stub,
+            retrieve_mode="hybrid",
+            num_candidates_per_beam=2,
+        )
+        beam = TripleBeam(
+            [
+                RetrievalResult(
+                    text="p rel q",
+                    score=1.0,
+                    metadata={"triple": '["p", "rel", "q"]'},
+                )
+            ],
+            1.0,
+        )
+
+        await search._search_candidates(beam)  # pylint: disable=protected-access
+
+        assert stub.retrieve.call_args.kwargs["mode"] == "vector"
+
+    @pytest.mark.asyncio
+    async def test_search_candidates_real_hybrid_retriever_no_index_type_uses_retrieve_mode(self):
+        """Production HybridRetriever has no index_type until injected; retrieve_mode must suffice."""
+        vs = MagicMock()
+        emb = AsyncMock()
+        hr = HybridRetriever(vector_store=vs, embed_model=emb)
+        assert getattr(hr, "index_type", None) is None
+        hr.retrieve = AsyncMock(return_value=[])
+        search = TripleBeamSearch(retriever=hr, retrieve_mode="hybrid", num_candidates_per_beam=11)
+        beam = TripleBeam(
+            [
+                RetrievalResult(
+                    text="u rel v",
+                    score=1.0,
+                    metadata={"triple": '["u", "rel", "v"]'},
+                )
+            ],
+            1.0,
+        )
+
+        await search._search_candidates(beam)  # pylint: disable=protected-access
+
+        hr.retrieve.assert_called_once()
+        assert hr.retrieve.call_args.kwargs["mode"] == "hybrid"
+
+
+class TestGraphRetrieverDynamicRetrieverIndexType:
+    """get_retriever_for_mode copies GraphRetriever.index_type onto dynamically built retrievers."""
+
+    @staticmethod
+    def test_injects_index_type_hybrid_onto_hybrid_triple_retriever(
+        mock_vector_store, mock_embed_model
+    ):
+        gr = GraphRetriever(
+            vector_store=mock_vector_store,
+            embed_model=mock_embed_model,
+            chunk_collection="kb_x_chunks",
+            triple_collection="kb_x_triples",
+        )
+        gr.index_type = "hybrid"
+        triple_r = gr.get_retriever_for_mode("hybrid", is_chunk=False)
+        assert triple_r.index_type == "hybrid"
+
+    @staticmethod
+    def test_injects_index_type_onto_vector_retriever(mock_vector_store, mock_embed_model):
+        gr = GraphRetriever(
+            vector_store=mock_vector_store,
+            embed_model=mock_embed_model,
+            chunk_collection="kb_x_chunks",
+            triple_collection="kb_x_triples",
+        )
+        gr.index_type = "vector"
+        r = gr.get_retriever_for_mode("vector", is_chunk=True)
+        assert r.index_type == "vector"
+
+    @staticmethod
+    def test_skips_injection_when_graph_index_type_unset(mock_vector_store, mock_embed_model):
+        gr = GraphRetriever(
+            vector_store=mock_vector_store,
+            embed_model=mock_embed_model,
+            chunk_collection="kb_x_chunks",
+            triple_collection="kb_x_triples",
+        )
+        assert gr.index_type is None
+        triple_r = gr.get_retriever_for_mode("hybrid", is_chunk=False)
+        assert not hasattr(triple_r, "index_type")

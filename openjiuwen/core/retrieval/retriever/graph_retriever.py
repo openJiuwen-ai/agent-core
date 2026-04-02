@@ -31,6 +31,7 @@ class TripleBeamSearch:
         num_candidates_per_beam: int = 100,
         max_length: int = 2,
         encoder_batch_size: int = 256,
+        retrieve_mode: Optional[str] = None,
         **kwargs,
     ) -> None:
         if max_length < 1:
@@ -45,6 +46,8 @@ class TripleBeamSearch:
         self.max_length = max_length
         self.encoder_batch_size = encoder_batch_size
         self.embed_model = retriever.embed_model if hasattr(retriever, "embed_model") else None
+        # HybridRetriever / VectorRetriever from get_retriever_for_mode lack index_type; graph passes this.
+        self.retrieve_mode = retrieve_mode
 
     @staticmethod
     def _cosine_scores(query_vec, cand_vecs):
@@ -187,10 +190,14 @@ class TripleBeamSearch:
         entities = {triple[0], triple[-1]}
         query_str = " ".join(entities)
 
-        mode = getattr(self.retriever, "index_type")
+        mode = getattr(self.retriever, "index_type", None)
+        if mode is None:
+            mode = self.retrieve_mode
+        if mode is None:
+            mode = "hybrid"
         if mode == "bm25":
             mode = "sparse"
-            
+
         # Use retrieve method instead of SearchQuery
         nodes = await self.retriever.retrieve(
             query=query_str,
@@ -365,6 +372,9 @@ class GraphRetriever(Retriever):
                 embed_model=self.embed_model,
             )
 
+        if self.index_type is not None:
+            retriever.index_type = self.index_type  # type: ignore[attr-defined]
+
         return retriever
 
     async def retrieve(
@@ -476,7 +486,11 @@ class GraphRetriever(Retriever):
         # Perform beam search on triples
         try:
             triple_retriever = self.get_retriever_for_mode(mode, is_chunk=False)
-            triple_beam_search = TripleBeamSearch(retriever=triple_retriever, **kwargs)
+            triple_beam_search = TripleBeamSearch(
+                retriever=triple_retriever,
+                retrieve_mode=mode,
+                **kwargs,
+            )
             beams = await triple_beam_search.beam_search(query, triples)
         except Exception as e:
             logger.warning("[graph] Beam search failed: %s, falling back to chunks", e)
