@@ -13,11 +13,9 @@ from openjiuwen.dev_tools.agentrl.config.schemas import (
 )
 ```
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.PersistenceConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.PersistenceConfig(enabled: bool = False, save_path: str = None, flush_interval: int = 100, save_rollouts: bool = True, save_step_summaries: bool = True)
 ```
 
@@ -31,11 +29,9 @@ Rollout 持久化配置。
 * **save_rollouts**(bool，可选)：是否保存 rollouts。默认值：`True`。
 * **save_step_summaries**(bool，可选)：是否保存步数摘要。默认值：`True`。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.TrainingConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.TrainingConfig(project_name: str = "OpenJiuwenAgentRL", experiment_name: str = "grpo_experiment", train_data_path: Optional[str] = None, val_data_path: Optional[str] = None, train_files: Optional[str] = None, val_files: Optional[str] = None, model_path: str = None, save_path: str = None, algorithm_adv_estimator: str = "grpo", algorithm_use_kl_in_reward: bool = False, algorithm_filter_groups: bool = False, algorithm_norm_adv_by_std_in_grpo: bool = True, whole_trajectory: bool = False, epoch_num: int = 2, total_epochs: int = 2, save_freq: int = 20, test_freq: int = 20, train_batch_size: int = 32, rollout_concurrency: int = 40, visible_device: str = "0,1,2,3", nnodes: int = 1, n_gpus_per_node: int = 4, micro_batch_size_per_gpu: int = 4, max_prompt_length: int = 3072, max_response_length: int = 3072, truncation: str = "truncate", val_before_train: bool = True, critic_warmup: int = 0, logger: List[str] = ["tensorboard"], log_rollout_details: bool = True, log_reward_distribution: bool = False, verl_extra: Dict[str, Any] = {}, verl_config_path: Optional[str] = None)
 ```
 
@@ -47,8 +43,8 @@ class openjiuwen.dev_tools.agentrl.config.schemas.TrainingConfig(project_name: s
 * **experiment_name**(str，可选)：实验名称。默认值：`"grpo_experiment"`。
 * **train_data_path**(str，可选)：训练数据路径。默认值：`None`。
 * **val_data_path**(str，可选)：验证数据路径。默认值：`None`。
-* **train_files**(str，可选)：训练文件路径（向后兼容别名）。默认值：`None`。
-* **val_files**(str，可选)：验证文件路径（向后兼容别名）。默认值：`None`。
+* **train_files**(str，可选)：与 `train_data_path` 同义，用于指定训练数据文件路径；二者任选其一配置即可。默认值：`None`。
+* **val_files**(str，可选)：与 `val_data_path` 同义，用于指定验证数据文件路径；二者任选其一配置即可。默认值：`None`。
 * **model_path**(str，可选)：模型路径。默认值：`None`。
 * **save_path**(str，可选)：保存路径。默认值：`None`。
 * **algorithm_adv_estimator**(str，可选)：优势估计器算法。默认值：`"grpo"`。
@@ -85,11 +81,9 @@ class openjiuwen.dev_tools.agentrl.config.schemas.TrainingConfig(project_name: s
 
 返回验证数据路径，优先使用 val_files 而非 val_data_path。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.RolloutConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.RolloutConfig(actor_optimizer_lr: float = 1e-6, actor_use_kl_loss: bool = False, actor_kl_loss_coef: float = 0.02, actor_entropy_coef: float = 0.0, actor_clip_ratio_low: float = 0.2, actor_clip_ratio_high: float = 0.3, actor_loss_agg_mode: str = "seq-mean-token-mean", rollout_n: int = 8)
 ```
 
@@ -108,11 +102,9 @@ Rollout / Actor 优化器配置。
 
 多轮 rollout 上限不在 `RolloutConfig` 中配置；启用 Ada 时由 `RLConfig.ada`（见 [AdaConfig](#class-openjiuwendev_toolsagentrlconfigschemasadaconfig)）提供 `rollout_max_round` 等字段。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.AgentRuntimeConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.AgentRuntimeConfig(system_prompt: Any = "You are a helpful assistant.", temperature: float = 0.7, top_p: float = 0.9, max_new_tokens: int = 512, presence_penalty: float = 0.0, frequency_penalty: float = 0.0)
 ```
 
@@ -127,11 +119,9 @@ Agent 运行时超参数。
 * **presence_penalty**(float，可选)：存在惩罚。默认值：`0.0`。
 * **frequency_penalty**(float，可选)：频率惩罚。默认值：`0.0`。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.AdaConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.AdaConfig(rollout_max_round: int = 2, final_keep_per_prompt: int = 8)
 ```
 
@@ -144,11 +134,9 @@ Ada rollout 变体的额外参数。
 * **rollout_max_round**(int，可选)：Rollout 最大轮数。默认值：`2`。
 * **final_keep_per_prompt**(int，可选)：每个提示词最终保留数。默认值：`8`。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.RLConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.RLConfig(training: TrainingConfig, rollout: RolloutConfig = RolloutConfig(), runtime: AgentRuntimeConfig = AgentRuntimeConfig(), persistence: PersistenceConfig = PersistenceConfig(), ada: Optional[AdaConfig] = None)
 ```
 

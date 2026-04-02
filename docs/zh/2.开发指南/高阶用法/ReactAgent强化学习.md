@@ -1,10 +1,6 @@
 # ReactAgent强化学习
 
-`openjiuwen.dev_tools.agentrl` 模块提供基于 VERL 强化学习框架和 OpenYuanrong 分布式计算引擎的 ReactAgent 强化训练能力。
-
-**运行环境：** 本教程中的示例**在昇腾（NPU）上运行**。请先参考 [verl 昇腾快速开始](https://verl.readthedocs.io/en/latest/ascend_tutorial/quick_start/ascend_quick_start.html) 安装 **verl** 昇腾版及相关依赖，包括 **torch**、**torch_npu**、CANN、**vllm**、**vllm-ascend** 等；完成后再结合下文「运行环境部署」与 `examples` 下的示例目录准备数据与启动训练。
-
-本教程介绍如何使用 `agentrl` 模块训练一个借助计算器工具求解数学题的 ReactAgent；Agent 需按 `### ANSWER: <answer> ###` 格式输出最终答案。详细代码请参考 `examples/rl_calculator`。
+`openjiuwen.dev_tools.agentrl` 模块提供基于 VERL 强化学习框架和 OpenYuanrong 分布式计算引擎的强化学习训练能力。 本教程提供详细的训练环境配置引导，并简要介绍如何使用该模块训练一个借助计算器工具求解数学题的 ReactAgent。
 
 ## 运行环境部署
 
@@ -17,9 +13,12 @@
 | Python | **3.11.10** |
 ### 从源码安装vLLM、vllm-ascend和VERL
 
-vLLM和vllm-ascend和VERL都需从源码进行安装，建议将三个源码放在同一个目录下，如rl_pkgs。
-
-安装 vLLM
+vLLM、vllm-ascend和VERL都需从源码进行安装，建议将三个源码放在同一个目录下，如rl_pkgs。
+```bash
+mkdir rl_pkgs
+cd rl_pkgs
+```
+安装 v0.11.0版本vLLM
 
 ```bash
 mkdir rl_pkgs
@@ -30,7 +29,7 @@ VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
 ```
 
-安装vllm-ascend
+安装v0.11.0rc1版本vllm-ascend
 
 ```bash
 git clone https://github.com/vllm-project/vllm-ascend
@@ -40,10 +39,9 @@ pip install -v -e .
 cd ..
 ```
 
-安装VERL 0.7.0
+安装0.7.0版本VERL
 
 ```bash
-
 git clone https://github.com/verl-project/verl
 cd verl
 git checkout v0.7.0
@@ -51,7 +49,7 @@ pip install -e .
 cd ..
 ```
 
-### pip安装 openJiuwen 与其它 Python 依赖
+### 安装 openJiuwen 与其它 Python 依赖
 
 
 ```bash
@@ -64,7 +62,7 @@ pip install openai==2.15.0
 ```
 
 ### 安装元戎与ray_adapter
-下载 [元戎 OpenYuanrong 0.7.0][yuanrong-wheel] 与 [ray_adapter 0.7.1][ray-adapter-wheel] 的 wheel 包,在conda环境中离线安装：
+下载 [元戎 OpenYuanrong 0.7.0][yuanrong-wheel] 与 [ray_adapter 0.7.1][ray-adapter-wheel] 的 wheel 包，在conda环境中离线安装：
 ```bash
 pip install openyuanrong-0.7.0-cp311-cp311-manylinux_2_34_aarch64.whl
 pip install ray_adapter-0.7.1-py3-none-any.whl
@@ -73,14 +71,14 @@ pip install ray_adapter-0.7.1-py3-none-any.whl
 ```bash
 iconv -f UTF-16 -t UTF-8 yr_v7.patch > yr_v7.patch.utf8
 ```
-进入verl源码目录，安装patch文件
+进入verl源码目录，安装patch文件：
 ```bash
 cd verl
 patch -p1 < ../yr_v7.patch.utf8
 ```
-[yuanrong-wheel]: https://build-logs.openeuler.openatom.cn:38080/temp-archived/openeuler/openYuanrong/yr_release/aarch64/0.7.0/openyuanrong-0.7.0-cp311-cp311-manylinux_2_34_aarch64.whl
+[yuanrong-wheel]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/tmp/202603311854/openyuanrong-0.7.1-cp311-cp311-manylinux_2_34_aarch64.whl 
 [ray-adapter-wheel]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/ray_adapter/ray_adapter-0.7.1-py3-none-any.whl
-[patch-url]: https://patch-url
+[patch-url]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/tmp/verl-070-use-yuanrong-as-distributed-backend.patch
 ## 整体流程
 
 强化学习训练主要包含以下步骤：
@@ -221,7 +219,7 @@ system_prompt = CALCULATOR_SYSTEM_PROMPT.format(
 ).content
 ```
 
-要求 Agent 在最终输出时使用 `### ANSWER: <answer> ###` 格式，便于奖励函数解析。
+可要求 Agent 在最终输出时使用 `### ANSWER: <answer> ###` 格式，便于奖励函数解析。
 
 ## 工具定义
 
@@ -296,7 +294,7 @@ def calc_reward(msg: RolloutMessage) -> dict:
 
 ## 启动训练
 
-组装以上配置与函数后，创建 `RLOptimizer` 并启动训练：
+完成以上配置后，创建 `RLOptimizer` 并启动训练：
 
 ```python
 from openjiuwen.core.common.logging import logger
@@ -334,6 +332,6 @@ if __name__ == "__main__":
 
 ## 运行示例
 
-可参考项目中的 `examples/rl_calculator` 完整示例以运行，训练日志会输出模型路径、数据路径、算法、epoch 等信息，若启用了 TensorBoard 可本地加载查看训练曲线。
+可参考项目中的 [examples/rl_calculator 完整示例](../../../../examples/rl_calculator/README.md) 以运行；训练日志会输出模型路径、数据路径、算法、epoch 等信息，若启用了 TensorBoard 可本地加载查看训练曲线。
 
-更多 API 与配置细节见 [agentrl 模块文档](../../API文档/openjiuwen.dev_tools/agentrl.README.md)。
+更多 API 与配置细节见 [agentrl 模块文档](../API文档/openjiuwen.dev_tools/agentrl.README.md)。

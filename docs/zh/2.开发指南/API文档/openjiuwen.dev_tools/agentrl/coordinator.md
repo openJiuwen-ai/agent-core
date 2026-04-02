@@ -2,13 +2,13 @@
 
 ## class openjiuwen.dev_tools.agentrl.coordinator.schemas.Rollout
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.schemas.Rollout(turn_id: Optional[int] = None, input_prompt: Optional[Dict[str, Any]] = None, output_response: Optional[Dict[str, Any]] = None, llm_config: Optional[Dict[str, Any]] = None)
 ```
 
 单轮对话 rollout。
 
-格式与 jiuwen_rl v1 兼容：
+字段约定：
 - input_prompt["message"]：输入消息列表（OpenAI 消息格式）
 - input_prompt["tools"]：工具定义列表
 - output_response：LLM 输出消息（content 或 tool_calls）
@@ -20,11 +20,9 @@ class openjiuwen.dev_tools.agentrl.coordinator.schemas.Rollout(turn_id: Optional
 * **output_response**(Optional[Dict[str, Any]]，可选)：LLM 输出响应。默认值：`None`。
 * **llm_config**(Optional[Dict[str, Any]]，可选)：LLM 配置。默认值：`None`。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutMessage
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutMessage(task_id: Optional[str] = None, origin_task_id: Optional[str] = None, rollout_id: Optional[str] = None, start_time: Optional[str] = None, end_time: Optional[str] = None, rollout_info: List[Rollout] = [], reward_list: List[float] = [], global_reward: Optional[float] = None, turn_count: int = 0, round_num: Optional[int] = None)
 ```
 
@@ -43,11 +41,9 @@ class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutMessage(task_id: O
 * **turn_count**(int，可选)：对话轮次计数。默认值：`0`。
 * **round_num**(Optional[int]，可选)：Rollout 轮数。默认值：`None`。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.coordinator.schemas.RLTask
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.schemas.RLTask(task_id: str, origin_task_id: str, task_sample: Dict[str, Any] = {}, round_num: int = 0)
 ```
 
@@ -60,11 +56,9 @@ class openjiuwen.dev_tools.agentrl.coordinator.schemas.RLTask(task_id: str, orig
 * **task_sample**(Dict[str, Any]，可选)：任务样本数据。默认值：`{}`。
 * **round_num**(int，可选)：Rollout 轮数。默认值：`0`。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutWithReward
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutWithReward(turn_id: Optional[int] = None, task_id: Optional[str] = None, rollout_id: Optional[str] = None, input_prompt_ids: List[int], output_response_ids: List[int], reward: Optional[float] = None, n_turns: Optional[int] = None, loss_mask: Optional[List[int]] = None)
 ```
 
@@ -81,11 +75,9 @@ class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutWithReward(turn_id
 * **n_turns**(Optional[int]，可选)：轮次数量。默认值：`None`。
 * **loss_mask**(Optional[List[int]]，可选)：每 token 的损失掩码。1 = 模型生成的 token（参与损失计算），0 = 环境 token（排除在损失计算之外）。默认值：`None`。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue()
 ```
 
@@ -95,7 +87,7 @@ class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue()
 
 初始化空的任务队列和 rollout 缓冲区。
 
-### async queue_task(self, task: RLTask) -> str
+### queue_task(self, task: RLTask) -> str
 
 将新任务加入队列并返回其任务标识符。
 
@@ -107,7 +99,7 @@ class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue()
 
 **str**，任务标识符。
 
-### async get_task(self) -> Optional[RLTask]
+### get_task(self) -> Optional[RLTask]
 
 获取下一个待处理的任务。
 
@@ -115,7 +107,7 @@ class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue()
 
 **Optional[RLTask]**，下一个任务，若队列为空则返回 `None`。
 
-### async delete_task(self, task: RLTask)
+### delete_task(self, task: RLTask)
 
 直接从处理中池中移除任务。
 
@@ -123,7 +115,7 @@ class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue()
 
 * **task**(RLTask)：要移除的任务。
 
-### async add_rollout(self, rollout: RolloutMessage) -> str
+### add_rollout(self, rollout: RolloutMessage) -> str
 
 存储已完成的 rollout 并清除其处理中条目。
 
@@ -135,7 +127,7 @@ class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue()
 
 **str**，Rollout ID。
 
-### async get_rollouts(self) -> Dict[str, RolloutMessage]
+### get_rollouts(self) -> Dict[str, RolloutMessage]
 
 原子性地获取并清除所有缓存的 rollouts。
 

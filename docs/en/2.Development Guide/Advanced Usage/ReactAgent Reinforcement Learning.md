@@ -1,10 +1,6 @@
 # ReactAgent Reinforcement Learning
 
-The `openjiuwen.dev_tools.agentrl` module provides ReactAgent reinforcement learning training capabilities based on the VERL reinforcement learning framework and the OpenYuanrong distributed computing engine.
-
-**Runtime environment:** The examples in this tutorial **run on Ascend (NPU)**. First follow the [VERL Ascend quick start](https://verl.readthedocs.io/en/latest/ascend_tutorial/quick_start/ascend_quick_start.html) to install the Ascend build of **verl** and related dependencies, including **torch**, **torch_npu**, CANN, **vllm**, **vllm-ascend**, and so on; then continue with the **Environment Setup** section below and the `examples` directories to prepare data and start training.
-
-This tutorial explains how to use the `agentrl` module to train a ReactAgent that solves math problems with a calculator tool; the Agent must output the final answer in the form `### ANSWER: <answer> ###`. For complete code, see `examples/rl_calculator`.
+The `openjiuwen.dev_tools.agentrl` module provides reinforcement learning training capabilities based on the VERL reinforcement learning framework and the OpenYuanrong distributed computing engine. This tutorial walks through detailed training environment setup and briefly explains how to use this module to train a ReactAgent that solves math problems with a calculator tool.
 
 ## Environment Setup
 
@@ -20,7 +16,12 @@ This tutorial explains how to use the `agentrl` module to train a ReactAgent tha
 
 vLLM, vllm-ascend, and VERL should all be installed from source. It is recommended to place the three source trees in the same directory, for example `rl_pkgs`.
 
-Install vLLM:
+```bash
+mkdir rl_pkgs
+cd rl_pkgs
+```
+
+Install vLLM v0.11.0:
 
 ```bash
 mkdir rl_pkgs
@@ -31,7 +32,7 @@ VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
 ```
 
-Install vllm-ascend:
+Install vllm-ascend v0.11.0rc1:
 
 ```bash
 git clone https://github.com/vllm-project/vllm-ascend
@@ -44,7 +45,6 @@ cd ..
 Install VERL 0.7.0:
 
 ```bash
-
 git clone https://github.com/verl-project/verl
 cd verl
 git checkout v0.7.0
@@ -52,7 +52,8 @@ pip install -e .
 cd ..
 ```
 
-### Install openJiuwen and other Python dependencies via pip
+### Install openJiuwen and other Python dependencies
+
 
 ```bash
 pip install openjiuwen
@@ -85,9 +86,9 @@ cd verl
 patch -p1 < ../yr_v7.patch.utf8
 ```
 
-[yuanrong-wheel]: https://build-logs.openeuler.openatom.cn:38080/temp-archived/openeuler/openYuanrong/yr_release/aarch64/0.7.0/openyuanrong-0.7.0-cp311-cp311-manylinux_2_34_aarch64.whl
+[yuanrong-wheel]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/tmp/202603311854/openyuanrong-0.7.1-cp311-cp311-manylinux_2_34_aarch64.whl
 [ray-adapter-wheel]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/ray_adapter/ray_adapter-0.7.1-py3-none-any.whl
-[patch-url]: https://patch-url
+[patch-url]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/tmp/verl-070-use-yuanrong-as-distributed-backend.patch
 
 ## Overall Flow
 
@@ -229,7 +230,7 @@ system_prompt = CALCULATOR_SYSTEM_PROMPT.format(
 ).content
 ```
 
-The Agent should use `### ANSWER: <answer> ###` format for final output to facilitate reward function parsing.
+You can require the Agent to use the `### ANSWER: <answer> ###` format in the final output so the reward function can parse it.
 
 ## Tool Definition
 
@@ -299,7 +300,7 @@ def calc_reward(msg: RolloutMessage) -> dict:
 ```
 
 - `rollout_info`: Input and output info for each dialogue turn.
-- `ground_truth`: From `input_prompt` returned by `task_data_fn`.
+- `ground_truth`: From `ground_truth` in the `input_prompt` produced from `task_data_fn`.
 - `reward_list`: Step-level rewards; `global_reward`: Task-level total reward.
 
 ## Starting Training
@@ -342,6 +343,6 @@ if __name__ == "__main__":
 
 ## Running the Example
 
-See the complete `examples/rl_calculator` example in the project to run training. Logs will print the model path, data paths, algorithm, epoch, and related information; if TensorBoard is enabled, load it locally to view training curves.
+See the [complete examples/rl_calculator example](../../../../examples/rl_calculator/README.md) in the repository to run training. Logs will print the model path, data paths, algorithm, epoch, and related information; if TensorBoard is enabled, load it locally to view training curves.
 
-For more API and configuration details, see the [agentrl module documentation](../../API%20Docs/openjiuwen.dev_tools/agentrl.README.md).
+For more API and configuration details, see the [agentrl module documentation](../API%20Docs/openjiuwen.dev_tools/agentrl.README.md).

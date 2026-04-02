@@ -18,7 +18,7 @@ Calculator 强化学习示例
 运行步骤
 --------
 
-1. 下载 Calc-X 数据：从 [calc-x-data.zip](https://drive.google.com/file/d/1FQMyKLLd6hP9dw9rfZn1EZOWNvKaDsqw/view) 下载压缩包并解压。解压后应得到包含 `train.parquet` 与 `test.parquet` 的目录（Parquet 含 `question`、`result` 列，分别对应题目与标准答案）。
+1. 下载 Calc-X 数据：从 [calc-x-data.zip](https://drive.google.com/file/d/1bQF0Etkw2TC6W7SX-LPA6Aq4XmLZC4e6/view?usp=drive_link) 下载压缩包并解压。解压后应得到包含 `train.parquet` 与 `test.parquet` 的目录（Parquet 含 `question`、`result` 列，分别对应题目与标准答案）。
 
 2. 编辑并启动训练：
 
@@ -51,7 +51,7 @@ lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
         TX packets 21306806  bytes 3990489575 (3.7 GiB)
         TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0**
    ```
-配置环境变量
+配置环境变量：
    ```bash
 export HCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0

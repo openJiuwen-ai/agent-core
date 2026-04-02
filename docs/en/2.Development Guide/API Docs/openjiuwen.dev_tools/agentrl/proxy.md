@@ -2,15 +2,13 @@
 
 `openjiuwen.dev_tools.agentrl.proxy` is the **inference proxy layer** for agentrl, responsible for:
 
-- Providing **BackendProxy**, a lightweight Flask reverse proxy that gives Agents a **stable OpenAI-compatible base URL** (`/v1`) while backend vLLM server addresses change between training steps.
+- Providing **BackendProxy**, which still gives Agents a **stable OpenAI-compatible inference base URL** (`/v1`) while backend vLLM addresses change between training steps.
 
-vLLM server lifecycle and addresses are managed by the **verl / Ray** training stack; this package does not ship a separate vLLM server wrapper class.
-
----
+vLLM inference service startup/shutdown and addresses are managed by the **verl / Ray** training stack; on the Agent side, use `BackendProxy` for a stable inference base URL.
 
 ## class openjiuwen.dev_tools.agentrl.proxy.backend_proxy.BackendProxy
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.proxy.backend_proxy.BackendProxy(llm_timeout_seconds: float = 30000, model_name: str = "agentrl")
 ```
 
@@ -45,7 +43,7 @@ Returns the port the proxy listens on (0 before start).
 
 Returns the proxy base URL (e.g. http://127.0.0.1:54321).
 
-### def update_backend_servers(self, servers) -> None
+### update_backend_servers(self, servers) -> None
 
 Replace the active backend server list.
 
@@ -53,15 +51,15 @@ Replace the active backend server list.
 
 * **servers**: List of server addresses or a single address string.
 
-### async def start(self) -> None
+### start(self) -> None
 
 Start Flask proxy in daemon thread and wait for health check to pass.
 
-### async def stop(self) -> None
+### stop(self) -> None
 
 Stop proxy server thread and release resources.
 
-### def start_sync(self) -> None
+### start_sync(self) -> None
 
 Blocking wrapper for `start()`.
 

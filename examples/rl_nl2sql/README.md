@@ -25,7 +25,7 @@ NL2SQL 强化学习示例
    pip install sqlparse
    ```
 
-2. 下载 Spider 数据：从 [spider_data.zip](https://drive.google.com/file/d/1403EGqzIDoHMdQF4c9Bkyl7dZLZ5Wt6J/view?pli=1) 下载压缩包并解压，得到包含 `database/`、`train.json` 等文件的 Spider 数据根目录（下文记为 `SPIDER_DIR`）。
+2. 下载 Spider 数据：从 [spider_data.zip](https://drive.google.com/file/d/1uHoxsz3yaalgv3QMfq910UqdvQu3-KwM/view?usp=drive_link) 下载压缩包并解压，得到包含 `database/`、`train.json` 等文件的 Spider 数据根目录（下文记为 `SPIDER_DIR`）。
 
 3. 准备数据库环境变量：
 
@@ -83,7 +83,7 @@ lo: flags=73<UP,LOOPBACK,RUNNING>  mtu 65536
         TX packets 21306806  bytes 3990489575 (3.7 GiB)
         TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0**
    ```
-配置环境变量
+配置环境变量：
    ```bash
 export HCCL_SOCKET_IFNAME=eth0
 export GLOO_SOCKET_IFNAME=eth0

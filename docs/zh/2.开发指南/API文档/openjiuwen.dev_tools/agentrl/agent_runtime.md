@@ -2,7 +2,7 @@
 
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollectionRail
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollectionRail()
 ```
 
@@ -31,37 +31,35 @@ Rail 优先级。
 
 初始化轨迹收集 Rail。
 
-### async before_model_call(self, ctx: AgentCallbackContext) -> None
+### before_model_call(self, ctx: AgentCallbackContext) -> None
 
 序列化输入消息和工具；用实际内容修补工具消息。
 
-### async after_model_call(self, ctx: AgentCallbackContext) -> None
+### after_model_call(self, ctx: AgentCallbackContext) -> None
 
 序列化 LLM 响应并将当前轮次提交为 Rollout。
 
-### async after_tool_call(self, ctx: AgentCallbackContext) -> None
+### after_tool_call(self, ctx: AgentCallbackContext) -> None
 
 捕获原始工具结果以覆盖上下文消息中错误的序列化内容。
 
-### def get_rollouts(self) -> List[Rollout]
+### get_rollouts(self) -> List[Rollout]
 
 返回当前运行收集的所有 Rollout 对象的副本。
 
-### def clear(self) -> None
+### clear(self) -> None
 
 清除所有已收集的 rollouts 和内部状态以进行新的收集。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollector
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollector()
 ```
 
 通过 TrajectoryCollectionRail 运行 Agent 并收集轨迹数据的封装器。
 
-### async collect(self, agent: Any, inputs: Dict[str, Any]) -> List[Rollout]
+### collect(self, agent: Any, inputs: Dict[str, Any]) -> List[Rollout]
 
 运行 Agent 并返回 Rollout 对象列表（每个 LLM 轮次一个）。
 
@@ -78,11 +76,9 @@ class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollector(
 
 * **ValueError**：Agent 不支持基于 Rail 的轨迹收集。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.runtime_executor.RuntimeExecutor
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.runtime_executor.RuntimeExecutor(*, task_runner: Optional[TaskRunnerCallable] = None, agent_factory: Optional[Callable[[RLTask], Any]] = None, task_data_fn: Optional[TaskDataFn] = None, reward_fn: Optional[Callable[[RolloutMessage], Any]] = None)
 ```
 
@@ -96,23 +92,23 @@ class openjiuwen.dev_tools.agentrl.agent_runtime.runtime_executor.RuntimeExecuto
 
 使用可选的任务运行器、Agent 工厂和辅助函数初始化运行时执行器。
 
-### def set_task_runner(self, fn: TaskRunnerCallable) -> None
+### set_task_runner(self, fn: TaskRunnerCallable) -> None
 
 设置任务运行器可调用对象以执行 rollout 任务。
 
-### def set_agent_factory(self, factory: Callable[[RLTask], Any]) -> None
+### set_agent_factory(self, factory: Callable[[RLTask], Any]) -> None
 
 设置 Agent 工厂用于为每个任务创建 Agent。
 
-### def set_task_data_fn(self, fn: TaskDataFn) -> None
+### set_task_data_fn(self, fn: TaskDataFn) -> None
 
 设置将任务样本转换为 Agent 输入的函数。
 
-### def set_reward_fn(self, fn: Callable[[RolloutMessage], Any]) -> None
+### set_reward_fn(self, fn: Callable[[RolloutMessage], Any]) -> None
 
 设置计算 rollout 消息奖励的奖励函数。
 
-### async execute_async(self, rollout_task: RLTask) -> RolloutMessage
+### execute_async(self, rollout_task: RLTask) -> RolloutMessage
 
 执行 rollout 任务并返回填充好的 RolloutMessage。
 
@@ -120,11 +116,9 @@ class openjiuwen.dev_tools.agentrl.agent_runtime.runtime_executor.RuntimeExecuto
 
 **RolloutMessage**，包含完整执行结果的 RolloutMessage 对象。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.parallel_executor.ParallelRuntimeExecutor
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.parallel_executor.ParallelRuntimeExecutor(data_store: TaskQueue, num_workers: int, *, task_runner: Optional[Callable] = None, agent_factory: Optional[Callable] = None, task_data_fn: Optional[Callable] = None, reward_fn: Optional[Callable] = None)
 ```
 
@@ -136,39 +130,37 @@ class openjiuwen.dev_tools.agentrl.agent_runtime.parallel_executor.ParallelRunti
 
 使用任务队列和 worker 数量初始化并行执行器。
 
-### async start(self) -> None
+### start(self) -> None
 
 启动所有 worker 循环。
 
-### async stop(self) -> None
+### stop(self) -> None
 
 停止所有 worker 并清理资源。
 
-### def is_running(self) -> bool
+### is_running(self) -> bool
 
 返回执行器当前是否正在运行。
 
-### def set_task_runner(self, fn: Callable) -> None
+### set_task_runner(self, fn: Callable) -> None
 
 设置任务运行器可调用对象。
 
-### def set_agent_factory(self, factory: Callable) -> None
+### set_agent_factory(self, factory: Callable) -> None
 
 设置 Agent 工厂。
 
-### def set_task_data_fn(self, fn: Callable) -> None
+### set_task_data_fn(self, fn: Callable) -> None
 
 设置任务数据函数。
 
-### def set_reward_fn(self, fn: Callable) -> None
+### set_reward_fn(self, fn: Callable) -> None
 
 设置奖励函数。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.agent_factory.AgentFactory
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.agent_factory.AgentFactory(system_prompt: str, tools: List[Any], tool_names: List[str], temperature: float, max_new_tokens: int, top_p: float, presence_penalty: float, frequency_penalty: float)
 ```
 
@@ -184,7 +176,7 @@ class openjiuwen.dev_tools.agentrl.agent_runtime.agent_factory.AgentFactory(syst
 
 代理 URL，必须在创建 Agent 前设置。
 
-### def __call__(self, rl_task: RLTask)
+### __call__(self, rl_task: RLTask)
 
 为给定的 RL 任务创建并配置 ReActAgent 实例。
 
@@ -196,11 +188,9 @@ class openjiuwen.dev_tools.agentrl.agent_runtime.agent_factory.AgentFactory(syst
 
 * **BaseError**：proxy_url 未设置时抛出。
 
----
-
 ## func openjiuwen.dev_tools.agentrl.agent_runtime.agent_factory.build_agent_factory
 
-```
+```python
 def build_agent_factory(runtime_cfg: AgentRuntimeConfig, tools: List[Any], tool_names: List[str]) -> AgentFactory
 ```
 

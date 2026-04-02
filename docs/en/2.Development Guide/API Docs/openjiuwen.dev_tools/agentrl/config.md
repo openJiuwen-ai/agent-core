@@ -13,11 +13,9 @@ from openjiuwen.dev_tools.agentrl.config.schemas import (
 )
 ```
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.PersistenceConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.PersistenceConfig(enabled: bool = False, save_path: str = None, flush_interval: int = 100, save_rollouts: bool = True, save_step_summaries: bool = True)
 ```
 
@@ -31,11 +29,9 @@ Rollout persistence configuration.
 * **save_rollouts**(bool, optional): Whether to save rollouts. Default: `True`.
 * **save_step_summaries**(bool, optional): Whether to save step summaries. Default: `True`.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.TrainingConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.TrainingConfig(project_name: str = "OpenJiuwenAgentRL", experiment_name: str = "grpo_experiment", train_data_path: Optional[str] = None, val_data_path: Optional[str] = None, train_files: Optional[str] = None, val_files: Optional[str] = None, model_path: str = None, save_path: str = None, algorithm_adv_estimator: str = "grpo", algorithm_use_kl_in_reward: bool = False, algorithm_filter_groups: bool = False, algorithm_norm_adv_by_std_in_grpo: bool = True, whole_trajectory: bool = False, epoch_num: int = 2, total_epochs: int = 2, save_freq: int = 20, test_freq: int = 20, train_batch_size: int = 32, rollout_concurrency: int = 40, visible_device: str = "0,1,2,3", nnodes: int = 1, n_gpus_per_node: int = 4, micro_batch_size_per_gpu: int = 4, max_prompt_length: int = 3072, max_response_length: int = 3072, truncation: str = "truncate", val_before_train: bool = True, critic_warmup: int = 0, logger: List[str] = ["tensorboard"], log_rollout_details: bool = True, log_reward_distribution: bool = False, verl_extra: Dict[str, Any] = {}, verl_config_path: Optional[str] = None)
 ```
 
@@ -47,8 +43,8 @@ Training configuration covering data, model, algorithm, and Verl trainer paramet
 * **experiment_name**(str, optional): Experiment name. Default: `"grpo_experiment"`.
 * **train_data_path**(str, optional): Training data path. Default: `None`.
 * **val_data_path**(str, optional): Validation data path. Default: `None`.
-* **train_files**(str, optional): Training file path (backward-compatible alias). Default: `None`.
-* **val_files**(str, optional): Validation file path (backward-compatible alias). Default: `None`.
+* **train_files**(str, optional): Synonym for `train_data_path` for specifying the training data file path; configure either field. Default: `None`.
+* **val_files**(str, optional): Synonym for `val_data_path` for specifying the validation data file path; configure either field. Default: `None`.
 * **model_path**(str, optional): Model path. Default: `None`.
 * **save_path**(str, optional): Save path. Default: `None`.
 * **algorithm_adv_estimator**(str, optional): Advantage estimator algorithm. Default: `"grpo"`.
@@ -85,11 +81,9 @@ Returns training data path, preferring train_files over train_data_path.
 
 Returns validation data path, preferring val_files over val_data_path.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.RolloutConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.RolloutConfig(actor_optimizer_lr: float = 1e-6, actor_use_kl_loss: bool = False, actor_kl_loss_coef: float = 0.02, actor_entropy_coef: float = 0.0, actor_clip_ratio_low: float = 0.2, actor_clip_ratio_high: float = 0.3, actor_loss_agg_mode: str = "seq-mean-token-mean", rollout_n: int = 8)
 ```
 
@@ -108,11 +102,9 @@ Rollout / Actor optimizer configuration.
 
 Multi-round rollout limits are **not** configured on `RolloutConfig`. When Ada is enabled, use `RLConfig.ada` (see [AdaConfig](#class-openjiuwendev_toolsagentrlconfigschemasadaconfig)) for `rollout_max_round` and related fields.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.AgentRuntimeConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.AgentRuntimeConfig(system_prompt: Any = "You are a helpful assistant.", temperature: float = 0.7, top_p: float = 0.9, max_new_tokens: int = 512, presence_penalty: float = 0.0, frequency_penalty: float = 0.0)
 ```
 
@@ -127,28 +119,24 @@ Agent runtime hyperparameters.
 * **presence_penalty**(float, optional): Presence penalty. Default: `0.0`.
 * **frequency_penalty**(float, optional): Frequency penalty. Default: `0.0`.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.AdaConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.AdaConfig(rollout_max_round: int = 2, final_keep_per_prompt: int = 8)
 ```
 
 Additional parameters for Ada rollout variant.
 
-Ada is enabled when `RLConfig.ada` is provided (not None). Multi-round rollout limits and Ada sampling are wired through Hydra (`trainer.rollout_max_round`, `JiuwenRL` custom hooks), not through `RolloutConfig`.
+When `RLConfig.ada` is provided (not None), Ada is enabled. Limits such as the maximum number of multi-round rollout rounds are coordinated through the fields of this class together with `trainer.rollout_max_round` / `JiuwenRL` custom functions in Hydra, not in `RolloutConfig`.
 
 **Parameters**:
 
 * **rollout_max_round**(int, optional): Rollout max rounds. Default: `2`.
 * **final_keep_per_prompt**(int, optional): Final keep count per prompt. Default: `8`.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.config.schemas.RLConfig
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.config.schemas.RLConfig(training: TrainingConfig, rollout: RolloutConfig = RolloutConfig(), runtime: AgentRuntimeConfig = AgentRuntimeConfig(), persistence: PersistenceConfig = PersistenceConfig(), ada: Optional[AdaConfig] = None)
 ```
 

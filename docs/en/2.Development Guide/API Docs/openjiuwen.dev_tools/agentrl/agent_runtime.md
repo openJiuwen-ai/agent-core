@@ -2,7 +2,7 @@
 
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollectionRail
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollectionRail()
 ```
 
@@ -31,37 +31,35 @@ Rail priority.
 
 Initialize trajectory collection rail.
 
-### async before_model_call(self, ctx: AgentCallbackContext) -> None
+### before_model_call(self, ctx: AgentCallbackContext) -> None
 
 Serialize input messages and tools; patch tool messages with actual content.
 
-### async after_model_call(self, ctx: AgentCallbackContext) -> None
+### after_model_call(self, ctx: AgentCallbackContext) -> None
 
 Serialize LLM response and commit current turn as Rollout.
 
-### async after_tool_call(self, ctx: AgentCallbackContext) -> None
+### after_tool_call(self, ctx: AgentCallbackContext) -> None
 
 Capture raw tool results to overwrite incorrect serialized content in context messages.
 
-### def get_rollouts(self) -> List[Rollout]
+### get_rollouts(self) -> List[Rollout]
 
 Return a copy of all Rollout objects collected for the current run.
 
-### def clear(self) -> None
+### clear(self) -> None
 
 Clear all collected rollouts and internal state for a new collection.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollector
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.trajectory.TrajectoryCollector()
 ```
 
 Wrapper that runs Agent via TrajectoryCollectionRail and collects trajectory data.
 
-### async collect(self, agent: Any, inputs: Dict[str, Any]) -> List[Rollout]
+### collect(self, agent: Any, inputs: Dict[str, Any]) -> List[Rollout]
 
 Run Agent and return list of Rollout objects (one per LLM turn).
 
@@ -78,11 +76,9 @@ Run Agent and return list of Rollout objects (one per LLM turn).
 
 * **ValueError**: Agent does not support rail-based trajectory collection.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.runtime_executor.RuntimeExecutor
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.runtime_executor.RuntimeExecutor(*, task_runner: Optional[TaskRunnerCallable] = None, agent_factory: Optional[Callable[[RLTask], Any]] = None, task_data_fn: Optional[TaskDataFn] = None, reward_fn: Optional[Callable[[RolloutMessage], Any]] = None)
 ```
 
@@ -96,23 +92,23 @@ Supports two execution modes:
 
 Initialize runtime executor with optional task runner, Agent factory, and helper functions.
 
-### def set_task_runner(self, fn: TaskRunnerCallable) -> None
+### set_task_runner(self, fn: TaskRunnerCallable) -> None
 
 Set task runner callable to execute rollout tasks.
 
-### def set_agent_factory(self, factory: Callable[[RLTask], Any]) -> None
+### set_agent_factory(self, factory: Callable[[RLTask], Any]) -> None
 
 Set Agent factory for creating an Agent per task.
 
-### def set_task_data_fn(self, fn: TaskDataFn) -> None
+### set_task_data_fn(self, fn: TaskDataFn) -> None
 
 Set the function that converts task samples to Agent input.
 
-### def set_reward_fn(self, fn: Callable[[RolloutMessage], Any]) -> None
+### set_reward_fn(self, fn: Callable[[RolloutMessage], Any]) -> None
 
 Set reward function that computes rewards for rollout messages.
 
-### async execute_async(self, rollout_task: RLTask) -> RolloutMessage
+### execute_async(self, rollout_task: RLTask) -> RolloutMessage
 
 Execute rollout task and return filled RolloutMessage.
 
@@ -120,11 +116,9 @@ Execute rollout task and return filled RolloutMessage.
 
 **RolloutMessage**, RolloutMessage with complete execution result.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.parallel_executor.ParallelRuntimeExecutor
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.parallel_executor.ParallelRuntimeExecutor(data_store: TaskQueue, num_workers: int, *, task_runner: Optional[Callable] = None, agent_factory: Optional[Callable] = None, task_data_fn: Optional[Callable] = None, reward_fn: Optional[Callable] = None)
 ```
 
@@ -136,39 +130,37 @@ Each worker creates its own RuntimeExecutor and processes tasks concurrently unt
 
 Initialize parallel executor with task queue and worker count.
 
-### async start(self) -> None
+### start(self) -> None
 
 Start all worker loops.
 
-### async stop(self) -> None
+### stop(self) -> None
 
 Stop all workers and clean up resources.
 
-### def is_running(self) -> bool
+### is_running(self) -> bool
 
 Return whether executor is currently running.
 
-### def set_task_runner(self, fn: Callable) -> None
+### set_task_runner(self, fn: Callable) -> None
 
 Set task runner callable.
 
-### def set_agent_factory(self, factory: Callable) -> None
+### set_agent_factory(self, factory: Callable) -> None
 
 Set Agent factory.
 
-### def set_task_data_fn(self, fn: Callable) -> None
+### set_task_data_fn(self, fn: Callable) -> None
 
 Set task data function.
 
-### def set_reward_fn(self, fn: Callable) -> None
+### set_reward_fn(self, fn: Callable) -> None
 
 Set reward function.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.agent_runtime.agent_factory.AgentFactory
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.agent_runtime.agent_factory.AgentFactory(system_prompt: str, tools: List[Any], tool_names: List[str], temperature: float, max_new_tokens: int, top_p: float, presence_penalty: float, frequency_penalty: float)
 ```
 
@@ -184,7 +176,7 @@ Initialize Agent factory.
 
 Proxy URL; must be set before creating an Agent.
 
-### def __call__(self, rl_task: RLTask)
+### __call__(self, rl_task: RLTask)
 
 Create and configure a ReActAgent instance for the given RL task.
 
@@ -196,11 +188,9 @@ Configured ReActAgent instance.
 
 * **BaseError**: Raised when proxy_url is not set.
 
----
-
 ## func openjiuwen.dev_tools.agentrl.agent_runtime.agent_factory.build_agent_factory
 
-```
+```python
 def build_agent_factory(runtime_cfg: AgentRuntimeConfig, tools: List[Any], tool_names: List[str]) -> AgentFactory
 ```
 

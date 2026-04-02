@@ -2,13 +2,13 @@
 
 ## class openjiuwen.dev_tools.agentrl.coordinator.schemas.Rollout
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.schemas.Rollout(turn_id: Optional[int] = None, input_prompt: Optional[Dict[str, Any]] = None, output_response: Optional[Dict[str, Any]] = None, llm_config: Optional[Dict[str, Any]] = None)
 ```
 
 Single-turn dialogue rollout.
 
-Format compatible with jiuwen_rl v1:
+Field conventions:
 - input_prompt["message"]: Input message list (OpenAI message format)
 - input_prompt["tools"]: Tool definition list
 - output_response: LLM output message (content or tool_calls)
@@ -20,11 +20,9 @@ Format compatible with jiuwen_rl v1:
 * **output_response**(Optional[Dict[str, Any]], optional): LLM output response. Default: `None`.
 * **llm_config**(Optional[Dict[str, Any]], optional): LLM config. Default: `None`.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutMessage
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutMessage(task_id: Optional[str] = None, origin_task_id: Optional[str] = None, rollout_id: Optional[str] = None, start_time: Optional[str] = None, end_time: Optional[str] = None, rollout_info: List[Rollout] = [], reward_list: List[float] = [], global_reward: Optional[float] = None, turn_count: int = 0, round_num: Optional[int] = None)
 ```
 
@@ -43,11 +41,9 @@ Complete task execution result, aggregating multi-turn dialogue and associated r
 * **turn_count**(int, optional): Dialogue turn count. Default: `0`.
 * **round_num**(Optional[int], optional): Rollout round count. Default: `None`.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.coordinator.schemas.RLTask
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.schemas.RLTask(task_id: str, origin_task_id: str, task_sample: Dict[str, Any] = {}, round_num: int = 0)
 ```
 
@@ -60,11 +56,9 @@ Minimal training task unit.
 * **task_sample**(Dict[str, Any], optional): Task sample data. Default: `{}`.
 * **round_num**(int, optional): Rollout round count. Default: `0`.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutWithReward
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.schemas.RolloutWithReward(turn_id: Optional[int] = None, task_id: Optional[str] = None, rollout_id: Optional[str] = None, input_prompt_ids: List[int], output_response_ids: List[int], reward: Optional[float] = None, n_turns: Optional[int] = None, loss_mask: Optional[List[int]] = None)
 ```
 
@@ -81,11 +75,9 @@ Standard MDP data unit representing token-level (input, output, reward) triplets
 * **n_turns**(Optional[int], optional): Number of turns. Default: `None`.
 * **loss_mask**(Optional[List[int]], optional): Per-token loss mask. 1 = model-generated token (participates in loss), 0 = environment token (excluded from loss). Default: `None`.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.coordinator.task_queue.TaskQueue()
 ```
 
@@ -95,7 +87,7 @@ Async task queue + Rollout result buffer for RL training daemon.
 
 Initialize empty task queue and rollout buffer.
 
-### async queue_task(self, task: RLTask) -> str
+### queue_task(self, task: RLTask) -> str
 
 Add new task to queue and return its task identifier.
 
@@ -107,7 +99,7 @@ Add new task to queue and return its task identifier.
 
 **str**, Task identifier.
 
-### async get_task(self) -> Optional[RLTask]
+### get_task(self) -> Optional[RLTask]
 
 Get next pending task.
 
@@ -115,7 +107,7 @@ Get next pending task.
 
 **Optional[RLTask]**, Next task, or `None` if queue is empty.
 
-### async delete_task(self, task: RLTask)
+### delete_task(self, task: RLTask)
 
 Remove task directly from in-progress pool.
 
@@ -123,7 +115,7 @@ Remove task directly from in-progress pool.
 
 * **task**(RLTask): Task to remove.
 
-### async add_rollout(self, rollout: RolloutMessage) -> str
+### add_rollout(self, rollout: RolloutMessage) -> str
 
 Store completed rollout and clear its in-progress entry.
 
@@ -135,7 +127,7 @@ Store completed rollout and clear its in-progress entry.
 
 **str**, Rollout ID.
 
-### async get_rollouts(self) -> Dict[str, RolloutMessage]
+### get_rollouts(self) -> Dict[str, RolloutMessage]
 
 Atomically get and clear all cached rollouts.
 
