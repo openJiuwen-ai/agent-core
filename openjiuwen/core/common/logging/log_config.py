@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import copy
+import os
 from typing import Any, Dict, Optional
 
 import yaml
@@ -50,8 +51,21 @@ class LogConfig:
 
     @classmethod
     def _load_config(cls, config_path: str) -> Dict[str, Any]:
+        from openjiuwen.core.common.security.path_checker import is_sensitive_path
+
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            try:
+                real_path = os.path.realpath(config_path)
+            except OSError:
+                real_path = os.path.abspath(os.path.expanduser(config_path))
+
+            if is_sensitive_path(real_path):
+                raise build_error(
+                    StatusCode.COMMON_LOG_PATH_INVALID,
+                    error_msg=f"the path is {real_path}"
+                )
+
+            with open(real_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
 
             if "logging" not in config:
