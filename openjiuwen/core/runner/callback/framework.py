@@ -110,6 +110,37 @@ def _narrow_call(
     return narrowed_args, narrowed_kwargs
 
 
+def _inject_session_if_needed(callback, narrowed_args, narrowed_kwargs):
+    """
+    Inject session parameter into narrowed_kwargs if the callback needs it
+
+    Args:
+        callback: Target function
+        narrowed_args: Positional arguments
+        narrowed_kwargs: Keyword arguments
+    """
+    # Check if session injection is needed
+    need_session = False
+
+    try:
+        sig = inspect.signature(callback)
+        # Check if callback has explicit 'session' parameter
+        if 'session' in sig.parameters:
+            need_session = True
+        # Check if callback has **kwargs parameter
+        elif any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            need_session = True
+    except (ValueError, TypeError):
+        need_session = False
+
+    # Inject session if needed and not already provided
+    if need_session:
+        session = narrowed_kwargs.get("session", None)
+        if not session:
+            from openjiuwen.core.session import get_current_session
+            narrowed_kwargs['session'] = get_current_session()
+
+
 class AsyncCallbackFramework:
     """Production-ready async callback framework.
 
@@ -678,6 +709,7 @@ class AsyncCallbackFramework:
         result: Any = _TRANSFORM_NOOP
         for info in callbacks:
             narrowed_args, narrowed_kwargs = _narrow_call(info.callback, args, kwargs)
+            _inject_session_if_needed(info.callback, narrowed_args, narrowed_kwargs)
             result = await info.callback(*narrowed_args, **narrowed_kwargs)
         return result
 
@@ -695,8 +727,8 @@ class AsyncCallbackFramework:
             error_handler: Optional[Callable] = None,
             max_retries: int = 0,
             retry_delay: float = 0.0,
-        timeout: Optional[float] = None,
-        callback_type: str = "",
+            timeout: Optional[float] = None,
+            callback_type: str = "",
     ) -> CallbackInfo:
         """Register a callback for an event.
 
@@ -924,6 +956,7 @@ class AsyncCallbackFramework:
 
                 # Call callback (might return coroutine or async generator)
                 narrowed_args, narrowed_kwargs = _narrow_call(callback, final_args, final_kwargs)
+                _inject_session_if_needed(callback, narrowed_args, narrowed_kwargs)
                 callback_result = callback(*narrowed_args, **narrowed_kwargs)
 
                 # Check if it's an async generator
@@ -1125,6 +1158,7 @@ class AsyncCallbackFramework:
 
                     final_args = filter_result.modified_args or args
                     final_kwargs = filter_result.modified_kwargs or kwargs
+                    _inject_session_if_needed(callback, final_args, final_kwargs)
 
                     # Execute with timeout if specified
                     if cb_info.timeout:
@@ -1219,6 +1253,7 @@ class AsyncCallbackFramework:
 
                 # Execute callback
                 narrowed_args, narrowed_kwargs = _narrow_call(callback, final_args, final_kwargs)
+                _inject_session_if_needed(callback, narrowed_args, narrowed_kwargs)
                 result = await callback(*narrowed_args, **narrowed_kwargs)
 
                 # Check condition
@@ -1405,6 +1440,7 @@ class AsyncCallbackFramework:
                     # Execute callback
                     start_time = time.time()
                     narrowed_args, narrowed_kwargs = _narrow_call(callback, final_args, final_kwargs)
+                    _inject_session_if_needed(callback, narrowed_args, narrowed_kwargs)
                     result = callback(*narrowed_args, **narrowed_kwargs)
 
                     # Check if result is an async generator function (not yet called)

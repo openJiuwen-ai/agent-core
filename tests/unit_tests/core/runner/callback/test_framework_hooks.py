@@ -158,7 +158,7 @@ async def test_error_hook_receives_original_args(framework):
     await framework.trigger("event", "arg1", key="value")
 
     assert received["args"] == ("arg1",)
-    assert received["kwargs"] == {"key": "value"}
+    assert received["kwargs"] == {"key": "value", 'session': None}
 
 
 @pytest.mark.asyncio

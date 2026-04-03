@@ -175,6 +175,7 @@ def create_on_decorator(
 
         @wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            _remove_session_if_not_needed(func, kwargs)
             return await func(*args, **kwargs)
 
         callback_info.wrapper = wrapper
@@ -229,6 +230,7 @@ def create_emit_before_decorator(
             async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
                 await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
                                   extra_kwargs=extra_kwargs)
+                _remove_session_if_not_needed(func, kwargs)
                 async for item in func(*args, **kwargs):
                     yield item
 
@@ -239,6 +241,7 @@ def create_emit_before_decorator(
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
                                   extra_kwargs=extra_kwargs)
+                _remove_session_if_not_needed(func, kwargs)
                 return await func(*args, **kwargs)
 
             return async_wrapper
@@ -248,6 +251,7 @@ def create_emit_before_decorator(
             async def sync_gen_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
                 await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
                                   extra_kwargs=extra_kwargs)
+                _remove_session_if_not_needed(func, kwargs)
                 for item in func(*args, **kwargs):
                     yield item
 
@@ -257,6 +261,7 @@ def create_emit_before_decorator(
         async def sync_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
             await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
                               extra_kwargs=extra_kwargs)
+            _remove_session_if_not_needed(func, kwargs)
             return func(*args, **kwargs)
 
         return sync_promoted_wrapper
@@ -304,6 +309,7 @@ def create_emit_after_decorator(
                 @wraps(func)
                 async def async_gen_once_wrapper(*args: Any, **kwargs: Any) -> Any:
                     collected: list[Any] = []
+                    _remove_session_if_not_needed(func, kwargs)
                     async for item in func(*args, **kwargs):
                         collected.append(item)
                         yield item
@@ -318,6 +324,7 @@ def create_emit_after_decorator(
 
             @wraps(func)
             async def async_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
+                _remove_session_if_not_needed(func, kwargs)
                 async for item in func(*args, **kwargs):
                     await _do_trigger(
                         framework, event, args, kwargs,
@@ -332,6 +339,7 @@ def create_emit_after_decorator(
         if inspect.iscoroutinefunction(func):
             @wraps(func)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                _remove_session_if_not_needed(func, kwargs)
                 result = await func(*args, **kwargs)
                 await _do_trigger(
                     framework, event, args, kwargs,
@@ -349,6 +357,7 @@ def create_emit_after_decorator(
                 @wraps(func)
                 async def sync_gen_once_wrapper(*args: Any, **kwargs: Any) -> Any:
                     collected: list[Any] = []
+                    _remove_session_if_not_needed(func, kwargs)
                     for item in func(*args, **kwargs):
                         collected.append(item)
                         yield item
@@ -363,6 +372,7 @@ def create_emit_after_decorator(
 
             @wraps(func)
             async def sync_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
+                _remove_session_if_not_needed(func, kwargs)
                 for item in func(*args, **kwargs):
                     await _do_trigger(
                         framework, event, args, kwargs,
@@ -376,6 +386,7 @@ def create_emit_after_decorator(
 
         @wraps(func)
         async def sync_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
+            _remove_session_if_not_needed(func, kwargs)
             result = func(*args, **kwargs)
             await _do_trigger(
                 framework, event, args, kwargs,
@@ -447,6 +458,7 @@ def create_emit_around_decorator(
                 await _do_trigger(framework, before_event, args, kwargs, pass_args=pass_args)
                 collected: list[Any] = []
                 try:
+                    _remove_session_if_not_needed(func, kwargs)
                     async for item in func(*args, **kwargs):
                         collected.append(item)
                         yield item
@@ -462,6 +474,7 @@ def create_emit_around_decorator(
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 await _do_trigger(framework, before_event, args, kwargs, pass_args=pass_args)
                 try:
+                    _remove_session_if_not_needed(func, kwargs)
                     result = await func(*args, **kwargs)
                     await _trigger_after(args, kwargs, result)
                     return result
@@ -477,6 +490,7 @@ def create_emit_around_decorator(
                 await _do_trigger(framework, before_event, args, kwargs, pass_args=pass_args)
                 collected: list[Any] = []
                 try:
+                    _remove_session_if_not_needed(func, kwargs)
                     for item in func(*args, **kwargs):
                         collected.append(item)
                         yield item
@@ -491,6 +505,7 @@ def create_emit_around_decorator(
         async def sync_promoted_wrapper(*args: Any, **kwargs: Any) -> Any:
             await _do_trigger(framework, before_event, args, kwargs, pass_args=pass_args)
             try:
+                _remove_session_if_not_needed(func, kwargs)
                 result = func(*args, **kwargs)
                 await _trigger_after(args, kwargs, result)
                 return result
@@ -511,6 +526,34 @@ async def _apply_output_transform(
     if inspect.iscoroutine(out):
         return await out
     return out
+
+
+def _remove_session_if_not_needed(callback, narrowed_kwargs):
+    """
+    Remove session from narrowed_kwargs if the callback doesn't accept it
+
+    Args:
+        callback: Target function
+        narrowed_kwargs: Keyword arguments to potentially modify
+    """
+    # Check if callback accepts session
+    accepts_session = False
+
+    try:
+        sig = inspect.signature(callback)
+        # Check for explicit 'session' parameter
+        if 'session' in sig.parameters:
+            accepts_session = True
+        # Check if callback has **kwargs (which would accept any parameter)
+        elif any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            accepts_session = True
+    except (ValueError, TypeError):
+        # If we can't inspect, keep the session to be safe
+        return
+
+    # Remove session if callback doesn't accept it
+    if not accepts_session and 'session' in narrowed_kwargs:
+        del narrowed_kwargs['session']
 
 
 def _make_transform_io_decorator(
@@ -557,6 +600,7 @@ def _make_transform_io_decorator(
             call_args, call_kwargs = _bind_args_no_duplicate(
                 func, new_args, new_kwargs
             )
+            _remove_session_if_not_needed(func, call_kwargs)
             source = func(*call_args, **call_kwargs)
             if output_source_fn is None:
                 async for item in source:
@@ -577,6 +621,7 @@ def _make_transform_io_decorator(
             call_args, call_kwargs = _bind_args_no_duplicate(
                 func, new_args, new_kwargs
             )
+            _remove_session_if_not_needed(func, call_kwargs)
             async_gen = func(*call_args, **call_kwargs)
             if not inspect.isasyncgen(async_gen):
                 raise TypeError(
@@ -597,6 +642,7 @@ def _make_transform_io_decorator(
             call_args, call_kwargs = _bind_args_no_duplicate(
                 func, new_args, new_kwargs
             )
+            _remove_session_if_not_needed(func, call_kwargs)
             result = await func(*call_args, **call_kwargs)
             return await output_fn(result)
 
@@ -611,6 +657,7 @@ def _make_transform_io_decorator(
             call_args, call_kwargs = _bind_args_no_duplicate(
                 func, new_args, new_kwargs
             )
+            _remove_session_if_not_needed(func, call_kwargs)
             gen = func(*call_args, **call_kwargs)
 
             async def _async_adapter() -> Any:
@@ -636,6 +683,7 @@ def _make_transform_io_decorator(
             call_args, call_kwargs = _bind_args_no_duplicate(
                 func, new_args, new_kwargs
             )
+            _remove_session_if_not_needed(func, call_kwargs)
             gen = func(*call_args, **call_kwargs)
             if not inspect.isgenerator(gen):
                 raise TypeError(
@@ -653,6 +701,7 @@ def _make_transform_io_decorator(
         call_args, call_kwargs = _bind_args_no_duplicate(
             func, new_args, new_kwargs
         )
+        _remove_session_if_not_needed(func, call_kwargs)
         result = func(*call_args, **call_kwargs)
         return await output_fn(result)
 
@@ -760,6 +809,7 @@ def create_transform_io_decorator(
                 call_args, call_kwargs = _bind_args_no_duplicate(
                     func, new_args, new_kwargs
                 )
+                _remove_session_if_not_needed(func, call_kwargs)
                 gen = func(*call_args, **call_kwargs)
                 if not inspect.isgenerator(gen):
                     raise TypeError(
@@ -789,6 +839,7 @@ def create_transform_io_decorator(
                 call_args, call_kwargs = _bind_args_no_duplicate(
                     func, new_args, new_kwargs
                 )
+                _remove_session_if_not_needed(func, call_kwargs)
                 result = func(*call_args, **call_kwargs)
                 if output_transform is None:
                     return result
@@ -1031,12 +1082,14 @@ def _make_wrap_decorator(
         if func_async_gen:
 
             async def _inner_gen(*a: Any, **kw: Any) -> Any:
+                _remove_session_if_not_needed(func, kw)
                 async for item in func(*a, **kw):
                     yield item
 
         else:
 
-            async def _inner_gen(*a: Any, **kw: Any) -> Any:  # type: ignore[misc]
+            async def _inner_gen(*a: Any, **kw: Any) -> Any:
+                _remove_session_if_not_needed(func, kw)# type: ignore[misc]
                 for item in func(*a, **kw):
                     yield item
 
@@ -1058,6 +1111,7 @@ def _make_wrap_decorator(
     else:
 
         async def _sync_as_async(*a: Any, **kw: Any) -> Any:
+            _remove_session_if_not_needed(func, kw)
             return func(*a, **kw)
 
         _inner = _sync_as_async

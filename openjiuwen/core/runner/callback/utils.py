@@ -74,7 +74,4 @@ async def trigger(event, **kwargs):
         **kwargs: Additional arguments passed to the trigger call.
     """
     fw = get_callback_framework()
-    if 'session' not in kwargs:
-        from openjiuwen.core.session import get_current_session
-        kwargs['session'] = get_current_session()
     await fw.trigger(event, **kwargs)
