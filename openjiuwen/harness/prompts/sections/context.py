@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     DAILY_MEMORY_TITLE,
     CONTEXT_FILES,
 )
+from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 
 # ---------------------------------------------------------------------------
@@ -38,14 +40,14 @@ def _format_date(timezone: str = "Asia/Shanghai") -> str:
 
 async def _read_context_file(
         sys_operation,
-        workspace_root: str,
+        workspace,
         file_key: str,
 ) -> str | None:
     """Read a single context file using sys_operation.
 
     Args:
         sys_operation: SysOperation instance.
-        workspace_root: Root path of the workspace.
+        workspace: Workspace instance.
         file_key: File identifier (e.g. "AGENT.md").
 
     Returns:
@@ -54,9 +56,17 @@ async def _read_context_file(
     if sys_operation is None:
         return None
 
-    full_path = f"{workspace_root}/{file_key}" if workspace_root else file_key
+    full_path: Path | None
+    if file_key == WorkspaceNode.MEMORY_MD.value:
+        memory_dir = workspace.get_node_path(WorkspaceNode.MEMORY)
+        full_path = memory_dir / WorkspaceNode.MEMORY_MD.value if memory_dir else None
+    else:
+        full_path = workspace.get_node_path(file_key)
 
-    result = await sys_operation.fs().read_file(full_path)
+    if full_path is None:
+        return None
+
+    result = await sys_operation.fs().read_file(str(full_path))
     if result.code == 0 and result.data:
         return result.data.content
 
@@ -65,14 +75,14 @@ async def _read_context_file(
 
 async def _read_daily_memory(
         sys_operation,
-        workspace_root: str,
+        workspace,
         timezone: Optional[str] = None,
 ) -> str | None:
     """Read today's daily memory file.
 
     Args:
         sys_operation: SysOperation instance.
-        workspace_root: Root path of the workspace.
+        workspace: Workspace instance.
         timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
                   Defaults to 'Asia/Shanghai' if None.
 
@@ -84,10 +94,13 @@ async def _read_daily_memory(
 
     tz = timezone or "Asia/Shanghai"
     date = _format_date(tz)
-    file_path = f"memory/daily_memory/{date}.md"
-    full_path = f"{workspace_root}/{file_path}" if workspace_root else file_path
+    memory_dir = workspace.get_node_path(WorkspaceNode.MEMORY)
+    if memory_dir is None:
+        return None
 
-    result = await sys_operation.fs().read_file(full_path)
+    full_path = memory_dir / WorkspaceNode.DAILY_MEMORY.value / f"{date}.md"
+
+    result = await sys_operation.fs().read_file(str(full_path))
     if result.code == 0 and result.data:
         return result.data.content
 
@@ -96,7 +109,7 @@ async def _read_daily_memory(
 
 async def _build_context_content(
         sys_operation,
-        workspace_root: str,
+        workspace,
         language: str = "cn",
         extra_content: Optional[str] = None,
         timezone: Optional[str] = None,
@@ -105,7 +118,7 @@ async def _build_context_content(
 
     Args:
         sys_operation: SysOperation instance.
-        workspace_root: Root path of the workspace.
+        workspace: Workspace instance.
         language: 'cn' or 'en'.
         extra_content: Optional content to append at the end (e.g. tools list).
         timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
@@ -121,13 +134,13 @@ async def _build_context_content(
     parts = [header]
 
     for file_key in CONTEXT_FILES:
-        content = await _read_context_file(sys_operation, workspace_root, file_key)
+        content = await _read_context_file(sys_operation, workspace, file_key)
         if content is None:
             continue
         title = titles.get(file_key, f"## {file_key}")
         parts.append(f"{title}\n\n{content}\n\n")
 
-    daily_content = await _read_daily_memory(sys_operation, workspace_root, timezone)
+    daily_content = await _read_daily_memory(sys_operation, workspace, timezone)
     if daily_content:
         date = _format_date(timezone or "Asia/Shanghai")
         title = daily_title_tpl.format(date=date)
@@ -164,10 +177,8 @@ async def build_context_section(
     if workspace is None:
         return None
 
-    workspace_root = str(getattr(workspace, "root_path", "") or "")
-
     content = await _build_context_content(
-        sys_operation, workspace_root, language, extra_content=tools_content, timezone=timezone
+        sys_operation, workspace, language, extra_content=tools_content, timezone=timezone
     )
 
     return PromptSection(
