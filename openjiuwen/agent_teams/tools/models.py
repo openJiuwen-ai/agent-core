@@ -14,7 +14,7 @@ from typing import Dict, Optional, cast
 from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
-from openjiuwen.agent_teams.tools.context import get_session_id
+from openjiuwen.agent_teams.spawn.context import get_session_id
 
 
 # ----------------- Static Table Models -----------------

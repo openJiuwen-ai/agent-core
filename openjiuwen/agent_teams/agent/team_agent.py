@@ -31,8 +31,8 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamSpec,
 )
-from openjiuwen.agent_teams.tools.member import TeamMember
-from openjiuwen.agent_teams.tools.status import ExecutionStatus, MemberStatus
+from openjiuwen.agent_teams.agent.member import TeamMember
+from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
@@ -393,7 +393,7 @@ class TeamAgent(BaseAgent):
         """Register role-appropriate team tools driven by permission sets."""
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
         from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-        from openjiuwen.agent_teams.tools.status import MemberMode
+        from openjiuwen.agent_teams.schema.status import MemberMode
 
         team_id = (ctx.team_spec.team_id if ctx.team_spec else None) or "default"
         db = get_shared_db(ctx.db_config)
@@ -525,7 +525,7 @@ class TeamAgent(BaseAgent):
         team_logger.info("[{}] coordination starting", self._member_id() or "?")
         self._session = session
         if session:
-            from openjiuwen.agent_teams.tools.context import set_session_id
+            from openjiuwen.agent_teams.spawn.context import set_session_id
             set_session_id(session.get_session_id())
         # Persist leader config to session for full-restart recovery
         if session and self._spec and self.role == TeamRole.LEADER:
@@ -574,12 +574,12 @@ class TeamAgent(BaseAgent):
         team_logger.info("[{}] coordination pausing (persistent)", self._member_id() or "?")
         # Signal teammates to pause polls
         if self._messager and self.role == TeamRole.LEADER:
-            from openjiuwen.agent_teams.tools.team_events import (
+            from openjiuwen.agent_teams.schema.events import (
                 EventMessage,
                 TeamStandbyEvent,
                 TeamTopic,
             )
-            from openjiuwen.agent_teams.tools.context import get_session_id
+            from openjiuwen.agent_teams.spawn.context import get_session_id
             team_id = self._team_id()
             if team_id:
                 try:
@@ -619,8 +619,8 @@ class TeamAgent(BaseAgent):
         """Subscribe to all TeamTopic channels on the transport."""
         if not self._messager or not self._coordination_loop:
             return
-        from openjiuwen.agent_teams.tools.context import get_session_id
-        from openjiuwen.agent_teams.tools.team_events import EventMessage, TeamTopic
+        from openjiuwen.agent_teams.spawn.context import get_session_id
+        from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 
         local_member_id = self._member_id() or ""
 
@@ -1098,8 +1098,8 @@ class TeamAgent(BaseAgent):
         """Publish MemberRestartedEvent on the team topic."""
         if not self._messager or not self._team_backend:
             return
-        from openjiuwen.agent_teams.tools.context import get_session_id
-        from openjiuwen.agent_teams.tools.team_events import (
+        from openjiuwen.agent_teams.spawn.context import get_session_id
+        from openjiuwen.agent_teams.schema.events import (
             EventMessage,
             MemberRestartedEvent,
             TeamTopic,
@@ -1126,7 +1126,7 @@ class TeamAgent(BaseAgent):
         Args:
             session: The new session to attach to.
         """
-        from openjiuwen.agent_teams.tools.context import set_session_id
+        from openjiuwen.agent_teams.spawn.context import set_session_id
         self._session = session
         set_session_id(session.get_session_id())
 

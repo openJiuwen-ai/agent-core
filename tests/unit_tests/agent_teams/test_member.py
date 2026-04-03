@@ -11,8 +11,8 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.member import TeamMember
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.agent.member import TeamMember
+from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
 )

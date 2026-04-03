@@ -25,7 +25,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
-from openjiuwen.agent_teams.tools.team_events import (
+from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TeamEvent,
     ToolApprovalResultEvent,

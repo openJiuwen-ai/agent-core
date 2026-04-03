@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.tools.context import (
+from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
     set_session_id,
 )
@@ -18,7 +18,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -662,7 +662,7 @@ class TestCompleteTaskTool:
     @pytest.mark.asyncio
     async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
         """Test invoking complete task tool successfully"""
-        from openjiuwen.agent_teams.tools.status import MemberMode
+        from openjiuwen.agent_teams.schema.status import MemberMode
         await db.create_member(
             member_id="leader1",
             team_id="test_team",

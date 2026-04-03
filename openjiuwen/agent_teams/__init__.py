@@ -27,7 +27,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamSpec,
 )
-from openjiuwen.agent_teams.tools.team_events import TeamEvent
+from openjiuwen.agent_teams.schema.events import TeamEvent
 
 __all__ = [
     "DeepAgentSpec",

@@ -21,14 +21,14 @@ from openjiuwen.agent_teams.tools.database import (
     TeamMember,
 )
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
     MemberMode,
     TaskStatus,
 )
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
-from openjiuwen.agent_teams.tools.team_events import (
+from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     MemberCanceledEvent,
     MemberShutdownEvent,
@@ -39,7 +39,7 @@ from openjiuwen.agent_teams.tools.team_events import (
     TeamCreatedEvent,
     TeamTopic,
 )
-from openjiuwen.agent_teams.tools.context import get_session_id
+from openjiuwen.agent_teams.spawn.context import get_session_id
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -343,7 +343,7 @@ class TeamBackend:
             return True
 
         # Validate state transition
-        from openjiuwen.agent_teams.tools.status import (
+        from openjiuwen.agent_teams.schema.status import (
             is_valid_transition,
             MEMBER_TRANSITIONS,
         )

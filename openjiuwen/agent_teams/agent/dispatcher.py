@@ -12,7 +12,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.tools.team_events import TeamEvent
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:

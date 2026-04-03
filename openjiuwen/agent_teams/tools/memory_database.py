@@ -22,7 +22,7 @@ from openjiuwen.agent_teams.tools.models import (
     TeamMessageBase,
     MessageReadStatusBase,
 )
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
     TaskStatus,
     MemberStatus,
     MemberMode,

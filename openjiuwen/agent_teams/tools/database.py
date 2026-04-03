@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 
 from sqlmodel import SQLModel
 
-from openjiuwen.agent_teams.tools.context import get_session_id
+from openjiuwen.agent_teams.spawn.context import get_session_id
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.agent_teams.tools.models import (
     Team,
@@ -25,26 +25,17 @@ from openjiuwen.agent_teams.tools.models import (
     TeamTaskBase,
     TeamTaskDependencyBase,
     TeamMessageBase,
-    MessageReadStatusBase,
     _get_task_model,
     _get_task_dependency_model,
     _get_message_model,
     _get_message_read_status_model,
 )
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
     TaskStatus, is_valid_transition, TASK_TRANSITIONS,
     MemberStatus, MEMBER_TRANSITIONS,
     ExecutionStatus, EXECUTION_TRANSITIONS,
     MemberMode,
 )
-
-# Re-export models so existing imports from database.py keep working
-__all__ = [
-    "Team", "TeamMember",
-    "TeamTaskBase", "TeamTaskDependencyBase", "TeamMessageBase", "MessageReadStatusBase",
-    "DatabaseType", "DatabaseConfig",
-    "TeamDatabase",
-]
 
 
 # ----------------- Database Configuration -----------------

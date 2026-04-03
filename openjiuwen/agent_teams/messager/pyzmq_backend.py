@@ -18,7 +18,7 @@ from openjiuwen.agent_teams.messager.messager import (
     Messager,
     MessagerHandler,
 )
-from openjiuwen.agent_teams.tools.team_events import EventMessage
+from openjiuwen.agent_teams.schema.events import EventMessage
 from openjiuwen.core.common.logging import team_logger
 
 try:

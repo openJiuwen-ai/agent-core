@@ -13,7 +13,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     TaskStatus,
 )
@@ -22,12 +22,12 @@ from openjiuwen.agent_teams.tools.database import (
     TeamTaskBase,
     TeamTaskDependencyBase,
 )
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
     is_valid_transition,
     TASK_TRANSITIONS,
     TaskStatus,
 )
-from openjiuwen.agent_teams.tools.team_events import (
+from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TaskCancelledEvent,
     TaskClaimedEvent,
@@ -37,7 +37,7 @@ from openjiuwen.agent_teams.tools.team_events import (
     TaskUpdatedEvent,
     TeamTopic,
 )
-from openjiuwen.agent_teams.tools.context import get_session_id
+from openjiuwen.agent_teams.spawn.context import get_session_id
 from openjiuwen.core.common.logging import team_logger
 
 

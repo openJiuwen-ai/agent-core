@@ -22,7 +22,7 @@ from typing import (
 
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
-from openjiuwen.agent_teams.tools.status import TaskStatus
+from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import (
     TeamBackend,
@@ -163,7 +163,7 @@ class SpawnMemberTool(TeamTool):
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-        from openjiuwen.agent_teams.tools.status import MemberMode
+        from openjiuwen.agent_teams.schema.status import MemberMode
 
         member_id = inputs.get("member_id")
         name = inputs.get("name")

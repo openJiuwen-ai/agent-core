@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.tools.context import (
+from openjiuwen.agent_teams.spawn.context import (
     reset_session_id,
     set_session_id,
 )
@@ -23,7 +23,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamMember,
 )
-from openjiuwen.agent_teams.tools.status import (
+from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
     TaskStatus,
@@ -31,7 +31,7 @@ from openjiuwen.agent_teams.tools.status import (
 from openjiuwen.agent_teams.tools.team import (
     TeamBackend,
 )
-from openjiuwen.agent_teams.tools.team_events import TeamEvent
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 

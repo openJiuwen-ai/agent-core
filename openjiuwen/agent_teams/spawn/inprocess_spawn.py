@@ -37,7 +37,7 @@ async def inprocess_spawn(
         An InProcessSpawnHandle wrapping the teammate's asyncio.Task.
     """
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
-    from openjiuwen.agent_teams.tools.context import set_session_id
+    from openjiuwen.agent_teams.spawn.context import set_session_id
     from openjiuwen.core.runner.runner import Runner
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 

@@ -12,7 +12,7 @@ from openjiuwen.agent_teams.messager import (
     SubscriptionHandle,
     TeamRuntimeMessager,
 )
-from openjiuwen.agent_teams.tools.team_events import BaseEventMessage
+from openjiuwen.agent_teams.schema.events import BaseEventMessage
 
 
 class _FakeRuntime:
