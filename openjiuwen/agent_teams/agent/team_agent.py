@@ -409,11 +409,13 @@ class TeamAgent(BaseAgent):
         self._message_manager = agent_team.message_manager
 
         exclude = {"spawn_member"} if spec.predefined_members else None
+        lang = (ctx.team_spec.metadata.get("lang") if ctx.team_spec else None) or "cn"
         team_tools = create_team_tools(
             role=ctx.role.value,
             agent_team=agent_team,
             on_teammate_created=self._on_teammate_created,
             exclude_tools=exclude,
+            lang=lang,
         )
 
         # Best-effort registration with Runner's

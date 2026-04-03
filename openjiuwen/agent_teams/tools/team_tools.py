@@ -20,6 +20,7 @@ from typing import (
     Set,
 )
 
+from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.status import TaskStatus
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
@@ -86,11 +87,9 @@ MEMBER_TOOLS: Set[str] = MEMBER_ONLY_TOOLS | SHARED_TOOLS
 class BuildTeamTool(TeamTool):
     """Create a new team"""
 
-    def __init__(self, team: TeamBackend):
+    def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="BuildTeamTool", name="build_team", description="组建团队，设置团队名称和协作目标。"
-                                                                        "这是启动协作的第一步，必须在 spawn_member 和"
-                                                                        "add_task 之前调用")
+            ToolCard(id="BuildTeamTool", name="build_team", description=t("build_team"))
         )
         self.team = team
         self.db = team.db
@@ -98,11 +97,11 @@ class BuildTeamTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "团队名称，体现团队职能方向"},
-                "desc": {"type": "string", "description": "团队协作目标和任务范围的描述"},
-                "prompt": {"type": "string", "description": "团队级别的全局协作提示词，所有成员可见"},
-                "leader_name": {"type": "string", "description": "Leader 的显示名称"},
-                "leader_desc": {"type": "string", "description": "Leader 的人设描述（专业背景、领域专长）"},
+                "name": {"type": "string", "description": t("build_team", "name")},
+                "desc": {"type": "string", "description": t("build_team", "desc")},
+                "prompt": {"type": "string", "description": t("build_team", "prompt")},
+                "leader_name": {"type": "string", "description": t("build_team", "leader_name")},
+                "leader_desc": {"type": "string", "description": t("build_team", "leader_desc")},
             },
             "required": ["name", "desc", "leader_name", "leader_desc"]
         }
@@ -122,11 +121,9 @@ class BuildTeamTool(TeamTool):
 class CleanTeamTool(TeamTool):
     """Clean up a team when all members are shutdown"""
 
-    def __init__(self, team: TeamBackend):
+    def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="CleanTeamTool", name="clean_team", description="解散团队并清理所有资源。前置条件："
-                                                                        "所有成员已通过 shutdown_member 关闭。"
-                                                                        "在所有任务完成、结果汇总后调用")
+            ToolCard(id="CleanTeamTool", name="clean_team", description=t("clean_team"))
         )
         self.team = team
         self.card.input_params = {
@@ -148,24 +145,18 @@ class CleanTeamTool(TeamTool):
 class SpawnMemberTool(TeamTool):
     """Create a new team member"""
 
-    def __init__(self, team: TeamBackend):
+    def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="SpawnMemberTool", name="spawn_member", description="按领域专长创建新的团队成员。"
-                                                                            "每个成员应有明确的人设和专业方向，"
-                                                                            "用于领取并执行匹配领域的任务。"
-                                                                            "创建后成员处于未启动状态，"
-                                                                            "需调用 startup_members 统一拉起")
+            ToolCard(id="SpawnMemberTool", name="spawn_member", description=t("spawn_member"))
         )
         self.team = team
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "member_id": {"type": "string", "description": "成员唯一标识符，建议使用有语义的 ID（如 backend-dev-1）"},
-                "name": {"type": "string", "description": "成员名称，体现其角色定位（如「后端开发专家」）"},
-                "desc": {"type": "string", "description": "成员的人设描述，包括专业背景、领域专长、行为风格和工作方式，用于任务匹配和角色定位"},
-                "prompt": {"type": "string", "description": "成员的启动指令。应引导成员通过 view_task 工具查看任务列表，认领任务"},
-                # "mode": {"type": "string", "enum": ["plan_mode", "build_mode"], "description": "成员模式。plan_mode:
-                # 需要leader审批任务才能完成（默认）；build_mode: 可以直接完成任务"},
+                "member_id": {"type": "string", "description": t("spawn_member", "member_id")},
+                "name": {"type": "string", "description": t("spawn_member", "name")},
+                "desc": {"type": "string", "description": t("spawn_member", "desc")},
+                "prompt": {"type": "string", "description": t("spawn_member", "prompt")},
             },
             "required": ["member_id", "name", "desc"],
         }
@@ -177,7 +168,6 @@ class SpawnMemberTool(TeamTool):
         member_id = inputs.get("member_id")
         name = inputs.get("name")
         desc = inputs.get("desc", "")
-        # mode_str = inputs.get("mode", self.team.teammate_mode.value)
         mode_str = self.team.teammate_mode.value
         mode = MemberMode(mode_str)
 
@@ -199,18 +189,16 @@ class SpawnMemberTool(TeamTool):
 class ShutdownMemberTool(TeamTool):
     """Shutdown a team member"""
 
-    def __init__(self, team: TeamBackend):
+    def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="ShutdownMemberTool", name="shutdown_member", description="关闭团队成员并释放资源。"
-                                                                                  "在成员完成所有任务后调用；"
-                                                                                  "若成员持续无法交付，可强制关闭")
+            ToolCard(id="ShutdownMemberTool", name="shutdown_member", description=t("shutdown_member"))
         )
         self.team = team
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "member_id": {"type": "string", "description": "要关闭的成员ID"},
-                "force": {"type": "boolean", "description": "是否强制关闭（忽略未完成任务），默认 false"},
+                "member_id": {"type": "string", "description": t("shutdown_member", "member_id")},
+                "force": {"type": "boolean", "description": t("shutdown_member", "force")},
             },
             "required": ["member_id"]
         }
@@ -229,18 +217,17 @@ class ShutdownMemberTool(TeamTool):
 class ApprovePlanTool(TeamTool):
     """Approve or reject a member's plan"""
 
-    def __init__(self, team: TeamBackend):
+    def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="ApprovePlanTool", name="approve_plan", description="审批或拒绝成员提交的执行计划。"
-                                                                            "审核计划是否符合目标要求，给出反馈指导成员调整")
+            ToolCard(id="ApprovePlanTool", name="approve_plan", description=t("approve_plan"))
         )
         self.team = team
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "member_id": {"type": "string", "description": "提交计划的成员ID"},
-                "approved": {"type": "boolean", "description": "true 批准计划，false 拒绝并要求修改"},
-                "feedback": {"type": "string", "description": "审批反馈，拒绝时应说明原因和修改方向"},
+                "member_id": {"type": "string", "description": t("approve_plan", "member_id")},
+                "approved": {"type": "boolean", "description": t("approve_plan", "approved")},
+                "feedback": {"type": "string", "description": t("approve_plan", "feedback")},
             },
             "required": ["member_id", "approved"]
         }
@@ -260,26 +247,19 @@ class ApprovePlanTool(TeamTool):
 class ApproveToolCallTool(TeamTool):
     """Approve or reject one teammate tool call."""
 
-    def __init__(self, team: TeamBackend):
+    def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(
-                id="ApproveToolCallTool",
-                name="approve_tool",
-                description=(
-                    "审批或拒绝 teammate 被 rail 中断的工具调用。"
-                    "收到工具审批请求后，Leader 应调用此工具反馈 approved、feedback 和 auto_confirm。"
-                ),
-            )
+            ToolCard(id="ApproveToolCallTool", name="approve_tool", description=t("approve_tool"))
         )
         self.team = team
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "member_id": {"type": "string", "description": "发起工具审批请求的成员 ID"},
-                "tool_call_id": {"type": "string", "description": "待恢复的中断 tool_call_id"},
-                "approved": {"type": "boolean", "description": "是否批准这次工具调用"},
-                "feedback": {"type": "string", "description": "可选审批反馈"},
-                "auto_confirm": {"type": "boolean", "description": "后续同名工具是否自动批准"},
+                "member_id": {"type": "string", "description": t("approve_tool", "member_id")},
+                "tool_call_id": {"type": "string", "description": t("approve_tool", "tool_call_id")},
+                "approved": {"type": "boolean", "description": t("approve_tool", "approved")},
+                "feedback": {"type": "string", "description": t("approve_tool", "feedback")},
+                "auto_confirm": {"type": "boolean", "description": t("approve_tool", "auto_confirm")},
             },
             "required": ["member_id", "tool_call_id", "approved"],
         }
@@ -301,10 +281,9 @@ class ApproveToolCallTool(TeamTool):
 class ListMembersTool(TeamTool):
     """List all team members"""
 
-    def __init__(self, team: TeamBackend):
+    def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="ListMembersTool", name="list_members", description="列出所有团队成员及其状态，"
-                                                                            "用于评估团队人员构成和是否需要创建新成员")
+            ToolCard(id="ListMembersTool", name="list_members", description=t("list_members"))
         )
         self.team = team
         self.card.input_params = {
@@ -330,18 +309,9 @@ class TaskManagerToolV2(TeamTool):
     priority per-task instead of top-level, no mode param.
     """
 
-    def __init__(self, agent_team: TeamBackend):
+    def __init__(self, agent_team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(
-                id="TaskManagerToolV2",
-                name="task_manager",
-                description=(
-                    "团队任务管理工具（仅Leader可用）。"
-                    "action: add（添加）、insert（插入已有DAG）、update（更新）、cancel（取消）、cancel_all（全部取消）。"
-                    "add 时通过 tasks 数组传入，支持单个或批量；"
-                    "insert 用于将任务插入已有 DAG 中间，支持 depended_by 反向依赖"
-                ),
-            )
+            ToolCard(id="TaskManagerToolV2", name="task_manager", description=t("task_manager"))
         )
         self.agent_team = agent_team
         self.task_manager = agent_team.task_manager
@@ -349,13 +319,13 @@ class TaskManagerToolV2(TeamTool):
         _task_schema: dict = {
             "type": "object",
             "properties": {
-                "task_id": {"type": "string", "description": "自定义任务ID，便于依赖引用"},
-                "title": {"type": "string", "description": "任务标题，简明描述任务目标"},
-                "content": {"type": "string", "description": "任务详细内容，包含执行说明和验收标准"},
+                "task_id": {"type": "string", "description": t("task_manager", "task.task_id")},
+                "title": {"type": "string", "description": t("task_manager", "task.title")},
+                "content": {"type": "string", "description": t("task_manager", "task.content")},
                 "depends_on": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "前置依赖的任务ID列表",
+                    "description": t("task_manager", "task.depends_on"),
                 },
             },
             "required": ["title", "content"],
@@ -367,27 +337,27 @@ class TaskManagerToolV2(TeamTool):
                 "action": {
                     "type": "string",
                     "enum": ["add", "insert", "update", "cancel", "cancel_all"],
-                    "description": "操作类型，默认 add",
+                    "description": t("task_manager", "action"),
                 },
                 # add
                 "tasks": {
                     "type": "array",
                     "items": _task_schema,
-                    "description": "add 时传入的任务列表（单个任务也用数组包裹）",
+                    "description": t("task_manager", "tasks"),
                 },
                 # insert / update / cancel
-                "task_id": {"type": "string", "description": "任务ID（insert 时为自定义ID，update/cancel 时为目标任务ID）"},
-                "title": {"type": "string", "description": "任务标题（insert/update 使用）"},
-                "content": {"type": "string", "description": "任务内容（insert/update 使用）"},
+                "task_id": {"type": "string", "description": t("task_manager", "task_id")},
+                "title": {"type": "string", "description": t("task_manager", "title")},
+                "content": {"type": "string", "description": t("task_manager", "content")},
                 "depends_on": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "insert 时的前置依赖任务ID列表",
+                    "description": t("task_manager", "depends_on"),
                 },
                 "depended_by": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "insert 时需要等待本任务完成的现有任务ID列表（反向依赖）",
+                    "description": t("task_manager", "depended_by"),
                 },
             },
             "required": [],
@@ -495,16 +465,9 @@ class ViewTaskToolV2(TeamTool):
     Explicit action enum instead of implicit param-based dispatch.
     """
 
-    def __init__(self, task_manager: TeamTaskManager):
+    def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
-            ToolCard(
-                id="ViewTaskToolV2",
-                name="view_task",
-                description=(
-                    "查看任务信息。"
-                    "action: get（单个任务详情）、list（按状态列出任务）、claimable（默认，可认领任务）"
-                ),
-            )
+            ToolCard(id="ViewTaskToolV2", name="view_task", description=t("view_task"))
         )
         self.task_manager = task_manager
         self.card.input_params = {
@@ -513,12 +476,12 @@ class ViewTaskToolV2(TeamTool):
                 "action": {
                     "type": "string",
                     "enum": ["get", "list", "claimable"],
-                    "description": "查看模式，默认 claimable",
+                    "description": t("view_task", "action"),
                 },
-                "task_id": {"type": "string", "description": "get 时的任务ID"},
+                "task_id": {"type": "string", "description": t("view_task", "task_id")},
                 "status": {
                     "type": "string",
-                    "description": "list 时按状态过滤：pending/claimed/plan_approved/completed/cancelled/blocked",
+                    "description": t("view_task", "status"),
                 },
             },
             "required": [],
@@ -550,17 +513,15 @@ class ViewTaskToolV2(TeamTool):
 class ClaimTaskTool(TeamTool):
     """Claim a task for a member"""
 
-    def __init__(self, task_manager: TeamTaskManager):
+    def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
-            ToolCard(id="ClaimTaskTool", name="claim_task", description="领取一个就绪任务。"
-                                                                        "只能领取 pending 状态且无人认领的任务，"
-                                                                        "应选择匹配自己领域专长的任务")
+            ToolCard(id="ClaimTaskTool", name="claim_task", description=t("claim_task"))
         )
         self.task_manager = task_manager
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "task_id": {"type": "string", "description": "要领取的任务ID，需为 pending 状态"},
+                "task_id": {"type": "string", "description": t("claim_task", "task_id")},
             },
             "required": ["task_id"]
         }
@@ -576,19 +537,15 @@ class ClaimTaskTool(TeamTool):
 class CompleteTaskTool(TeamTool):
     """Complete a task"""
 
-    def __init__(self, task_manager: TeamTaskManager):
+    def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
-            ToolCard(id="CompleteTaskTool", name="complete_task", description="标记任务完成。"
-                                                                              "完成后会自动解锁依赖本任务的下游任务，"
-                                                                              "使其变为 pending 可领取状态。"
-                                                                              "调用后应通过 send_message 向 Leader 汇报"
-                                                                              "结果摘要")
+            ToolCard(id="CompleteTaskTool", name="complete_task", description=t("complete_task"))
         )
         self.task_manager = task_manager
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "task_id": {"type": "string", "description": "要标记完成的任务ID，需为自己已领取（claimed）的任务"},
+                "task_id": {"type": "string", "description": t("complete_task", "task_id")},
             },
             "required": ["task_id"]
         }
@@ -606,17 +563,16 @@ class CompleteTaskTool(TeamTool):
 class SendMessageTool(TeamTool):
     """Send a point-to-point message"""
 
-    def __init__(self, message_manager: TeamMessageManager):
+    def __init__(self, message_manager: TeamMessageManager, t: Translator):
         super().__init__(
-            ToolCard(id="SendMessageTool", name="send_message", description="向指定成员发送点对点消息。用于通知成员领取任务、"
-                                                                            "回复进度汇报、升级阻塞问题或协调成员间依赖")
+            ToolCard(id="SendMessageTool", name="send_message", description=t("send_message"))
         )
         self.message_manager = message_manager
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "消息内容，应包含明确的行动指引或信息"},
-                "to_member": {"type": "string", "description": "接收者的成员ID"},
+                "content": {"type": "string", "description": t("send_message", "content")},
+                "to_member": {"type": "string", "description": t("send_message", "to_member")},
             },
             "required": ["content", "to_member"]
         }
@@ -637,13 +593,12 @@ class BroadcastMessageTool(TeamTool):
     def __init__(
         self,
         message_manager: TeamMessageManager,
+        t: Translator,
         team: TeamBackend | None = None,
         on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     ):
         super().__init__(
-            ToolCard(id="BroadcastMessageTool", name="broadcast_message", description="向所有团队成员广播消息。"
-                                                                                      "用于宣布全局决策、"
-                                                                                      "约束变更或需要所有人知晓的信息")
+            ToolCard(id="BroadcastMessageTool", name="broadcast_message", description=t("broadcast_message"))
         )
         self.message_manager = message_manager
         self._team = team
@@ -651,7 +606,7 @@ class BroadcastMessageTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "广播内容，所有成员都会收到"},
+                "content": {"type": "string", "description": t("broadcast_message", "content")},
             },
             "required": ["content"]
         }
@@ -680,35 +635,43 @@ def create_team_tools(
     agent_team: TeamBackend,
     on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
     exclude_tools: Optional[Set[str]] = None,
+    lang: str = "cn",
 ) -> List[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
     Args:
         role: "leader" or "teammate".
         agent_team: AgentTeam instance providing task/message/db/messager.
+        on_teammate_created: Callback invoked when a teammate is created.
         exclude_tools: Tool names to exclude from the allowed set.
+        lang: Locale code ("cn" or "en") for tool descriptions.
     """
+    from openjiuwen.agent_teams.tools.locales import make_translator
+
+    t = make_translator(lang)
     task_mgr = agent_team.task_manager
     msg_mgr = agent_team.message_manager
 
     all_tools = {
         # Team management
-        "build_team": BuildTeamTool(agent_team),
-        "clean_team": CleanTeamTool(agent_team),
+        "build_team": BuildTeamTool(agent_team, t),
+        "clean_team": CleanTeamTool(agent_team, t),
         # Member management
-        "spawn_member": SpawnMemberTool(agent_team),
-        "shutdown_member": ShutdownMemberTool(agent_team),
-        "approve_plan": ApprovePlanTool(agent_team),
-        "approve_tool": ApproveToolCallTool(agent_team),
-        "list_members": ListMembersTool(agent_team),
+        "spawn_member": SpawnMemberTool(agent_team, t),
+        "shutdown_member": ShutdownMemberTool(agent_team, t),
+        "approve_plan": ApprovePlanTool(agent_team, t),
+        "approve_tool": ApproveToolCallTool(agent_team, t),
+        "list_members": ListMembersTool(agent_team, t),
         # Task management
-        "task_manager": TaskManagerToolV2(agent_team),
-        "view_task": ViewTaskToolV2(task_mgr),
-        "claim_task": ClaimTaskTool(task_mgr),
-        "complete_task": CompleteTaskTool(task_mgr),
+        "task_manager": TaskManagerToolV2(agent_team, t),
+        "view_task": ViewTaskToolV2(task_mgr, t),
+        "claim_task": ClaimTaskTool(task_mgr, t),
+        "complete_task": CompleteTaskTool(task_mgr, t),
         # Messaging
-        "send_message": SendMessageTool(msg_mgr),
-        "broadcast_message": BroadcastMessageTool(msg_mgr, team=agent_team, on_teammate_created=on_teammate_created),
+        "send_message": SendMessageTool(msg_mgr, t),
+        "broadcast_message": BroadcastMessageTool(
+            msg_mgr, t, team=agent_team, on_teammate_created=on_teammate_created,
+        ),
     }
 
     allowed = LEADER_TOOLS if role == "leader" else MEMBER_TOOLS
