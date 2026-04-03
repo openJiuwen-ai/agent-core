@@ -89,7 +89,7 @@ class BuildTeamTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="BuildTeamTool", name="build_team", description=t("build_team"))
+            ToolCard(id="team.build_team", name="build_team", description=t("build_team"))
         )
         self.team = team
         self.db = team.db
@@ -123,7 +123,7 @@ class CleanTeamTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="CleanTeamTool", name="clean_team", description=t("clean_team"))
+            ToolCard(id="team.clean_team", name="clean_team", description=t("clean_team"))
         )
         self.team = team
         self.card.input_params = {
@@ -147,7 +147,7 @@ class SpawnMemberTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="SpawnMemberTool", name="spawn_member", description=t("spawn_member"))
+            ToolCard(id="team.spawn_member", name="spawn_member", description=t("spawn_member"))
         )
         self.team = team
         self.card.input_params = {
@@ -191,7 +191,7 @@ class ShutdownMemberTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="ShutdownMemberTool", name="shutdown_member", description=t("shutdown_member"))
+            ToolCard(id="team.shutdown_member", name="shutdown_member", description=t("shutdown_member"))
         )
         self.team = team
         self.card.input_params = {
@@ -219,7 +219,7 @@ class ApprovePlanTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="ApprovePlanTool", name="approve_plan", description=t("approve_plan"))
+            ToolCard(id="team.approve_plan", name="approve_plan", description=t("approve_plan"))
         )
         self.team = team
         self.card.input_params = {
@@ -249,7 +249,7 @@ class ApproveToolCallTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="ApproveToolCallTool", name="approve_tool", description=t("approve_tool"))
+            ToolCard(id="team.approve_tool", name="approve_tool", description=t("approve_tool"))
         )
         self.team = team
         self.card.input_params = {
@@ -283,7 +283,7 @@ class ListMembersTool(TeamTool):
 
     def __init__(self, team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="ListMembersTool", name="list_members", description=t("list_members"))
+            ToolCard(id="team.list_members", name="list_members", description=t("list_members"))
         )
         self.team = team
         self.card.input_params = {
@@ -311,7 +311,7 @@ class TaskManagerToolV2(TeamTool):
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
         super().__init__(
-            ToolCard(id="TaskManagerToolV2", name="task_manager", description=t("task_manager"))
+            ToolCard(id="team.task_manager", name="task_manager", description=t("task_manager"))
         )
         self.agent_team = agent_team
         self.task_manager = agent_team.task_manager
@@ -467,7 +467,7 @@ class ViewTaskToolV2(TeamTool):
 
     def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
-            ToolCard(id="ViewTaskToolV2", name="view_task", description=t("view_task"))
+            ToolCard(id="team.view_task", name="view_task", description=t("view_task"))
         )
         self.task_manager = task_manager
         self.card.input_params = {
@@ -515,7 +515,7 @@ class ClaimTaskTool(TeamTool):
 
     def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
-            ToolCard(id="ClaimTaskTool", name="claim_task", description=t("claim_task"))
+            ToolCard(id="team.claim_task", name="claim_task", description=t("claim_task"))
         )
         self.task_manager = task_manager
         self.card.input_params = {
@@ -539,7 +539,7 @@ class CompleteTaskTool(TeamTool):
 
     def __init__(self, task_manager: TeamTaskManager, t: Translator):
         super().__init__(
-            ToolCard(id="CompleteTaskTool", name="complete_task", description=t("complete_task"))
+            ToolCard(id="team.complete_task", name="complete_task", description=t("complete_task"))
         )
         self.task_manager = task_manager
         self.card.input_params = {
@@ -565,7 +565,7 @@ class SendMessageTool(TeamTool):
 
     def __init__(self, message_manager: TeamMessageManager, t: Translator):
         super().__init__(
-            ToolCard(id="SendMessageTool", name="send_message", description=t("send_message"))
+            ToolCard(id="team.send_message", name="send_message", description=t("send_message"))
         )
         self.message_manager = message_manager
         self.card.input_params = {
@@ -598,7 +598,7 @@ class BroadcastMessageTool(TeamTool):
         on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     ):
         super().__init__(
-            ToolCard(id="BroadcastMessageTool", name="broadcast_message", description=t("broadcast_message"))
+            ToolCard(id="team.broadcast_message", name="broadcast_message", description=t("broadcast_message"))
         )
         self.message_manager = message_manager
         self._team = team

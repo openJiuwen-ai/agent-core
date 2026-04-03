@@ -123,7 +123,7 @@ class TestBuildTeamTool:
         """Test tool initialization"""
         tool = BuildTeamTool(agent_team_without_team, t)
         assert tool.card.name == "build_team"
-        assert tool.card.id == "BuildTeamTool"
+        assert tool.card.id == "team.build_team"
         assert tool.team == agent_team_without_team
         assert tool.db == agent_team_without_team.db
         assert tool.messager == agent_team_without_team.messager
@@ -175,7 +175,7 @@ class TestCleanTeamTool:
         """Test tool initialization"""
         tool = CleanTeamTool(agent_team, t)
         assert tool.card.name == "clean_team"
-        assert tool.card.id == "CleanTeamTool"
+        assert tool.card.id == "team.clean_team"
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
@@ -222,7 +222,7 @@ class TestSpawnMemberTool:
         """Test tool initialization"""
         tool = SpawnMemberTool(agent_team, t)
         assert tool.card.name == "spawn_member"
-        assert tool.card.id == "SpawnMemberTool"
+        assert tool.card.id == "team.spawn_member"
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
@@ -247,7 +247,7 @@ class TestShutdownMemberTool:
         """Test tool initialization"""
         tool = ShutdownMemberTool(agent_team, t)
         assert tool.card.name == "shutdown_member"
-        assert tool.card.id == "ShutdownMemberTool"
+        assert tool.card.id == "team.shutdown_member"
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
@@ -304,7 +304,7 @@ class TestApprovePlanTool:
         """Test tool initialization"""
         tool = ApprovePlanTool(agent_team, t)
         assert tool.card.name == "approve_plan"
-        assert tool.card.id == "ApprovePlanTool"
+        assert tool.card.id == "team.approve_plan"
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
@@ -362,7 +362,7 @@ class TestApproveToolCallTool:
     def test_initialization(self, agent_team, t):
         tool = ApproveToolCallTool(agent_team, t)
         assert tool.card.name == "approve_tool"
-        assert tool.card.id == "ApproveToolCallTool"
+        assert tool.card.id == "team.approve_tool"
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
@@ -393,7 +393,7 @@ class TestListMembersTool:
         """Test tool initialization"""
         tool = ListMembersTool(agent_team, t)
         assert tool.card.name == "list_members"
-        assert tool.card.id == "ListMembersTool"
+        assert tool.card.id == "team.list_members"
         assert tool.team == agent_team
 
     @pytest.mark.asyncio
@@ -440,7 +440,7 @@ class TestTaskManagerToolV2:
         """Test tool initialization"""
         tool = TaskManagerToolV2(agent_team, t)
         assert tool.card.name == "task_manager"
-        assert tool.card.id == "TaskManagerToolV2"
+        assert tool.card.id == "team.task_manager"
 
     @pytest.mark.asyncio
     async def test_invoke_add_single_task(self, agent_team, t):
@@ -556,7 +556,7 @@ class TestViewTaskToolV2:
         """Test tool initialization"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         assert tool.card.name == "view_task"
-        assert tool.card.id == "ViewTaskToolV2"
+        assert tool.card.id == "team.view_task"
 
     @pytest.mark.asyncio
     async def test_invoke_get_single_task(self, agent_team, t):
@@ -628,7 +628,7 @@ class TestClaimTaskTool:
         """Test tool initialization"""
         tool = ClaimTaskTool(agent_team.task_manager, t)
         assert tool.card.name == "claim_task"
-        assert tool.card.id == "ClaimTaskTool"
+        assert tool.card.id == "team.claim_task"
 
     @pytest.mark.asyncio
     async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
@@ -657,7 +657,7 @@ class TestCompleteTaskTool:
         """Test tool initialization"""
         tool = CompleteTaskTool(agent_team.task_manager, t)
         assert tool.card.name == "complete_task"
-        assert tool.card.id == "CompleteTaskTool"
+        assert tool.card.id == "team.complete_task"
 
     @pytest.mark.asyncio
     async def test_invoke_success(self, agent_team, t, sample_agent_card, db):
@@ -691,7 +691,7 @@ class TestSendMessageTool:
         """Test tool initialization"""
         tool = SendMessageTool(agent_team.message_manager, t)
         assert tool.card.name == "send_message"
-        assert tool.card.id == "SendMessageTool"
+        assert tool.card.id == "team.send_message"
 
     @pytest.mark.asyncio
     async def test_invoke_success(self, agent_team, t):
@@ -712,7 +712,7 @@ class TestBroadcastMessageTool:
         """Test tool initialization"""
         tool = BroadcastMessageTool(agent_team.message_manager, t)
         assert tool.card.name == "broadcast_message"
-        assert tool.card.id == "BroadcastMessageTool"
+        assert tool.card.id == "team.broadcast_message"
 
     @pytest.mark.asyncio
     async def test_invoke_success(self, agent_team, t):
