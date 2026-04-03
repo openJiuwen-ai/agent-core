@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
-from datetime import datetime
-
 import pytest
 
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
@@ -215,7 +214,6 @@ async def test_build_context_section(tmp_path: Path):
     assert "# Agent Config" in cn_content
     assert "## SOUL.md" in cn_content
     assert "## daily_memory/" in cn_content
-
     section_en = await build_context_section(
         sys_operation, workspace, "en", timezone="Asia/Shanghai"
     )
@@ -227,6 +225,37 @@ async def test_build_context_section(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_build_context_section_returns_none_when_workspace_is_none():
     assert await build_context_section(None, None, "cn") is None
+
+
+@pytest.mark.asyncio
+async def test_build_context_section_skips_empty_daily_memory_dir(tmp_path: Path):
+    sys_operation = _make_sys_operation(tmp_path)
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config")
+    (tmp_path / "memory" / "daily_memory").mkdir(parents=True, exist_ok=True)
+
+    workspace = Workspace(root_path=str(tmp_path))
+    section_cn = await build_context_section(
+        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
+    )
+    cn_content = section_cn.render("cn")
+    assert "# Agent Config" in cn_content
+    assert "## daily_memory/" not in cn_content
+
+
+@pytest.mark.asyncio
+async def test_build_context_section_skips_when_today_daily_memory_missing(tmp_path: Path):
+    sys_operation = _make_sys_operation(tmp_path)
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config")
+    await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/2026-04-02.md", "# Yesterday")
+
+    workspace = Workspace(root_path=str(tmp_path))
+    section_cn = await build_context_section(
+        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
+    )
+    cn_content = section_cn.render("cn")
+    assert "# Agent Config" in cn_content
+    assert "# Yesterday" not in cn_content
+    assert "## daily_memory/" not in cn_content
 
 
 # =============================================================================
@@ -276,7 +305,7 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
         workspace,
         "cn",
         tools_content=tools_cn,
-        timezone="Asia/Shanghai"
+        timezone="Asia/Shanghai",
     )
     assert "## 可用工具" in section_cn.render("cn")
     assert "**MyTool**" in section_cn.render("cn")
@@ -286,7 +315,7 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
         workspace,
         "en",
         tools_content=tools_en,
-        timezone="Asia/Shanghai"
+        timezone="Asia/Shanghai",
     )
     assert "## Available Tools" in section_en.render("en")
     assert "**MyTool**" in section_en.render("en")
@@ -303,7 +332,7 @@ async def test_build_context_section_without_tools(tmp_path: Path):
         workspace,
         "cn",
         tools_content=None,
-        timezone="Asia/Shanghai"
+        timezone="Asia/Shanghai",
     )
     content = section.render("cn")
     assert "## AGENT.md" in content

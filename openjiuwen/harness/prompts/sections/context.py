@@ -78,7 +78,7 @@ async def _read_daily_memory(
         workspace,
         timezone: Optional[str] = None,
 ) -> str | None:
-    """Read today's daily memory file.
+    """Read today's daily memory file only when today's file exists.
 
     Args:
         sys_operation: SysOperation instance.
@@ -87,18 +87,27 @@ async def _read_daily_memory(
                   Defaults to 'Asia/Shanghai' if None.
 
     Returns:
-        Daily memory content string, or None if file doesn't exist.
+        Daily memory content string, or None if today's file doesn't exist.
     """
     if sys_operation is None:
         return None
 
-    tz = timezone or "Asia/Shanghai"
-    date = _format_date(tz)
     memory_dir = workspace.get_node_path(WorkspaceNode.MEMORY)
     if memory_dir is None:
         return None
 
-    full_path = memory_dir / WorkspaceNode.DAILY_MEMORY.value / f"{date}.md"
+    tz = timezone or "Asia/Shanghai"
+    date = _format_date(tz)
+    daily_memory_dir = memory_dir / WorkspaceNode.DAILY_MEMORY.value
+    list_result = await sys_operation.fs().list_files(path=str(daily_memory_dir))
+    if list_result.code != 0 or not list_result.data or not list_result.data.list_items:
+        return None
+
+    today_file = f"{date}.md"
+    if not any(item.name == today_file for item in list_result.data.list_items):
+        return None
+
+    full_path = daily_memory_dir / f"{date}.md"
 
     result = await sys_operation.fs().read_file(str(full_path))
     if result.code == 0 and result.data:
