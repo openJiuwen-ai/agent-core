@@ -26,6 +26,9 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
@@ -96,6 +99,65 @@ class AbilityManager:
                 f"execute ability input tool call is invalid, {type(tool_call)}!"
             )
         return tool_calls
+
+    @staticmethod
+    def _repair_tool_arguments_json(arguments: str) -> Optional[str]:
+        text = arguments.strip()
+        if not text:
+            return None
+
+        stack: List[str] = []
+        in_string = False
+        escape = False
+        for char in text:
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+
+            if char == '"':
+                in_string = True
+                continue
+            if char in "{[":
+                stack.append(char)
+                continue
+            if char == "}":
+                if not stack or stack[-1] != "{":
+                    return None
+                stack.pop()
+                continue
+            if char == "]":
+                if not stack or stack[-1] != "[":
+                    return None
+                stack.pop()
+
+        if in_string:
+            return None
+        if not stack:
+            return text
+
+        suffix = "".join("}" if opener == "{" else "]" for opener in reversed(stack))
+        return f"{text}{suffix}"
+
+    @classmethod
+    def _parse_tool_arguments(cls, arguments: Any) -> Any:
+        if not isinstance(arguments, str):
+            return arguments
+        try:
+            return json.loads(arguments)
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            repaired = cls._repair_tool_arguments_json(arguments)
+            if repaired and repaired != arguments:
+                try:
+                    logger.warning("Recovered malformed tool arguments by balancing closing brackets")
+                    return json.loads(repaired)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return {}
 
     @staticmethod
     def _build_execution_error(
@@ -390,7 +452,8 @@ class AbilityManager:
                     mcp_tool_name = mcp_tool.name
                     mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{mcp_tool_name}'
                     self._tools[mcp_tool.name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
-                                                          description=mcp_tool.description)
+                                                          description=mcp_tool.description,
+                                                          input_params=mcp_tool.parameters or {})
                     tool_infos.append(mcp_tool)
 
         return tool_infos
@@ -435,6 +498,12 @@ class AbilityManager:
                 context=ctx.context,
                 extra=ctx.extra,
             )
+            # Propagate steering queue so after_tool_call
+            # rails can push_steering() on the same queue.
+            if ctx.steering_queue is not None:
+                tool_ctx.bind_steering_queue(
+                    ctx.steering_queue
+                )
             tool_contexts.append(tool_ctx)
             tasks.append(
                 self._railed_execute_single_tool_call(
@@ -454,6 +523,10 @@ class AbilityManager:
             tool_ctx = tool_contexts[i]
             if isinstance(result, Exception):
                 # Handle exception
+                if isinstance(result, ToolInterruptException):
+                    final_results.append((result, None))
+                    continue
+
                 error_msg = f"Ability execution error: {str(result)}"
                 logger.error(error_msg)
                 tool_result = None
@@ -516,6 +589,11 @@ class AbilityManager:
             tag=None,
     ) -> Tuple[Any, ToolMessage]:
         """Execute one tool call under rail lifecycle events."""
+        skip_result = ctx.extra.pop("_skip_tool", None)
+
+        if skip_result:
+            return ctx.inputs.tool_result, ctx.inputs.tool_msg
+
         if isinstance(ctx.inputs, ToolCallInputs):
             if ctx.inputs.tool_name:
                 tool_call.name = ctx.inputs.tool_name
@@ -580,14 +658,7 @@ class AbilityManager:
         tool_name = tool_call.name
 
         # Parse arguments
-        try:
-            tool_args = (
-                json.loads(tool_call.arguments)
-                if isinstance(tool_call.arguments, str)
-                else tool_call.arguments
-            )
-        except (json.JSONDecodeError, AttributeError):
-            tool_args = {}
+        tool_args = self._parse_tool_arguments(tool_call.arguments)
 
         # Check ability type and execute accordingly
         if tool_name in self._tools:
@@ -638,7 +709,19 @@ class AbilityManager:
                     f"Agent instance not found in resource_mgr: {agent_id}"
                 )
             try:
-                result = await agent.invoke(tool_args)
+                child_session_id = f"{session.get_session_id()}:{tool_call.id}"
+                tool_args["conversation_id"] = child_session_id
+
+                child_session = create_agent_session(
+                    session_id=child_session_id,
+                    card=agent.card,
+                )
+
+                auto_confirm_config = session.get_state(INTERRUPT_AUTO_CONFIRM_KEY)
+                if auto_confirm_config:
+                    child_session.update_state({INTERRUPT_AUTO_CONFIRM_KEY: auto_confirm_config})
+
+                result = await Runner.run_agent(agent=agent, inputs=tool_args, session=child_session)
             except Exception as e:
                 error_msg = f"Agent execution error: {str(e)}"
                 logger.error(error_msg)

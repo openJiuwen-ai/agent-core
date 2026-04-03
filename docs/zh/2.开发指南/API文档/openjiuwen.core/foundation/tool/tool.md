@@ -105,6 +105,10 @@ async def stream(inputs: Input, **kwargs) -> AsyncIterator[Output]
 
 **AsyncIterator[Output]**，工具执行过程中的增量结果迭代器。
 
+## Auth
+
+tool默认注册了ssl认证和参数认证，并支持自定义注册认证方式，详情请参考[auth.md](./auth/auth.md)。
+
 ## class LocalFunction
 
 ```python
@@ -259,7 +263,7 @@ async def invoke(inputs: Input, **kwargs) -> Output
 
 **参数**：
 
-* **inputs**(Input)：输入参数，将根据配置映射到 Body、Query、Path 或 Header。
+* **inputs**(Input)：输入参数，将根据配置映射到 Body、Query、Path、Header 或 Form。
 * **\*\*kwargs**：可选参数，支持可选参数如下：
   * **skip_inputs_validate** (bool)：输入`inputs`是否基于`ToolCard`的`input_params`进行校验。默认为`True`。
   * **max_response_byte_size**（int): HTTP回复最大的字节长度，默认为`RestfulApiCard`的`max_response_byte_size`值。

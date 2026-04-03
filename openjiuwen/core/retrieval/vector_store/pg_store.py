@@ -118,6 +118,42 @@ class PGVectorStore(VectorStore):
             async with session.begin():
                 await session.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
+    def _reflect_table(self, sync_conn) -> Table:
+        """Reflect an existing table using a synchronous connection."""
+        metadata = MetaData()
+        table = Table(self.collection_name, metadata, autoload_with=sync_conn)
+        self._metadata = metadata
+        self._table = table
+        return table
+
+    def _define_table(self, dim: int) -> Table:
+        """Define a new pgvector table and refresh the cached metadata."""
+        metadata = MetaData()
+        table = Table(
+            self.collection_name,
+            metadata,
+            Column("id", String, primary_key=True),
+            Column(self.text_field, Text),
+            Column(self.metadata_field, JSONB),
+            Column(self.vector_col_name, Vector(dim)),
+            # We can add tsvector column for sparse search optimization if needed
+            # But for now we might compute it on the fly or add it.
+            # Column("tsv", TSVECTOR)
+        )
+        self._metadata = metadata
+        self._table = table
+        return table
+
+    def _clear_cached_table(self, table_name: str) -> None:
+        """Clear cached SQLAlchemy table metadata after a table is dropped."""
+        if table_name != self.collection_name:
+            return
+
+        self._table = None
+        if getattr(self.table_ref, "name", None) == table_name:
+            self.table_ref = None
+        self._metadata = MetaData()
+
     async def _get_or_create_table(self, dim: int = 0) -> Table:
         """Get existing table or create new one if dim is provided"""
         if self._table is not None:
@@ -134,8 +170,7 @@ class PGVectorStore(VectorStore):
             table_exists = await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table(self.collection_name))
 
             if table_exists:
-                self._table = Table(self.collection_name, self._metadata, autoload_with=conn)
-                return self._table
+                return await conn.run_sync(self._reflect_table)
 
             if dim > 0:
                 if dim > 2000:
@@ -146,18 +181,9 @@ class PGVectorStore(VectorStore):
 
                 await self._ensure_extension()
                 # Define table
-                self._table = Table(
-                    self.collection_name,
-                    self._metadata,
-                    Column("id", String, primary_key=True),
-                    Column(self.text_field, Text),
-                    Column(self.metadata_field, JSONB),
-                    Column(self.vector_col_name, Vector(dim)),
-                    # We can add tsvector column for sparse search optimization if needed
-                    # But for now we might compute it on the fly or add it.
-                    # Column("tsv", TSVECTOR)
-                )
+                self._table = self._define_table(dim)
                 await conn.run_sync(self._metadata.create_all)
+                await conn.commit()
 
                 # Create index
                 # We need to use specific operator class based on metric
@@ -440,8 +466,10 @@ class PGVectorStore(VectorStore):
             return await conn.run_sync(lambda sync_conn: inspect(sync_conn).has_table(table_name))
 
     async def delete_table(self, table_name: str) -> None:
+        quoted_table_name = table_name.replace('"', '""')
         async with self._engine.begin() as conn:
-            await conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+            await conn.execute(text(f'DROP TABLE IF EXISTS "{quoted_table_name}"'))
+        self._clear_cached_table(table_name)
 
     def build_filters(self, table: Table, filters: dict) -> List[Any]:
         conds = []

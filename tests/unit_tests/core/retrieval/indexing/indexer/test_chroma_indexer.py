@@ -13,6 +13,7 @@ from unittest.mock import (
     patch,
 )
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import (
     ChromaIndexer,
@@ -188,8 +189,9 @@ class TestChromaIndexer:
         chunks = [TextChunk(id_="1", text="chunk 1", doc_id="doc_1")]
         config = IndexConfig(index_name="test_index", index_type="vector")
 
-        result = await indexer.build_index(chunks, config)
-        assert result is False  # Should fail
+        with pytest.raises(BaseError) as exc_info:
+            await indexer.build_index(chunks, config)
+        assert exc_info.value.code == StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND.code
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")
@@ -205,8 +207,10 @@ class TestChromaIndexer:
 
         with patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.ChromaVectorStore") as mock_store_class:
             mock_store_class.side_effect = Exception("ChromaDB error")
-            result = await indexer.build_index(chunks, config, mock_embed_model)
-            assert result is False
+            with pytest.raises(BaseError) as exc_info:
+                await indexer.build_index(chunks, config, mock_embed_model)
+            assert exc_info.value.code == StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR.code
+            assert "ChromaDB error" in (exc_info.value.message or "")
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.chroma_indexer.chromadb.PersistentClient")

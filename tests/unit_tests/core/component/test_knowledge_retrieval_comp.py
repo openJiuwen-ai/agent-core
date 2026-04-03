@@ -9,7 +9,7 @@ Covers:
 - Input validation (missing query, empty query)
 - Embedding model initialisation errors
 - Retrieval failures
-- Output formatting (with / without metadata)
+- Output formatting (results and context)
 - KnowledgeRetrieval → LLM pipeline in a full workflow
 - Config validation (missing embed config for vector index)
 - Multiple knowledge bases
@@ -37,6 +37,7 @@ from openjiuwen.core.retrieval.common.config import (
 from openjiuwen.core.retrieval.common.retrieval_result import MultiKBRetrievalResult
 from openjiuwen.core.session.node import Session as NodeSession
 from openjiuwen.core.workflow import (
+    ComponentKBConfig,
     End,
     KnowledgeRetrievalCompConfig,
     KnowledgeRetrievalComponent,
@@ -58,7 +59,6 @@ os.environ.setdefault("IS_SENSITIVE", "false")
 
 # Patch target paths
 _KR_MOD = "openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp"
-_EMBED_MOD = "openjiuwen.core.retrieval.embedding.openai_embedding"
 
 
 # Helpers & Fixtures
@@ -82,7 +82,6 @@ def _make_retrieval_results(texts: List[str], scores: Optional[List[float]] = No
 
 
 def _default_kr_config(
-    include_metadata: bool = False,
     index_type: str = "vector",
     embed_config: Optional[EmbeddingConfig] = None,
 ) -> KnowledgeRetrievalCompConfig:
@@ -94,19 +93,19 @@ def _default_kr_config(
             api_key="fake-embed-key",
         )
     return KnowledgeRetrievalCompConfig(
-        kb_configs=[
-            KnowledgeBaseConfig(kb_id="test_kb", index_type=index_type),
+        component_kb_configs=[
+            ComponentKBConfig(
+                kb_config=KnowledgeBaseConfig(kb_id="test_kb", index_type=index_type),
+                vector_store_config=VectorStoreConfig(
+                    store_provider=StoreType.Chroma,
+                    collection_name="test_collection",
+                    distance_metric="cosine",
+                ),
+                embed_config=embed_config,
+            ),
         ],
+        vector_store_connection_config={},
         retrieval_config=RetrievalConfig(top_k=3),
-        vector_store_config=VectorStoreConfig(
-            store_provider=StoreType.Chroma,
-            collection_name="test_collection",
-            distance_metric="cosine",
-        ),
-        vector_store_additional_config={},
-        embed_config=embed_config,
-        result_separator="\n\n",
-        include_metadata=include_metadata,
     )
 
 
@@ -174,18 +173,15 @@ class TestKnowledgeRetrievalOutput:
         out = KnowledgeRetrievalOutput()
         assert out.results == []
         assert out.context == ""
-        assert out.results_with_metadata is None
 
     @staticmethod
     def test_with_values():
-        results = _make_retrieval_results(["text1", "text2"])
         out = KnowledgeRetrievalOutput(
             results=["text1", "text2"],
             context="text1\n\ntext2",
-            results_with_metadata=[r.model_dump() for r in results],
         )
         assert len(out.results) == 2
-        assert out.results_with_metadata is not None
+        assert out.context == "text1\n\ntext2"
 
 
 # Test: KnowledgeRetrievalExecutable
@@ -196,7 +192,7 @@ class TestKnowledgeRetrievalExecutable:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_invoke_returns_results(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
         """Successful retrieval returns results and context."""
         mock_embed_cls.return_value = MagicMock()
@@ -220,31 +216,7 @@ class TestKnowledgeRetrievalExecutable:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
-    async def test_invoke_with_metadata(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
-        """When include_metadata=True, output contains results_with_metadata."""
-        mock_embed_cls.return_value = MagicMock()
-        mock_create_vs.return_value = MagicMock()
-        mock_skb_cls.return_value = MagicMock()
-        results = _make_retrieval_results(["doc A"])
-        mock_retrieve.return_value = results
-
-        config = _default_kr_config(include_metadata=True)
-        exe = KnowledgeRetrievalExecutable(config)
-        session = _mock_session()
-        context = _mock_context()
-
-        output = await exe.invoke({"query": "metadata query"}, session, context)
-
-        assert output["results"] == ["doc A"]
-        assert output["results_with_metadata"] is not None
-        assert len(output["results_with_metadata"]) == 1
-
-    @pytest.mark.asyncio
-    @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
-    @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
-    @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_invoke_empty_query_raises(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
         """An empty query string raises an appropriate error."""
         mock_embed_cls.return_value = MagicMock()
@@ -264,7 +236,7 @@ class TestKnowledgeRetrievalExecutable:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_invoke_missing_query_raises(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
         """Missing query field raises a validation error."""
         mock_embed_cls.return_value = MagicMock()
@@ -284,7 +256,7 @@ class TestKnowledgeRetrievalExecutable:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_invoke_retrieval_failure(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
         """When the retrieval call fails, it raises with the correct status code."""
         mock_embed_cls.return_value = MagicMock()
@@ -308,15 +280,19 @@ class TestKnowledgeRetrievalExecutable:
         mock_create_vs.return_value = MagicMock()
 
         config = KnowledgeRetrievalCompConfig(
-            kb_configs=[KnowledgeBaseConfig(kb_id="kb1", index_type="vector")],
+            component_kb_configs=[
+                ComponentKBConfig(
+                    kb_config=KnowledgeBaseConfig(kb_id="kb1", index_type="vector"),
+                    vector_store_config=VectorStoreConfig(
+                        store_provider=StoreType.Chroma,
+                        collection_name="test",
+                        distance_metric="cosine",
+                    ),
+                    embed_config=None,  # deliberately omitted
+                ),
+            ],
+            vector_store_connection_config={},
             retrieval_config=RetrievalConfig(top_k=3),
-            vector_store_config=VectorStoreConfig(
-                store_provider=StoreType.Chroma,
-                collection_name="test",
-                distance_metric="cosine",
-            ),
-            vector_store_additional_config={},
-            embed_config=None,  # deliberately omitted
         )
         exe = KnowledgeRetrievalExecutable(config)
         session = _mock_session()
@@ -331,7 +307,7 @@ class TestKnowledgeRetrievalExecutable:
         )
 
     @pytest.mark.asyncio
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_embed_model_init_failure(self, mock_embed_cls):
         """When embedding model initialisation fails, it raises the correct error."""
         mock_embed_cls.side_effect = RuntimeError("embed init failed")
@@ -349,7 +325,7 @@ class TestKnowledgeRetrievalExecutable:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_invoke_empty_results(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
         """When retrieval returns no results, output contains empty lists and context."""
         mock_embed_cls.return_value = MagicMock()
@@ -371,40 +347,65 @@ class TestKnowledgeRetrievalExecutable:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
-    async def test_invoke_custom_separator(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
-        """Custom result_separator is used when joining results."""
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
+    async def test_invoke_context_joined_with_default_separator(
+        self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve
+    ):
+        """Retrieved results are joined into context with default separator."""
         mock_embed_cls.return_value = MagicMock()
         mock_create_vs.return_value = MagicMock()
         mock_skb_cls.return_value = MagicMock()
         mock_retrieve.return_value = _make_retrieval_results(["A", "B", "C"])
 
         config = _default_kr_config()
-        config.result_separator = " | "
         exe = KnowledgeRetrievalExecutable(config)
         session = _mock_session()
         context = _mock_context()
 
         output = await exe.invoke({"query": "sep query"}, session, context)
-        assert output["context"] == "A | B | C"
+        assert output["context"] == "A\n\nB\n\nC"
 
     @pytest.mark.asyncio
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_invoke_multiple_kb_configs(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
-        """Multiple kb_configs create multiple SimpleKnowledgeBase instances."""
+        """Multiple component_kb_configs create multiple SimpleKnowledgeBase instances."""
         mock_embed_cls.return_value = MagicMock()
         mock_create_vs.return_value = MagicMock()
         mock_skb_cls.return_value = MagicMock()
         mock_retrieve.return_value = _make_retrieval_results(["from_kb1", "from_kb2"])
 
-        config = _default_kr_config()
-        config.kb_configs = [
-            KnowledgeBaseConfig(kb_id="kb_1", index_type="vector"),
-            KnowledgeBaseConfig(kb_id="kb_2", index_type="vector"),
-        ]
+        embed_config = EmbeddingConfig(
+            model_name="text-embedding-test",
+            base_url="http://fake-embed.api.com",
+            api_key="fake-embed-key",
+        )
+        config = KnowledgeRetrievalCompConfig(
+            component_kb_configs=[
+                ComponentKBConfig(
+                    kb_config=KnowledgeBaseConfig(kb_id="kb_1", index_type="vector"),
+                    vector_store_config=VectorStoreConfig(
+                        store_provider=StoreType.Chroma,
+                        collection_name="coll_1",
+                        distance_metric="cosine",
+                    ),
+                    embed_config=embed_config,
+                ),
+                ComponentKBConfig(
+                    kb_config=KnowledgeBaseConfig(kb_id="kb_2", index_type="vector"),
+                    vector_store_config=VectorStoreConfig(
+                        store_provider=StoreType.Chroma,
+                        collection_name="coll_2",
+                        distance_metric="cosine",
+                    ),
+                    embed_config=embed_config,
+                ),
+            ],
+            vector_store_connection_config={},
+            retrieval_config=RetrievalConfig(top_k=3),
+        )
         exe = KnowledgeRetrievalExecutable(config)
         session = _mock_session()
         context = _mock_context()
@@ -419,7 +420,7 @@ class TestKnowledgeRetrievalExecutable:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_lazy_initialisation_only_once(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
         """Knowledge base is only initialised once across multiple invocations."""
         mock_embed_cls.return_value = MagicMock()
@@ -470,7 +471,7 @@ class TestKnowledgeRetrievalInWorkflow:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_start_kr_end_workflow(self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve):
         """Start → KnowledgeRetrieval → End workflow completes successfully."""
         mock_embed_cls.return_value = MagicMock()
@@ -504,7 +505,7 @@ class TestKnowledgeRetrievalInWorkflow:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_start_kr_end_workflow_empty_results(
         self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve
     ):
@@ -543,7 +544,7 @@ class TestKnowledgeRetrievalWithLLMWorkflow:
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")
     @patch(f"{_KR_MOD}.create_vector_store")
-    @patch(f"{_EMBED_MOD}.OpenAIEmbedding")
+    @patch(f"{_KR_MOD}.OpenAIEmbedding")
     async def test_start_kr_llm_end_workflow(
         self, mock_embed_cls, mock_create_vs, mock_skb_cls, mock_retrieve, mock_llm_model
     ):

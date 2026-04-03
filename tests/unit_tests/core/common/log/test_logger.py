@@ -2,11 +2,13 @@
 Test log function
 """
 
+import importlib
 import logging
 import os
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from io import StringIO
 from typing import (
     Any,
@@ -18,9 +20,9 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import (
-    LogManager,
-    LoggerProtocol,
     get_session_id,
+    LoggerProtocol,
+    LogManager,
     set_session_id,
 )
 from openjiuwen.core.common.logging.default import DefaultLogger
@@ -52,6 +54,32 @@ def thread_function(session_id, log_list, stdout_capture):
     log_list.append((session_id, get_session_id()))
 
 
+def write_yaml_config(config_file_path: str, config_content: Dict[str, Any]) -> None:
+    """Write YAML logging config for tests."""
+    import yaml
+
+    with open(config_file_path, "w", encoding="utf-8") as f:
+        yaml.dump(config_content, f)
+
+
+@contextmanager
+def patched_logging_config(config_file_path: str):
+    """Patch module-level logging config objects for tests."""
+    log_config_module = importlib.import_module("openjiuwen.core.common.logging.log_config")
+
+    original_log_config = log_config_module.log_config
+    test_log_config = log_config_module.LogConfig(config_file_path)
+
+    LogManager.reset()
+    log_config_module.log_config = test_log_config
+
+    try:
+        yield test_log_config, None
+    finally:
+        LogManager.reset()
+        log_config_module.log_config = original_log_config
+
+
 @pytest.fixture
 def temp_config_dir():
     """Create a temporary configuration directory"""
@@ -68,6 +96,7 @@ def test_config_file(temp_config_dir):
     test_config = {
         "logging": {
             "level": "INFO",
+            "structured_output_format": "json",
             "backup_count": 5,
             "max_bytes": 1024 * 1024,
             "format": "%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s",
@@ -78,46 +107,24 @@ def test_config_file(temp_config_dir):
             "performance_log_file": "performance.log",
             "interface_output": ["console", "file"],
             "performance_output": ["console", "file"],
+            "loggers": {
+                "agent": {
+                    "level": "DEBUG",
+                }
+            },
             "log_path": temp_config_dir.name,
         }
     }
 
-    import yaml
-
-    with open(config_file_path, "w", encoding="utf-8") as f:
-        yaml.dump(test_config, f)
-
+    write_yaml_config(config_file_path, test_config)
     return config_file_path
 
 
 @pytest.fixture
 def mock_log_config(test_config_file):
     """Mock log configuration"""
-    from openjiuwen.core.common.logging.default.log_config import (
-        LogConfig,
-        log_config as original_log_config,
-    )
-    from openjiuwen.core.common.logging.default.config_manager import (
-        ConfigManager,
-        config_manager as original_config_manager,
-    )
-
-    test_log_config = LogConfig(test_config_file)
-    test_config_manager = ConfigManager(test_config_file)
-
-    import openjiuwen.core.common.logging.default.log_config as log_config_module
-    import openjiuwen.core.common.logging.default.config_manager as config_manager_module
-
-    _original_log_config = original_log_config
-    _original_config_manager = original_config_manager
-
-    log_config_module.log_config = test_log_config
-    config_manager_module.config_manager = test_config_manager
-
-    yield test_log_config
-
-    log_config_module.log_config = _original_log_config
-    config_manager_module.config_manager = _original_config_manager
+    with patched_logging_config(test_config_file) as (test_log_config, _):
+        yield test_log_config
 
 
 @pytest.fixture(scope="function")
@@ -172,7 +179,7 @@ def initialized_logger(mock_log_config, stdout_capture):
 
     yield
 
-    set_session_id("")
+    set_session_id()
     try:
         for logger in LogManager.get_all_loggers().values():
             if hasattr(logger, "_logger"):
@@ -331,6 +338,324 @@ class TestLogManager:
 
         same_logger = LogManager.get_logger("on_demand_test")
         assert same_logger is new_type_logger
+
+    def test_get_logger_uses_dynamic_logger_override(self, temp_config_dir):
+        """Dynamic loggers should pick up matching per-logger level overrides."""
+        config_file_path = os.path.join(temp_config_dir.name, "dynamic_logger_config.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console", "file"],
+                "log_path": temp_config_dir.name,
+                "loggers": {
+                    "foo": {
+                        "level": "DEBUG",
+                    }
+                },
+            }
+        }
+
+        write_yaml_config(config_file_path, config_content)
+
+        with patched_logging_config(config_file_path):
+            logger = LogManager.get_logger("foo")
+
+            assert logger.get_config()["level"] == logging.DEBUG
+            assert logger.get_config()["output"] == ["console", "file"]
+            assert logger.get_config()["log_file"] == os.path.join(temp_config_dir.name, "foo.log")
+
+
+class TestLogConfig:
+    """Test log configuration loading."""
+
+    def test_structured_output_format_defaults_to_json(self, temp_config_dir):
+        """Structured event output defaults to JSON when not configured."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "test_config.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "log_path": temp_config_dir.name,
+                "log_file": "common.log",
+                "output": ["console"],
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        test_log_config = LogConfig(config_file_path)
+
+        assert test_log_config.get_common_config()["structured_output_format"] == "json"
+
+    def test_structured_output_format_can_be_loaded_from_yaml(self, temp_config_dir):
+        """Structured event output format can be loaded from YAML."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "test_config.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "structured_output_format": "text",
+                "log_path": temp_config_dir.name,
+                "log_file": "common.log",
+                "output": ["console"],
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        test_log_config = LogConfig(config_file_path)
+
+        assert test_log_config.get_common_config()["structured_output_format"] == "text"
+
+    def test_normalize_logging_config_normalizes_per_logger_levels(self):
+        """normalize_logging_config should normalize both root and per-logger levels."""
+        from openjiuwen.core.common.logging.log_levels import normalize_logging_config
+
+        raw_config = {
+            "level": "INFO",
+            "loggers": {
+                "agent": {"level": "DEBUG"},
+                "invalid_logger": {"level": "NOT_A_LEVEL"},
+            },
+        }
+        result = normalize_logging_config(raw_config)
+
+        assert result["level"] == logging.INFO
+        assert result["loggers"]["agent"]["level"] == logging.DEBUG
+        assert result["loggers"]["invalid_logger"]["level"] == logging.WARNING
+
+    def test_per_logger_level_override_is_loaded_from_yaml(self, temp_config_dir):
+        """Per-logger level overrides should beat the global level."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "per_logger_override.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console", "file"],
+                "log_path": temp_config_dir.name,
+                "loggers": {
+                    "agent": {"level": "DEBUG"},
+                },
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        test_log_config = LogConfig(config_file_path)
+
+        assert test_log_config.get_common_config()["level"] == logging.INFO
+        assert test_log_config.get_custom_config("agent")["level"] == logging.DEBUG
+        assert test_log_config.get_custom_config("other")["level"] == logging.INFO
+
+    def test_partial_logger_override_inherits_global_settings(self, temp_config_dir):
+        """A partial logger override should inherit unspecified global settings."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "partial_logger_override.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console"],
+                "format": "%(levelname)s | %(message)s",
+                "log_path": temp_config_dir.name,
+                "loggers": {
+                    "agent": {"level": "DEBUG"},
+                },
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        test_log_config = LogConfig(config_file_path)
+        common_config = test_log_config.get_common_config()
+        agent_config = test_log_config.get_custom_config("agent")
+
+        assert agent_config["level"] == logging.DEBUG
+        assert agent_config["output"] == common_config["output"]
+        assert agent_config["format"] == common_config["format"]
+        assert agent_config["log_file"] == os.path.join(temp_config_dir.name, "agent.log")
+
+    def test_builtin_logger_level_override_is_scoped_to_target_logger(self, temp_config_dir):
+        """Per-logger level overrides should only affect the targeted built-in logger."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "builtin_logger_override.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console", "file"],
+                "log_path": temp_config_dir.name,
+                "log_file": "common.log",
+                "interface_log_file": "interface.log",
+                "interface_output": ["console", "file"],
+                "loggers": {
+                    "interface": {
+                        "level": "DEBUG",
+                    }
+                },
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        test_log_config = LogConfig(config_file_path)
+        common_config = test_log_config.get_common_config()
+        interface_config = test_log_config.get_interface_config()
+
+        assert common_config["level"] == logging.INFO
+        assert interface_config["level"] == logging.DEBUG
+
+    def test_default_backend_rejects_non_level_logger_overrides(self, temp_config_dir):
+        """Default backend should reject per-logger keys other than level."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "dynamic_logger_override.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console", "file"],
+                "structured_output_format": "json",
+                "log_path": temp_config_dir.name,
+                "loggers": {
+                    "foo": {
+                        "level": "DEBUG",
+                        "output": ["console"],
+                    }
+                },
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        with pytest.raises(BaseError):
+            LogConfig(config_file_path)
+
+    def test_default_backend_rejects_loguru_specific_root_keys(self, temp_config_dir):
+        """Default backend should reject loguru-only root keys."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "default_mixed_schema.yaml")
+        config_content = {
+            "logging": {
+                "backend": "default",
+                "level": "INFO",
+                "output": ["console"],
+                "log_path": temp_config_dir.name,
+                "sinks": {
+                    "console": {
+                        "target": "stdout",
+                    }
+                },
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        with pytest.raises(BaseError):
+            LogConfig(config_file_path)
+
+    def test_backend_defaults_to_default_when_missing(self, temp_config_dir):
+        """Missing backend should default to the stdlib backend."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "implicit_default_backend.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console"],
+                "log_path": temp_config_dir.name,
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        test_log_config = LogConfig(config_file_path)
+
+        assert test_log_config.get_backend() == "default"
+        assert test_log_config.get_common_config()["backend"] == "default"
+
+    def test_default_provider_builds_dynamic_logger_config(self, temp_config_dir):
+        """Default backend provider should materialize dynamic logger config directly."""
+        from openjiuwen.core.common.logging.default.config_provider import (
+            build_default_logger_config,
+            load_default_backend_config,
+        )
+
+        normalized_config = load_default_backend_config(
+            {
+                "level": "INFO",
+                "output": ["console"],
+                "log_path": temp_config_dir.name,
+                "loggers": {
+                    "agent": {
+                        "level": "DEBUG",
+                    }
+                },
+            }
+        )
+
+        agent_config = build_default_logger_config(normalized_config, "agent")
+
+        assert agent_config["backend"] == "default"
+        assert agent_config["level"] == logging.DEBUG
+        assert agent_config["output"] == ["console"]
+        assert agent_config["log_file"] == os.path.join(temp_config_dir.name, "agent.log")
+
+    def test_invalid_per_logger_level_falls_back_to_warning(self, temp_config_dir):
+        """Invalid per-logger levels should fall back to WARNING."""
+        from openjiuwen.core.common.logging.log_config import LogConfig
+
+        config_file_path = os.path.join(temp_config_dir.name, "invalid_logger_level.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "log_path": temp_config_dir.name,
+                "loggers": {
+                    "agent": {"level": "NOT_A_LEVEL"},
+                },
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        test_log_config = LogConfig(config_file_path)
+
+        assert test_log_config.get_custom_config("agent")["level"] == logging.WARNING
+
+
+class TestPerLoggerBehavior:
+    def test_agent_debug_override_does_not_enable_common_debug(self, temp_config_dir, capsys):
+        """Agent DEBUG override should not change the global/common logger level."""
+        config_file_path = os.path.join(temp_config_dir.name, "per_logger_behavior.yaml")
+        config_content = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console"],
+                "structured_output_format": "text",
+                "log_path": temp_config_dir.name,
+                "log_file": "common.log",
+                "interface_log_file": "interface.log",
+                "prompt_builder_interface_log_file": "prompt_builder.log",
+                "performance_log_file": "performance.log",
+                "interface_output": ["console"],
+                "performance_output": ["console"],
+                "loggers": {
+                    "agent": {"level": "DEBUG"},
+                },
+            }
+        }
+        write_yaml_config(config_file_path, config_content)
+
+        with patched_logging_config(config_file_path):
+            common_logger = LogManager.get_logger("common")
+            agent_logger = LogManager.get_logger("agent")
+
+            common_logger.debug("common debug should stay hidden")
+            common_logger.info("common info should be visible")
+            agent_logger.debug("agent debug should be visible")
+
+            for logger in (common_logger, agent_logger):
+                for handler in logger._logger.handlers:
+                    handler.flush()
+
+        output = capsys.readouterr().out
+        assert "common debug should stay hidden" not in output
+        assert "common info should be visible" in output
+        assert "agent debug should be visible" in output
 
 
 class TestLogLevel:
@@ -511,8 +836,8 @@ class TestLogManagerReset:
 
     def test_reset_clears_loggers(self, initialized_logger):
         """Test reset clears all loggers"""
-        logger1 = LogManager.get_logger("common")
-        logger2 = LogManager.get_logger("interface")
+        LogManager.get_logger("common")
+        LogManager.get_logger("interface")
 
         assert len(LogManager.get_all_loggers()) > 0
 
@@ -628,10 +953,10 @@ class TestLogDirectoryCreation:
 
             with pytest.raises(BaseError) as exc_info:
                 DefaultLogger('test_failure', config)
-            
+
             assert exc_info.value.code == StatusCode.COMMON_LOG_PATH_INIT_FAILED.code
             assert "common log_path initialization failed" in exc_info.value.message
-    
+
     @staticmethod
     def test_create_existing_directory_no_error(temp_config_dir):
         """No error will be reported when the test directory already exists"""
@@ -683,6 +1008,6 @@ class TestLogDirectoryCreation:
 
         with pytest.raises(BaseError) as exc_info:
             DefaultLogger('test_sensitive', config)
-        
+
         assert exc_info.value.code == StatusCode.COMMON_LOG_PATH_INVALID.code
         assert "common log_path is invalid" in exc_info.value.message.lower()

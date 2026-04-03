@@ -1,8 +1,94 @@
 # ReactAgent Reinforcement Learning
 
-openJiuwen provides reinforcement learning (RL) based Agent training capabilities. Through the `openjiuwen.dev_tools.agentrl` module, you can use algorithms such as GRPO and PPO to perform online reinforcement learning on Agents that use Tools, continuously improving Agent performance on specific tasks.
+The `openjiuwen.dev_tools.agentrl` module provides reinforcement learning training capabilities based on the VERL reinforcement learning framework and the OpenYuanrong distributed computing engine. This tutorial walks through detailed training environment setup and briefly explains how to use this module to train a ReactAgent that solves math problems with a calculator tool.
 
-This tutorial uses `examples/rl_calculator` as an example to introduce how to use the reinforcement learning module to train an Agent that can correctly solve math problems with the help of a calculator tool.
+## Environment Setup
+
+### Prerequisites
+
+| Item | Recommended version |
+|------|---------------------|
+| Hardware | Atlas **910B4** (NPU) |
+| CANN | **8.3 RC1** |
+| Python | **3.11.10** |
+
+### Install vLLM, vllm-ascend, and VERL from source
+
+vLLM, vllm-ascend, and VERL should all be installed from source. It is recommended to place the three source trees in the same directory, for example `rl_pkgs`.
+
+```bash
+mkdir rl_pkgs
+cd rl_pkgs
+```
+
+Install vLLM v0.11.0:
+
+```bash
+mkdir rl_pkgs
+git clone https://github.com/vllm-project/vllm
+cd vllm
+git checkout v0.11.0
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
+```
+
+Install vllm-ascend v0.11.0rc1:
+
+```bash
+git clone https://github.com/vllm-project/vllm-ascend
+cd vllm-ascend
+git checkout v0.11.0rc1
+pip install -v -e .
+cd ..
+```
+
+Install VERL 0.7.0:
+
+```bash
+git clone https://github.com/verl-project/verl
+cd verl
+git checkout v0.7.0
+pip install -e .
+cd ..
+```
+
+### Install openJiuwen and other Python dependencies
+
+
+```bash
+pip install openjiuwen
+pip install triton-ascend==3.2.0rc4
+pip install transformers==4.57.6
+pip install uvicorn==0.40.0
+pip install fastapi==0.128.0
+pip install openai==2.15.0
+```
+
+### Install OpenYuanrong and ray_adapter
+
+Download the [OpenYuanrong 0.7.0][yuanrong-wheel] and [ray_adapter 0.7.1][ray-adapter-wheel] wheel packages and install them offline in your conda environment:
+
+```bash
+pip install openyuanrong-0.7.0-cp311-cp311-manylinux_2_34_aarch64.whl
+pip install ray_adapter-0.7.1-py3-none-any.whl
+```
+
+Download the [VERL OpenYuanrong patch package][patch-url], place it under `rl_pkgs`, and convert it to UTF-8:
+
+```bash
+iconv -f UTF-16 -t UTF-8 yr_v7.patch > yr_v7.patch.utf8
+```
+
+Apply the patch in the VERL source tree:
+
+```bash
+cd verl
+patch -p1 < ../yr_v7.patch.utf8
+```
+
+[yuanrong-wheel]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/tmp/202603311854/openyuanrong-0.7.1-cp311-cp311-manylinux_2_34_aarch64.whl
+[ray-adapter-wheel]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/ray_adapter/ray_adapter-0.7.1-py3-none-any.whl
+[patch-url]: https://openyuanrong.obs.cn-southwest-2.myhuaweicloud.com/tmp/verl-070-use-yuanrong-as-distributed-backend.patch
 
 ## Overall Flow
 
@@ -10,7 +96,7 @@ Reinforcement learning training mainly includes the following steps:
 
 1. **Prepare Configuration**: Build `RLConfig`, covering training, Rollout, runtime, persistence, and other parameters.
 2. **Define Reward Function**: Implement and register a reward function to compute rewards based on Agent output and ground truth.
-3. **Register Tools**: Provide callable tools for the Agent (e.g., a calculator).
+3. **Register Tools**: Provide callable tools for the Agent (e.g., a calculator tool for simple expression evaluation and equation solving).
 4. **Prepare Data**: Implement `task_data_fn` to convert dataset rows into Agent input format.
 5. **Start Training**: Create `RLOptimizer`, configure it, and call `train()` to start training.
 
@@ -69,7 +155,6 @@ config = RLConfig(
         save_rollouts=True,
         save_step_summaries=True,
     ),
-    # Multi-round Ada: uncomment — ada=AdaConfig(rollout_max_round=2, final_keep_per_prompt=8),
 )
 ```
 
@@ -85,9 +170,9 @@ config = RLConfig(
 | total_epochs | Total training epochs |
 | max_prompt_length / max_response_length | Max input/output token length |
 | n_gpus_per_node / visible_device | GPU count and visible device IDs |
-| algorithm_adv_estimator | Algorithm type, e.g. `grpo`, `ppo` |
+| algorithm_adv_estimator | Algorithm type |
 | save_freq / test_freq | Checkpoint save and validation interval (steps) |
-| project_name / experiment_name | Project and experiment names (for logging) |
+| project_name / experiment_name | Project and experiment names |
 | save_path | Model checkpoint save path |
 | whole_trajectory | Whether to use full trajectory for advantage computation |
 | logger | Logging backends, e.g. `["tensorboard"]` |
@@ -99,13 +184,6 @@ config = RLConfig(
 | rollout_n | Number of samples per prompt |
 | actor_optimizer_lr | Actor model learning rate |
 | actor_clip_ratio_low / actor_clip_ratio_high | PPO clip lower/upper bounds |
-
-**AdaConfig (optional, enable via `RLConfig.ada`)**
-
-| Parameter | Description |
-|-----------|-------------|
-| rollout_max_round | Max dialogue rounds when multi-round Ada rollout is enabled |
-| final_keep_per_prompt | Number of samples kept per prompt under Ada sampling |
 
 **AgentRuntimeConfig (Runtime Configuration)**
 
@@ -152,7 +230,7 @@ system_prompt = CALCULATOR_SYSTEM_PROMPT.format(
 ).content
 ```
 
-The Agent should use `### ANSWER: <answer> ###` format for final output to facilitate reward function parsing.
+You can require the Agent to use the `### ANSWER: <answer> ###` format in the final output so the reward function can parse it.
 
 ## Tool Definition
 
@@ -167,16 +245,16 @@ from openjiuwen.core.foundation.tool import tool
 )
 def calculator(expression: str) -> str:
     """Evaluate a math expression and return the result."""
-    # Implement expression evaluation logic, support arithmetic, equation solving, etc.
+    # Implement expression evaluation logic; support arithmetic, equation solving, etc.
     # ...
-    return str(result)
+    return result
 ```
 
 Register tools during training via `optimizer.set_tools([calculator])`.
 
 ## Data Preparation
 
-Implement `task_data_fn` to convert each dataset row (e.g., a row in parquet) into Agent input. The dataset typically contains `question`, `result`, and other columns:
+Implement `task_data_fn` to convert each dataset row (e.g., a row in parquet) into `query` and `ground_truth`:
 
 ```python
 def task_data_fn(task_sample: dict) -> dict:
@@ -191,7 +269,7 @@ def task_data_fn(task_sample: dict) -> dict:
     }
 ```
 
-`query` is passed as user input to the Agent; `ground_truth` can be compared with Agent output in the reward function.
+`query` is passed as user input to the Agent; `ground_truth` can be compared with Agent output in the reward function to obtain the reward value.
 
 ## Reward Function
 
@@ -222,7 +300,7 @@ def calc_reward(msg: RolloutMessage) -> dict:
 ```
 
 - `rollout_info`: Input and output info for each dialogue turn.
-- `ground_truth`: From `input_prompt` returned by `task_data_fn`.
+- `ground_truth`: From `ground_truth` in the `input_prompt` produced from `task_data_fn`.
 - `reward_list`: Step-level rewards; `global_reward`: Task-level total reward.
 
 ## Starting Training
@@ -265,23 +343,6 @@ if __name__ == "__main__":
 
 ## Running the Example
 
-Refer to the complete example in `examples/rl_calculator`:
+See the [complete examples/rl_calculator example](../../../../examples/rl_calculator/README.md) in the repository to run training. Logs will print the model path, data paths, algorithm, epoch, and related information; if TensorBoard is enabled, load it locally to view training curves.
 
-```bash
-# Enter the example directory
-cd examples/rl_calculator
-
-# Ensure data files exist: train.parquet, test.parquet (with question, result, etc.)
-# Run training
-python train.py
-```
-
-Training logs will output model path, data path, algorithm, epoch, etc. If TensorBoard is enabled, use `logger=["tensorboard"]` to view training curves.
-
-## Further Notes
-
-- **Algorithms**: `algorithm_adv_estimator` supports `grpo`, `ppo`, etc.
-- **Multi-turn (Ada)**: set `ada=AdaConfig(rollout_max_round=..., final_keep_per_prompt=...)` on `RLConfig`; see [config documentation](../../API%20Docs/openjiuwen.dev_tools/agentrl/config.md).
-- **Persistence**: Use `PersistenceConfig` to save rollout data locally for debugging and analysis.
-
-For more API and configuration details, see the [agentrl module documentation](../../API%20Docs/openjiuwen.dev_tools/agentrl.README.md).
+For more API and configuration details, see the [agentrl module documentation](../API%20Docs/openjiuwen.dev_tools/agentrl.README.md).

@@ -11,6 +11,7 @@ from .update import (
     MemoryValidationOp,
     MemoryDeduplicationOp,
     UpdateVectorStoreOp,
+    PersistMemoryOp,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "MemoryValidationOp",
     "MemoryDeduplicationOp",
     "UpdateVectorStoreOp",
+    "PersistMemoryOp",
 ]

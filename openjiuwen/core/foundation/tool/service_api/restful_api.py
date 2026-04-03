@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
+import json
 from copy import deepcopy
 from typing import AsyncIterator, ClassVar, Dict, Any, Literal, Set
 
@@ -15,7 +16,9 @@ from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig
 from openjiuwen.core.foundation.tool.base import Input, Output, ToolCard
+from openjiuwen.core.foundation.tool.form_handler.form_handler_manager import FormHandlerManager
 from openjiuwen.core.foundation.tool.service_api.api_param_mapper import APIParamLocation, APIParamMapper
 from openjiuwen.core.foundation.tool.service_api.response_parser import ParserRegistry
 from openjiuwen.core.runner.callback import trigger
@@ -133,7 +136,7 @@ class RestfulApi(Tool):
             card: RestfulApiCard configuration
 
         Returns:
-            Dictionary with keys: 'path', 'query', 'header', 'body'
+            Dictionary with keys: 'path', 'query', 'header', 'body', 'form'
             Each value is a list of parameter definitions with: name, type, description, required
 
         Example:
@@ -159,7 +162,8 @@ class RestfulApi(Tool):
             "path": [],
             "query": [],
             "header": [],
-            "body": []
+            "body": [],
+            "form": []
         }
 
         if not card.input_params:
@@ -191,22 +195,47 @@ class RestfulApi(Tool):
         # GET, HEAD, OPTIONS, DELETE use params; POST, PUT, PATCH use json body
         # Note: While DELETE CAN have a body per HTTP spec, it's uncommon in REST APIs
         # If you need DELETE with body, explicitly mark parameters with "location": "body" in schema
-        if self._method in ["GET", "HEAD", "OPTIONS", "DELETE"]:
-            request_arg["params"] = map_results.get(APIParamLocation.BODY)
+        form_params = map_results.get(APIParamLocation.FORM, {})
+        body_params = map_results.get(APIParamLocation.BODY, {})
+        headers = map_results.get(APIParamLocation.HEADER, {})
+        if form_params:
+            headers = self._prepare_headers_for_form_data(headers)
+            request_arg["data"] = await self._process_form_data(form_params, body_params)
+        elif self._method in ["GET", "HEAD", "OPTIONS", "DELETE"]:
+            request_arg["params"] = body_params
         else:
             # POST, PUT, PATCH send data as JSON in request body
-            request_arg["json"] = map_results.get(APIParamLocation.BODY)
-        ssl_verify, ssl_cert = SslUtils.get_ssl_config(self._RESTFUL_SSL_VERIFY, self._RESTFUL_SSL_CERT, ["false"])
-        if ssl_verify:
-            ssl_context = SslUtils.create_strict_ssl_context(ssl_cert)
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-        else:
-            connector = aiohttp.TCPConnector(ssl=False)
+            request_arg["json"] = body_params
+        from openjiuwen.core.foundation.tool.auth.auth_callback import AuthType
+        from openjiuwen.core.runner import Runner
+        framework = Runner.callback_framework
+        auth_result = await framework.trigger(
+            ToolCallEvents.TOOL_AUTH,
+            auth_config=ToolAuthConfig(
+                auth_type=AuthType.SSL,
+                config={
+                    "verify_switch_env": self._RESTFUL_SSL_VERIFY,
+                    "ssl_cert_env": self._RESTFUL_SSL_CERT,
+                },
+                tool_type="restful_api",
+                tool_id=self.card.id,
+            ),
+        )
+        connector = next(item for item in auth_result
+                         if item is not None).auth_data.get("connector")
         url = self._url
         path_params = {k: str(v) for k, v in map_results.get(APIParamLocation.PATH).items()}
         if path_params:
             url = url.format(**path_params)
-        query_params = [(k, v) for k, v in map_results.get(APIParamLocation.QUERY, {}).items()]
+        query_params = []
+        for k, v in map_results.get(APIParamLocation.QUERY, {}).items():
+            if isinstance(v, list):
+                # parse ids=[1,2,3] for ids=1&ids=2&ids=3
+                for item in v:
+                    query_params.append((k, item))
+            else:
+                query_params.append((k, v))
+
         if query_params:
             url = f'{url}?{urlencode(query_params)}'
         proxy = UrlUtils.get_global_proxy_url(url)
@@ -214,7 +243,7 @@ class RestfulApi(Tool):
             async with session.request(
                     self._method,
                     url,
-                    headers=map_results.get(APIParamLocation.HEADER),
+                    headers=headers,
                     allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=timeout),
                     **request_arg,
@@ -301,3 +330,67 @@ class RestfulApi(Tool):
 
     def get_method(self):
         return self._method
+
+    async def _process_form_data(
+            self,
+            form_params: Dict[str, Any],
+            body_params: Dict[str, Any]
+    ) -> aiohttp.FormData:
+        """
+        Process form parameters using FormHandlerManager.
+
+        Args:
+            form_params: Parameters with location=form, format: {param_name: {"form_handler_type": xxx, "value": xxx}}
+            body_params: Parameters with location=body (merged into form)
+
+        Returns:
+            aiohttp.FormData object
+        """
+        form_handler_manager = FormHandlerManager()
+        final_form_data = aiohttp.FormData()
+
+        for param_name, param_info in form_params.items():
+            form_handler_type = param_info["form_handler_type"]
+            value = param_info["value"]
+
+            handler = form_handler_manager.get_handler(form_handler_type)()
+            final_form_data = await handler.handle(
+                form=final_form_data,
+                form_data={param_name: value},
+            )
+
+        for param_name, param_value in body_params.items():
+            if param_value is None:
+                continue
+            final_form_data.add_field(param_name, json.dumps(param_value), content_type="application/json")
+
+        return final_form_data
+
+    def _prepare_headers_for_form_data(self, headers: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Prepare headers for FormData requests, removing conflicting Content-Type.
+
+        When using aiohttp.FormData to upload files, aiohttp automatically sets
+        the correct multipart/form-data Content-Type (including boundary).
+        Manually setting Content-Type will cause the request to fail.
+
+        Args:
+            headers: Original headers
+
+        Returns:
+            Processed headers (with Content-Type removed)
+        """
+        if not headers:
+            return {}
+
+        processed_headers = {}
+        for key, value in headers.items():
+            if key.lower() != "content-type":
+                processed_headers[key] = value
+            else:
+                logger.debug(
+                    f"Content-Type header '{value}' removed for multipart/form-data request. "
+                    f"aiohttp will set the correct Content-Type automatically."
+                )
+
+        return processed_headers

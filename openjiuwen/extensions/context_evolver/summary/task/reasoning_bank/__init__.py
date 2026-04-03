@@ -6,10 +6,12 @@ from .update import (
     SummarizeMemoryOp,
     SummarizeMemoryParallelOp,
     UpdateVectorStoreOp,
+    PersistMemoryOp,
 )
 
 __all__ = [
     "SummarizeMemoryOp",
     "SummarizeMemoryParallelOp",
     "UpdateVectorStoreOp",
+    "PersistMemoryOp",
 ]

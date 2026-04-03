@@ -30,9 +30,150 @@ python -m examples.context_evolver.quickstart
 
 ### 前置条件
 
-1. 在 `.env` 文件中配置 API 凭证
-2. 在 `config.yaml` 文件中配置算法设置
+1. 安装 Docker（参见下方 [基础设施配置](#基础设施配置)）
+2. 启动 Milvus 实例（参见下方 [基础设施配置](#基础设施配置)）
+3. 在 `.env` 文件中创建并配置 API 凭证
+4. 在 `config.yaml` 文件中配置算法设置
 
+## 基础设施配置
+
+### 1. 安装 Docker
+
+运行 Milvus 容器化服务需要先安装 Docker。
+
+#### Linux（Ubuntu / Debian）
+
+```bash
+# 卸载旧版本 Docker
+sudo apt-get remove -y docker docker-engine docker.io containerd runc
+
+# 安装依赖
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+# 添加 Docker 官方 GPG 密钥及软件源
+sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+    sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 安装 Docker Engine 及 Compose 插件
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# 允许非 root 用户运行 Docker（执行后需重新登录）
+sudo usermod -aG docker $USER
+
+# 验证安装
+docker --version
+docker compose version
+```
+
+#### Windows
+
+1. 从 [https://docs.docker.com/desktop/install/windows-install/](https://docs.docker.com/desktop/install/windows-install/) 下载 **Docker Desktop for Windows**。
+2. 运行安装程序（`Docker Desktop Installer.exe`）并按向导操作。
+3. 建议选择 **WSL 2 后端**，或在提示时启用 Hyper-V。
+4. 安装完成后启动 Docker Desktop，并在 PowerShell 中验证：
+
+```powershell
+docker --version
+docker compose version
+```
+
+#### macOS
+
+1. 从 [https://docs.docker.com/desktop/install/mac-install/](https://docs.docker.com/desktop/install/mac-install/) 下载 **Docker Desktop for Mac**。
+2. 打开 `.dmg` 文件，将 Docker 拖入 `Applications` 文件夹并启动。
+3. 在终端中验证：
+
+```bash
+docker --version
+docker compose version
+```
+
+---
+
+### 2. 使用 Docker 安装 Milvus
+
+Milvus Standalone 是推荐用于开发和小规模生产的单节点部署方式，使用 Docker Compose 管理三个服务：**Milvus**、**etcd** 和 **MinIO**。
+
+#### 第一步 — 下载官方 Compose 文件
+
+**Linux / macOS**
+
+```bash
+wget https://github.com/milvus-io/milvus/releases/download/v2.6.2/milvus-standalone-docker-compose.yml \
+    -O docker-compose.yml
+```
+
+**Windows（PowerShell）**
+
+```powershell
+Invoke-WebRequest `
+    -URI "https://github.com/milvus-io/milvus/releases/download/v2.6.2/milvus-standalone-docker-compose.yml" `
+    -OutFile "docker-compose.yml"
+```
+
+#### 第二步 — 启动 Milvus
+
+```bash
+docker compose up -d
+```
+
+确认三个容器均已运行：
+
+```bash
+docker compose ps
+```
+
+预期输出：
+
+```
+NAME                IMAGE                               STATUS
+milvus-standalone   milvusdb/milvus:v2.6.2             Up (healthy)
+milvus-etcd         quay.io/coreos/etcd:v3.5.5         Up (healthy)
+milvus-minio        minio/minio:RELEASE.2023-03-13...  Up (healthy)
+```
+
+Milvus gRPC 现已在 `localhost:19530` 上提供服务。
+
+#### 第三步 — 验证连通性（可选）
+
+```bash
+# 确认端口 19530 处于监听状态
+docker exec milvus-standalone \
+    python3 -c "from pymilvus import connections; connections.connect(); print('OK')"
+```
+
+#### 停止与重启 Milvus
+
+```bash
+# 停止（数据保留在 Docker 卷中）
+docker compose down
+
+# 重新启动
+docker compose up -d
+
+# 删除容器及所有数据
+docker compose down --volumes --remove-orphans
+```
+
+#### 连接器所需的环境变量
+
+在下一节创建的 `.env` 文件中添加 Milvus 连接配置：
+
+```env
+# Milvus 向量数据库
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
+MILVUS_COLLECTION=vector_nodes
+```
+
+---
 
 ## 配置
 

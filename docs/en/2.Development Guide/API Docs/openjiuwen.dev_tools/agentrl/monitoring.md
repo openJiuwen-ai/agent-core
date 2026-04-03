@@ -2,7 +2,7 @@
 
 ## class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.TrainingStepMetrics
 
-```
+```python
 @dataclass class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.TrainingStepMetrics(step: int, epoch: int, verl_metrics: Dict[str, Any], avg_turns: float, reward_mean: float, consecutive_zero_reward_steps: int)
 ```
 
@@ -17,11 +17,9 @@ Dataclass encapsulating all metrics for a single training step log entry.
 * **reward_mean**(float): Mean reward value.
 * **consecutive_zero_reward_steps**(int): Consecutive zero-reward steps.
 
----
-
 ## class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.RLMetricsTracker
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.RLMetricsTracker(project_name: str, experiment_name: str, backends: List[str], config: Optional[Dict[str, Any]] = None)
 ```
 
@@ -40,27 +38,27 @@ Initialize metrics tracker.
 * **backends**(List[str]): Logging backend list.
 * **config**(Optional[Dict[str, Any]], optional): Config dictionary. Default: `None`.
 
-### def log_step(self, step: int, metrics: Dict[str, Any]) -> None
+### log_step(self, step: int, metrics: Dict[str, Any]) -> None
 
 Log scalar metrics dictionary at given step.
 
-### def log_training_step(self, data: TrainingStepMetrics) -> None
+### log_training_step(self, data: TrainingStepMetrics) -> None
 
 Log complete training step with RL-augmented metrics.
 
-### def log_rollout_stats(self, step: int, rewards_by_uid: Dict[str, List[Dict[str, Any]]], total_positive: int = 0, total_negative: int = 0, total_training_samples: Optional[int] = None) -> None
+### log_rollout_stats(self, step: int, rewards_by_uid: Dict[str, List[Dict[str, Any]]], total_positive: int = 0, total_negative: int = 0, total_training_samples: Optional[int] = None) -> None
 
 Log structured rollout statistics.
 
-### def log_reward_distribution(self, step: int, rewards: List[float]) -> None
+### log_reward_distribution(self, step: int, rewards: List[float]) -> None
 
 Log reward distribution histogram (WandB only).
 
-### def log_validation(self, step: int, val_metrics: Dict[str, Any]) -> None
+### log_validation(self, step: int, val_metrics: Dict[str, Any]) -> None
 
 Log validation metrics.
 
-### def finish(self) -> None
+### finish(self) -> None
 
 Clean up tracking resources.
 

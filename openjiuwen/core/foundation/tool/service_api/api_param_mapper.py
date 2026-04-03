@@ -14,15 +14,17 @@ class APIParamLocation(Enum):
     PATH = "path"  # Path parameters in URL (e.g., /users/{id})
     BODY = "body"  # Request body parameters
     HEADER = "header"  # HTTP header parameters
+    FORM = "form"  # Form data parameters
 
 
 class APIParamMapper:
-    """Maps input parameters to their corresponding API locations (query, path, body, header).
+    """Maps input parameters to their corresponding API locations (query, path, body, header, form).
 
     This class handles parameter distribution based on schema definitions and provides
     default value merging for query, path, and header parameters.
     """
     _LOCATION = "location"  # Key name for location specification in schema
+    _FORM_HANDLER_TYPE = "form_handler_type"
 
     def __init__(
             self,
@@ -75,7 +77,6 @@ class APIParamMapper:
 
                 value = inputs[param_name]
                 location_raw = param_schema.get(self._LOCATION)
-
                 # Normalize location
                 if isinstance(location_raw, str):
                     # Schema explicitly defines location
@@ -90,6 +91,14 @@ class APIParamMapper:
                     else:
                         location = APIParamLocation.QUERY
 
+                if location == APIParamLocation.FORM:
+                    form_handler_type = param_schema.get(self._FORM_HANDLER_TYPE, "default")
+                    if value:
+                        result[APIParamLocation.FORM][param_name] = {
+                            "form_handler_type": form_handler_type,
+                            "value": value
+                        }
+                    continue
                 result[location][param_name] = value
 
         # Merge defaults (inputs override defaults, but None/'' preserve defaults)

@@ -3,21 +3,24 @@
 
 
 DEFAULT_INNER_LOG_CONFIG = {
-                'level': 'INFO',
-                'output': ['console', 'file'],
-                'log_path': './logs/',
-                'log_file': 'run/jiuwen.log',
-                'interface_log_file': 'interface/jiuwen_interface.log',
-                'interface_output': ['console', 'file'],
-                'prompt_builder_interface_log_file': 'interface/jiuwen_prompt_builder_interface.log',
-                'performance_log_file': 'performance/jiuwen_performance.log',
-                'performance_output': ['console', 'file'],
-                'backup_count': 20,
-                'max_bytes': 20971520,
-                'format': ('%(asctime)s | %(log_type)s | %(filename)s | %(lineno)d | '
-                          '%(funcName)s | %(trace_id)s | %(levelname)s | %(message)s')
-            }
+    "backend": "default",
+    "level": "INFO",
+    "structured_output_format": "json",
+    "backup_count": 20,
+    "max_bytes": 20971520,
+    "format": "%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s",
+    "log_path": "./logs/",
+    "log_file": "run/jiuwen.log",
+    "propagate": True,
+    "output": ["console", "file"],
+    "interface_log_file": "interface/jiuwen_interface.log",
+    "interface_output": ["console", "file"],
+    "prompt_builder_interface_log_file": "interface/jiuwen_prompt_builder_interface.log",
+    "performance_log_file": "performance/jiuwen_performance.log",
+    "performance_output": ["console", "file"],
+    "loggers": {},
+}
 
 DEFAULT_LOG_CONFIG = {
-    'logging': DEFAULT_INNER_LOG_CONFIG
+    "logging": DEFAULT_INNER_LOG_CONFIG
 }

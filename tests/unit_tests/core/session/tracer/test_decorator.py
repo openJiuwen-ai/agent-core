@@ -161,19 +161,18 @@ class MockModel(BaseModelClient):
         }
         return mock_params
 
-
     async def invoke(self,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            *,
-            tools: Union[List[ToolInfo], List[dict], None] = None,
-            temperature: Optional[float] = None,
-            top_p: Optional[float] = None,
-            model: str = None,
-            max_tokens: Optional[int] = None,
-            stop: Union[Optional[str], None] = None,
-            output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
-            **kwargs):
+                     messages: Union[str, List[BaseMessage], List[dict]],
+                     *,
+                     tools: Union[List[ToolInfo], List[dict], None] = None,
+                     temperature: Optional[float] = None,
+                     top_p: Optional[float] = None,
+                     model: str = None,
+                     max_tokens: Optional[int] = None,
+                     stop: Union[Optional[str], None] = None,
+                     output_parser: Optional[BaseOutputParser] = None,
+                     timeout: float = None,
+                     **kwargs):
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         logger.info(f"begin to invoke, inputs={messages}")
         params = self._build_request_params(
@@ -194,17 +193,17 @@ class MockModel(BaseModelClient):
         return messages
 
     async def stream(self,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            *,
-            tools: Union[List[ToolInfo], List[dict], None] = None,
-            temperature: Optional[float] = None,
-            top_p: Optional[float] = None,
-            model: str = None,
-            max_tokens: Optional[int] = None,
-            stop: Union[Optional[str], None] = None,
-            output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
-            **kwargs):
+                     messages: Union[str, List[BaseMessage], List[dict]],
+                     *,
+                     tools: Union[List[ToolInfo], List[dict], None] = None,
+                     temperature: Optional[float] = None,
+                     top_p: Optional[float] = None,
+                     model: str = None,
+                     max_tokens: Optional[int] = None,
+                     stop: Union[Optional[str], None] = None,
+                     output_parser: Optional[BaseOutputParser] = None,
+                     timeout: float = None,
+                     **kwargs):
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         logger.info(f"begin to stream, inputs={messages}")
         params = self._build_request_params(
@@ -400,9 +399,9 @@ class TestDecator:
         assert len(results) == 3
         assert results[0][2].get("instance_info", {}).get("class_name", "") == "Qwen/Qwen3-32B"
         assert results[1][2].get("llm_params", {}) == {'max_tokens': None,
-                                                   'messages': [BaseMessage(role='aa', content='', name=None)],
-                                                   'model': 'a', 'stop': None, 'stream': True, 'temperature': None,
-                                                   'tools': None, 'top_p': None}
+                                                       'messages': [BaseMessage(role='aa', content='', name=None)],
+                                                       'model': 'a', 'stop': None, 'stream': True, 'temperature': None,
+                                                       'tools': None, 'top_p': None}
 
         results.clear()
         await mocked_model.invoke(model="a", messages=[BaseMessage(role="aa")])
@@ -415,3 +414,8 @@ class TestDecator:
                                                        'messages': [BaseMessage(role='aa', content='', name=None)],
                                                        'model': 'a', 'stop': None, 'stream': False, 'temperature': None,
                                                        'tools': None, 'top_p': None}
+        results.clear()
+        await mocked_model.invoke([BaseMessage(role="aa")])
+        for item in results:
+            print(item)
+        assert results[0][2].get("inputs", {}) == {'inputs': [BaseMessage(role='aa', content='', name=None)]}

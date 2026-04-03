@@ -9,8 +9,6 @@
 - Providing a parallel runtime executor;
 - Providing the high-level user entry point `RLOptimizer`.
 
-This module removes service-oriented logic and uses verl's RayPPOTrainer and Ray actors directly.
-
 **Classes**:
 
 | CLASS | DESCRIPTION |
@@ -21,15 +19,15 @@ This module removes service-oriented logic and uses verl's RayPPOTrainer and Ray
 | [AgentRuntimeConfig](./agentrl/config.md#class-openjiuwendev_toolsagentrlconfigschemasagentruntimeconfig) | Agent runtime hyperparameters. |
 | [PersistenceConfig](./agentrl/config.md#class-openjiuwendev_toolsagentrlconfigschemaspersistenceconfig) | Rollout persistence configuration. |
 | [AdaConfig](./agentrl/config.md#class-openjiuwendev_toolsagentrlconfigschemasadaconfig) | Additional parameters for Ada rollout variant. |
-| [Rollout](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrollout) | Single-turn dialogue rollout. |
-| [RolloutMessage](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrolloutmessage) | Complete task execution result. |
-| [RLTask](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrltask) | Minimal training task unit. |
-| [RolloutWithReward](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrolloutwithreward) | Standard MDP data unit. |
-| [TaskQueue](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatortask_queuetaskqueue) | Async task queue + Rollout result buffer. |
+| [Rollout](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrollout) | Single-turn dialogue rollout. |
+| [RolloutMessage](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrolloutmessage) | Complete task execution result. |
+| [RLTask](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrltask) | Minimal training task unit. |
+| [RolloutWithReward](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrolloutwithreward) | Standard MDP data unit. |
+| [TaskQueue](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatortask_queuetaskqueue) | Async task queue + Rollout result buffer. |
 | [RLOptimizer](./agentrl/optimizer.md#class-openjiuwendev_toolsagentrloptimizerrl_optimizerrloptimizer) | Top-level RL training entry point. |
-| [TaskRunner](./agentrl/optimizer.md#class-openjiuwendev_toolsagentrloptimizertask_runnertaskrunner) | Ray remote Actor for coordinating training initialization and execution. |
-| [MainTrainer](./agentrl/rl_trainer.md#class-openjiuwendev_toolsagentrlrl_trainermain_trainermaintrainer) | Training loop coordinator (DataLoaders, `BackendProxy`, `TrainingCoordinator`, validation, `fit`). |
-| [VerlTrainingExecutor](./agentrl/rl_trainer.md#class-openjiuwendev_toolsagentrlrl_trainerverl_executorverltrainingexecutor) | Verl-based training executor extending `RayPPOTrainer` (PPO/GRPO steps, rollout sleep/wake). |
+| [TaskRunner](./agentrl/optimizer.md#class-openjiuwendev_toolsagentrloptimizertask_runnertaskrunner) | Ray remote Actor that coordinates training initialization and execution. |
+| [MainTrainer](./agentrl/rl_trainer.md#class-openjiuwendev_toolsagentrlrl_trainermain_trainermaintrainer) | Training loop coordinator (`DataLoader`, `BackendProxy`, `TrainingCoordinator`, validation, and `fit`). |
+| [VerlTrainingExecutor](./agentrl/rl_trainer.md#class-openjiuwendev_toolsagentrlrl_trainerverl_executorverltrainingexecutor) | Training executor subclassing verl's `RayPPOTrainer` (PPO/GRPO steps; rollout sleep/wake). |
 | [RewardRegistry](./agentrl/reward.md#class-openjiuwendev_toolsagentrlrewardregistryrewardregistry) | Reward function registry. |
 | [RolloutPersistence](./agentrl/rollout_store.md#class-openjiuwendev_toolsagentrlrollout_storebaserolloutpersistence) | Rollout persistence abstract interface. |
 | [FileRolloutStore](./agentrl/rollout_store.md#class-openjiuwendev_toolsagentrlrollout_storefile_storefilerolloutstore) | File-based Rollout persistence implementation. |

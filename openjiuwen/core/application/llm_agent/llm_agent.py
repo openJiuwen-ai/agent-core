@@ -8,6 +8,7 @@ from typing import Dict, List, Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.session import with_session
 from openjiuwen.core.single_agent import Session
 from openjiuwen.core.single_agent.legacy import (
     AgentSession, ControllerAgent,
@@ -183,19 +184,25 @@ class LLMAgent(ControllerAgent):
                 Runner.resource_mgr.add_tool(tool=tools_to_add, tag=self.agent_config.id)
             # Sync agent's workflows to external session
             # When external session is provided, agent's workflows need to be registered
+        async for chunk in self._inner_stream(inputs=inputs, session=agent_session,
+                                              need_cleanup=need_cleanup, own_stream=own_stream):
+            yield chunk
 
+
+    @with_session()
+    async def _inner_stream(self, inputs, session, need_cleanup, own_stream):
         # Store final result for send_to_agent
         final_result_holder = {"result": None}
-        await self.context_engine.create_context(session=agent_session)
+        await self.context_engine.create_context(session=session)
 
         # Fully delegate to controller
         async def stream_process():
             try:
-                result = await self.controller.invoke(inputs, agent_session)
+                result = await self.controller.invoke(inputs, session)
                 final_result_holder["result"] = result
             finally:
                 if need_cleanup:
-                    await agent_session.post_run()
+                    await session.post_run()
 
         task = asyncio.create_task(stream_process())
         result_for_memory_list = []
@@ -203,7 +210,7 @@ class LLMAgent(ControllerAgent):
         if own_stream:
             # Only read from stream_iterator when owning stream
             # If external session passed, external caller handles reading
-            async for result in agent_session.stream_iterator():
+            async for result in session.stream_iterator():
                 result_for_memory_list.append(_extract_answer_output(result))
                 yield result
 

@@ -37,6 +37,28 @@ if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import BaseAgent
 
 
+class RunKind(Enum):
+    """Run kind enumeration for different execution modes."""
+    NORMAL = "normal"
+    HEARTBEAT = "heartbeat"
+    CRON = "cron"
+
+
+class HeartbeatReason(Enum):
+    """Heartbeat trigger reason."""
+    INTERVAL = "interval"
+    MANUAL = "manual"
+
+
+@dataclass
+class RunContext:
+    """Structured runtime context for heartbeat."""
+    reason: Optional[HeartbeatReason] = None
+    session_id: Optional[str] = None
+    context_mode: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
 # ================================================================
 # Typed Event Inputs
 # ================================================================
@@ -51,10 +73,28 @@ class InvokeInputs:
         query: User query string
         conversation_id: Optional conversation/session ID
         result: Agent invoke result (filled after invoke)
+        run_kind: Run kind (normal or heartbeat)
+        run_context: Structured runtime context
     """
     query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    run_kind: Optional[RunKind] = None
+    run_context: Optional[RunContext] = None
+
+    def is_heartbeat(self) -> bool:
+        """Check if this is a heartbeat run."""
+        return self.run_kind == RunKind.HEARTBEAT
+
+    def is_lightweight_context(self) -> bool:
+        """Check if lightweight context mode is enabled."""
+        if self.run_context and self.run_context.context_mode:
+            return self.run_context.context_mode == "lightweight"
+        return False
+
+    def is_cron(self) -> bool:
+        """Check if this is a cron run."""
+        return self.run_kind == RunKind.CRON
 
 
 @dataclass
@@ -62,12 +102,14 @@ class ModelCallInputs:
     """Input data for BEFORE/AFTER_MODEL_CALL events.
 
     Attributes:
-        messages: Message list for LLM
+        messages: Preview message list before the final LLM window is rebuilt
         tools: Optional tool definitions
+        model_context: Current ModelContext used to build the final LLM window
         response: LLM response (filled after call)
     """
     messages: List[Any] = field(default_factory=list)
     tools: Optional[List[Any]] = None
+    model_context: Optional[ModelContext] = None
     response: Optional[Any] = None
 
 
@@ -101,11 +143,20 @@ class TaskIterationInputs:
         loop_event: Event object that triggered this iteration
         conversation_id: Optional conversation/session ID
         result: Iteration result (filled after iteration)
+        query: Effective query for this iteration.  Rails may
+            modify this field in ``before_task_iteration`` to
+            alter the query sent to the inner agent.
+        is_follow_up: True when this iteration was triggered by
+            a controller follow-up rather than the original user
+            query.  ``task_instruction`` templates should not be
+            applied to follow-up queries.
     """
     iteration: int
     loop_event: Any
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    query: Optional[str] = None
+    is_follow_up: bool = False
 
 
 @dataclass
@@ -200,6 +251,9 @@ class AgentCallbackContext:
     _force_finish_request: Optional[ForceFinishRequest] = field(
         default=None, init=False, repr=False
     )
+    _steering_queue: Optional[asyncio.Queue] = field(
+        default=None, init=False, repr=False
+    )
 
     async def fire(
         self, event: AgentCallbackEvent
@@ -254,6 +308,68 @@ class AgentCallbackContext:
     def has_force_finish_request(self) -> bool:
         """Check whether a force-finish request is pending."""
         return self._force_finish_request is not None
+
+    # ---- Steering runtime control ----
+
+    def bind_steering_queue(
+        self, queue: asyncio.Queue,
+    ) -> None:
+        """Bind an external steering queue.
+
+        Wires the same ``asyncio.Queue`` that the
+        EventHandler writes to, so the inner agent loop
+        can drain pending steering messages before each
+        model call.
+
+        Args:
+            queue: The shared asyncio.Queue instance.
+        """
+        self._steering_queue = queue
+
+    def push_steering(self, msg: str) -> None:
+        """Push a steering message into the queue.
+
+        Safe no-op if no queue is bound.
+
+        Args:
+            msg: Steering instruction text.
+        """
+        if self._steering_queue is not None:
+            self._steering_queue.put_nowait(msg)
+
+    def drain_steering(self) -> List[str]:
+        """Drain all pending steering messages.
+
+        Returns:
+            List of steering message strings,
+            empty if no queue bound or queue empty.
+        """
+        if self._steering_queue is None:
+            return []
+        msgs: List[str] = []
+        while not self._steering_queue.empty():
+            try:
+                msgs.append(
+                    self._steering_queue.get_nowait()
+                )
+            except asyncio.QueueEmpty:
+                break
+        return msgs
+
+    def has_pending_steering(self) -> bool:
+        """Check whether steering messages are pending.
+
+        Returns:
+            True if a queue is bound and non-empty.
+        """
+        if self._steering_queue is None:
+            return False
+        return not self._steering_queue.empty()
+
+    @property
+    def steering_queue(self) -> Optional[asyncio.Queue]:
+        """Return the bound steering queue, or None."""
+        return self._steering_queue
 
     @asynccontextmanager
     async def lifecycle(
@@ -361,7 +477,7 @@ class AgentRail(ABC):
     async def before_model_call(
         self, ctx: AgentCallbackContext
     ) -> None:
-        """Called before LLM is invoked."""
+        """Called before LLM is invoked with preview messages and model_context."""
         pass
 
     async def after_model_call(

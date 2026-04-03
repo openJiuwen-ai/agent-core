@@ -2,7 +2,7 @@
 
 ## class openjiuwen.dev_tools.agentrl.optimizer.rl_optimizer.RLOptimizer
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.optimizer.rl_optimizer.RLOptimizer(config: RLConfig)
 ```
 
@@ -26,7 +26,7 @@ Initialize RL optimizer.
 
 * **config**(RLConfig): RL configuration.
 
-### def set_tools(self, tools: list) -> None
+### set_tools(self, tools: list) -> None
 
 Register tools for the Agent.
 
@@ -34,15 +34,15 @@ Register tools for the Agent.
 
 * **tools**(list): List of tools.
 
-### def set_task_runner(self, task_runner) -> None
+### set_task_runner(self, task_runner) -> None
 
 Set custom task runner: `async (RLTask) -> RolloutMessage`.
 
-### def set_task_data_fn(self, fn: Callable[[Dict[str, Any]], Dict[str, Any]]) -> None
+### set_task_data_fn(self, fn: Callable[[Dict[str, Any]], Dict[str, Any]]) -> None
 
 Set the function that converts dataset rows to Agent input.
 
-### def register_reward(self, fn, name: Optional[str] = None) -> None
+### register_reward(self, fn, name: Optional[str] = None) -> None
 
 Register reward function in the global reward registry.
 
@@ -51,23 +51,23 @@ Register reward function in the global reward registry.
 * **fn**: Reward function.
 * **name**(Optional[str], optional): Reward name, default uses function name. Default: `None`.
 
-### def set_agent_factory(self, factory: Callable[[RLTask], Any]) -> None
+### set_agent_factory(self, factory: Callable[[RLTask], Any]) -> None
 
 Override the default AgentFactory.
 
-### def init_trainer(self) -> None
+### init_trainer(self) -> None
 
 Initialize the Ray-based training system.
 
-### def start_training(self) -> None
+### start_training(self) -> None
 
 Start the training loop on the remote TaskRunner.
 
-### def stop(self) -> None
+### stop(self) -> None
 
-Tear down TaskRunner actor and shut down Ray.
+Destroy the remote `TaskRunner` actor and run the Ray runtime shutdown procedure.
 
-### def train(self) -> None
+### train(self) -> None
 
 Initialize and run the full training pipeline in a single call.
 
@@ -113,21 +113,19 @@ Initialize and run the full training pipeline in a single call.
 >>> optimizer.train()
 ```
 
----
-
 ## class openjiuwen.dev_tools.agentrl.optimizer.task_runner.TaskRunner
 
-```
+```python
 @ray.remote(num_cpus=1) class openjiuwen.dev_tools.agentrl.optimizer.task_runner.TaskRunner()
 ```
 
-Ray remote Actor for coordinating training initialization and execution. Created and managed internally by `RLOptimizer`; advanced users may also use it directly for custom Ray deployment.
+Ray remote Actor that performs training initialization and scheduling. By default it is created and owned inside `RLOptimizer`; you may also instantiate it on the Ray side to customize deployment topology or integration.
 
 ### __init__(self) -> None
 
 Initialize TaskRunner.
 
-### def init_trainer(self, config, *, task_runner=None, agent_factory=None, task_data_fn=None, reward_fn=None, metrics_tracker=None, persistence=None) -> None
+### init_trainer(self, config, *, task_runner=None, agent_factory=None, task_data_fn=None, reward_fn=None, metrics_tracker=None, persistence=None) -> None
 
 Initialize all training components and Ray workers.
 
@@ -141,7 +139,7 @@ Initialize all training components and Ray workers.
 * **metrics_tracker**(optional): Metrics tracker. Default: `None`.
 * **persistence**(optional): Rollout persistence implementation. Default: `None`.
 
-### def start_trainer(self) -> None
+### start_trainer(self) -> None
 
 Start the main training loop. Must call `init_trainer()` first.
 
@@ -149,11 +147,9 @@ Start the main training loop. Must call `init_trainer()` first.
 
 * **BaseError**: Raised when called before `init_trainer()`.
 
----
-
 ## func openjiuwen.dev_tools.agentrl.optimizer.task_runner.get_ppo_ray_runtime_env
 
-```
+```python
 def get_ppo_ray_runtime_env() -> dict
 ```
 

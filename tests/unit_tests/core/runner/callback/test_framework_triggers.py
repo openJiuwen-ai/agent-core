@@ -111,7 +111,7 @@ async def test_trigger_passes_args_and_kwargs(framework):
     await framework.trigger("event", "pos1", "pos2", key1="val1", key2="val2")
 
     assert received["args"] == ("pos1", "pos2")
-    assert received["kwargs"] == {"key1": "val1", "key2": "val2"}
+    assert received["kwargs"] == {"key1": "val1", "key2": "val2", 'session': None}
 
 
 @pytest.mark.asyncio
@@ -908,7 +908,7 @@ async def test_modify_filter_only_args(framework):
 
     # Args should be modified, kwargs should be original
     assert received[0]["args"] == (100,)
-    assert received[0]["kwargs"] == {"key": "value"}
+    assert received[0]["kwargs"] == {"key": "value", 'session': None}
 
 
 @pytest.mark.asyncio
@@ -941,4 +941,4 @@ async def test_modify_filter_only_kwargs(framework):
 
     # Args should be original, kwargs should be modified
     assert received[0]["args"] == (1, 2, 3)
-    assert received[0]["kwargs"] == {"new_key": "new_value"}
+    assert received[0]["kwargs"] == {"new_key": "new_value", 'session': None}

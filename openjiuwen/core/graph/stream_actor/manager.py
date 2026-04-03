@@ -29,22 +29,25 @@ class ActorManager:
         self._stream_edges = workflow_spec.stream_edges
         self._streams: Dict[str, StreamActor] = {}
         self._streams_transform = StreamTransform()
-
-        consumer_dict = _build_reverse_graph(self._stream_edges)
-        for consumer_id, producer_ids in consumer_dict.items():
+        self._active_producer_ids: dict[str, set[ComponentAbility]] = {}
+        self._consumer_dict = _build_reverse_graph(self._stream_edges)
+        self._producer_abilities: dict[str, set[ComponentAbility]] = {}
+        for consumer_id, producer_ids in self._consumer_dict.items():
             consumer_stream_ability = [ability for ability in workflow_spec.comp_configs[consumer_id].abilities if
                                        ability in [ComponentAbility.COLLECT, ComponentAbility.TRANSFORM]]
             sources = set()
             for producer_id in producer_ids:
+                abilities = self._producer_abilities.get(producer_id, set())
                 for ability in workflow_spec.comp_configs[producer_id].abilities:
                     if ability in [ComponentAbility.STREAM, ComponentAbility.TRANSFORM]:
+                        abilities.add(ability)
                         sources.add(f"{producer_id}-{ability.name}")
+                self._producer_abilities[producer_id] = abilities
 
             self._streams[consumer_id] = StreamActor(consumer_id, graph.get_node(consumer_id),
                                                      consumer_stream_ability, list(sources),
                                                      stream_generator_timeout=session.config().get_env(
                                                          STREAM_INPUT_GEN_TIMEOUT_KEY))
-
         self._sub_graph = sub_graph
         self._sub_workflow_stream = AsyncStreamQueue(maxsize=10 * 1024) if sub_graph else None
 
@@ -53,6 +56,11 @@ class ActorManager:
             raise build_error(StatusCode.GRAPH_STREAM_ACTOR_EXECUTION_ERROR,
                               reason=f"only sub graph has sub_workflow_stream")
         return self._sub_workflow_stream
+
+    def active_produce_ability(self, producer_id, ability):
+        abilities = self._active_producer_ids.get(producer_id, set())
+        abilities.add(ability)
+        self._active_producer_ids[producer_id] = abilities
 
     def _get_actor(self, consumer_id: str) -> StreamActor:
         return self._streams[consumer_id]
@@ -63,6 +71,7 @@ class ActorManager:
 
     async def produce(self, producer_id: str, message_content: Any,
                       ability: ComponentAbility, first_frame: bool = False):
+        self.active_produce_ability(producer_id, ability)
         consumer_ids = self._stream_edges.get(producer_id)
         if consumer_ids:
             for consumer_id in consumer_ids:
@@ -82,8 +91,17 @@ class ActorManager:
 
     async def consume(self, consumer_id: str, ability: ComponentAbility, schema: dict,
                       stream_callback: Callable[[dict], Awaitable[None]] = None) -> dict:
+        producer_ids = self._consumer_dict.get(consumer_id, [])
+        for producer_id in producer_ids:
+            all_abilities = self._producer_abilities.get(producer_id)
+            active_abilities = self._active_producer_ids.get(producer_id, set())
+            if not active_abilities:
+                for ab in all_abilities:
+                    await self.end_message(producer_id, ab)
+                    self.active_produce_ability(producer_id, ab)
         actor = self._get_actor(consumer_id)
-        return await actor.generator(ability, schema, stream_callback)
+        consume_iter = await actor.generator(ability, schema, stream_callback)
+        return consume_iter
 
     async def shutdown(self):
         for actor in self._streams.values():

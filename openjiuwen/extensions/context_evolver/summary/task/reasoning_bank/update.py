@@ -12,6 +12,7 @@ from openjiuwen.core.common.logging import context_engine_logger as logger
 
 from ....core.op import BaseOp
 from ....core.context import RuntimeContext
+from ....core.persistence import MemoryPersistenceHelper
 from ....schema import ReasoningBankMemoryItem, ReasoningBankMemory
 from .prompt import ReasoningBankPrompts
 
@@ -516,9 +517,104 @@ class UpdateVectorStoreOp(BaseOp):
         logger.info("Stored %s memories in vector store", len(stored_ids))
 
 
+class PersistMemoryOp(BaseOp):
+    """Persist ReasoningBank memories from the in-memory vector store to a JSON file or Milvus.
+
+    Designed to be appended at the end of the ReasoningBank summary pipeline::
+
+        (SummarizeMemoryOp() | SummarizeMemoryParallelOp()) >>
+        UpdateVectorStoreOp() >>
+        PersistMemoryOp(persist_type="json")
+
+    It reads **all** vector nodes that belong to *user_id* from the in-memory
+    vector store and writes them to the configured backend.
+
+    Args:
+        persist_type:       Backend to use — ``"json"`` or ``"milvus"``.
+        persist_path:       File-path template for the JSON backend.
+                            ``{user_id}`` and ``{algo_name}`` are replaced at
+                            runtime.
+                            Default: ``"./memories/{algo_name}/{user_id}.json"``.
+        milvus_host:        Milvus server hostname (default: ``"localhost"``).
+        milvus_port:        Milvus gRPC port (default: ``19530``).
+        milvus_collection:  Milvus collection name
+                            (default: ``"vector_nodes"``).
+    """
+
+    _ALGO_NAME = "rb"
+
+    def __init__(
+        self,
+        persist_type: str = "auto",
+        persist_path: str = "./memories/{algo_name}/{user_id}.json",
+        milvus_host: str = "localhost",
+        milvus_port: int = 19530,
+        milvus_collection: str = "vector_nodes",
+    ) -> None:
+        super().__init__(
+            persist_type=persist_type,
+            persist_path=persist_path,
+            milvus_host=milvus_host,
+            milvus_port=milvus_port,
+            milvus_collection=milvus_collection,
+        )
+        self._helper = MemoryPersistenceHelper(
+            persist_type=persist_type,
+            persist_path=persist_path,
+            milvus_host=milvus_host,
+            milvus_port=milvus_port,
+            milvus_collection=milvus_collection,
+        )
+
+    @property
+    def helper(self) -> MemoryPersistenceHelper:
+        """The persistence helper used by this op."""
+        return self._helper
+
+    async def async_execute(self, context: RuntimeContext) -> None:
+        """Persist all ReasoningBank memories for *user_id* to the configured backend.
+
+        In ``"auto"`` mode (default) Milvus is probed on the first call.
+        If reachable, memories are persisted to Milvus; otherwise they are
+        written to a local JSON file.
+
+        Args:
+            context: Runtime context — must contain ``user_id``.
+
+        Sets:
+            context.persist_count: Number of nodes persisted.
+        """
+        user_id = context.get("user_id", "default")
+
+        if not self.vector_store:
+            raise ValueError("Vector store not configured in ServiceContext")
+
+        # Collect every node that belongs to this user
+        all_nodes = self.vector_store.get_all(
+            metadata_filter={"workspace_id": user_id, "type": "reasoning_bank_memory"}
+        )
+
+        if not all_nodes:
+            logger.info(
+                "PersistMemoryOp (RB): no memories to persist for user=%s", user_id
+            )
+            context.persist_count = 0
+            return
+
+        nodes_dict = {node.id: node.to_dict() for node in all_nodes}
+        self._helper.save(user_id, self._ALGO_NAME, nodes_dict)
+
+        context.persist_count = len(nodes_dict)
+        logger.info(
+            "PersistMemoryOp (RB): persisted %d memories for user=%s via %s",
+            len(nodes_dict), user_id, self._helper.persist_type,
+        )
+
+
 # Export all operations
 __all__ = [
     "SummarizeMemoryOp",
     "SummarizeMemoryParallelOp",
     "UpdateVectorStoreOp",
+    "PersistMemoryOp",
 ]

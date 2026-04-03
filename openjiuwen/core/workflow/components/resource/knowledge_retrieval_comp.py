@@ -22,6 +22,7 @@ from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Input, Output
+from openjiuwen.core.retrieval import OpenAIEmbedding
 from openjiuwen.core.retrieval.common.config import (
     EmbeddingConfig,
     KnowledgeBaseConfig,
@@ -38,23 +39,21 @@ from openjiuwen.core.workflow.components.base import ComponentConfig
 from openjiuwen.core.workflow.components.component import ComponentComposable, ComponentExecutable
 
 
+class ComponentKBConfig(BaseModel):
+    kb_config: KnowledgeBaseConfig
+    vector_store_config: VectorStoreConfig
+    embed_config: Optional[EmbeddingConfig] = Field(default=None)
+    embed_additional_config: Dict[str, Any] = Field(default_factory=dict)
+
+
 @dataclass(kw_only=True)
 class KnowledgeRetrievalCompConfig(ComponentConfig):
-    kb_configs: List[KnowledgeBaseConfig]
+    component_kb_configs: List[ComponentKBConfig]
+    vector_store_connection_config: Dict[str, Any]
     retrieval_config: RetrievalConfig
-    vector_store_config: VectorStoreConfig
-    # Additional config needed for vector store creation should be passed here
-    vector_store_additional_config: Dict[str, Any]
-    embed_config: Optional[EmbeddingConfig] = field(default=None)
-
-    # Optional LLM config for agentic / query-rewrite scenarios
     model_id: Optional[str] = field(default=None)
     model_client_config: Optional[ModelClientConfig] = field(default=None)
     model_config: Optional[ModelRequestConfig] = field(default=None)
-
-    # Output formatting
-    result_separator: str = field(default="\n\n")
-    include_metadata: bool = field(default=False)
 
 
 class KnowledgeRetrievalInput(BaseModel):
@@ -65,7 +64,6 @@ class KnowledgeRetrievalInput(BaseModel):
 class KnowledgeRetrievalOutput(BaseModel):
     results: List[str] = Field(default_factory=list)
     context: str = Field(default="")
-    results_with_metadata: Optional[List[dict]] = Field(default=None)
 
 
 # Executable (runtime logic)
@@ -73,7 +71,7 @@ class KnowledgeRetrievalExecutable(ComponentExecutable):
     def __init__(self, component_config: KnowledgeRetrievalCompConfig):
         super().__init__()
         self._config = component_config
-        self._kb: List[KnowledgeBase] = []
+        self._kbs: List[KnowledgeBase] = []
         self._llm: Optional[Model] = None
         self._initialized: bool = False
         self._session: Optional[Session] = None
@@ -109,21 +107,22 @@ class KnowledgeRetrievalExecutable(ComponentExecutable):
 
         try:
             retrieval_results: List[MultiKBRetrievalResult] = await retrieve_multi_kb_with_source(
-                kbs=self._kb,
+                kbs=self._kbs,
                 query=query,
                 config=retrieval_config,
             )
         except Exception as e:
             workflow_logger.error(
-                "Knowledge retrieval failed",
+                "Knowledge retrieval retrieve call failed",
                 event_type=LogEventType.WORKFLOW_COMPONENT_ERROR,
-                component_id=self._session.get_executable_id(),
+                component_id=session.get_component_id(),
                 component_type_str="KnowledgeRetrievalComponent",
-                session_id=self._session.get_session_id(),
+                session_id=session.get_session_id(),
+                exception=e,
             )
             raise build_error(
                 StatusCode.COMPONENT_KNOWLEDGE_RETRIEVAL_INVOKE_CALL_FAILED,
-                error_msg=f"Retrieve call failed: {e}",
+                error_msg="Knowledge retrieval retrieve call failed",
                 cause=e,
             ) from e
 
@@ -154,52 +153,49 @@ class KnowledgeRetrievalExecutable(ComponentExecutable):
             if self._initialized:
                 return
             try:
-                if self._config.retrieval_config.agentic:
-                    self._llm = await self._create_llm_instance()
-                self._kb = await self._create_knowledge_base()
+                self._llm = await self._create_llm_instance() if self._config.retrieval_config.agentic else None
+                self._kbs = await self._create_knowledge_bases()
                 self._initialized = True
             except Exception as e:
                 raise build_error(
                     StatusCode.COMPONENT_KNOWLEDGE_RETRIEVAL_INVOKE_CALL_FAILED,
-                    error_msg=f"Failed to initialise knowledge base: {e}",
+                    error_msg="Failed to initialise knowledge retrieval component",
                     cause=e,
                 ) from e
 
-    async def _create_knowledge_base(self) -> List[KnowledgeBase]:
-        # Embed model needed for vector/hybrid search
-        embed_model = None
-        if self._config.embed_config is None:
-            index_types = [kb_config.index_type for kb_config in self._config.kb_configs]
-            if any(it in ("vector", "hybrid") for it in index_types):
-                raise build_error(
-                    StatusCode.COMPONENT_KNOWLEDGE_RETRIEVAL_EMBED_MODEL_INIT_ERROR,
-                    error_msg="Embedding config is required for vector or hybrid index types",
-                )
-        else:
-            from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
-
-            try:
-                embed_model = OpenAIEmbedding(config=self._config.embed_config)
-            except Exception as e:
-                raise build_error(
-                    StatusCode.COMPONENT_KNOWLEDGE_RETRIEVAL_EMBED_MODEL_INIT_ERROR,
-                    error_msg=f"Failed to initialize embedding model: {e}",
-                    cause=e,
-                ) from e
-
-        # Vector store
-        vector_store = create_vector_store(
-            self._config.vector_store_config, **self._config.vector_store_additional_config
-        )
-
-        # Create knowledge base instances for retrieval
+    async def _create_knowledge_bases(self) -> List[KnowledgeBase]:
         use_graph = self._config.retrieval_config.use_graph
         kb_instances = []
-        for kb_config in self._config.kb_configs:
+
+        for component_kb_config in self._config.component_kb_configs:
+            vector_store = create_vector_store(
+                component_kb_config.vector_store_config, **self._config.vector_store_connection_config
+            )
+
+            # Embed model needed for vector/hybrid search
+            embed_model = None
+            if component_kb_config.embed_config is None:
+                if component_kb_config.kb_config.index_type in ("vector", "hybrid"):
+                    raise build_error(
+                        StatusCode.COMPONENT_KNOWLEDGE_RETRIEVAL_EMBED_MODEL_INIT_ERROR,
+                        error_msg="Embedding config is required for vector or hybrid index type",
+                    )
+            else:
+                try:
+                    embed_model = OpenAIEmbedding(
+                        config=component_kb_config.embed_config, **component_kb_config.embed_additional_config
+                    )
+                except Exception as e:
+                    raise build_error(
+                        StatusCode.COMPONENT_KNOWLEDGE_RETRIEVAL_EMBED_MODEL_INIT_ERROR,
+                        error_msg="Failed to initialise embedding model",
+                        cause=e,
+                    ) from e
+
             if use_graph:
                 kb_instances.append(
                     GraphKnowledgeBase(
-                        config=kb_config,
+                        config=component_kb_config.kb_config,
                         vector_store=vector_store,
                         embed_model=embed_model,
                         llm_client=self._llm,
@@ -208,12 +204,13 @@ class KnowledgeRetrievalExecutable(ComponentExecutable):
             else:
                 kb_instances.append(
                     SimpleKnowledgeBase(
-                        config=kb_config,
+                        config=component_kb_config.kb_config,
                         vector_store=vector_store,
                         embed_model=embed_model,
                         llm_client=self._llm,
                     )
                 )
+
         return kb_instances
 
     async def _create_llm_instance(self) -> Model:
@@ -243,17 +240,14 @@ class KnowledgeRetrievalExecutable(ComponentExecutable):
 
     def _format_output(self, results: List[MultiKBRetrievalResult]) -> dict:
         texts = [r.text for r in results]
-        context = self._config.result_separator.join(texts)
+        context = "\n\n".join(texts)
 
-        output: Dict[str, Any] = {
-            "results": texts,
-            "context": context,
-        }
+        output = KnowledgeRetrievalOutput(
+            results=texts,
+            context=context,
+        )
 
-        if self._config.include_metadata:
-            output["results_with_metadata"] = [m.model_dump() for m in results]
-
-        return output
+        return output.model_dump()
 
 
 class KnowledgeRetrievalComponent(ComponentComposable):

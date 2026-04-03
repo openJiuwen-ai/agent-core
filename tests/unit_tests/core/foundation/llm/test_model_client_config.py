@@ -9,6 +9,7 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, Prov
 
 
 class _TempMockClient(BaseModelClient):
+    __client_name__ = "TempMockLLM"
     pass
 
 
@@ -44,21 +45,8 @@ def test_model_client_config_normalizes_openrouter_provider_case():
     assert cfg.client_provider == ProviderType.OpenRouter
 
 
-def test_model_client_config_model_validate_invalid_provider_raises_base_error():
-    with pytest.raises(BaseError) as error:
-        ModelClientConfig(
-            client_provider="mock-LLM",
-            api_key="sk-test",
-            api_base="http://localhost"
-        )
-    assert error.value.code == StatusCode.MODEL_PROVIDER_INVALID.code
-
-
 def test_model_client_config_allows_registered_string_provider():
-    from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY
-
     provider = "TempMockLLM"
-    _CLIENT_TYPE_REGISTRY[provider] = _TempMockClient
     cfg = ModelClientConfig(
         client_provider=provider,
         api_key="sk-test",

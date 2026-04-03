@@ -130,9 +130,9 @@ def decorate_model_with_trace(model, agent_session):
     instance_info = {"class_name": model_name, "type": "llm"}
     proxy = _TraceProxy(model)
     proxy.invoke = async_trace(model.invoke, session, InvokeType.LLM, instance_info,
-                               index=1, inputs_field_name="messages")
+                               index=0, inputs_field_name="messages")
     proxy.stream = async_trace_stream(model.stream, session, InvokeType.LLM, instance_info,
-                                      index=1, inputs_field_name="messages")
+                                      index=0, inputs_field_name="messages")
     return proxy
 
 

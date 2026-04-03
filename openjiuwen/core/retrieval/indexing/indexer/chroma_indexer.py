@@ -107,7 +107,20 @@ class ChromaIndexer(Indexer):
         embed_model: Optional[Embedding] = None,
         **kwargs,
     ) -> bool:
-        """Build index"""
+        """
+        Build or append to a ChromaDB collection for the given chunks.
+        Args:
+            chunks: Records to index (text and metadata; embeddings filled when needed).
+            config: Index name, index type (vector / hybrid / etc.).
+            embed_model: Required when ``config.index_type`` is ``vector`` or ``hybrid``.
+            **kwargs: Supported: ``database_name`` for the Chroma database name.
+
+        Returns:
+            ``True`` when the batch is written successfully.
+
+        Raises:
+            BaseError: Duplicate ``doc_id``, missing embed model, embedding failure, or add failure.
+        """
         try:
             collection_name = config.index_name
             vector_store_config = VectorStoreConfig(
@@ -169,17 +182,15 @@ class ChromaIndexer(Indexer):
 
             logger.info(f"Successfully built index {collection_name} with {len(chunks)} chunks")
             return True
+        except BaseError:
+            raise
         except Exception as e:
-            # Stored data could be damaged with runtime errors ignored, therefore it is raised
-            should_raise = [StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR.code]
-            # Re-raise all BaseError exceptions to preserve error information
-            # This includes embedding errors, configuration errors, and runtime errors
-            if isinstance(e, BaseError) and getattr(e, "code", None) in should_raise:
-                raise e
-            # For non-BaseError exceptions (e.g., from third-party libraries),
-            # log and return False to avoid breaking the process
             logger.error(f"Failed to build index: {e}")
-            return False
+            raise build_error(
+                StatusCode.RETRIEVAL_INDEXING_ADD_DOC_RUNTIME_ERROR,
+                error_msg=str(e),
+                cause=e,
+            ) from e
 
     async def update_index(
         self,

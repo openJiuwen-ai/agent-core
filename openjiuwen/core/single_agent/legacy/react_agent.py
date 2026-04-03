@@ -20,7 +20,7 @@ from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session import Config
+from openjiuwen.core.session import Config, with_session
 from openjiuwen.core.session.workflow import Session as WorkflowSession
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
@@ -235,6 +235,10 @@ class LegacyReActAgent(BaseAgent):
         if session is None:
             session = await self._session.pre_run(session_id=session_id, inputs=inputs)
             session_created = True
+        return await self._inner_invoke(session=session, inputs=inputs, session_created=session_created)
+
+    @with_session()
+    async def _inner_invoke(self, session, inputs, session_created):
         await self.context_engine.create_context(session=session)
 
         try:
@@ -296,15 +300,22 @@ class LegacyReActAgent(BaseAgent):
             if hasattr(self, '_tools') and self._tools:
                 tools_to_add = [(tool.card.name, tool) for tool in self._tools]
                 Runner.resource_mgr.add_tool(tool=tools_to_add, tag=self.agent_config.id)
-        await self.context_engine.create_context(session=agent_session)
+
+        async for chunk in self._inner_stream(session=agent_session, inputs=inputs, need_cleanup=need_cleanup,
+                                              own_stream=own_stream):
+            yield chunk
+
+    @with_session()
+    async def _inner_stream(self, session, inputs, need_cleanup, own_stream):
+        await self.context_engine.create_context(session=session)
 
         final_result_holder = {"result": None}
 
         async def stream_process():
             try:
-                final_result = await self.invoke(inputs, agent_session)
+                final_result = await self.invoke(inputs, session)
                 final_result_holder["result"] = final_result
-                await agent_session.write_stream(OutputSchema(
+                await session.write_stream(OutputSchema(
                     type="answer",
                     index=0,
                     payload={"output": final_result, "result_type": "answer"}
@@ -313,12 +324,12 @@ class LegacyReActAgent(BaseAgent):
                 logger.error(f"ReActAgent stream error: {e}")
             finally:
                 if need_cleanup:
-                    await agent_session.post_run()
+                    await session.post_run()
 
         task = asyncio.create_task(stream_process())
 
         if own_stream:
-            async for result in agent_session.stream_iterator():
+            async for result in session.stream_iterator():
                 yield result
 
         await task

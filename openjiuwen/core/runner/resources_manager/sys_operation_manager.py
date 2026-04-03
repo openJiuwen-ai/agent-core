@@ -13,6 +13,7 @@ class SysOperationMgr:
 
     def __init__(self):
         self._sys_operations: ThreadSafeDict[str, SysOperation] = ThreadSafeDict()
+        self._sandbox_key_owner_map: dict[str, str] = {}
 
     def add_sys_operation(self, sys_operation_id: str, sys_operation_instance: SysOperation):
         """Add a new system operation instance to the system operation registry.
@@ -34,6 +35,17 @@ class SysOperationMgr:
         if sys_operation_id in self._sys_operations:
             raise build_error(StatusCode.SYS_OPERATION_MANAGER_PROCESS_ERROR, process="add",
                               error_msg=f"already exists sys_operation_card {sys_operation_id}")
+        isolation_key_template = sys_operation_instance.isolation_key_template
+        if isolation_key_template:
+            if isolation_key_template in self._sandbox_key_owner_map:
+                existing_op_id = self._sandbox_key_owner_map[isolation_key_template]
+                if existing_op_id != sys_operation_id:
+                    raise ValueError(
+                        f"Isolation key template '{isolation_key_template}' is already registered "
+                        f"by operation '{existing_op_id}'. Cannot register operation '{sys_operation_id}' "
+                        f"with the same sandbox configuration."
+                    )
+            self._sandbox_key_owner_map[isolation_key_template] = sys_operation_id
         self._sys_operations[sys_operation_id] = sys_operation_instance
 
     def remove_sys_operation(self, sys_operation_id: str) -> Optional[SysOperation]:
@@ -51,7 +63,10 @@ class SysOperationMgr:
         if sys_operation_id is None:
             raise build_error(StatusCode.SYS_OPERATION_MANAGER_PROCESS_ERROR, process="remove",
                               error_msg="sys_operation_id can not be none")
-        return self._sys_operations.pop(sys_operation_id, None)
+        sys_operation = self._sys_operations.pop(sys_operation_id, None)
+        if sys_operation is not None and sys_operation.isolation_key_template:
+            self._sandbox_key_owner_map.pop(sys_operation.isolation_key_template, None)
+        return sys_operation
 
     def get_sys_operation(self, sys_operation_id: str) -> Optional[SysOperation]:
         """Retrieve the registered SysOperation instance by its unique ID.

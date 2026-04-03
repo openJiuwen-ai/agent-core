@@ -13,9 +13,12 @@ from openjiuwen.extensions.context_evolver.service.task_memory_service import (
 
 from openjiuwen.extensions.context_evolver.context_evolving_react_agent import (
     ContextEvolvingReActAgent,
-    create_memory_agent_config,
     MemoryAgentConfigInput,
+)
+
+from openjiuwen.extensions.context_evolver.service.trajectory_generator import (
     SummarizeTrajectoriesInput,
+    summarize_trajectories,
 )
 
 from openjiuwen.extensions.context_evolver.tool.wikipedia_tool import wikipedia_tool
@@ -47,6 +50,7 @@ __all__ = [
     "create_memory_agent_config",
     "MemoryAgentConfigInput",
     "SummarizeTrajectoriesInput",
+    "summarize_trajectories",
     "wikipedia_tool",
     "JSONFileConnector",
     "safe_model_dump",

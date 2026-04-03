@@ -130,10 +130,17 @@ async def main():
         merge_filter=MERGE_FILTER,
     )
     llm_config = get_env_json("JIUWEN_GRAPH_MEM_LLM_CONFIG")
+
+    # For OpenAI models, set:
+    # - llm_structured_output = False
+    # - llm_extra_kwargs = dict(extra_body=dict(reasoning_effort="minimal"))
+    # For Qwen3 models, set:
+    # - llm_structured_output = True
+    # - llm_extra_kwargs = dict(extra_body=dict(enable_thinking=False))
     graph_memory = GraphMemory(
         db_config=db_config,
         llm_client=llm,
-        llm_structured_output=llm_config.get("structured_output", True),
+        llm_structured_output=llm_config.get("structured_output", False),
         llm_extra_kwargs=dict(extra_body=dict(enable_thinking=False)),
         reranker=reranker,
         extraction_strategy=strategy,

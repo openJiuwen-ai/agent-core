@@ -149,7 +149,19 @@ class StatusCode(Enum):
         101102, "component knowledge_retrieval input parameter error, reason: {error_msg}")
     COMPONENT_KNOWLEDGE_RETRIEVAL_LLM_MODEL_INIT_ERROR = (
         101103, "component knowledge_retrieval llm_model initialization failed, reason: {error_msg}")
-    
+
+    ## MemoryWriteComponent  101150 - 101199
+    COMPONENT_MEMORY_WRITE_INPUT_PARAM_ERROR = (
+        101150, "component memory_write input parameter error, reason: {error_msg}")
+    COMPONENT_MEMORY_WRITE_INVOKE_CALL_FAILED = (
+        101151, "component memory_write invoke call failed, reason: {error_msg}")
+
+    ## MemoryRetrievalComponent  101200 - 101249
+    COMPONENT_MEMORY_RETRIEVAL_INPUT_PARAM_ERROR = (
+        101200, "component memory_retrieval input parameter error, reason: {error_msg}")
+    COMPONENT_MEMORY_RETRIEVAL_INVOKE_CALL_FAILED = (
+        101201, "component memory_retrieval invoke call failed, reason: {error_msg}")
+
     ## ToolComponent  102000 - 102019
     COMPONENT_TOOL_EXECUTION_ERROR = (102000, "component tool execution error, reason: {error_msg}")
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
@@ -194,6 +206,7 @@ class StatusCode(Enum):
     DEEPAGENT_CONTEXT_PARAM_ERROR = (123022, "deepagent callback context parameter error, reason: {error_msg}")
     DEEPAGENT_RUNTIME_ERROR = (123023, "deepagent runtime error, reason: {error_msg}")
     DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED = (123024, "deepagent task loop not implemented, reason: {error_msg}")
+    DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND = (123025, "subagent not found, reason: {error_msg}")
 
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999
@@ -820,17 +833,18 @@ class StatusCode(Enum):
     # 4. openapi tool 182400 - 182499
     TOOL_OPENAPI_CLIENT_EXECUTION_ERROR = (182400, "openapi client execute error, error='{reason}'")
 
-    # 5. deepagents tool 182500 - 182699
+    # 5. harness tool 182500 - 182699
     TOOL_TODOS_LOAD_FAILED = (182500, "todo tool loads failed, error='{reason}'")
     TOOL_TODOS_SAVE_FAILED = (182501, "todo tool saves failed, error='{reason}'")
     TOOL_TODOS_CLEAR_FAILED = (182502, "todo tool clears failed, error='{reason}'")
     TOOL_TODOS_VALIDATION_INVALID = (182503, "todo tool validation invalid, error='{reason}'")
     TOOL_TODOS_INVOKE_FAILED = (182504, "todo tool invoke failed, error='{reason}'")
-    TOOL_TASK_TOOL_INVOKED = (182505, "task tool invoked, error='{reason}'")
+    TOOL_TASK_TOOL_INVOKED = (182505, "task tool invoked failed, error='{reason}'")
 
     TOOL_WEB_SEARCH_ENGINE_ERROR = (182506, "web search engine error, engine='{engine}', reason='{reason}'")
     TOOL_WEB_SEARCH_ALL_ENGINES_FAILED = (182507, "all web search engines failed, errors='{errors}'")
     TOOL_WEB_API_KEY_NOT_SET = (182508, "web tool api key is not set, key_name='{key_name}'")
+    TOOL_SESSION_TOOL_INVOKED = (182509, "session tool invoked failed, error='{reason}'")
 
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")
@@ -898,6 +912,18 @@ class StatusCode(Enum):
     SYS_OPERATION_REGISTRY_ERROR = (
         199006,
         "sys operation registry error, process: {process}, reason: {error_msg}")
+    SYS_OPERATION_SANDBOX_GATEWAY_ERROR = (
+        199007,
+        "sandbox gateway error, operation: {operation}, reason: {error_msg}")
+    SYS_OPERATION_SANDBOX_LAUNCHER_ERROR = (
+        199008,
+        "sandbox launcher error, operation: {operation}, reason: {error_msg}")
+    SYS_OPERATION_SANDBOX_PROVIDER_ERROR = (
+        199009,
+        "sandbox provider error, operation: {operation}, reason: {error_msg}")
+    SYS_OPERATION_SANDBOX_ISOLATION_KEY_ERROR = (
+        199010,
+        "sandbox isolation key error, operation: {operation}, reason: {error_msg}")
 
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.

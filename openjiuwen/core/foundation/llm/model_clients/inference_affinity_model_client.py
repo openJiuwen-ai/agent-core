@@ -7,11 +7,11 @@ from typing import List, Dict, Any, Optional, AsyncIterator, Union
 from contextlib import asynccontextmanager
 import aiohttp
 
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, AudioGenerationResponse, \
-    VideoGenerationResponse
+from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
+    AudioGenerationResponse
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage,
     AssistantMessage,
@@ -74,14 +74,19 @@ class InferenceAffinityModelClient(BaseModelClient):
         return params
 
     @asynccontextmanager
-    async def _create_session(self):
-        """Create a new aiohttp session for each request"""
-        timeout = aiohttp.ClientTimeout(
-            total=self.model_client_config.timeout,
-            connect=30,
-            sock_read=self.model_client_config.timeout
+    async def _create_session(self, timeout: Optional[float] = None):
+        """Create a new aiohttp session for each request
+
+        Args:
+            timeout: Optional timeout override for this specific request
+        """
+        final_timeout = timeout if timeout is not None else self.model_client_config.timeout
+        timeout_obj = aiohttp.ClientTimeout(
+            total=final_timeout,
+            connect=getattr(self.model_client_config, 'connect_timeout', 30),
+            sock_read=final_timeout
         )
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout_obj) as session:
             yield session
 
     async def invoke(
@@ -95,6 +100,7 @@ class InferenceAffinityModelClient(BaseModelClient):
             max_tokens: Optional[int] = None,
             stop: Union[Optional[str], None] = None,
             output_parser: Optional[BaseOutputParser] = None,
+            timeout: Optional[float] = None,
             session_id: str = None,
             enable_cache_sharing: bool = False,
             **kwargs
@@ -110,13 +116,15 @@ class InferenceAffinityModelClient(BaseModelClient):
             max_tokens: Maximum tokens to generate
             stop: Stop sequences
             output_parser: Optional output parser
-            session_id: session id
+            timeout: Request timeout in seconds
+            session_id: session id for cache sharing
             enable_cache_sharing: enable cache sharing
             **kwargs: Additional parameters
 
         Returns:
             AssistantMessage: Model response
         """
+        tracer_record_data = kwargs.pop("tracer_record_data", None)
         params = self._build_and_sanitize_params(
             messages=messages,
             tools=tools,
@@ -130,6 +138,21 @@ class InferenceAffinityModelClient(BaseModelClient):
             enable_cache_sharing=enable_cache_sharing,
             **kwargs
         )
+        if tracer_record_data:
+            await tracer_record_data(llm_params=params)
+
+        llm_logger.info(
+            "LLM request params ready.",
+            event_type=LogEventType.LLM_CALL_START,
+            model_name=params.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=params.get("messages"),
+            tools=params.get("tools"),
+            temperature=params.get("temperature"),
+            top_p=params.get("top_p"),
+            max_tokens=params.get("max_tokens"),
+            is_stream=False
+        )
 
         try:
             await trigger(
@@ -142,10 +165,31 @@ class InferenceAffinityModelClient(BaseModelClient):
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"))
 
-            response_data = await self._make_async_request(params)
-            logger.info(f"InferenceAffinity API response: {response_data}")
+            response_data = await self._make_async_request(params, timeout=timeout)
+
+            llm_logger.info(
+                "InferenceAffinity API response received.",
+                event_type=LogEventType.LLM_CALL_END,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=False,
+                metadata={"response": response_data}
+            )
 
             # Parse response and apply output parser
+            llm_logger.info(
+                "Before parse response with output parser.",
+                event_type=LogEventType.LLM_CALL_END,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=False,
+                metadata={"output_parser": str(output_parser)}
+            )
             assistant_message = await self._parse_response(response_data, output_parser)
 
             await trigger(
@@ -165,7 +209,19 @@ class InferenceAffinityModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 is_stream=False,
                 error=e)
-            logger.error(f"InferenceAffinity API async invoke error: {e}")
+            llm_logger.error(
+                "InferenceAffinity API async invoke error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=False,
+                exception=str(e)
+            )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"InferenceAffinity API async invoke error: {str(e)}"
@@ -182,6 +238,7 @@ class InferenceAffinityModelClient(BaseModelClient):
             max_tokens: Optional[int] = None,
             stop: Union[Optional[str], None] = None,
             output_parser: Optional[BaseOutputParser] = None,
+            timeout: Optional[float] = None,
             session_id: str = None,
             enable_cache_sharing: bool = False,
             **kwargs
@@ -197,13 +254,15 @@ class InferenceAffinityModelClient(BaseModelClient):
             max_tokens: Maximum tokens to generate
             stop: Stop sequences
             output_parser: Optional output parser
-            session_id: session id
+            timeout: Request timeout in seconds
+            session_id: session id for cache sharing
             enable_cache_sharing: enable cache sharing
             **kwargs: Additional parameters
 
         Yields:
             AssistantMessageChunk: Streaming response chunk
         """
+        tracer_record_data = kwargs.pop("tracer_record_data", None)
         params = self._build_and_sanitize_params(
             messages=messages,
             tools=tools,
@@ -217,6 +276,9 @@ class InferenceAffinityModelClient(BaseModelClient):
             enable_cache_sharing=enable_cache_sharing,
             **kwargs
         )
+
+        if tracer_record_data:
+            await tracer_record_data(llm_params=params)
 
         try:
             await trigger(
@@ -232,7 +294,7 @@ class InferenceAffinityModelClient(BaseModelClient):
 
             if output_parser:
                 # Use streaming parser
-                async for parsed_result in self._astream_with_parser(params, output_parser):
+                async for parsed_result in self._astream_with_parser(params, output_parser, timeout=timeout):
                     await trigger(
                         LLMCallEvents.LLM_OUTPUT,
                         model_name=params.get("model"),
@@ -242,7 +304,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                     yield parsed_result
             else:
                 # Direct return without parser
-                async for chunk in self._stream_response(params):
+                async for chunk in self._stream_response(params, timeout=timeout):
                     if chunk:
                         await trigger(
                             LLMCallEvents.LLM_OUTPUT,
@@ -259,7 +321,19 @@ class InferenceAffinityModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
                 error=e)
-            logger.error(f"InferenceAffinity API async stream error: {e}")
+            llm_logger.error(
+                "InferenceAffinity API async stream error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                messages=params.get("messages"),
+                tools=params.get("tools"),
+                temperature=params.get("temperature"),
+                top_p=params.get("top_p"),
+                max_tokens=params.get("max_tokens"),
+                is_stream=True,
+                exception=str(e)
+            )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"InferenceAffinity API async stream error: {str(e)}"
@@ -324,10 +398,10 @@ class InferenceAffinityModelClient(BaseModelClient):
         Args:
             session_id: Cache salt value to identify specific cache
             messages: Message list
-            messages_released_index: Message release index
+            messages_released_index: Message release index (0-based)
             model: Model name (defaults to config model_name)
             tools: Tool list
-            tools_released_index: Tool release index
+            tools_released_index: Tool release index (0-based)
 
         Returns:
             bool: Whether release was successful
@@ -336,56 +410,147 @@ class InferenceAffinityModelClient(BaseModelClient):
             BaseError: If release request fails
         """
         try:
-            # Build release request parameters
+            messages_dict = self._convert_messages_to_dict(messages)
+            tools_dict = self._convert_tools_to_dict(tools)
+            sanitized_messages = self._sanitize_tool_calls(messages_dict)
+
             release_params = {
-                "model": model or self.model_config.model_name,
+                "model": model if model else self.model_config.model_name,
                 "cache_salt": session_id,
                 "cache_sharing": True,
-                "messages": messages,
+                "messages": sanitized_messages,
                 "messages_released_index": messages_released_index,
             }
 
-            if tools is not None:
-                release_params["tools"] = tools
+            if tools_dict:
+                release_params["tools"] = tools_dict
 
             if tools_released_index is not None:
                 release_params["tools_released_index"] = tools_released_index
+
+            client_name = self._get_client_name()
+            llm_logger.info(
+                "Before release KV cache, release request params ready.",
+                event_type=LogEventType.LLM_CALL_START,
+                model_name=model if model else self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                metadata={
+                    "client_name": client_name,
+                    "session_id": session_id,
+                    "messages_released_index": messages_released_index,
+                    "tools_released_index": tools_released_index,
+                }
+            )
 
             # Call vLLM release API
             url = f"{self.model_client_config.api_base.rstrip('/')}/release_kv_cache"
             headers = {"Content-Type": "application/json"}
 
-            async with self._create_session() as session:
-                async with session.post(url, headers=headers, json=release_params) as response:
+            async with self._create_session() as http_session:
+                async with http_session.post(url, headers=headers, json=release_params) as response:
+                    response_text = await response.text()
+
                     if response.status == 200:
-                        result = await response.json()
-                        logger.info(f"Release successful: {result}")
-                        return True
+                        try:
+                            result = json.loads(response_text)
+                            llm_logger.info(
+                                "KV cache release successful.",
+                                event_type=LogEventType.LLM_CALL_END,
+                                model_name=model if model else self.model_config.model_name,
+                                model_provider=self.model_client_config.client_provider,
+                                metadata={
+                                    "client_name": client_name,
+                                    "session_id": session_id,
+                                    "response": result
+                                }
+                            )
+                            return True
+                        except json.JSONDecodeError:
+                            llm_logger.info(
+                                "KV cache release successful (non-JSON response).",
+                                event_type=LogEventType.LLM_CALL_END,
+                                model_name=model if model else self.model_config.model_name,
+                                model_provider=self.model_client_config.client_provider,
+                                metadata={
+                                    "client_name": client_name,
+                                    "session_id": session_id,
+                                    "response_text": response_text
+                                }
+                            )
+                            return True
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Release failed with status {response.status}: {error_text}")
+                        llm_logger.error(
+                            f"KV cache release failed with status {response.status}.",
+                            event_type=LogEventType.LLM_CALL_ERROR,
+                            model_name=model if model else self.model_config.model_name,
+                            model_provider=self.model_client_config.client_provider,
+                            metadata={
+                                "client_name": client_name,
+                                "session_id": session_id,
+                                "status_code": response.status,
+                                "response_body": response_text
+                            }
+                        )
                         return False
 
+        except ValueError as ve:
+            # Log validation errors before re-raising
+            llm_logger.warning(
+                "KV cache release validation error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=model if model else self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                metadata={
+                    "client_name": self._get_client_name(),
+                    "session_id": session_id,
+                    "error": str(ve)
+                },
+                exc_info=True
+            )
+            raise  # Preserve original traceback
         except Exception as e:
-            logger.error(f"Release error: {e}")
+            client_name = self._get_client_name()
+            llm_logger.error(
+                f"KV cache release error: {str(e)}",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=model if model else self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                metadata={
+                    "client_name": client_name,
+                    "session_id": session_id,
+                    "error": str(e)
+                },
+                exc_info=True
+            )
             raise build_error(
                 error_code=StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"Release error: {str(e)}"
+                error_msg=f"Release error: {str(e)}",
+                status=StatusCode.ERROR
             ) from e
 
-    async def _make_async_request(self, params: Dict) -> Dict:
-        """Make async HTTP request with retry logic"""
+    async def _make_async_request(self, params: Dict, timeout: Optional[float] = None) -> Dict:
+        """Make async HTTP request with retry logic
+
+        Args:
+            params: Request parameters
+            timeout: Optional timeout override for this specific request
+        """
         url = f"{self.model_client_config.api_base.rstrip('/')}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
 
         last_error = None
         for attempt in range(self.model_client_config.max_retries):
             try:
-                logger.debug(
-                    f"[ASYNC] Non-stream request (attempt {attempt + 1}/{self.model_client_config.max_retries})")
+                llm_logger.debug(
+                    f"Non-stream request (attempt {attempt + 1}/{self.model_client_config.max_retries})",
+                    event_type=LogEventType.LLM_CALL_START,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    metadata={"attempt": attempt + 1}
+                )
 
-                async with self._create_session() as session:
-                    async with session.post(url, headers=headers, json=params) as response:
+                async with self._create_session(timeout=timeout) as http_session:
+                    async with http_session.post(url, headers=headers, json=params) as response:
                         if response.status != 200:
                             error_text = await response.text()
                             raise Exception(f"API returned error {response.status}: {error_text}")
@@ -395,13 +560,32 @@ class InferenceAffinityModelClient(BaseModelClient):
             except Exception as e:
                 last_error = e
                 if isinstance(e, asyncio.TimeoutError):
-                    logger.warning(f"[ASYNC] Request timeout: {str(e)}")
+                    llm_logger.warning(
+                        f"Request timeout: {str(e)}",
+                        event_type=LogEventType.LLM_CALL_ERROR,
+                        model_name=params.get("model"),
+                        model_provider=self.model_client_config.client_provider,
+                        metadata={"attempt": attempt + 1}
+                    )
                 else:
-                    logger.error(f"[ASYNC] Request failed: {str(e)}")
+                    llm_logger.error(
+                        f"Request failed: {str(e)}",
+                        event_type=LogEventType.LLM_CALL_ERROR,
+                        model_name=params.get("model"),
+                        model_provider=self.model_client_config.client_provider,
+                        metadata={"attempt": attempt + 1},
+                        exception=str(e)
+                    )
 
                 if attempt < self.model_client_config.max_retries - 1:
                     wait_time = 2 ** attempt
-                    logger.info(f"Retrying in {wait_time} seconds...")
+                    llm_logger.info(
+                        f"Retrying in {wait_time} seconds...",
+                        event_type=LogEventType.LLM_CALL_START,
+                        model_name=params.get("model"),
+                        model_provider=self.model_client_config.client_provider,
+                        metadata={"wait_time": wait_time, "next_attempt": attempt + 2}
+                    )
                     await asyncio.sleep(wait_time)
 
         raise Exception(f"Request failed after {self.model_client_config.max_retries} attempts: {str(last_error)}")
@@ -433,9 +617,8 @@ class InferenceAffinityModelClient(BaseModelClient):
         reasoning_content = message.get("reasoning_content", None)
 
         # Parse tool_calls
-        tool_calls = None
-        if "tool_calls" in message and message["tool_calls"]:
-            tool_calls = []
+        tool_calls = []
+        if message.get("tool_calls"):
             for idx, tc in enumerate(message.get("tool_calls", [])):
                 function = tc.get("function", {})
                 tool_call = ToolCall(
@@ -443,7 +626,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                     type="function",
                     name=function.get("name", "") or "",
                     arguments=function.get("arguments", "") or "",
-                    index=idx
+                    index=tc.get("index", idx)
                 )
                 tool_calls.append(tool_call)
 
@@ -451,12 +634,10 @@ class InferenceAffinityModelClient(BaseModelClient):
         usage_metadata = None
         usage = response.get("usage")
         if usage:
-            # Extract basic token information
             input_tokens = usage.get("prompt_tokens", 0) or 0
             output_tokens = usage.get("completion_tokens", 0) or 0
             total_tokens = usage.get("total_tokens", 0) or 0
 
-            # Extract cached token information
             cache_tokens = 0
             prompt_tokens_details = usage.get("prompt_tokens_details")
             if prompt_tokens_details:
@@ -472,19 +653,47 @@ class InferenceAffinityModelClient(BaseModelClient):
 
         # Apply output parser (only parse content field)
         parser_content = None
-        logger.info(f"Before parse content with parser, content: {content}")
-        logger.info(f"Before parse content with parser, parser: {parser}")
+        llm_logger.info(
+            "Before parse content with parser.",
+            event_type=LogEventType.LLM_CALL_END,
+            model_name=self.model_config.model_name,
+            model_provider=self.model_client_config.client_provider,
+            response_content=content,
+            is_stream=False
+        )
+        llm_logger.info(
+            "Before parse content with parser config.",
+            event_type=LogEventType.LLM_CALL_END,
+            model_name=self.model_config.model_name,
+            model_provider=self.model_client_config.client_provider,
+            is_stream=False,
+            metadata={"parser": str(parser)}
+        )
         if parser and content:
             try:
                 parser_content = await parser.parse(content)
-                logger.info(f"Parser parse success, parsed content: {parser_content}")
+                llm_logger.info(
+                    "Parser parse success.",
+                    event_type=LogEventType.LLM_CALL_END,
+                    model_name=self.model_config.model_name,
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=False,
+                    metadata={"parser_content": parser_content}
+                )
             except Exception as e:
-                logger.warning(f"Parser parse error: {e}")
+                llm_logger.warning(
+                    "Parser parse error.",
+                    event_type=LogEventType.LLM_CALL_ERROR,
+                    model_name=self.model_config.model_name,
+                    model_provider=self.model_client_config.client_provider,
+                    is_stream=False,
+                    exception=str(e)
+                )
                 parser_content = None
 
         return AssistantMessage(
             content=content,
-            tool_calls=tool_calls,
+            tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
             finish_reason="tool_calls" if tool_calls else "stop",
             reasoning_content=reasoning_content,
@@ -494,7 +703,8 @@ class InferenceAffinityModelClient(BaseModelClient):
     async def _astream_with_parser(
             self,
             params: Dict,
-            output_parser: BaseOutputParser
+            output_parser: BaseOutputParser,
+            timeout: Optional[float] = None
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Process streaming response with output parser
 
@@ -507,7 +717,7 @@ class InferenceAffinityModelClient(BaseModelClient):
         """
         accumulated_content = ""
 
-        async for chunk_item in self._stream_response(params):
+        async for chunk_item in self._stream_response(params, timeout=timeout):
             if chunk_item:
                 # Accumulate content
                 if chunk_item.content:
@@ -523,28 +733,41 @@ class InferenceAffinityModelClient(BaseModelClient):
                             parser_content = current_parsed_result
                             accumulated_content = ""  # Clear buffer to implement incremental output
                     except Exception as e:
-                        logger.debug(f"Stream parser attempt: {e}")
+                        llm_logger.debug(
+                            "Stream parser attempt error.",
+                            event_type=LogEventType.LLM_CALL_ERROR,
+                            model_name=self.model_config.model_name,
+                            model_provider=self.model_client_config.client_provider,
+                            is_stream=True,
+                            exception=str(e)
+                        )
                         parser_content = None
 
                 # Create new chunk with original content and parser_content
                 chunk_with_parser = AssistantMessageChunk(
-                    content=chunk_item.content,  # Keep original content increment unchanged
+                    content=chunk_item.content,
                     reasoning_content=chunk_item.reasoning_content,
                     tool_calls=chunk_item.tool_calls,
                     usage_metadata=chunk_item.usage_metadata,
                     finish_reason=chunk_item.finish_reason,
-                    parser_content=parser_content  # Has value when parsing succeeds, otherwise None
+                    parser_content=parser_content
                 )
 
                 yield chunk_with_parser
 
-    async def _stream_response(self, params: Dict) -> AsyncIterator[AssistantMessageChunk]:
-        """Stream response from API"""
+    async def _stream_response(self, params: Dict, timeout: Optional[float] = None) -> AsyncIterator[
+        AssistantMessageChunk]:
+        """Stream response from API
+
+        Args:
+            params: Request parameters
+            timeout: Optional timeout override for this specific request
+        """
         url = f"{self.model_client_config.api_base.rstrip('/')}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
 
-        async with self._create_session() as session:
-            async with session.post(url, headers=headers, json=params) as response:
+        async with self._create_session(timeout=timeout) as http_session:
+            async with http_session.post(url, headers=headers, json=params) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise Exception(f"API returned error {response.status}: {error_text}")
@@ -586,25 +809,29 @@ class InferenceAffinityModelClient(BaseModelClient):
                 reasoning_content = delta.get("reasoning_content", None)
 
                 # Parse tool_calls delta
-                tool_calls = None
-                if "tool_calls" in delta and delta["tool_calls"]:
-                    tool_calls = []
-                    for tc in delta["tool_calls"]:
-                        function_name = (tc.get("function") or {}).get("name", "")
-                        function_arguments = (tc.get("function") or {}).get("arguments", "")
+                tool_calls = []
+                tool_calls_delta = delta.get("tool_calls")
+                if tool_calls_delta:
+                    for tc_delta in tool_calls_delta:
+                        index = tc_delta.get("index", 0)
+                        tool_call_id = tc_delta.get("id", "")
+                        function_delta = tc_delta.get("function", {})
+                        name_delta = function_delta.get("name", "")
+                        args_delta = function_delta.get("arguments", "")
+
                         tool_call = ToolCall(
-                            id=tc.get("id", "") or "",
+                            id=tool_call_id or "",
                             type="function",
-                            name=function_name,
-                            arguments=function_arguments,
-                            index=tc.get("index", 0)
+                            name=name_delta or "",
+                            arguments=args_delta,
+                            index=index
                         )
                         tool_calls.append(tool_call)
 
                 # Build usage_metadata (usually only in the last chunk)
                 usage_metadata = None
-                if "usage" in chunk_data and chunk_data["usage"]:
-                    usage = chunk_data["usage"]
+                usage = chunk_data.get("usage")
+                if usage:
                     usage_metadata = UsageMetadata(
                         model_name=self.model_config.model_name,
                         input_tokens=usage.get("prompt_tokens", 0) or 0,
@@ -612,20 +839,30 @@ class InferenceAffinityModelClient(BaseModelClient):
                         total_tokens=usage.get("total_tokens", 0) or 0,
                     )
 
-                is_contain_content = content or reasoning_content or tool_calls
-                if is_contain_content or usage_metadata:
-                    return AssistantMessageChunk(
-                        content=content,
-                        reasoning_content=reasoning_content,
-                        tool_calls=tool_calls,
-                        usage_metadata=usage_metadata,
-                        finish_reason=choice.get("finish_reason") or "null"
-                    )
+                # Skip empty chunks
+                if not content and not reasoning_content and not tool_calls:
+                    return None
 
-        except json.JSONDecodeError:
+                return AssistantMessageChunk(
+                    content=content,
+                    reasoning_content=reasoning_content,
+                    tool_calls=tool_calls if tool_calls else None,
+                    usage_metadata=usage_metadata,
+                    finish_reason=choice.get("finish_reason") or "null"
+                )
             return None
 
-        return None
+        except (json.JSONDecodeError, KeyError, IndexError, AttributeError) as e:
+            llm_logger.warning(
+                "Error parsing stream chunk.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                line_content=line[:200] if len(line) <= 200 else f"{line[:200]}...",
+                exception=str(e)
+            )
+            return None
 
     def _sanitize_tool_calls(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -650,7 +887,6 @@ class InferenceAffinityModelClient(BaseModelClient):
             for tc in tool_calls:
                 if not isinstance(tc, dict):
                     continue
-                # Extract only valid fields
                 func = tc.get("function", {})
                 cleaned.append({
                     "id": tc.get("id", ""),

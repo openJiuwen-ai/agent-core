@@ -115,6 +115,7 @@ class BaseFsOperation(BaseOperation, ABC):
             mode: Literal['text', 'bytes'] = "text",
             prepend_newline: bool = True,
             append_newline: bool = False,
+            append: bool = False,
             create_if_not_exist: bool = True,
             permissions: str = "644",
             encoding: str = "utf-8",
@@ -129,6 +130,7 @@ class BaseFsOperation(BaseOperation, ABC):
             mode: Writing mode: "text" (for string content) or "bytes" (for binary data) (default: "text").
             prepend_newline: Add a newline character (`\n`) before the content (text mode only; default: True).
             append_newline: Add a newline character (`\n`) after the content (text mode only; default: False).
+            append: Append to the file instead of overwriting (default: False).
             create_if_not_exist: Auto-create the file if it doesn't exist (default: True).
             permissions: Octal file permissions (Unix/Linux only; ignored on Windows) (default: "644").
             encoding: Character encoding for text mode (default: utf-8).

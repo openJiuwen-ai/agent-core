@@ -24,4 +24,4 @@ class ReActAgentComp(ComponentComposable):
 
     def add_component(self, graph: Graph, node_id: str, wait_for_all: bool = False) -> None:
         """Add this component to a workflow graph."""
-        graph.add_node(node_id, self.to_executable(), wait_for_all=wait_for_all)
+        graph.add_node(node_id, self.executable, wait_for_all=wait_for_all)

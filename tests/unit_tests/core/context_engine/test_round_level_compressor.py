@@ -1,297 +1,150 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
+from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+    ROUND_LEVEL_FALLBACK_MARKER,
+    RoundLevelCompressor,
     RoundLevelCompressorConfig,
+    _CompressTarget,
 )
-from openjiuwen.core.context_engine.schema.messages import OffloadMixin
-from openjiuwen.core.foundation.llm import (
-    UserMessage,
-    AssistantMessage,
-)
+from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 
 
-async def create_context_with_compressor(
-    compressor_config: RoundLevelCompressorConfig,
-    history_messages=None,
-    token_counter=None,
-):
-    """Create context with RoundLevelCompressor via ContextEngine.create_context."""
-    engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
-    return await engine.create_context(
-        "test_ctx",
-        None,
-        history_messages=history_messages or [],
-        processors=[("RoundLevelCompressor", compressor_config)],
-        token_counter=token_counter,
-    )
+class _TestableRoundLevelCompressor(RoundLevelCompressor):
+    def __init__(self, config: RoundLevelCompressorConfig):
+        super().__init__(config)
+        self.compress_until_target_result = None
+
+    async def build_memory_message_for_test(self, summary: str, target: _CompressTarget, context):
+        return await self._build_memory_message(summary, target, context)
+
+    def build_compression_user_prompt_for_test(self, **kwargs) -> str:
+        return self._build_compression_user_prompt(**kwargs)
+
+    async def _compress_until_target(self, *args, **kwargs):
+        return self.compress_until_target_result
 
 
 class TestRoundLevelCompressor:
-    """RoundLevelCompressor unit tests: complex scenarios with multi-round add_messages."""
-
     @pytest.mark.asyncio
-    async def test_tokens_threshold_triggers_round_compression(self):
-        """When token count exceeds threshold and enough rounds exist, rounds are compressed."""
-        mock = MagicMock()
-        mock.parser_content = {
-            "user_summary": "User intents: ask A, ask B, ask C.",
-            "assistant_summary": "AI responses: answer A, answer B, answer C."
-        }
-
-        mock_counter = MagicMock()
-        mock_counter.count_messages = MagicMock(return_value=15000)
-
-        with patch(
-            "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
-        ) as mock_model_cls:
-            mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock])
-            mock_model_cls.return_value = mock_model
-
-            config = RoundLevelCompressorConfig(
-                rounds_threshold=3,
-                tokens_threshold=5000,
-                keep_last_round=False,
+    async def test_build_memory_message_offload_falls_back_to_plain_user_message(self):
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_total_tokens=100,
+                target_total_tokens=50,
             )
-            ctx = await create_context_with_compressor(config, token_counter=mock_counter)
-
-            rounds = []
-            for i in range(5):
-                rounds.append(UserMessage(content=f"User question {i}"))
-                rounds.append(AssistantMessage(content=f"Assistant answer {i}"))
-
-            await ctx.add_messages(rounds)
-
-            result = ctx.get_messages()
-            assert len(result) < 10
-            offloaded = [m for m in result if isinstance(m, OffloadMixin)]
-            assert len(offloaded) >= 2
-
-            reloaded_user = await ctx.reloader_tool().invoke(
-                dict(offload_handle=offloaded[0].offload_handle, offload_type="in_memory")
-            )
-            reloaded_ai = await ctx.reloader_tool().invoke(
-                dict(offload_handle=offloaded[1].offload_handle, offload_type="in_memory")
-            )
-            assert "User question" in reloaded_user or "User intents" in reloaded_user
-            assert "Assistant answer" in reloaded_ai or "AI responses" in reloaded_ai
-
-    @pytest.mark.asyncio
-    async def test_multi_round_add_triggers_compression(self):
-        """Multiple add_messages calls: compression triggered when threshold reached."""
-        mock = MagicMock()
-        mock.parser_content = {
-            "user_summary": "Compressed user intents.",
-            "assistant_summary": "Compressed assistant responses."
-        }
-
-        mock_counter = MagicMock()
-        mock_counter.count_messages = MagicMock(return_value=12000)
-
-        with patch(
-            "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
-        ) as mock_model_cls:
-            mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock])
-            mock_model_cls.return_value = mock_model
-
-            config = RoundLevelCompressorConfig(
-                rounds_threshold=3,
-                tokens_threshold=5000,
-                keep_last_round=False,
-            )
-            ctx = await create_context_with_compressor(config, token_counter=mock_counter)
-
-            await ctx.add_messages([
-                UserMessage(content="Round 0 user"),
-                AssistantMessage(content="Round 0 assistant"),
-            ])
-            result0 = ctx.get_messages()
-            assert len(result0) == 2
-
-            await ctx.add_messages([
-                UserMessage(content="Round 1 user"),
-                AssistantMessage(content="Round 1 assistant"),
-            ])
-            result1 = ctx.get_messages()
-            assert len(result1) == 4
-
-            await ctx.add_messages([
-                UserMessage(content="Round 2 user"),
-                AssistantMessage(content="Round 2 assistant"),
-            ])
-            result2 = ctx.get_messages()
-            offloaded = [m for m in result2 if isinstance(m, OffloadMixin)]
-            assert len(offloaded) >= 2
-
-            reloaded = await ctx.reloader_tool().invoke(
-                dict(offload_handle=offloaded[0].offload_handle, offload_type="in_memory")
-            )
-            assert "Round" in reloaded or "user" in reloaded.lower() or "assistant" in reloaded.lower()
-
-    @pytest.mark.asyncio
-    async def test_keep_last_round_preserves_final_round(self):
-        """With keep_last_round=True, the last round is not compressed."""
-        mock = MagicMock()
-        mock.parser_content = {
-            "user_summary": "Earlier user intents.",
-            "assistant_summary": "Earlier AI responses."
-        }
-
-        mock_counter = MagicMock()
-        mock_counter.count_messages = MagicMock(return_value=15000)
-
-        with patch(
-            "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
-        ) as mock_model_cls:
-            mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock])
-            mock_model_cls.return_value = mock_model
-
-            config = RoundLevelCompressorConfig(
-                rounds_threshold=3,
-                tokens_threshold=5000,
-                keep_last_round=True,
-            )
-            ctx = await create_context_with_compressor(config, token_counter=mock_counter)
-
-            rounds = []
-            for i in range(5):
-                rounds.append(UserMessage(content=f"Q{i}"))
-                rounds.append(AssistantMessage(content=f"A{i}"))
-
-            await ctx.add_messages(rounds)
-
-            result = ctx.get_messages()
-            last_user = next(m for m in result if m.content == "Q4")
-            last_ai = next(m for m in result if m.content == "A4")
-            assert not isinstance(last_user, OffloadMixin)
-            assert not isinstance(last_ai, OffloadMixin)
-
-    @pytest.mark.asyncio
-    async def test_reloader_tool_restores_original_messages(self):
-        """Reloader tool returns original messages for offloaded content."""
-        mock = MagicMock()
-        mock.parser_content = {
-            "user_summary": "Summarized users.",
-            "assistant_summary": "Summarized assistants."
-        }
-
-        mock_counter = MagicMock()
-        mock_counter.count_messages = MagicMock(return_value=20000)
-
-        with patch(
-            "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
-        ) as mock_model_cls:
-            mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock])
-            mock_model_cls.return_value = mock_model
-
-            config = RoundLevelCompressorConfig(
-                rounds_threshold=3,
-                tokens_threshold=5000,
-                keep_last_round=False,
-            )
-            ctx = await create_context_with_compressor(config, token_counter=mock_counter)
-
-            original_contents = [
-                ("Unique user content X", "Unique assistant content Y"),
-                ("Unique user content X2", "Unique assistant content Y2"),
-                ("Unique user content X3", "Unique assistant content Y3"),
-            ]
-            rounds = []
-            for u, a in original_contents:
-                rounds.append(UserMessage(content=u))
-                rounds.append(AssistantMessage(content=a))
-
-            await ctx.add_messages(rounds)
-
-            result = ctx.get_messages()
-            offloaded = [m for m in result if isinstance(m, OffloadMixin)]
-            assert len(offloaded) >= 2
-
-            for offload_msg in offloaded[:2]:
-                reloaded = await ctx.reloader_tool().invoke(
-                    dict(
-                        offload_handle=offload_msg.offload_handle,
-                        offload_type="in_memory",
-                    )
-                )
-                assert "Unique" in reloaded
-                assert "content" in reloaded
-
-    @pytest.mark.asyncio
-    async def test_insufficient_rounds_no_compression(self):
-        """When rounds are below rounds_threshold, no compression occurs."""
-        mock_counter = MagicMock()
-        mock_counter.count_messages = MagicMock(return_value=15000)
-
-        config = RoundLevelCompressorConfig(
-            rounds_threshold=10,
-            tokens_threshold=5000,
-            keep_last_round=False,
         )
-        with patch(
-            "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
-        ) as mock_model_cls:
-            mock_model_cls.return_value = MagicMock()
-            ctx = await create_context_with_compressor(config, token_counter=mock_counter)
+        compressor.offload_messages = AsyncMock(return_value=None)
+        context = MagicMock()
+        target = _CompressTarget(
+            block_id="block_1",
+            scope="ongoing_react",
+            start_idx=0,
+            end_idx=0,
+            messages=[AssistantMessage(content="analysis state")],
+        )
 
-            rounds = [
-                UserMessage(content="u1"),
-                AssistantMessage(content="a1"),
-                UserMessage(content="u2"),
-                AssistantMessage(content="a2"),
-            ]
-            await ctx.add_messages(rounds)
+        message = await compressor.build_memory_message_for_test(
+            "User Requirements:\n- Keep intent.",
+            target,
+            context,
+        )
 
-            result = ctx.get_messages()
-            assert len(result) == 4
-            assert not any(isinstance(m, OffloadMixin) for m in result)
+        assert isinstance(message, UserMessage)
+        assert message.content.startswith(ROUND_LEVEL_FALLBACK_MARKER)
+        assert "processor: RoundLevelCompressor" in message.content
 
     @pytest.mark.asyncio
-    async def test_customized_compression_prompt_used(self):
-        """Customized compression prompt is passed to Model.invoke."""
-        mock = MagicMock()
-        mock.parser_content = {
-            "user_summary": "Custom user summary.",
-            "assistant_summary": "Custom ai summary."
-        }
-
-        mock_counter = MagicMock()
-        mock_counter.count_messages = MagicMock(return_value=12000)
-
-        custom_prompt = "Custom round compression prompt."
-
-        with patch(
-            "openjiuwen.core.context_engine.processor.compressor.round_level_compressor.Model"
-        ) as mock_model_cls:
-            mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(side_effect=[mock])
-            mock_model_cls.return_value = mock_model
-
-            config = RoundLevelCompressorConfig(
-                rounds_threshold=3,
-                tokens_threshold=5000,
-                keep_last_round=False,
-                customized_compression_prompt=custom_prompt,
+    async def test_on_get_context_window_reports_original_message_range(self):
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_total_tokens=100,
+                target_total_tokens=50,
+                offload_writeback_enabled=False,
             )
-            ctx = await create_context_with_compressor(config, token_counter=mock_counter)
+        )
+        compressor.compress_until_target_result = [
+            UserMessage(
+                content=(
+                    f"{ROUND_LEVEL_FALLBACK_MARKER}\n"
+                    "processor: RoundLevelCompressor\n"
+                    "Summary:\ncompressed"
+                )
+            )
+        ]
+        context = MagicMock()
+        context.token_counter.return_value = None
+        context_window = ContextWindow(
+            system_messages=[],
+            context_messages=[
+                UserMessage(content="u" * 90),
+                AssistantMessage(content="a" * 90),
+                UserMessage(content="x" * 90),
+                AssistantMessage(content="y" * 90),
+            ],
+            tools=[],
+        )
 
-            rounds = []
-            for i in range(4):
-                rounds.append(UserMessage(content=f"u{i}"))
-                rounds.append(AssistantMessage(content=f"a{i}"))
-            await ctx.add_messages(rounds)
+        event, updated_context_window = await compressor.on_get_context_window(context, context_window)
 
-            call_args_list = mock_model.invoke.call_args_list
-            assert len(call_args_list) >= 1
-            for call_args in call_args_list[:1]:
-                messages_passed = call_args[0][0]
-                assert any(m.content == custom_prompt for m in messages_passed)
+        assert event is not None
+        assert event.messages_to_modify == [0, 1, 2, 3]
+        assert len(updated_context_window.context_messages) == 1
+        assert updated_context_window.context_messages[0].content.startswith(ROUND_LEVEL_FALLBACK_MARKER)
+
+    @staticmethod
+    def test_build_compression_user_prompt_includes_ongoing_and_completed_requirements():
+        compressor = _TestableRoundLevelCompressor(
+            RoundLevelCompressorConfig(
+                trigger_total_tokens=100,
+                target_total_tokens=50,
+            )
+        )
+        context = MagicMock()
+        context.token_counter.return_value = None
+
+        prompt_text = compressor.build_compression_user_prompt_for_test(
+            context_messages=[
+                UserMessage(content="request"),
+                AssistantMessage(content="working"),
+                UserMessage(content="another request"),
+                AssistantMessage(content="final answer"),
+            ],
+            targets=[
+                _CompressTarget(
+                    block_id="block_1",
+                    scope="ongoing_react",
+                    start_idx=0,
+                    end_idx=1,
+                    messages=[
+                        UserMessage(content="request"),
+                        AssistantMessage(content="working"),
+                    ],
+                ),
+                _CompressTarget(
+                    block_id="block_2",
+                    scope="completed_react",
+                    start_idx=2,
+                    end_idx=3,
+                    messages=[
+                        UserMessage(content="another request"),
+                        AssistantMessage(content="final answer"),
+                    ],
+                ),
+            ],
+            context=context,
+            phase_name="phase_1",
+            target_tokens=300,
+            keep_recent_messages=0,
+            system_messages=None,
+            tools=None,
+        )
+
+        assert "User Requirements" in prompt_text
+        assert "Final Result" in prompt_text
+        assert "Do not weaken or over-compress the user's original request" in prompt_text

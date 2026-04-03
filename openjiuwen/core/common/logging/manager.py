@@ -32,6 +32,7 @@ class LogManager:
     _loggers: Dict[str, LoggerProtocol] = {}
     _initialized = False
     _default_logger_class: Optional[Type[LoggerProtocol]] = None
+    _selected_backend: Optional[str] = None
 
     @classmethod
     def set_default_logger_class(cls, logger_class: Type[LoggerProtocol]) -> None:
@@ -39,7 +40,7 @@ class LogManager:
         cls._default_logger_class = logger_class
 
     @classmethod
-    def initialize(cls) -> None:
+    def initialize(cls, backend: Optional[str] = None) -> None:
         """
         Initialize log manager
 
@@ -49,11 +50,18 @@ class LogManager:
         if cls._initialized:
             return
 
-        default_logger_class = cls._get_default_logger_class()
+        cls._selected_backend = backend.strip().lower() if isinstance(backend, str) and backend.strip() else None
         log_config = cls._get_log_config()
+        resolved_backend = cls._selected_backend
+        if resolved_backend is None and log_config is not None and hasattr(log_config, "get_backend"):
+            resolved_backend = log_config.get_backend()  # type: ignore[assignment,no-any-return]
+
+        default_logger_class = cls._get_default_logger_class(resolved_backend)
 
         if log_config:
-            all_configs: Dict[str, Dict[str, Any]] = log_config.get_all_configs()  # type: ignore[attr-defined]
+            all_configs: Dict[str, Dict[str, Any]] = log_config.get_all_configs(  # type: ignore[attr-defined]
+                backend=cls._selected_backend
+            )
             for log_type, config in all_configs.items():  # type: ignore[misc]
                 if log_type not in cls._loggers:
                     cls._loggers[log_type] = default_logger_class(log_type, config)  # type: ignore[call-arg]
@@ -104,7 +112,9 @@ class LogManager:
             log_config = cls._get_log_config()
 
             if log_config:
-                config = log_config.get_custom_config(log_type)  # type: ignore[attr-defined]
+                config = log_config.get_custom_config(  # type: ignore[attr-defined]
+                    log_type, backend=cls._selected_backend
+                )
             else:
                 raise RuntimeError(f"LogConfig not available. Cannot create logger for '{log_type}'.")
 
@@ -132,12 +142,33 @@ class LogManager:
         Clear all loggers and initialization state.
         Mainly used for testing scenarios.
         """
+        for logger in cls._loggers.values():
+            close_logger = getattr(logger, "close", None)
+            if callable(close_logger):
+                close_logger()
         cls._loggers = {}
         cls._initialized = False
         cls._default_logger_class = None
+        cls._selected_backend = None
+        try:
+            from openjiuwen.core.common.logging import reset_lazy_loggers
+        except ImportError:
+            return
+        reset_lazy_loggers()
+
+        try:
+            from openjiuwen.core.common.logging.events import reset_common_logger_cache
+        except ImportError:
+            return
+        reset_common_logger_cache()
 
     @classmethod
-    def _get_default_logger_class(cls) -> Type[LoggerProtocol]:
+    def _get_default_logger_class(cls, backend: Optional[str] = None) -> Type[LoggerProtocol]:
+        resolved_backend = backend or cls._get_configured_backend()
+
+        if resolved_backend:
+            cls._default_logger_class = cls._get_logger_class_for_backend(resolved_backend)
+
         if cls._default_logger_class is None:
             try:
                 from openjiuwen.core.common.logging.default.default_impl import DefaultLogger
@@ -148,9 +179,35 @@ class LogManager:
         return cls._default_logger_class
 
     @classmethod
+    def _get_configured_backend(cls) -> Optional[str]:
+        log_config = cls._get_log_config()
+        if log_config is None or not hasattr(log_config, "get_backend"):
+            return None
+        return log_config.get_backend()  # type: ignore[no-any-return]
+
+    @classmethod
+    def _get_logger_class_for_backend(cls, backend: str) -> Type[LoggerProtocol]:
+        backend_name = backend.strip().lower()
+
+        if backend_name == "default":
+            from openjiuwen.core.common.logging.default.default_impl import DefaultLogger
+
+            return DefaultLogger
+
+        if backend_name == "loguru":
+            try:
+                from openjiuwen.core.common.logging.loguru.loguru_impl import LoguruLogger
+            except ImportError as e:
+                raise RuntimeError("Loguru backend requested but loguru is not available.") from e
+
+            return LoguruLogger
+
+        raise RuntimeError(f"Unsupported logging backend: {backend}")
+
+    @classmethod
     def _get_log_config(cls) -> Optional[object]:
         try:
-            from openjiuwen.core.common.logging.default.log_config import log_config
+            from openjiuwen.core.common.logging.log_config import log_config
 
             return log_config
         except ImportError:

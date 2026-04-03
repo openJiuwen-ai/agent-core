@@ -3,6 +3,10 @@
 
 logging:
   level: "INFO"
+  structured_output_format: "json"
+  loggers:
+    agent:
+      level: "DEBUG"
 
   backup_count: 20
   max_bytes: 20971520
@@ -13,12 +17,12 @@ logging:
 
   log_file: "run/jiuwen.log"
 
-  output: ["console", "file"]
+  output: [ "console", "file" ]
 
   interface_log_file: "interface/jiuwen_interface.log"
-  interface_output: ["console", "file"]
+  interface_output: [ "console", "file" ]
 
   prompt_builder_interface_log_file: "interface/jiuwen_prompt_builder_interface.log"
 
   performance_log_file: "performance/jiuwen_performance.log"
-  performance_output: ["console", "file"] 
+  performance_output: [ "console", "file" ]

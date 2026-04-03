@@ -1,5 +1,10 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
+import contextvars
+import inspect
+from typing import Any
+import functools
 
 from openjiuwen.core.session.checkpointer import Checkpointer
 from openjiuwen.core.session.config.base import (
@@ -46,9 +51,104 @@ from openjiuwen.core.session.utils import (
     NESTED_PATH_SPLIT,
 )
 
+
+
 from openjiuwen.core.session.session import Session
 
 deprecated = ["Session"]
+
+_current_session = contextvars.ContextVar("current_session", default=None)
+
+
+def get_current_session():
+    return _current_session.get()
+
+
+def with_session_for_class(cls):
+    methods = ['invoke', 'stream', 'collect', 'transform']
+    for method_name in methods:
+        if hasattr(cls, method_name):
+            method = getattr(cls, method_name)
+            if asyncio.iscoroutinefunction(method):
+                # Apply the session decorator
+                decorated = with_session()(method)
+                setattr(cls, method_name, decorated)
+
+    return cls
+
+
+def with_session(session: Any = None):
+    def decorator(func):
+        sig = inspect.signature(func)
+        param_names = list(sig.parameters.keys())
+
+        session_param_index = None
+        for i, name in enumerate(param_names):
+            if name == 'session':
+                session_param_index = i
+                break
+
+        def get_target_session(args, kwargs):
+            if session is not None:
+                return session
+            if 'session' in kwargs:
+                return kwargs['session']
+            if session_param_index is not None and len(args) > session_param_index:
+                return args[session_param_index]
+            return None
+
+        if inspect.isasyncgenfunction(func):
+            @functools.wraps(func)
+            async def async_gen_wrapper(*args, **kwargs):
+                target_session = get_target_session(args, kwargs)
+                token = _current_session.set(target_session)
+                try:
+                    async for value in func(*args, **kwargs):
+                        yield value
+                finally:
+                    _current_session.reset(token)
+
+            return async_gen_wrapper
+
+        elif inspect.isgeneratorfunction(func):
+            @functools.wraps(func)
+            def sync_gen_wrapper(*args, **kwargs):
+                target_session = get_target_session(args, kwargs)
+                token = _current_session.set(target_session)
+                try:
+                    for value in func(*args, **kwargs):
+                        yield value
+                finally:
+                    _current_session.reset(token)
+
+            return sync_gen_wrapper
+
+        else:
+            if asyncio.iscoroutinefunction(func):
+                @functools.wraps(func)
+                async def async_wrapper(*args, **kwargs):
+                    target_session = get_target_session(args, kwargs)
+                    token = _current_session.set(target_session)
+                    try:
+                        return await func(*args, **kwargs)
+                    finally:
+                        _current_session.reset(token)
+
+                return async_wrapper
+            else:
+                @functools.wraps(func)
+                def sync_wrapper(*args, **kwargs):
+                    target_session = get_target_session(args, kwargs)
+                    token = _current_session.set(target_session)
+                    try:
+                        return func(*args, **kwargs)
+                    finally:
+                        _current_session.reset(token)
+
+                return sync_wrapper
+
+    return decorator
+
 
 __all__ = [
     # session

@@ -12,6 +12,7 @@ from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator, Ite
 from pydantic import BaseModel, field_validator
 
 import aiofiles
+from filelock import AsyncFileLock, BaseAsyncFileLock
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -130,6 +131,58 @@ class _ErrorLogParams:
 class FsOperation(BaseFsOperation):
     """File system operation"""
 
+    @staticmethod
+    def _get_lock_timeout(options: Optional[Dict[str, Any]] = None) -> float:
+        """Gets the file lock timeout value from options or uses default.
+
+        Args:
+            options: Optional dict containing extended configuration.
+                     May include 'lock_timeout' in seconds.
+
+        Returns:
+            float: Timeout in seconds for acquiring file locks.
+        """
+        if options and "lock_timeout" in options:
+            return float(options["lock_timeout"])
+        return 300.0
+
+    @staticmethod
+    def _get_async_lock(file_path: pathlib.Path) -> BaseAsyncFileLock:
+        """Gets an async file lock for the given file.
+
+        Args:
+            file_path: Path to the target file that needs locking.
+
+        Returns:
+            BaseAsyncFileLock: Async file lock instance using a .lock suffix file.
+        """
+        lock_file = file_path.with_suffix(file_path.suffix + ".lock")
+        lock = AsyncFileLock(lock_file)
+        return lock
+
+    @staticmethod
+    def _get_ordered_locks(path1: pathlib.Path, path2: pathlib.Path) -> Tuple[BaseAsyncFileLock, BaseAsyncFileLock]:
+        """Gets two file locks in a globally consistent order to prevent deadlocks.
+
+        Uses case-normalized path comparison for cross-platform (Windows/Linux) safety.
+
+        Args:
+            path1: First file path to lock (e.g., source file).
+            path2: Second file path to lock (e.g., destination file).
+
+        Returns:
+            Tuple[BaseAsyncFileLock, BaseAsyncFileLock]: A Pair of async locks ordered deterministically by path.
+        """
+        key1 = os.path.normcase(str(path1))
+        key2 = os.path.normcase(str(path2))
+
+        if key1 <= key2:
+            first_path, second_path = path1, path2
+        else:
+            first_path, second_path = path2, path1
+
+        return FsOperation._get_async_lock(first_path), FsOperation._get_async_lock(second_path)
+
     async def read_file(
             self,
             path: str,
@@ -195,14 +248,19 @@ class FsOperation(BaseFsOperation):
             # Extract validated parameters
             file_path = validated_params.file_path
 
-            if mode == "bytes":
-                final_content = await self._read_bytes(file_path, validated_params.chunk_size)
-            else:
-                # Line-based operations - lines already contain original line endings
-                lines = []
-                async for line in FsOperation._read_text_content(validated_params):
-                    lines.append(line)
-                final_content = "".join(lines)
+            lock = self._get_async_lock(file_path)
+            timeout = self._get_lock_timeout(options)
+
+            async with asyncio.timeout(timeout):
+                async with lock:
+                    if mode == "bytes":
+                        final_content = await self._read_bytes(file_path, validated_params.chunk_size)
+                    else:
+                        # Line-based operations - lines already contain original line endings
+                        lines = []
+                        async for line in FsOperation._read_text_content(validated_params):
+                            lines.append(line)
+                        final_content = "".join(lines)
 
             data = ReadFileData(path=str(file_path), content=final_content, mode=mode)
             success_result = ReadFileResult(
@@ -262,6 +320,7 @@ class FsOperation(BaseFsOperation):
             method_name=method_name,
             method_params=method_params
         ))
+        lock = None
         try:
             # Create _ReadParams object
             read_params = _ReadParams(
@@ -287,6 +346,10 @@ class FsOperation(BaseFsOperation):
             # Extract validated parameters
             file_path = validated_params.file_path
 
+            lock = self._get_async_lock(file_path)
+            timeout = self._get_lock_timeout(options)
+
+            await lock.acquire(timeout=timeout)
             # bytes mode
             if mode != "text":
                 async for chunk in self._read_bytes_stream(file_path, validated_params.chunk_size):
@@ -306,6 +369,9 @@ class FsOperation(BaseFsOperation):
         except Exception as e:
             yield self._create_error_result("read_file_stream", str(e), ReadFileStreamResult,
                                             _ErrorLogParams(method_name, method_params, start_time))
+        finally:
+            if lock and lock.is_locked:
+                await lock.release()
 
     async def write_file(
             self,
@@ -315,6 +381,7 @@ class FsOperation(BaseFsOperation):
             mode: Literal['text', 'bytes'] = "text",
             prepend_newline: bool = True,
             append_newline: bool = False,
+            append: bool = False,
             create_if_not_exist: bool = True,
             permissions: str = "644",
             encoding: str = "utf-8",
@@ -329,6 +396,7 @@ class FsOperation(BaseFsOperation):
             mode: Writing mode: "text" (for string content) or "bytes" (for binary data) (default: "text").
             prepend_newline: Add a newline character (`\n`) before the content (text mode only; default: True).
             append_newline: Add a newline character (`\n`) after the content (text mode only; default: False).
+            append: Append to the file instead of overwriting (default: False).
             create_if_not_exist: Auto-create the file if it doesn't exist (default: True).
             permissions: Octal file permissions (Unix/Linux only; ignored on Windows) (default: "644").
             encoding: Character encoding for text mode (default: utf-8).
@@ -358,21 +426,27 @@ class FsOperation(BaseFsOperation):
                                                  WriteFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
 
-            if mode == "text":
-                txt = str(content)
-                if prepend_newline:
-                    txt = "\n" + txt
-                if append_newline:
-                    txt = txt + "\n"
+            lock = self._get_async_lock(file_path)
+            timeout = self._get_lock_timeout(options)
 
-                data_bytes = txt.encode(encoding)
-            else:
-                data_bytes = content if isinstance(content, (bytes, bytearray)) else bytes(content)
+            async with asyncio.timeout(timeout):
+                async with lock:
+                    if mode == "text":
+                        txt = str(content)
+                        if prepend_newline:
+                            txt = "\n" + txt
+                        if append_newline:
+                            txt = txt + "\n"
+                        data_bytes = txt.encode(encoding)
+                    else:
+                        data_bytes = content if isinstance(content, (bytes, bytearray)) else bytes(content)
 
-            async with aiofiles.open(file_path, mode="wb") as f:
-                await f.write(data_bytes)
+                    write_mode = "ab" if append else "wb"
+                    async with aiofiles.open(file_path, mode=write_mode) as f:
+                        await f.write(data_bytes)
 
-            self._apply_permissions(file_path, permissions)
+                    self._apply_permissions(file_path, permissions)
+
             success_result = WriteFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
@@ -436,9 +510,15 @@ class FsOperation(BaseFsOperation):
                 return self._create_error_result("upload_file", f"Target exists: {dst}", UploadFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
 
-            size = await self._transfer_file(src, dst, chunk_size)
-            if preserve_permissions:
-                self._copy_permissions(src, dst)
+            src_lock, dst_lock = self._get_ordered_locks(src, dst)
+            timeout = self._get_lock_timeout(options)
+
+            async with asyncio.timeout(timeout):
+                async with src_lock, dst_lock:
+                    size = await self._transfer_file(src, dst, chunk_size)
+                    if preserve_permissions:
+                        self._copy_permissions(src, dst)
+
             success_result = UploadFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
@@ -492,6 +572,9 @@ class FsOperation(BaseFsOperation):
             method_name=method_name,
             method_params=method_params
         ))
+
+        src_lock = None
+        dst_lock = None
         try:
             src = pathlib.Path(local_path).expanduser().resolve()
             dst = self._resolve_path(target_path, create_parent=create_parent_dirs)
@@ -504,6 +587,12 @@ class FsOperation(BaseFsOperation):
                 yield self._create_error_result("upload_file_stream", f"Target exists: {dst}", UploadFileStreamResult,
                                                 _ErrorLogParams(method_name, method_params, start_time))
                 return
+
+            src_lock, dst_lock = self._get_ordered_locks(src, dst)
+            timeout = self._get_lock_timeout(options)
+
+            await src_lock.acquire(timeout=timeout)
+            await dst_lock.acquire(timeout=timeout)
 
             async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
                 index = 0
@@ -537,6 +626,11 @@ class FsOperation(BaseFsOperation):
         except Exception as e:
             yield self._create_error_result("upload_file_stream", str(e), UploadFileStreamResult,
                                             _ErrorLogParams(method_name, method_params, start_time))
+        finally:
+            if src_lock and src_lock.is_locked:
+                await src_lock.release()
+            if dst_lock and dst_lock.is_locked:
+                await dst_lock.release()
 
     async def download_file(
             self,
@@ -588,9 +682,15 @@ class FsOperation(BaseFsOperation):
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
 
-            size = await self._transfer_file(src, dst, chunk_size)
-            if preserve_permissions:
-                self._copy_permissions(src, dst)
+            src_lock, dst_lock = self._get_ordered_locks(src, dst)
+            timeout = self._get_lock_timeout(options)
+
+            async with asyncio.timeout(timeout):
+                async with src_lock, dst_lock:
+                    size = await self._transfer_file(src, dst, chunk_size)
+                    if preserve_permissions:
+                        self._copy_permissions(src, dst)
+
             success_result = DownloadFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
@@ -644,6 +744,9 @@ class FsOperation(BaseFsOperation):
             method_name=method_name,
             method_params=method_params
         ))
+
+        src_lock = None
+        dst_lock = None
         try:
             src = self._resolve_path(source_path)
             dst = pathlib.Path(local_path).expanduser().resolve()
@@ -659,6 +762,12 @@ class FsOperation(BaseFsOperation):
                 return
             if create_parent_dirs:
                 dst.parent.mkdir(parents=True, exist_ok=True)
+
+            src_lock, dst_lock = self._get_ordered_locks(src, dst)
+            timeout = self._get_lock_timeout(options)
+
+            await src_lock.acquire(timeout=timeout)
+            await dst_lock.acquire(timeout=timeout)
 
             async with aiofiles.open(src, mode="rb") as src_f, aiofiles.open(dst, mode="wb") as dst_f:
                 index = 0
@@ -693,6 +802,11 @@ class FsOperation(BaseFsOperation):
         except Exception as e:
             yield self._create_error_result("download_file_stream", str(e), DownloadFileStreamResult,
                                             _ErrorLogParams(method_name, method_params, start_time))
+        finally:
+            if src_lock and src_lock.is_locked:
+                await src_lock.release()
+            if dst_lock and dst_lock.is_locked:
+                await dst_lock.release()
 
     async def list_files(
             self,

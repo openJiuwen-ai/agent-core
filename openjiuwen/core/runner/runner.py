@@ -32,6 +32,14 @@ from openjiuwen.core.session import Config
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.stream import BaseStreamMode
+from openjiuwen.core.runner.spawn import (
+    Message,
+    MessageType,
+    SpawnAgentConfig,
+    SpawnConfig,
+    SpawnedProcessHandle,
+    spawn_process,
+)
 from openjiuwen.core.single_agent import (
     BaseAgent,
     create_agent_session,
@@ -56,6 +64,12 @@ class _RunnerImpl:
     _DEFAULT_AGENT_SESSION_ID = "default_session"
 
     _AGENT_CONVERSATION_ID = "conversation_id"
+
+    @staticmethod
+    def _get_spawn_logging_config() -> dict[str, Any]:
+        from openjiuwen.core.common.logging.log_config import get_log_config_snapshot
+
+        return get_log_config_snapshot()
 
     def __init__(self, runner_id: str = _DEFAULT_RUNNER_ID, config: RunnerConfig = None):
         """
@@ -396,7 +410,6 @@ class _RunnerImpl:
             if agent_instance is None:
                 raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent_id=agent, reason="agent not exist")
             if isinstance(agent_instance, RemoteAgent):
-                # Remote single_agent does not add session, keep sessionId in input
                 if self._AGENT_CONVERSATION_ID not in inputs:
                     inputs[self._AGENT_CONVERSATION_ID] = session_id
                 return agent_instance, None
@@ -408,6 +421,116 @@ class _RunnerImpl:
         agent_session = self._create_agent_session(agent, session_id)
         await agent_session.pre_run(inputs=inputs)
         return agent, agent_session
+
+    async def spawn_agent(
+        self,
+        agent_config: SpawnAgentConfig,
+        inputs: Any,
+        *,
+        session: Optional[str | AgentSession] = None,
+        context: ModelContext = None,
+        envs: Optional[dict[str, Any]] = None,
+        spawn_config: Optional[SpawnConfig] = None,
+    ) -> SpawnedProcessHandle:
+        """
+        Spawn a child process to run an agent.
+
+        Args:
+            agent: Agent name or BaseAgent instance to execute
+            inputs: Input data for the agent
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            envs: Environment variables or configuration overrides
+            spawn_config: Configuration for spawned process management
+
+        Returns:
+            SpawnedProcessHandle for managing the spawned process
+        """
+        if not isinstance(agent_config, SpawnAgentConfig):
+            raise TypeError("Runner.spawn_agent now requires SpawnAgentConfig.")
+        normalized_inputs = inputs if isinstance(inputs, dict) else {"data": inputs}
+        session_id = normalized_inputs.get(
+            self._AGENT_CONVERSATION_ID,
+            session if isinstance(session, str) else self._DEFAULT_AGENT_SESSION_ID,
+        )
+        logging_config = (
+            agent_config.logging_config
+            if agent_config.logging_config is not None
+            else self._get_spawn_logging_config()
+        )
+        spawn_payload = agent_config.model_copy(update={"session_id": session_id, "logging_config": logging_config})
+        handle = await spawn_process(
+            agent_config=spawn_payload.model_dump(mode="json"),
+            inputs=normalized_inputs,
+            config=spawn_config,
+        )
+        if spawn_config is not None:
+            await handle.start_health_check()
+        return handle
+
+    async def spawn_agent_streaming(
+        self,
+        agent_config: SpawnAgentConfig,
+        inputs: Any,
+        *,
+        session: Optional[str | AgentSession] = None,
+        context: ModelContext = None,
+        stream_modes: list[BaseStreamMode] = None,
+        envs: Optional[dict[str, Any]] = None,
+        spawn_config: Optional[SpawnConfig] = None,
+    ) -> AsyncIterator[tuple[SpawnedProcessHandle, Any]]:
+        """
+        Spawn a child process to run an agent with streaming output.
+
+        Args:
+            agent: Agent name or BaseAgent instance to execute
+            inputs: Input data for the agent
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            stream_modes: Types of streaming data to output
+            envs: Environment variables or configuration overrides
+            spawn_config: Configuration for spawned process management
+
+        Yields:
+            Tuples of (SpawnedProcessHandle, message) as messages arrive
+        """
+        if not isinstance(agent_config, SpawnAgentConfig):
+            raise TypeError("Runner.spawn_agent_streaming now requires SpawnAgentConfig.")
+        normalized_inputs = inputs if isinstance(inputs, dict) else {"data": inputs}
+        session_id = normalized_inputs.get(
+            self._AGENT_CONVERSATION_ID,
+            session if isinstance(session, str) else self._DEFAULT_AGENT_SESSION_ID,
+        )
+        logging_config = (
+            agent_config.logging_config
+            if agent_config.logging_config is not None
+            else self._get_spawn_logging_config()
+        )
+        spawn_payload = agent_config.model_copy(update={"session_id": session_id, "logging_config": logging_config})
+
+        handle = await spawn_process(
+            agent_config=spawn_payload.model_dump(mode="json"),
+            inputs=normalized_inputs,
+            config=spawn_config,
+        )
+
+        yield handle, None
+
+        while handle.is_alive:
+            message = await handle.receive_message()
+            if message is None:
+                break
+
+            if message.type == MessageType.STREAM_CHUNK:
+                yield handle, message.payload
+            elif message.type == MessageType.DONE:
+                yield handle, message.payload
+                break
+            elif message.type == MessageType.ERROR:
+                yield handle, message.payload
+                break
+            elif message.type == MessageType.OUTPUT:
+                yield handle, message.payload
 
     async def _prepare_workflow(self, workflow: Union[str, Workflow],
                                 session: str | AgentSession | WorkflowSession) -> tuple[Workflow, WorkflowSession]:
@@ -654,7 +777,79 @@ class Runner:
             envs=envs
         ):
             yield chunk
-    
+
+    @classmethod
+    async def spawn_agent(
+        cls,
+        agent_config: SpawnAgentConfig,
+        inputs: Any,
+        *,
+        session: Optional[str | AgentSession] = None,
+        context: Optional[ModelContext] = None,
+        envs: Optional[dict[str, Any]] = None,
+        spawn_config: Optional[SpawnConfig] = None,
+    ) -> SpawnedProcessHandle:
+        """
+        Spawn a child process to run an agent.
+
+        Args:
+            agent: Agent name or BaseAgent instance to execute
+            inputs: Input data for the agent
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            envs: Environment variables or configuration overrides
+            spawn_config: Configuration for spawned process management
+
+        Returns:
+            SpawnedProcessHandle for managing the spawned process
+        """
+        return await GLOBAL_RUNNER.spawn_agent(
+            agent_config=agent_config,
+            inputs=inputs,
+            session=session,
+            context=context,
+            envs=envs,
+            spawn_config=spawn_config,
+        )
+
+    @classmethod
+    async def spawn_agent_streaming(
+        cls,
+        agent_config: SpawnAgentConfig,
+        inputs: Any,
+        *,
+        session: Optional[str | AgentSession] = None,
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+        spawn_config: Optional[SpawnConfig] = None,
+    ) -> AsyncIterator[tuple[SpawnedProcessHandle, Any]]:
+        """
+        Spawn a child process to run an agent with streaming output.
+
+        Args:
+            agent: Agent name or BaseAgent instance to execute
+            inputs: Input data for the agent
+            session: Existing session ID or Session instance for context persistence
+            context: model context
+            stream_modes: Types of streaming data to output
+            envs: Environment variables or configuration overrides
+            spawn_config: Configuration for spawned process management
+
+        Yields:
+            Tuples of (SpawnedProcessHandle, message) as messages arrive
+        """
+        async for handle, message in GLOBAL_RUNNER.spawn_agent_streaming(
+            agent_config=agent_config,
+            inputs=inputs,
+            session=session,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs,
+            spawn_config=spawn_config,
+        ):
+            yield handle, message
+
     @classmethod
     async def run_agent_team(
         cls,

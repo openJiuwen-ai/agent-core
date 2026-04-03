@@ -2,34 +2,189 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import codecs
 import locale
 import os
 import platform
-from typing import Optional, Dict, Any, AsyncIterator, Callable
+import re
+import shutil
+from typing import Optional, Dict, Any, AsyncIterator, Callable, List, Literal, Tuple
 
-from _pytest import pathlib
-
+import pathlib
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import LogEventType, sys_operation_logger
 from openjiuwen.core.sys_operation.local.utils import OperationUtils, StreamEvent, StreamEventType
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
-from openjiuwen.core.sys_operation.shell import BaseShellOperation
+from openjiuwen.core.sys_operation.shell import BaseShellOperation, ShellType
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.registry import operation
 from openjiuwen.core.sys_operation.result import (
-    ExecuteCmdResult, ExecuteCmdStreamResult, ExecuteCmdData, ExecuteCmdChunkData
+    ExecuteCmdResult, ExecuteCmdStreamResult, ExecuteCmdData, ExecuteCmdChunkData,
+    ExecuteCmdBackgroundData, ExecuteCmdBackgroundResult
 )
+
+
+_POWERSHELL_TOKENS = (
+    "powershell ", "powershell.exe ", "pwsh ", "pwsh.exe ",
+    "get-childitem", "set-location", "remove-item", "test-path",
+    "join-path", "select-object", "where-object", "foreach-object",
+    "invoke-webrequest", "invoke-restmethod", "out-file", "start-process",
+    "$env:", "$psversiontable", "$null", "$true", "$false",
+)
+
+_PS_VARIABLE_PATTERN = re.compile(r"(^|[\s;(])\$[A-Za-z_][A-Za-z0-9_]*")
+_POWERSHELL_CANDIDATES = ("pwsh", "powershell", "powershell.exe")
+
+
+def _looks_like_powershell(command: str) -> bool:
+    lowered = (command or "").strip().lower()
+    if not lowered:
+        return False
+    if any(token in lowered for token in _POWERSHELL_TOKENS):
+        return True
+    if "@'" in command or '@"' in command:
+        return True
+    if _PS_VARIABLE_PATTERN.search(command):
+        return True
+    return False
+
+
+def _available_powershell() -> str:
+    for candidate in _POWERSHELL_CANDIDATES:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return "powershell"
 
 
 @operation(name="shell", mode=OperationMode.LOCAL, description="local shell operation")
 class ShellOperation(BaseShellOperation):
     """Shell operation"""
 
+    _DANGEROUS_PATTERNS: List[Tuple[re.Pattern, str]] = [
+        (re.compile(r"\brm\s+-rf\b", re.IGNORECASE), "rm -rf"),
+        (re.compile(r"\bdel\s+/[a-z]*[fsq][a-z]*\b", re.IGNORECASE), "del /f /s /q"),
+        (re.compile(r"\brd\s+/s\s+/q\b", re.IGNORECASE), "rd /s /q"),
+        (re.compile(r"\bformat\s+[a-z]:", re.IGNORECASE), "format drive"),
+        (re.compile(r"\bshutdown\b", re.IGNORECASE), "shutdown"),
+        (re.compile(r"\breboot\b", re.IGNORECASE), "reboot"),
+        (re.compile(r"\bdiskpart\b", re.IGNORECASE), "diskpart"),
+        (re.compile(r"\bmkfs\b", re.IGNORECASE), "mkfs"),
+        (re.compile(r"\breg\s+delete\b", re.IGNORECASE), "reg delete"),
+        (re.compile(r"\bremove-item\b[^\n\r]*-recurse[^\n\r]*-force", re.IGNORECASE), "Remove-Item -Recurse -Force"),
+    ]
+
     _BUFFERING_WRAPPERS: Dict[str, Callable[[str], str]] = {
         "windows": lambda cmd: cmd,
         "linux": lambda cmd: f"stdbuf -oL -eL {cmd}",
         "darwin": lambda cmd: f"script -q /dev/null {cmd}",
     }
+
+    @staticmethod
+    def _resolve_execution_plan(command: str, shell_type: ShellType) -> tuple[list[str] | str, bool, str]:
+        """Resolve command execution plan based on shell_type.
+
+        Returns:
+            (args_or_cmd, use_shell, resolved_shell_name):
+            - args_or_cmd: arg list for create_subprocess_exec, or str for create_subprocess_shell
+            - use_shell: True → create_subprocess_shell, False → create_subprocess_exec
+            - resolved_shell_name: resolved shell name (for logging)
+        """
+        is_windows = os.name == "nt"
+
+        if is_windows:
+            if shell_type == ShellType.AUTO:
+                if _looks_like_powershell(command):
+                    exe = _available_powershell()
+                    return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
+                return command, True, "cmd"
+            if shell_type == ShellType.POWERSHELL:
+                exe = _available_powershell()
+                return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
+            if shell_type == ShellType.CMD:
+                return command, True, "cmd"
+            if shell_type in {ShellType.BASH, ShellType.SH}:
+                exe = shutil.which("bash") if shell_type == ShellType.BASH else shutil.which("sh")
+                if not exe:
+                    raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                                      execution="_resolve_execution_plan",
+                                      error_msg=f"shell '{shell_type.value}' is not available on this system")
+                return [exe, "-lc" if shell_type == ShellType.BASH else "-c", command], False, shell_type.value
+            raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                              execution="_resolve_execution_plan",
+                              error_msg=f"unsupported shell_type for Windows: {shell_type.value}")
+
+        # Non-Windows: auto and sh both use create_subprocess_shell (OS default /bin/sh)
+        if shell_type in {ShellType.AUTO, ShellType.SH}:
+            return command, True, "sh"
+        if shell_type == ShellType.BASH:
+            exe = shutil.which("bash") or "/bin/bash"
+            return [exe, "-lc", command], False, "bash"
+        if shell_type == ShellType.POWERSHELL:
+            exe = shutil.which("pwsh") or shutil.which("powershell")
+            if not exe:
+                raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                                  execution="_resolve_execution_plan",
+                                  error_msg="shell 'powershell' is not available on this system")
+            return [exe, "-NoProfile", "-NonInteractive", "-Command", command], False, "powershell"
+        if shell_type == ShellType.CMD:
+            raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                              execution="_resolve_execution_plan",
+                              error_msg="shell_type 'cmd' is only supported on Windows")
+        raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                          execution="_resolve_execution_plan",
+                          error_msg=f"unsupported shell_type: {shell_type.value}")
+
+    async def _create_subprocess(
+        self,
+        command: str,
+        cwd: pathlib.Path,
+        env: Dict[str, str],
+        shell_type: ShellType = ShellType.AUTO,
+        background: bool = False,
+    ) -> asyncio.subprocess.Process:
+        """Create an asyncio subprocess with the appropriate shell.
+
+        Args:
+            command: Shell command to execute.
+            cwd: Working directory.
+            env: Environment variables.
+            shell_type: Shell selection (auto/cmd/powershell/bash/sh).
+            background: If True, redirect all I/O to DEVNULL (no output capture).
+
+        Returns:
+            asyncio.subprocess.Process
+        """
+        args, use_shell, _ = self._resolve_execution_plan(command, shell_type)
+
+        if background:
+            stdout = asyncio.subprocess.DEVNULL
+            stderr = asyncio.subprocess.DEVNULL
+            stdin = asyncio.subprocess.DEVNULL
+        else:
+            stdout = asyncio.subprocess.PIPE
+            stderr = asyncio.subprocess.PIPE
+            stdin = None
+
+        if use_shell:
+            cmd = self._wrap_command_with_buffering(args) if not background else args
+            return await asyncio.create_subprocess_shell(
+                cmd,
+                cwd=str(cwd),
+                env=env,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        return await asyncio.create_subprocess_exec(
+            *args,
+            cwd=str(cwd),
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     async def execute_cmd(
             self,
@@ -38,7 +193,8 @@ class ShellOperation(BaseShellOperation):
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
             environment: Optional[Dict[str, str]] = None,
-            options: Optional[Dict[str, Any]] = None
+            options: Optional[Dict[str, Any]] = None,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdResult:
         """
         Asynchronously execute a command(shell mode only).
@@ -49,11 +205,12 @@ class ShellOperation(BaseShellOperation):
             timeout: Command execution timeout in seconds (default: 300 seconds).
             environment: Key-value dict of custom environment variables.
             options: Additional execution configuration options.
+            shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
 
         Returns:
             ExecuteCmdResult: Execution result.
         """
-
+        shell_type_enum = ShellType.from_str(shell_type)
         method_name = self.execute_cmd.__name__
         method_params = locals().copy()
         method_params.pop('self', None)
@@ -91,19 +248,21 @@ class ShellOperation(BaseShellOperation):
         try:
             # Resolve CWD
             actual_cwd = self._resolve_cwd(cwd)
+            blocked = self._check_command_safety(command)
+            if blocked:
+                return _create_exec_cmd_err(error_msg=f"command rejected for safety: {blocked}",
+                                            data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
             if not self._check_allowlist(command):
                 return _create_exec_cmd_err(error_msg="command not allowed by allowlist",
                                             data=ExecuteCmdData(command=command, cwd=str(actual_cwd)))
 
             exec_env = OperationUtils.prepare_environment(environment)
-            wrap_command = self._wrap_command_with_buffering(command)
-            proc = await asyncio.create_subprocess_shell(
-                wrap_command,
-                cwd=str(actual_cwd),
-                env=exec_env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            if os.name == "nt":
+                system_encoding = self._detect_shell_encoding()
+                if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
+                    lang_encoding = self._get_lang_encoding(system_encoding)
+                    exec_env["LANG"] = f"C.{lang_encoding}"
+            proc = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
 
             encoding = (options or {}).get("encoding", self._detect_shell_encoding())
             process_handler = OperationUtils.create_handler(process=proc, encoding=encoding, timeout=timeout)
@@ -135,7 +294,6 @@ class ShellOperation(BaseShellOperation):
                 method_params=method_params,
                 method_result=self._safe_model_dump(success_result),
                 method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000,
-                metadata={"wrap_command": wrap_command}
             ))
             return success_result
 
@@ -150,7 +308,8 @@ class ShellOperation(BaseShellOperation):
             cwd: Optional[str] = None,
             timeout: Optional[int] = 300,
             environment: Optional[Dict[str, str]] = None,
-            options: Optional[Dict[str, Any]] = None
+            options: Optional[Dict[str, Any]] = None,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
         """
         Asynchronously execute a command streaming(shell mode only).
@@ -161,10 +320,12 @@ class ShellOperation(BaseShellOperation):
             timeout: Command execution timeout in seconds (default: 300 seconds).
             environment: Key-value dict of custom environment variables.
             options: Additional execution configuration options.
+            shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
 
         Returns:
             AsyncIterator[ExecuteCmdStreamResult]: Streaming structured results.
         """
+        shell_type_enum = ShellType.from_str(shell_type)
         method_name = self.execute_cmd_stream.__name__
         method_params = locals().copy()
         method_params.pop('self', None)
@@ -207,7 +368,12 @@ class ShellOperation(BaseShellOperation):
 
         try:
             actual_cwd = self._resolve_cwd(cwd)
-
+            blocked = self._check_command_safety(command)
+            if blocked:
+                yield _create_exec_cmd_stream_err(
+                    error_msg=f"command rejected for safety: {blocked}",
+                    data=ExecuteCmdChunkData(chunk_index=chunk_index, exit_code=-1))
+                return
             if not self._check_allowlist(command):
                 yield _create_exec_cmd_stream_err(
                     error_msg="command not allowed by allowlist",
@@ -215,14 +381,12 @@ class ShellOperation(BaseShellOperation):
                 return
 
             exec_env = OperationUtils.prepare_environment(environment)
-            wrap_command = self._wrap_command_with_buffering(command)
-            process = await asyncio.create_subprocess_shell(
-                wrap_command,
-                cwd=str(actual_cwd),
-                env=exec_env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            if os.name == "nt":
+                system_encoding = self._detect_shell_encoding()
+                if system_encoding and system_encoding.lower() not in ("utf-8", "utf8"):
+                    lang_encoding = self._get_lang_encoding(system_encoding)
+                    exec_env["LANG"] = f"C.{lang_encoding}"
+            process = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
 
             chunk_size = (options or {}).get("chunk_size", 1024)
             encoding = (options or {}).get("encoding", self._detect_shell_encoding())
@@ -270,7 +434,6 @@ class ShellOperation(BaseShellOperation):
                         method_params=method_params,
                         method_result=self._safe_model_dump(exit_result),
                         method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000,
-                        metadata={"wrap_command": wrap_command}
                     ))
                     return exit_result
 
@@ -303,6 +466,123 @@ class ShellOperation(BaseShellOperation):
             yield _create_exec_cmd_stream_err(error_msg=f"unexpected error: {str(e)}",
                                               data=ExecuteCmdChunkData(chunk_index=chunk_index, exit_code=-1))
             return
+
+    async def execute_cmd_background(
+            self,
+            command: str,
+            *,
+            cwd: Optional[str] = None,
+            environment: Optional[Dict[str, str]] = None,
+            grace: float = 3.0,
+            shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
+    ) -> ExecuteCmdBackgroundResult:
+        """
+        Launch a command in the background and return immediately with its PID.
+
+        Args:
+            command: Command to execute.
+            cwd: Working directory for command execution (default: current directory).
+            environment: Key-value dict of custom environment variables.
+            grace: Seconds to wait for early failure detection (default: 3.0).
+            shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
+
+        Returns:
+            ExecuteCmdBackgroundResult: Result containing the process PID.
+        """
+        shell_type_enum = ShellType.from_str(shell_type)
+        method_name = self.execute_cmd_background.__name__
+        method_params = locals().copy()
+        method_params.pop('self', None)
+
+        start_time = asyncio.get_event_loop().time()
+        sys_operation_logger.info("Start to execute cmd background", event=self._create_sys_operation_event(
+            event_type=LogEventType.SYS_OP_START,
+            method_name=method_name,
+            method_params=method_params
+        ))
+
+        def _create_exec_cmd_background_err(
+                error_msg: str,
+                data: Optional[ExecuteCmdBackgroundData] = None
+        ) -> ExecuteCmdBackgroundResult:
+            err_result = build_operation_error_result(
+                error_type=StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+                msg_format_kwargs={"execution": "execute_cmd_background", "error_msg": error_msg},
+                result_cls=ExecuteCmdBackgroundResult,
+                data=data
+            )
+            sys_operation_logger.error("Failed to execute cmd background", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_ERROR,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(err_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return err_result
+
+        if not command or not command.strip():
+            return _create_exec_cmd_background_err(error_msg="command can not be empty")
+
+        actual_cwd = None
+        try:
+            actual_cwd = self._resolve_cwd(cwd)
+            blocked = self._check_command_safety(command)
+            if blocked:
+                return _create_exec_cmd_background_err(
+                    error_msg=f"command rejected for safety: {blocked}",
+                    data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)))
+            if not self._check_allowlist(command):
+                return _create_exec_cmd_background_err(
+                    error_msg="command not allowed by allowlist",
+                    data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)))
+
+            exec_env = OperationUtils.prepare_environment(environment)
+            process = await self._create_subprocess(
+                command, actual_cwd, exec_env, shell_type=shell_type_enum, background=True
+            )
+
+            process_handler = OperationUtils.create_handler(process=process)
+            pid, err = await process_handler.background(grace=grace)
+            if err:
+                return _create_exec_cmd_background_err(
+                    error_msg=f"background command failed: {err}",
+                    data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)))
+
+            success_result = ExecuteCmdBackgroundResult(
+                code=StatusCode.SUCCESS.code,
+                message="Background command started successfully",
+                data=ExecuteCmdBackgroundData(
+                    command=command,
+                    cwd=str(actual_cwd),
+                    pid=pid,
+                )
+            )
+            sys_operation_logger.info("End to execute cmd background", event=self._create_sys_operation_event(
+                event_type=LogEventType.SYS_OP_END,
+                method_name=method_name,
+                method_params=method_params,
+                method_result=self._safe_model_dump(success_result),
+                method_exec_time_ms=(asyncio.get_event_loop().time() - start_time) * 1000
+            ))
+            return success_result
+
+        except Exception as e:
+            return _create_exec_cmd_background_err(
+                error_msg=f"unexpected error: {str(e)}",
+                data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)) if actual_cwd else None)
+
+    def _check_command_safety(self, command: str) -> Optional[str]:
+        """Check command against dangerous patterns. Returns matched label/pattern or None if safe."""
+        custom_patterns = getattr(self._run_config, 'dangerous_patterns', None)
+        if custom_patterns is not None:
+            for raw_pattern in custom_patterns:
+                if re.search(raw_pattern, command, re.IGNORECASE):
+                    return raw_pattern
+            return None
+        for pattern, label in self._DANGEROUS_PATTERNS:
+            if pattern.search(command):
+                return label
+        return None
 
     def _check_allowlist(self, command: str) -> bool:
         """Check if command is in allowlist."""
@@ -348,3 +628,19 @@ class ShellOperation(BaseShellOperation):
             return encoding if encoding else "utf-8"
         except Exception:
             return "utf-8"
+
+    @staticmethod
+    def _get_lang_encoding(encoding: str) -> str:
+        """Convert encoding name to LANG-style encoding name using Python's codec registry.
+
+        Args:
+            encoding: Python encoding name (e.g., 'cp936', 'gbk', 'utf-8')
+
+        Returns:
+            LANG-style encoding name (e.g., 'GBK', 'UTF-8')
+        """
+        try:
+            info = codecs.lookup(encoding)
+            return info.name.upper()
+        except LookupError:
+            return encoding.upper()

@@ -260,7 +260,7 @@ async def test_emit_before_pass_args_false(framework):
         return data
 
     await my_func("secret_data")
-    assert received_args[0] == ((), {})
+    assert received_args[0] == ((), {'session': None})
 
 
 @pytest.mark.asyncio
@@ -406,7 +406,7 @@ async def test_emit_around_pass_args_false_before(framework):
 
     await my_func("secret")
     # Before should have no args
-    assert received_before[0] == ((), {})
+    assert received_before[0] == ((), {'session': None})
     # After should have result only
     assert "result" in received_after[0]
 
@@ -431,7 +431,7 @@ async def test_emit_around_pass_result_false(framework):
     result = await my_func()
     assert result == {"status": "done"}
     # After event should have no args since pass_args and pass_result are False
-    assert received_after[0] == ((), {})
+    assert received_after[0] == ((), {'session': None})
 
 
 @pytest.mark.asyncio

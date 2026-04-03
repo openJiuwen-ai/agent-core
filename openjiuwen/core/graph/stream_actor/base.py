@@ -176,6 +176,8 @@ class StreamProcessor:
             if _is_end_message(message):
                 source_id = _get_producer_id(message)
                 handle_map.add(source_key)
+                all_queues = []
+                is_all_finish = False
                 for path, queues in self.processor_queues.items():
                     path = extract_origin_key(path)
                     is_handled = False
@@ -183,9 +185,14 @@ class StreamProcessor:
                     if paths:
                         is_handled = path in paths
                     is_all_finish = handle_map == self.sources
+                    all_queues.extend(queues)
                     if (is_handled or is_all_finish) and self.is_value_from_source(path, source_id):
                         for queue in queues:
                             await queue.put(EndFrame(source_id))
+                if is_all_finish:
+                    for queue in all_queues:
+                        await queue.put(EndFrame(source_id))
+
             else:
                 for path, queues in self.processor_queues.items():
                     path = extract_origin_key(path)
@@ -234,13 +241,14 @@ class StreamProcessor:
 
         async def generator():
             while True:
-                message = await asyncio.wait_for(queue.get(), timeout=self._timeout)
-                if message is None:
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=self._timeout)
+                except asyncio.TimeoutError:
                     logger.warning(
                         f"Receive chunk timeout {self._timeout}s of [{self.node_id}.{k_path}]",
                         event_type=LogEventType.GRAPH_RECEIVE_STREAM_CHUNK,
                         node_id=self.node_id,
-                        chunk=message,
+                        chunk=None,
                         metadata={"k_path": k_path, "r_path": r_path}
                     )
                     break

@@ -123,7 +123,6 @@ async run_agent(
 ```python
 >>> import asyncio
 >>> from openjiuwen.core.common.constants.enums import ControllerType
->>> from openjiuwen.core.single_agent.legacy import WorkflowSchema
 >>> from openjiuwen.core.application.workflow_agent import WorkflowAgentConfig, WorkflowAgent
 >>> from openjiuwen.core.runner import Runner
 >>> from openjiuwen.core.single_agent import AgentCard
@@ -146,18 +145,19 @@ async run_agent(
 ...     lambda _: flow
 ... )
 >>>
->>> # 创建Agent
+>>> # 创建Agent，使用 WorkflowCard 描述工作流输入参数
+>>> workflow_card = WorkflowCard(
+...     id="workflow_id",
+...     version="1",
+...     name="简单工作流",
+...     description="this_is_a_demo",
+...     input_params={"query": {"type": "string"}},
+... )
 >>> workflow_agent_config = WorkflowAgentConfig(
 ...     id="agent_id",
 ...     version="1",
 ...     description="this_is_a_demo",
-...     workflows=[WorkflowSchema(
-...         id="workflow_id",
-...         version="1",
-...         name="简单工作流",
-...         description="this_is_a_demo",
-...         inputs={"query": {"type": "string"}},
-...     )],
+...     workflows=[workflow_card],
 ...     controller_type=ControllerType.WorkflowController
 ... )
 >>> agent = WorkflowAgent(agent_config=workflow_agent_config)

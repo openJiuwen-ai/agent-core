@@ -62,12 +62,7 @@ class ModelClientConfig(BaseModel):
             self.client_provider = to_provider_type(normalized_provider)
             return self
 
-        supported_providers = ", ".join(_CLIENT_TYPE_REGISTRY.keys())
-        raise build_error(
-            StatusCode.MODEL_PROVIDER_INVALID,
-            error_msg=f"unavailable model provider: {self.client_provider},"
-                      f"and available providers are: {supported_providers}"
-        )
+        return self
 
 
 class ModelRequestConfig(BaseModel):
@@ -77,4 +72,4 @@ class ModelRequestConfig(BaseModel):
     top_p: float = Field(default=0.1, description="Top-p sampling parameter")
     max_tokens: Optional[int] = Field(default=None, description="Maximum number of tokens to generate")
     stop: Union[Optional[str], None] = Field(default=None, description="Stop sequence")
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow", "populate_by_name": True}

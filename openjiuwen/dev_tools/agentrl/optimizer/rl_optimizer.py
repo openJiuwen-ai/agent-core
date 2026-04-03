@@ -12,14 +12,14 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
-import ray
+import ray_adapter as ray
 from hydra import compose, initialize
 from omegaconf import OmegaConf
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.dev_tools.agentrl.config.schemas import RLConfig
+from openjiuwen.dev_tools.agentrl.config.schemas import RLConfig, VerlHydraOverlay
 from openjiuwen.dev_tools.agentrl.coordinator.schemas import RLTask
 from openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker import RLMetricsTracker
 from openjiuwen.dev_tools.agentrl.rollout_store.base import RolloutPersistence
@@ -143,13 +143,17 @@ class RLOptimizer:
     # -- Hydra / Ray initialisation -----------------------------------------
 
     def _compose_hydra_config(self):
-        """Compose the full Verl config by merging YAML defaults with RLConfig."""
+        """Compose Verl config: ``ppo_trainer`` from the verl package + Pydantic overlays + RLConfig."""
         train_cfg = self.config.training
         rollout_cfg = self.config.rollout
 
-        with initialize(config_path="../config", version_base=None):
-            base_cfg = compose(config_name="config")
+        with initialize(version_base=None, config_path="pkg://verl.trainer.config"):
+            ppo_cfg = compose(config_name="ppo_trainer")
 
+        OmegaConf.set_struct(ppo_cfg, False)
+        overlay = OmegaConf.create(VerlHydraOverlay().model_dump())
+        OmegaConf.set_struct(overlay, False)
+        base_cfg = OmegaConf.merge(ppo_cfg, overlay)
         OmegaConf.set_struct(base_cfg, False)
 
         dynamic = {
@@ -252,7 +256,7 @@ class RLOptimizer:
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create(
-            {**ray_init_kwargs, "runtime_env": runtime_env, "namespace": "JiuwenRL"}
+            {**ray_init_kwargs, "runtime_env": runtime_env}
         )
         logger.info("ray init kwargs: %s", ray_init_kwargs)
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
@@ -303,7 +307,7 @@ class RLOptimizer:
         """Tear down the TaskRunner actor and shutdown Ray."""
         try:
             actor = ray.get_actor("ppo_task_runner")
-            ray.kill(actor, no_restart=True)
+            ray.kill(actor)
         except ValueError:
             logger.info("No Ray actor named 'ppo_task_runner' running")
         self._runner = None

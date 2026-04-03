@@ -23,6 +23,7 @@ from openjiuwen.core.foundation.prompt import PromptTemplate
 
 class MockModelClient(BaseModelClient):
     """Mock 大模型，返回预定义的响应"""
+    __client_name__ = "MocKMetaTemplateLLM"
 
     def __init__(
             self,
@@ -113,8 +114,6 @@ class MockModelClient(BaseModelClient):
     ) -> ImageGenerationResponse:
         pass
 
-_CLIENT_TYPE_REGISTRY["MocKMetaTemplateLLM"] = MockModelClient
-
 
 @pytest.mark.asyncio
 async def test_register_custom_template():
@@ -136,7 +135,7 @@ async def test_register_custom_template():
     builder.pop_meta_template(META_TEMPLATE_NAME_PREFIX + "custom_general")
 
     # register invalid type template
-    template = ("this is a invalid tuple meta template", )
+    template = ("this is a invalid tuple meta template",)
     with pytest.raises(BaseError) as context:
         builder.register_meta_template("custom_general", template)
     assert context.value.code == StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code
@@ -149,23 +148,23 @@ async def test_build_with_default_meta_template():
     )
     response = await builder.build(prompt="你是一个旅行助手")
     assert response == (
-        TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE.content[0].content +
-        TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE.format(
-            dict(instruction="你是一个旅行助手")).content[0].content
+            TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE.content[0].content +
+            TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE.format(
+                dict(instruction="你是一个旅行助手")).content[0].content
     )
 
     response = await builder.build(prompt="你是一个旅行助手", template_type="general")
     assert response == (
-        TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE.content[0].content +
-        TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE.format(
-            dict(instruction="你是一个旅行助手")).content[0].content
+            TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_SYSTEM_TEMPLATE.content[0].content +
+            TEMPLATE_ZH.PROMPT_BUILD_GENERAL_META_USER_TEMPLATE.format(
+                dict(instruction="你是一个旅行助手")).content[0].content
     )
 
     response = await builder.build(prompt="你是一个旅行助手", template_type="plan")
     assert response == (
-        TEMPLATE_ZH.PROMPT_BUILD_PLAN_META_SYSTEM_TEMPLATE.content[0].content +
-        TEMPLATE_ZH.PROMPT_BUILD_PLAN_META_USER_TEMPLATE.format(
-            dict(instruction="你是一个旅行助手", tools="None")).content[0].content
+            TEMPLATE_ZH.PROMPT_BUILD_PLAN_META_SYSTEM_TEMPLATE.content[0].content +
+            TEMPLATE_ZH.PROMPT_BUILD_PLAN_META_USER_TEMPLATE.format(
+                dict(instruction="你是一个旅行助手", tools="None")).content[0].content
     )
 
 
@@ -182,9 +181,9 @@ async def test_build_with_custom_meta_template():
     with pytest.raises(BaseError) as context:
         builder.register_meta_template("custom_general", template)
         response = await builder.build(prompt="你是一个旅行助手", template_type="other",
-                                 custom_template_name="not_defined")
+                                       custom_template_name="not_defined")
     assert context.value.code == StatusCode.TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR.code
 
     response = await builder.build(prompt="你是一个旅行助手", template_type="other",
-                             custom_template_name="custom_general")
+                                   custom_template_name="custom_general")
     assert response == template

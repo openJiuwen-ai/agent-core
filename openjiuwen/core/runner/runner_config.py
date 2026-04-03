@@ -2,12 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import uuid
-from dataclasses import (
-    dataclass,
-    field,
-)
 from enum import Enum
 from typing import Optional
+
+from pydantic import BaseModel, Field
 
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 
@@ -17,27 +15,26 @@ class MessageQueueType(str, Enum):
     FAKE = "fake"
 
 
-@dataclass
-class PulsarConfig:
+class PulsarConfig(BaseModel):
     url: Optional[str] = None
     max_workers: int = 8
 
 
-@dataclass
-class MessageQueueConfig:
+class MessageQueueConfig(BaseModel):
     """Message Queue Configuration"""
+
     type: str = MessageQueueType.PULSAR
     pulsar_config: Optional[PulsarConfig] = None
 
 
-@dataclass
-class DistributedConfig:
+class DistributedConfig(BaseModel):
     """Distributed Configuration"""
+
     request_timeout: float = 30.0
     max_request_concurrency: int = 10000
-    message_queue_config: MessageQueueConfig = field(default_factory=MessageQueueConfig)
-    agent_topic_template = "openjiuwen.single_agent.{agent_id}.{version}"
-    reply_topic_template = "openjiuwen.reply.runner.{instance_id}"
+    message_queue_config: MessageQueueConfig = Field(default_factory=MessageQueueConfig)
+    agent_topic_template: str = "openjiuwen.single_agent.{agent_id}.{version}"
+    reply_topic_template: str = "openjiuwen.reply.runner.{instance_id}"
 
     def get_agent_topic_template(self, env_prefix: str = "") -> str:
         """Get single_agent topic template with environment prefix"""
@@ -52,21 +49,25 @@ class DistributedConfig:
         return self.reply_topic_template
 
 
-@dataclass
-class RunnerConfig:
+class RunnerConfig(BaseModel):
     """Runner Global Configuration"""
+
     distributed_mode: bool = True
-    distributed_config: Optional[DistributedConfig] = field(default_factory=DistributedConfig)
+    distributed_config: Optional[DistributedConfig] = Field(default_factory=DistributedConfig)
     env_prefix: str = ""
-    instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    instance_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     checkpointer_config: Optional[CheckpointerConfig] = None
 
     def agent_topic_template(self) -> str:
         """Get single_agent topic template with environment prefix"""
+        if self.distributed_config is None:
+            return ""
         return self.distributed_config.get_agent_topic_template(self.env_prefix)
 
     def reply_topic_template(self) -> str:
         """Get reply topic template with environment prefix"""
+        if self.distributed_config is None:
+            return ""
         return self.distributed_config.get_reply_topic_template(self.env_prefix)
 
 
@@ -76,7 +77,7 @@ DEFAULT_RUNNER_CONFIG = RunnerConfig(
         request_timeout=30.0,
         message_queue_config=MessageQueueConfig(
             type=MessageQueueType.FAKE,
-        )
+        ),
     ),
 )
 
@@ -91,5 +92,5 @@ def set_runner_config(cfg: RunnerConfig):
 def get_runner_config() -> RunnerConfig:
     global _global_config
     if _global_config is None:
-        _global_config = DEFAULT_RUNNER_CONFIG
+        _global_config = DEFAULT_RUNNER_CONFIG.model_copy(deep=True)
     return _global_config

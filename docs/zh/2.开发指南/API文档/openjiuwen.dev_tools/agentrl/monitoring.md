@@ -2,7 +2,7 @@
 
 ## class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.TrainingStepMetrics
 
-```
+```python
 @dataclass class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.TrainingStepMetrics(step: int, epoch: int, verl_metrics: Dict[str, Any], avg_turns: float, reward_mean: float, consecutive_zero_reward_steps: int)
 ```
 
@@ -17,11 +17,9 @@
 * **reward_mean**(float)：平均奖励值。
 * **consecutive_zero_reward_steps**(int)：连续零奖励步数。
 
----
-
 ## class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.RLMetricsTracker
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.RLMetricsTracker(project_name: str, experiment_name: str, backends: List[str], config: Optional[Dict[str, Any]] = None)
 ```
 
@@ -40,27 +38,27 @@ class openjiuwen.dev_tools.agentrl.monitoring.metrics_tracker.RLMetricsTracker(p
 * **backends**(List[str])：日志后端列表。
 * **config**(Optional[Dict[str, Any]]，可选)：配置字典。默认值：`None`。
 
-### def log_step(self, step: int, metrics: Dict[str, Any]) -> None
+### log_step(self, step: int, metrics: Dict[str, Any]) -> None
 
 在给定步数下记录标量指标字典。
 
-### def log_training_step(self, data: TrainingStepMetrics) -> None
+### log_training_step(self, data: TrainingStepMetrics) -> None
 
 记录包含 RL 增强指标的完整训练步。
 
-### def log_rollout_stats(self, step: int, rewards_by_uid: Dict[str, List[Dict[str, Any]]], total_positive: int = 0, total_negative: int = 0, total_training_samples: Optional[int] = None) -> None
+### log_rollout_stats(self, step: int, rewards_by_uid: Dict[str, List[Dict[str, Any]]], total_positive: int = 0, total_negative: int = 0, total_training_samples: Optional[int] = None) -> None
 
 记录结构化的 rollout 统计信息。
 
-### def log_reward_distribution(self, step: int, rewards: List[float]) -> None
+### log_reward_distribution(self, step: int, rewards: List[float]) -> None
 
 记录奖励分布直方图（仅 WandB）。
 
-### def log_validation(self, step: int, val_metrics: Dict[str, Any]) -> None
+### log_validation(self, step: int, val_metrics: Dict[str, Any]) -> None
 
 记录验证指标。
 
-### def finish(self) -> None
+### finish(self) -> None
 
 清理跟踪资源。
 

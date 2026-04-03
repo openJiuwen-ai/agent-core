@@ -9,8 +9,6 @@
 - 提供并行运行时执行器；
 - 提供高级用户入口 `RLOptimizer`。
 
-本模块移除了面向服务的逻辑，直接使用 verl 的 RayPPOTrainer 与 Ray actors。
-
 **Classes**：
 
 | CLASS | DESCRIPTION |
@@ -21,11 +19,11 @@
 | [AgentRuntimeConfig](./agentrl/config.md#class-openjiuwendev_toolsagentrlconfigschemasagentruntimeconfig) | Agent 运行时超参数。 |
 | [PersistenceConfig](./agentrl/config.md#class-openjiuwendev_toolsagentrlconfigschemaspersistenceconfig) | Rollout 持久化配置。 |
 | [AdaConfig](./agentrl/config.md#class-openjiuwendev_toolsagentrlconfigschemasadaconfig) | Ada rollout 变体的额外参数。 |
-| [Rollout](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrollout) | 单轮对话 rollout。 |
-| [RolloutMessage](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrolloutmessage) | 完整的任务执行结果。 |
-| [RLTask](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrltask) | 最小训练任务单元。 |
-| [RolloutWithReward](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrolloutwithreward) | 标准 MDP 数据单元。 |
-| [TaskQueue](./agentrl/schemas.md#class-openjiuwendev_toolsagentrlcoordinatortask_queuetaskqueue) | 异步任务队列 + Rollout 结果缓冲区。 |
+| [Rollout](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrollout) | 单轮对话 rollout。 |
+| [RolloutMessage](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrolloutmessage) | 完整的任务执行结果。 |
+| [RLTask](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrltask) | 最小训练任务单元。 |
+| [RolloutWithReward](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatorschemasrolloutwithreward) | 标准 MDP 数据单元。 |
+| [TaskQueue](./agentrl/coordinator.md#class-openjiuwendev_toolsagentrlcoordinatortask_queuetaskqueue) | 异步任务队列 + Rollout 结果缓冲区。 |
 | [RLOptimizer](./agentrl/optimizer.md#class-openjiuwendev_toolsagentrloptimizerrl_optimizerrloptimizer) | 顶级 RL 训练入口点。 |
 | [TaskRunner](./agentrl/optimizer.md#class-openjiuwendev_toolsagentrloptimizertask_runnertaskrunner) | Ray 远程 Actor，协调训练初始化与执行。 |
 | [MainTrainer](./agentrl/rl_trainer.md#class-openjiuwendev_toolsagentrlrl_trainermain_trainermaintrainer) | 训练循环协调器（DataLoader、`BackendProxy`、`TrainingCoordinator`、验证与 `fit`）。 |

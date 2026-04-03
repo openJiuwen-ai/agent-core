@@ -85,23 +85,26 @@ class _ToolMeta(ABCMeta):
                     raise
 
             instance.stream = _lifecycle_stream
-
+        _extra = {
+            "tool_name": instance.card.name,
+            "tool_info": instance.card.tool_info(),
+        }
         fn = instance.invoke
-        fn = _fw.emit_before(ToolCallEvents.TOOL_INVOKE_INPUT)(fn)
+        fn = _fw.emit_before(ToolCallEvents.TOOL_INVOKE_INPUT, extra_kwargs=_extra)(fn)
         fn = _fw.transform_io(
             input_event=ToolCallEvents.TOOL_INVOKE_INPUT,
             output_event=ToolCallEvents.TOOL_INVOKE_OUTPUT,
         )(fn)
-        fn = _fw.emit_after(ToolCallEvents.TOOL_INVOKE_OUTPUT)(fn)
+        fn = _fw.emit_after(ToolCallEvents.TOOL_INVOKE_OUTPUT, extra_kwargs=_extra)(fn)
         instance.invoke = fn
 
         fn = instance.stream
-        fn = _fw.emit_before(ToolCallEvents.TOOL_STREAM_INPUT)(fn)
+        fn = _fw.emit_before(ToolCallEvents.TOOL_STREAM_INPUT, extra_kwargs=_extra)(fn)
         fn = _fw.transform_io(
             input_event=ToolCallEvents.TOOL_STREAM_INPUT,
             output_event=ToolCallEvents.TOOL_STREAM_OUTPUT,
         )(fn)
-        fn = _fw.emit_after(ToolCallEvents.TOOL_STREAM_OUTPUT, item_key="result")(fn)
+        fn = _fw.emit_after(ToolCallEvents.TOOL_STREAM_OUTPUT, item_key="result", extra_kwargs=_extra)(fn)
         instance.stream = fn
         return instance
 

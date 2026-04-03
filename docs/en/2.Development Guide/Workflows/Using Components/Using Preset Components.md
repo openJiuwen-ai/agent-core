@@ -1027,6 +1027,225 @@ async def main():
 asyncio.run(main())
 ```
 
+# MemoryRetrieval Component
+
+The `MemoryRetrievalComponent` is a preset component that integrates long-term memory retrieval into openJiuwen workflows. It wraps long-term memory retrieval capabilities, retrieving fragment memories and history summaries based on a query string. It supports isolating memory data by user and scope, and filters low-quality results via a similarity threshold.
+
+## Configuration
+
+Create a `MemoryRetrievalCompConfig` to configure the component. The key fields are:
+
+- `memory`: `LongTermMemory` instance used to perform memory retrieval.
+- `scope_id`: Scope ID for isolating memory data across different scenarios. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `user_id`: User ID for isolating memory data per user. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `threshold`: Similarity threshold; results below this value are filtered out. Default: `0.3`.
+
+## Input / Output
+
+**Input**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `query` | str | The query string to retrieve memories for. Must not be empty. |
+| `top_k` | int | Maximum number of results to return. Default: `5`. |
+
+**Output**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `fragment_memory_results` | List[MemResult] | List of retrieved fragment memory results. |
+| `summary_results` | List[MemResult] | List of retrieved history summary results. |
+
+## Example: Memory Retrieval Workflow (Start → MemoryRetrieval → LLM → End)
+
+The following example builds a workflow with long-term memory retrieval using the `MemoryRetrievalComponent`:
+
+```python
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.memory.long_term_memory import LongTermMemory
+from openjiuwen.core.workflow import (
+    End,
+    LLMCompConfig,
+    LLMComponent,
+    MemoryRetrievalCompConfig,
+    MemoryRetrievalComponent,
+    Start,
+    Workflow,
+    WorkflowCard,
+    create_workflow_session,
+)
+
+# 1. Build workflow
+flow = Workflow(card=WorkflowCard(name="Memory Retrieval Workflow", id="mem_ret_wf", version="1.0"))
+
+start = Start()
+
+# 2. Configure MemoryRetrieval component
+memory = LongTermMemory()  # Replace with actual initialization in production
+mr_config = MemoryRetrievalCompConfig(
+    memory=memory,
+    user_id="user_001",
+    scope_id="default_scope",
+    threshold=0.3,
+)
+mr_component = MemoryRetrievalComponent(component_config=mr_config)
+
+# 3. Configure LLM component
+llm_config = LLMCompConfig(
+    model_client_config=ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="your-api-key",
+        api_base="https://api.example.com/v1",
+        timeout=120,
+        verify_ssl=False,
+    ),
+    model_config=ModelRequestConfig(model="gpt-4", temperature=0.7),
+    template_content=[
+        {"role": "system", "content": "Answer based on the provided memory context."},
+        {"role": "user", "content": "Memory context:\n{{context}}\n\nQuestion: {{query}}\n\nAnswer:"},
+    ],
+    response_format={"type": "text"},
+    output_config={"answer": {"type": "string", "required": True}},
+)
+llm_component = LLMComponent(component_config=llm_config)
+
+end = End({"responseTemplate": "{{answer}}"})
+
+# 4. Assemble workflow graph: Start → MemoryRetrieval → LLM → End
+flow.set_start_comp("start", start, inputs_schema={"query": "${query}"})
+flow.add_workflow_comp("mr", mr_component, inputs_schema={"query": "${start.query}"})
+flow.add_workflow_comp("llm", llm_component, inputs_schema={
+    "context": "${mr.fragment_memory_results}",
+    "query": "${start.query}",
+})
+flow.set_end_comp("end", end, inputs_schema={"answer": "${llm.answer}"})
+
+flow.add_connection("start", "mr")
+flow.add_connection("mr", "llm")
+flow.add_connection("llm", "end")
+
+# 5. Execute
+import asyncio
+
+async def main():
+    session = create_workflow_session(session_id="mem_ret_session")
+    result = await flow.invoke({"query": "What did we discuss before?"}, session)
+    print(result.result)
+
+asyncio.run(main())
+```
+
+# MemoryWrite Component
+
+The `MemoryWriteComponent` is a preset component that writes conversation messages to long-term memory. It wraps long-term memory write capabilities, supporting isolation of memory data by user, scope, and session, with an option to automatically generate memory fragments.
+
+## Configuration
+
+Create a `MemoryWriteCompConfig` to configure the component. The key fields are:
+
+- `memory`: `LongTermMemory` instance used to perform memory write operations.
+- `scope_id`: Scope ID for isolating memory data across different scenarios. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `user_id`: User ID for isolating memory data per user. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `session_id`: Session ID for associating with the current session. Default: `LongTermMemory.DEFAULT_VALUE`.
+- `agent_config`: `AgentMemoryConfig`, agent memory configuration that controls memory generation behavior. Default: `AgentMemoryConfig()`.
+- `gen_mem`: Whether to automatically generate memory fragments. Default: `True`.
+- `gen_mem_with_history_msg_num`: Number of historical messages to reference when generating memories. Default: `2`.
+
+## Input / Output
+
+**Input**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `messages` | List[BaseMessage] | List of messages to write to long-term memory. Must not be empty. |
+| `timestamp` | datetime, optional | Timestamp for the messages. Default: `None` (uses current time). |
+
+**Output**:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | bool | Whether the write operation succeeded. Default: `True`. |
+
+## Example: Memory Write Workflow (Start → LLM → MemoryWrite → End)
+
+The following example builds a workflow that writes conversation messages to long-term memory using the `MemoryWriteComponent`:
+
+```python
+from openjiuwen.core.foundation.llm import BaseMessage, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.memory.long_term_memory import LongTermMemory
+from openjiuwen.core.workflow import (
+    End,
+    LLMCompConfig,
+    LLMComponent,
+    MemoryWriteCompConfig,
+    MemoryWriteComponent,
+    Start,
+    Workflow,
+    WorkflowCard,
+    create_workflow_session,
+)
+
+# 1. Build workflow
+flow = Workflow(card=WorkflowCard(name="Memory Write Workflow", id="mem_write_wf", version="1.0"))
+
+start = Start()
+
+# 2. Configure LLM component
+llm_config = LLMCompConfig(
+    model_client_config=ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="your-api-key",
+        api_base="https://api.example.com/v1",
+        timeout=120,
+        verify_ssl=False,
+    ),
+    model_config=ModelRequestConfig(model="gpt-4", temperature=0.7),
+    template_content=[
+        {"role": "system", "content": "You are an AI assistant."},
+        {"role": "user", "content": "{{query}}"},
+    ],
+    response_format={"type": "text"},
+    output_config={"reply": {"type": "string", "required": True}},
+)
+llm_component = LLMComponent(component_config=llm_config)
+
+# 3. Configure MemoryWrite component
+memory = LongTermMemory()  # Replace with actual initialization in production
+mw_config = MemoryWriteCompConfig(
+    memory=memory,
+    user_id="user_001",
+    scope_id="default_scope",
+    session_id="mem_write_session",
+    gen_mem=True,
+    gen_mem_with_history_msg_num=2,
+)
+mw_component = MemoryWriteComponent(component_config=mw_config)
+
+end = End({"responseTemplate": "{{reply}}"})
+
+# 4. Assemble workflow graph: Start → LLM → MemoryWrite → End
+flow.set_start_comp("start", start, inputs_schema={"query": "${query}"})
+flow.add_workflow_comp("llm", llm_component, inputs_schema={"query": "${start.query}"})
+flow.add_workflow_comp("mw", mw_component, inputs_schema={
+    "messages": "${llm.messages}",
+})
+flow.set_end_comp("end", end, inputs_schema={"reply": "${llm.reply}"})
+
+flow.add_connection("start", "llm")
+flow.add_connection("llm", "mw")
+flow.add_connection("llm", "end")
+
+# 5. Execute
+import asyncio
+
+async def main():
+    session = create_workflow_session(session_id="mem_write_session")
+    result = await flow.invoke({"query": "Please remember that I like hot pot"}, session)
+    print(result.result)
+
+asyncio.run(main())
+```
+
 Output result:
 
 ```
@@ -1586,23 +1805,22 @@ main workflow with sub workflow run result: result={'output': {'result': 'hello'
 
 # KnowledgeRetrieval Component
 
-The `KnowledgeRetrievalComponent` is a preset component that integrates knowledge retrieval into openJiuwen workflows. It wraps `KnowledgeBase` and supports multiple vector store backends (Milvus, ChromaDB, PGVector) via the `store_provider` field in `VectorStoreConfig`.
+The `KnowledgeRetrievalComponent` is a preset component that integrates knowledge retrieval into openJiuwen workflows. It wraps knowledge-base retrieval and supports **multiple knowledge bases**: you configure one or more knowledge bases via `component_kb_configs`; retrieval runs over all of them and results are merged. Each knowledge base uses a vector store backend (Milvus, ChromaDB, PGVector) via the `store_provider` field in `VectorStoreConfig`.
 
 ## Configuration
 
 Create a `KnowledgeRetrievalCompConfig` to configure the component. The key fields are:
 
-- `kb_configs`: List of `KnowledgeBaseConfig` defining which knowledge bases to retrieve from.
-- `retrieval_config`: `RetrievalConfig` controlling top_k, score_threshold, etc.
-- `vector_store_config`: `VectorStoreConfig` with `store_provider` set to `StoreType.Milvus`, `StoreType.Chroma`, or `StoreType.PGVector`.
-- `vector_store_additional_config`: Additional keyword arguments for the vector store constructor.
-- `embed_config`: `EmbeddingConfig` for embedding model (required for vector/hybrid index types).
-- `result_separator`: Separator when joining retrieved texts into `context`. Default: `"\n\n"`.
-- `include_metadata`: Set to `True` to include `results_with_metadata` in the output.
+- `component_kb_configs`: List of `ComponentKBConfig`, each defining one knowledge base. You can configure multiple knowledge bases; retrieval is performed over all of them and results are merged.
+  - Each `ComponentKBConfig` includes: `kb_config` (`KnowledgeBaseConfig`, e.g. kb_id and index_type), `vector_store_config` (`VectorStoreConfig`), `embed_config` (`EmbeddingConfig`, optional but required for vector/hybrid index types), and `embed_additional_config` (optional).
+- `vector_store_connection_config`: Connection-related arguments passed to the vector store constructor (e.g. `{"chroma_path": "/tmp/chroma"}` or `{"milvus_uri": "http://localhost:19530", "milvus_token": ""}`). Shared when creating vector stores for all entries in `component_kb_configs`.
+- `retrieval_config`: `RetrievalConfig` for top_k, score_threshold, graph/agentic options, etc.
+- `model_id` (optional): Model ID to resolve an LLM from the Runner resource manager (e.g. for agentic retrieval).
+- `model_client_config`, `model_config` (optional): LLM client and request config for agentic retrieval.
 
 ## Example: RAG Workflow (Start → KnowledgeRetrieval → LLM → End)
 
-The following example builds a simple Retrieval-Augmented Generation pipeline using the `KnowledgeRetrievalComponent`:
+The following example builds a simple Retrieval-Augmented Generation pipeline using the `KnowledgeRetrievalComponent` (single knowledge base):
 
 ```python
 from openjiuwen.core.retrieval.common.config import (
@@ -1614,6 +1832,7 @@ from openjiuwen.core.retrieval.common.config import (
 )
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.workflow import (
+    ComponentKBConfig,
     End,
     KnowledgeRetrievalCompConfig,
     KnowledgeRetrievalComponent,
@@ -1630,25 +1849,25 @@ flow = Workflow(card=WorkflowCard(name="RAG Workflow", id="rag_wf", version="1.0
 
 start = Start()
 
-# 2. Configure KnowledgeRetrieval component
+# 2. Configure KnowledgeRetrieval component (supports multiple knowledge bases; here one is configured)
 kr_config = KnowledgeRetrievalCompConfig(
-    kb_configs=[
-        KnowledgeBaseConfig(kb_id="demo_kb", index_type="vector"),
+    component_kb_configs=[
+        ComponentKBConfig(
+            kb_config=KnowledgeBaseConfig(kb_id="demo_kb", index_type="vector"),
+            vector_store_config=VectorStoreConfig(
+                store_provider=StoreType.Chroma,
+                collection_name="demo_collection",
+                distance_metric="cosine",
+            ),
+            embed_config=EmbeddingConfig(
+                model_name="text-embedding-v3",
+                base_url="https://api.example.com/embeddings",
+                api_key="your-api-key",
+            ),
+        ),
     ],
+    vector_store_connection_config={"chroma_path": "/tmp/demo_chroma"},
     retrieval_config=RetrievalConfig(top_k=3, score_threshold=0.0),
-    vector_store_config=VectorStoreConfig(
-        store_provider=StoreType.Chroma,
-        collection_name="demo_collection",
-        distance_metric="cosine",
-    ),
-    vector_store_additional_config={"chroma_path": "/tmp/demo_chroma"},
-    embed_config=EmbeddingConfig(
-        model_name="text-embedding-v3",
-        base_url="https://api.example.com/embeddings",
-        api_key="your-api-key",
-    ),
-    result_separator="\n\n",
-    include_metadata=False,
 )
 kr_component = KnowledgeRetrievalComponent(component_config=kr_config)
 

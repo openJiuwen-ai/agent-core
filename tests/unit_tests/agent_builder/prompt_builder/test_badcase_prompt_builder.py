@@ -21,6 +21,7 @@ import openjiuwen.dev_tools.prompt_builder.builder.prompt_zh as TEMPLATE_ZH
 
 class MockModelClient(BaseModelClient):
     """Mock 大模型，返回预定义的响应"""
+    __client_name__ = "MockModelClient"
 
     def __init__(
             self,
@@ -112,13 +113,10 @@ class MockModelClient(BaseModelClient):
         pass
 
 
-_CLIENT_TYPE_REGISTRY["MocKBadCaseLLM"] = MockModelClient
-
-
 @pytest.mark.asyncio
 async def test_bad_case_prompt_builder():
     builder = BadCasePromptBuilder(
-        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MocKBadCaseLLM", api_base="", api_key="")
+        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MockModelClient", api_base="", api_key="")
     )
     prompt = "bad_case test prompt"
     information_extraction_cases = [

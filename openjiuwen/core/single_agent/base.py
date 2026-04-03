@@ -32,6 +32,7 @@ from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.session import with_session_for_class
 from openjiuwen.core.session.session import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.agent_callback_manager import AgentCallbackManager
@@ -78,6 +79,7 @@ class _AgentMeta(ABCMeta):
         return instance
 
 
+@with_session_for_class
 class BaseAgent(metaclass=_AgentMeta):
     """Single Agent Base Class
 
@@ -223,8 +225,8 @@ class BaseAgent(metaclass=_AgentMeta):
         event inputs, use the dataclasses defined in rail.base:
             BEFORE_INVOKE      InvokeInputs(query, conversation_id?)
             AFTER_INVOKE       InvokeInputs(query, conversation_id?, result)
-            BEFORE_MODEL_CALL  ModelCallInputs(messages, tools?)
-            AFTER_MODEL_CALL   ModelCallInputs(messages, tools?, response)
+            BEFORE_MODEL_CALL  ModelCallInputs(messages_preview, tools?, model_context?)
+            AFTER_MODEL_CALL   ModelCallInputs(messages_final, tools?, model_context?, response)
             BEFORE_TOOL_CALL   ToolCallInputs(tool_call, tool_name?, tool_args?)
             AFTER_TOOL_CALL    ToolCallInputs(tool_call, tool_name?, tool_args?, tool_result, tool_msg)
 

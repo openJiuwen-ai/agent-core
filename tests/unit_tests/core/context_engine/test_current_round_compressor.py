@@ -49,6 +49,15 @@ def create_mock_token_counter(return_value: int = 100):
     mock_counter.count_messages = MagicMock(return_value=return_value)
     return mock_counter
 
+
+def create_length_token_counter():
+    """Create a mock token counter that scales with message content length."""
+    mock_counter = MagicMock()
+    mock_counter.count_messages = MagicMock(
+        side_effect=lambda messages: sum(len(getattr(message, "content", "") or "") for message in messages)
+    )
+    return mock_counter
+
 offload_type = (OffloadUserMessage, OffloadAssistantMessage, OffloadToolMessage)
 
 
@@ -63,9 +72,9 @@ class TestCurrentRoundCompressor:
         So we need UserMessage followed by assistant/tool messages.
         """
         mock_response = MagicMock()
-        mock_response.parser_content = {"summary": "Compressed: tool execution result."}
+        mock_response.content = "Compressed: tool execution result."
 
-        mock_token_counter = create_mock_token_counter(200)
+        mock_token_counter = create_length_token_counter()
 
         with patch(
             "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model"
@@ -75,9 +84,8 @@ class TestCurrentRoundCompressor:
             mock_model_cls.return_value = mock_model
 
             config = CurrentRoundCompressorConfig(
-                messages_threshold=10,
                 tokens_threshold=100,
-                large_message_threshold=50,
+                min_selected_tokens_for_compression=1,
                 messages_to_keep=1,  # Keep 1 message (the last UserMessage)
             )
             ctx = await create_context_with_compressor(config, token_counter=mock_token_counter)
@@ -108,11 +116,9 @@ class TestCurrentRoundCompressor:
     async def test_compression_with_assistant_and_tool_messages(self):
         """Compression should handle assistant and tool messages correctly."""
         mock_response = MagicMock()
-        mock_response.parser_content = {
-            "summary": "Through _add_2025 tool, obtained: result is -6."
-        }
+        mock_response.content = "Through _add_2025 tool, obtained: result is -6."
 
-        mock_token_counter = create_mock_token_counter(200)
+        mock_token_counter = create_length_token_counter()
 
         with patch(
             "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model"
@@ -122,10 +128,9 @@ class TestCurrentRoundCompressor:
             mock_model_cls.return_value = mock_model
 
             config = CurrentRoundCompressorConfig(
-                messages_threshold=10,
-                large_message_threshold=20,
                 messages_to_keep=1,
                 tokens_threshold=100,
+                min_selected_tokens_for_compression=1,
             )
             ctx = await create_context_with_compressor(config, token_counter=mock_token_counter)
             large_content = "根据用户传入的参数a:10,b:20，通过调用_add_2025工具得到的结果是-6。" * 10
@@ -155,11 +160,9 @@ class TestCurrentRoundCompressor:
     async def test_compression_with_multi_assistant_and_tool_messages(self):
         """Compression should handle assistant and tool messages correctly."""
         mock_response = MagicMock()
-        mock_response.parser_content = {
-            "summary": "Through _add_2025 tool, obtained: result is -6."
-        }
+        mock_response.content = "Through _add_2025 tool, obtained: result is -6."
 
-        mock_token_counter = create_mock_token_counter(200)
+        mock_token_counter = create_length_token_counter()
 
         with patch(
             "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model"
@@ -169,11 +172,9 @@ class TestCurrentRoundCompressor:
             mock_model_cls.return_value = mock_model
 
             config = CurrentRoundCompressorConfig(
-                messages_threshold=10,
-                large_message_threshold=20,
                 messages_to_keep=1,
                 tokens_threshold=100,
-                single_multi_compression=True,
+                min_selected_tokens_for_compression=1,
             )
             ctx = await create_context_with_compressor(config, token_counter=mock_token_counter)
             large_content = "根据用户传入的参数a:10,b:20，通过调用_add_2025工具得到的结果是-6。" * 10

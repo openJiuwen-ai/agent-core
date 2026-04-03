@@ -85,7 +85,7 @@ class TestTripleExtractor:
     @pytest.mark.asyncio
     async def test_extract_with_exception(self, mock_llm_client):
         """Test exception during extraction"""
-        mock_llm_client.ainvoke = AsyncMock(side_effect=Exception("LLM error"))
+        mock_llm_client.invoke = AsyncMock(side_effect=Exception("429 too many requests"))
 
         extractor = TripleExtractor(
             llm_client=mock_llm_client,
@@ -98,13 +98,14 @@ class TestTripleExtractor:
         with pytest.raises(BaseError) as exc_info:
             await extractor.extract(chunks)
         assert exc_info.value.code == StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR.code
+        assert "429 too many requests" in (exc_info.value.message or "")
 
     @pytest.mark.asyncio
     async def test_extract_invalid_json(self, mock_llm_client):
         """Test invalid JSON response"""
         mock_completion = MagicMock()
         mock_completion.content = "Invalid JSON response"
-        mock_llm_client.ainvoke = AsyncMock(return_value=mock_completion)
+        mock_llm_client.invoke = AsyncMock(return_value=mock_completion)
 
         extractor = TripleExtractor(
             llm_client=mock_llm_client,
@@ -117,6 +118,7 @@ class TestTripleExtractor:
         with pytest.raises(BaseError) as exc_info:
             await extractor.extract(chunks)
         assert exc_info.value.code == StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR.code
+        assert "parsed" in (exc_info.value.message or "").lower()
 
     @pytest.mark.asyncio
     async def test_extract_empty_chunks(self, mock_llm_client):

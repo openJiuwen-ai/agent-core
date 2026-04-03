@@ -109,7 +109,7 @@ async def async_request_with_retry(
 
 
 def _handle_response(response: Optional[httpx.Response]) -> tuple[dict | list, str]:
-    if not response.text.startswith("{") and response.text.endswith("}"):
+    if not response.text.strip():
         raise ValueError("Empty response")
     resp_json = response.json()
     resp_str = f"{response.text=}"

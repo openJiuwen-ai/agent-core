@@ -2,7 +2,7 @@
 
 ## class openjiuwen.dev_tools.agentrl.reward.registry.RewardRegistry
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.reward.registry.RewardRegistry()
 ```
 
@@ -12,7 +12,7 @@ Global registry mapping reward names to callable objects.
 
 Initialize reward registry.
 
-### def register(self, name: str, fn: RewardCallable) -> None
+### register(self, name: str, fn: RewardCallable) -> None
 
 Register reward function by name.
 
@@ -25,7 +25,7 @@ Register reward function by name.
 
 * **BaseError**: Raised when reward name is empty.
 
-### def get(self, name: str) -> RewardCallable
+### get(self, name: str) -> RewardCallable
 
 Look up reward function by name. Raises if not found.
 
@@ -41,15 +41,13 @@ Look up reward function by name. Raises if not found.
 
 * **BaseError**: Raised when reward function is not found.
 
-### def list(self) -> List[str]
+### list(self) -> List[str]
 
 Return a list of all registered reward names.
 
 **Returns**:
 
 **List[str]**, List of reward names.
-
----
 
 ## Module-level default registry
 
@@ -59,11 +57,9 @@ from openjiuwen.dev_tools.agentrl.reward.registry import reward_registry
 
 Module-level default reward registry instance.
 
----
-
 ## func openjiuwen.dev_tools.agentrl.reward.registry.register_reward
 
-```
+```python
 def register_reward(name: str) -> Callable[[RewardCallable], RewardCallable]
 ```
 

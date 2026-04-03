@@ -272,6 +272,14 @@ class TeamRuntime:
         """
         return len(self._agent_cards)
 
+    async def cleanup_session(self, session_id: str) -> None:
+        """Clean up all message-bus state for a finished session.
+
+        Args:
+            session_id: The session ID to clean up.
+        """
+        await self._message_bus.cleanup_session(session_id)
+
     def bind_team_session(self, session) -> None:
         self._active_team_sessions[session.get_session_id()] = session
 

@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable, Awaitable
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAffinityModel
@@ -14,8 +14,14 @@ class KVCacheManager:
 
     async def release(self, context_window: ContextWindow, **kwargs):
         model = kwargs.get("model")
-        if model is None or not isinstance(model, InferenceAffinityModel):
+        if model is None:
             return
+        if isinstance(model, InferenceAffinityModel):
+            release_fn: Callable[..., Awaitable[bool]] | None = model.release
+        else:
+            release_fn = getattr(model, "release", None)
+            if release_fn is None:
+                return
 
         if not self._last_context_window:
             self._last_context_window = context_window
@@ -30,8 +36,7 @@ class KVCacheManager:
                 kwargs["tools"] = self._last_context_window.get_tools()
                 kwargs["tools_released_index"] = tools_released_index
 
-            result = await model.release(
-                model=model.model_config.model_name,
+            result = await release_fn(
                 session_id=self._session_id,
                 messages=self._last_context_window.get_messages(),
                 messages_released_index=messages_released_index,

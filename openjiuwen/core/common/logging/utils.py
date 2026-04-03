@@ -90,7 +90,7 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
     # Support str / PathLike, and guard against invalid types / empty values
     try:
         path_str = os.fspath(path_value)
-    except TypeError:
+    except TypeError as e:
         raise build_error(
             StatusCode.COMMON_LOG_PATH_INVALID,
             error_msg=f'the path_value is {path_value}'
@@ -114,4 +114,3 @@ def normalize_and_validate_log_path(path_value: Any) -> str:
         )
 
     return real_path
-

@@ -2,7 +2,7 @@
 
 ## class openjiuwen.dev_tools.agentrl.reward.registry.RewardRegistry
 
-```
+```python
 class openjiuwen.dev_tools.agentrl.reward.registry.RewardRegistry()
 ```
 
@@ -12,7 +12,7 @@ class openjiuwen.dev_tools.agentrl.reward.registry.RewardRegistry()
 
 初始化奖励注册表。
 
-### def register(self, name: str, fn: RewardCallable) -> None
+### register(self, name: str, fn: RewardCallable) -> None
 
 按名称注册奖励函数。
 
@@ -25,7 +25,7 @@ class openjiuwen.dev_tools.agentrl.reward.registry.RewardRegistry()
 
 * **BaseError**：奖励名称为空时抛出。
 
-### def get(self, name: str) -> RewardCallable
+### get(self, name: str) -> RewardCallable
 
 根据名称查找奖励函数。若未找到则抛出异常。
 
@@ -41,15 +41,13 @@ class openjiuwen.dev_tools.agentrl.reward.registry.RewardRegistry()
 
 * **BaseError**：奖励函数未找到时抛出。
 
-### def list(self) -> List[str]
+### list(self) -> List[str]
 
 返回所有已注册奖励名称的列表。
 
 **返回**：
 
 **List[str]**，奖励名称列表。
-
----
 
 ## 模块级默认注册表
 
@@ -59,11 +57,9 @@ from openjiuwen.dev_tools.agentrl.reward.registry import reward_registry
 
 模块级默认奖励注册表实例。
 
----
-
 ## func openjiuwen.dev_tools.agentrl.reward.registry.register_reward
 
-```
+```python
 def register_reward(name: str) -> Callable[[RewardCallable], RewardCallable]
 ```
 

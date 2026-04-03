@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Union, List, Optional, AsyncIterator, Type, Dict
 
+from openjiuwen.core.common.clients import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.model_clients.dashscope_model_client import DashScopeModelClient
@@ -18,12 +19,14 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import SiliconFlowModelClient
+from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
 
 _CLIENT_TYPE_REGISTRY: Dict[str, Type[BaseModelClient]] = {
     "OpenAI": OpenAIModelClient,
     "OpenRouter": OpenAIModelClient,
     "SiliconFlow": SiliconFlowModelClient,
     "DashScope": DashScopeModelClient,
+    "InferenceAffinity": InferenceAffinityModelClient,
 }
 
 
@@ -108,19 +111,18 @@ class Model:
         if client_config.client_id is None:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config client_id is none")
-        client_provider = client_config.client_provider
-
-        client_class = _CLIENT_TYPE_REGISTRY.get(client_provider)
-
-        if client_class is None:
-            supported_types = ", ".join(_CLIENT_TYPE_REGISTRY.keys())
-
+        client_provider = client_config.client_provider.value if hasattr(client_config.client_provider,
+            'value') else client_config.client_provider
+        try:
+            client = get_client_registry().get_client(client_provider, "llm", model_config=self.model_config,
+                                                      model_client_config=client_config)
+        except ValueError as e:
+            supported_types = [name for name in get_client_registry().list_clients() if name.startswith("llm_")]
             raise build_error(
                 StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                 error_msg=f"Unsupported client_type: '{client_provider}', Supported types: {supported_types}"
             )
-
-        return client_class(self.model_config, client_config)
+        return client
 
     async def invoke(
             self,
@@ -210,6 +212,55 @@ class Model:
                 **kwargs
         ):
             yield chunk
+
+    async def release(
+            self,
+            session_id: str,
+            messages: List,
+            messages_released_index: int,
+            *,
+            model: Optional[str] = None,
+            tools: Optional[List] = None,
+            tools_released_index: Optional[int] = None,
+    ) -> bool:
+        """Release model cache/resources if the underlying client supports it."""
+        release_fn = getattr(self._client, "release", None)
+        if release_fn is None:
+            return False
+        return await release_fn(
+            session_id=session_id,
+            messages=messages,
+            messages_released_index=messages_released_index,
+            model=model,
+            tools=tools,
+            tools_released_index=tools_released_index,
+        )
+
+    def supports_kv_cache_release(self) -> bool:
+        """Whether underlying client supports KV cache release."""
+        return callable(getattr(self._client, "release", None))
+
+    def build_kv_cache_invoke_kwargs(
+            self,
+            *,
+            session: object = None,
+            enable_kv_cache_release: bool = False,
+    ) -> dict:
+        """Build extra kwargs for invoke/stream related to KV cache behavior.
+
+        For InferenceAffinity (vLLM):
+          - session_id: use session.get_session_id() if provided
+          - enable_cache_sharing: follow enable_kv_cache_release
+        """
+        if not isinstance(self._client, InferenceAffinityModelClient):
+            return {}
+
+        extra: dict = {}
+        if session is not None and hasattr(session, "get_session_id"):
+            extra["session_id"] = session.get_session_id()
+        if enable_kv_cache_release:
+            extra["enable_cache_sharing"] = True
+        return extra
 
     async def generate_image(
             self,
@@ -334,17 +385,17 @@ class Model:
 
 
 def init_model(
-    provider: str,
-    model_name: str,
-    api_key: str,
-    api_base: str,
-    *,
-    temperature: float = 0.95,
-    top_p: float = 0.1,
-    max_tokens: Optional[int] = None,
-    timeout: float = 60.0,
-    max_retries: int = 3,
-    verify_ssl: bool = False,
+        provider: str,
+        model_name: str,
+        api_key: str,
+        api_base: str,
+        *,
+        temperature: float = 0.95,
+        top_p: float = 0.1,
+        max_tokens: Optional[int] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        verify_ssl: bool = False,
 ) -> Model:
     """Convenience factory to create a Model instance.
 

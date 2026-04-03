@@ -27,6 +27,17 @@ class ReActAgentCompExecutable(ComponentExecutable):
         )
         self._react_agent.configure(config)
 
+    @property
+    def ability_manager(self):
+        """Get the ability manager for adding tools/workflows/agents.
+        
+        This provides a public interface to manage agent capabilities.
+        
+        Returns:
+            AbilityManager: The ability manager instance
+        """
+        return self._react_agent.ability_manager
+
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         """Execute ReAct loop synchronously with batch input/output."""
         try:
@@ -44,6 +55,7 @@ class ReActAgentCompExecutable(ComponentExecutable):
         """Execute ReAct loop with streaming output."""
         try:
             # Stream the ReAct agent execution
+            # For workflow sessions, this writes to session.write_stream() which the workflow consumes
             async for chunk in self._react_agent.stream(inputs, session):
                 yield chunk
         except Exception as e:
@@ -83,15 +95,6 @@ class ReActAgentCompExecutable(ComponentExecutable):
             }
 
     async def transform(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
-        """Execute ReAct loop with streaming input/output."""
-        try:
-            # Process each input chunk through the ReAct agent
-            async for input_chunk in inputs:
-                # Execute ReAct on this chunk
-                result = await self._react_agent.invoke(input_chunk, session)
-                yield result
-        except Exception as e:
-            yield {
-                "type": "error",
-                "payload": {"output": f"Error in ReAct transform: {str(e)}", "result_type": "error"}
-            }
+        # Transform streaming input to streaming output
+        result = await self.invoke(inputs, session, context)
+        yield result

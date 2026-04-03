@@ -8,10 +8,60 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.schema import BaseCard
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.code import BaseCodeOperation
-from openjiuwen.core.sys_operation.config import LocalWorkConfig, SandboxGatewayConfig
+from openjiuwen.core.sys_operation.config import ContainerScope, LocalWorkConfig, SandboxGatewayConfig
 from openjiuwen.core.sys_operation.fs import BaseFsOperation
 from openjiuwen.core.sys_operation.registry import OperationRegistry
 from openjiuwen.core.sys_operation.shell import BaseShellOperation
+from openjiuwen.core.sys_operation.sandbox.run_config import SandboxRunConfig
+
+
+# Template placeholder for session_id in isolation key template
+_TEMPLATE_SESSION_PLACEHOLDER = "{session_id}"
+
+
+def generate_isolation_key_template(
+    isolation_prefix: Optional[str],
+    container_scope: ContainerScope,
+    custom_id: Optional[str],
+    launcher_type: str = "pre_deploy",
+    sandbox_type: str = "aio",
+) -> str:
+    """Generate isolation key template without actual session_id.
+
+    This template is used for conflict detection - it represents the pattern
+    of isolation keys without the dynamic session_id component.
+
+    Format: {container_scope}_{launcher_type}_{sandbox_type}_{prefix}_{identity}
+    Where identity is:
+    - SYSTEM: "system"
+    - SESSION: "{session_id}" (placeholder)
+    - CUSTOM: custom_id
+
+    Args:
+        isolation_prefix: Namespace prefix for agent isolation
+        container_scope: Isolation level (SYSTEM/SESSION/CUSTOM)
+        custom_id: Fixed container key for CUSTOM scope
+        launcher_type: Launcher type (pre_deploy)
+        sandbox_type: Sandbox type (aio)
+
+    Returns:
+        Isolation key template string
+    """
+    prefix = f"{isolation_prefix}_" if isolation_prefix else ""
+
+    if container_scope == ContainerScope.SYSTEM:
+        identity = "system"
+    elif container_scope == ContainerScope.CUSTOM:
+        if custom_id:
+            identity = custom_id
+        else:
+            raise ValueError("container_scope is CUSTOM but custom_id is None")
+    elif container_scope == ContainerScope.SESSION:
+        identity = _TEMPLATE_SESSION_PLACEHOLDER
+    else:
+        identity = "default"
+
+    return f"{container_scope.value}_{launcher_type}_{sandbox_type}_{prefix}{identity}"
 
 
 class ToolIdProxy:
@@ -118,11 +168,20 @@ class SysOperation:
     """SysOperation"""
 
     def __init__(self, card: SysOperationCard):
+        self.id = card.id
         self.mode = card.mode
         if self.mode == OperationMode.LOCAL:
             self._run_config = card.work_config or LocalWorkConfig()
         else:
-            self._run_config = card.gateway_config or SandboxGatewayConfig()
+            gateway_config = self._validate_sandbox_gateway_config(card.gateway_config)
+            isolation_key_template = generate_isolation_key_template(
+                isolation_prefix=gateway_config.isolation.prefix,
+                container_scope=gateway_config.isolation.container_scope,
+                custom_id=gateway_config.isolation.custom_id,
+                launcher_type=gateway_config.launcher_config.launcher_type,
+                sandbox_type=gateway_config.launcher_config.sandbox_type,
+            )
+            self._run_config = SandboxRunConfig(config=gateway_config, isolation_key_template=isolation_key_template)
         self._instances = {}
 
     def __getattr__(self, name):
@@ -135,6 +194,20 @@ class SysOperation:
             return lambda: self._get_operation(name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
+    @property
+    def work_dir(self) -> Optional[str]:
+        """Return the configured work directory (local mode only), or None if not set."""
+        if self.mode == OperationMode.LOCAL:
+            return getattr(self._run_config, "work_dir", None)
+        return None
+
+    @property
+    def isolation_key_template(self) -> Optional[str]:
+        """Return the sandbox isolation key template, or None for local mode."""
+        if self.mode == OperationMode.SANDBOX:
+            return getattr(self._run_config, "isolation_key_template", None)
+        return None
+
     def fs(self) -> BaseFsOperation:
         return self._get_operation("fs")
 
@@ -143,6 +216,21 @@ class SysOperation:
 
     def shell(self) -> BaseShellOperation:
         return self._get_operation("shell")
+
+    @staticmethod
+    def _validate_sandbox_gateway_config(gateway_config: Optional[SandboxGatewayConfig]) -> SandboxGatewayConfig:
+        config = gateway_config or SandboxGatewayConfig()
+        launcher_config = config.launcher_config
+        if launcher_config is None:
+            raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
+                              error_msg="sandbox mode requires launcher_config")
+        if not launcher_config.launcher_type:
+            raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
+                              error_msg="sandbox mode requires launcher_type")
+        if not launcher_config.sandbox_type:
+            raise build_error(StatusCode.SYS_OPERATION_CARD_PARAM_ERROR,
+                              error_msg="sandbox mode requires sandbox_type")
+        return config
 
     def _get_operation(self, name):
         """get operation"""

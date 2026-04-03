@@ -1,5 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 from abc import ABC
 from typing import AsyncIterator, TypeVar
 
@@ -8,6 +9,7 @@ from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable
+from openjiuwen.core.session import with_session_for_class
 from openjiuwen.core.session.session import BaseSession
 from openjiuwen.core.session.internal.workflow import NodeSession
 from openjiuwen.core.session.node import Session
@@ -16,6 +18,7 @@ Input = TypeVar("Input", contravariant=True)
 Output = TypeVar("Output", contravariant=True)
 
 
+@with_session_for_class
 class ComponentExecutable(Executable):
     """
     Interface for executable components in a workflow.

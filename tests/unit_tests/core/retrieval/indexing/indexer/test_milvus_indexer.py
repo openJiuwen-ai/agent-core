@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.retrieval import IndexConfig, MilvusIndexer, TextChunk, VectorStoreConfig
 from openjiuwen.core.retrieval.utils.common import create_milvus_alias
@@ -176,8 +177,9 @@ class TestMilvusIndexer:
 
         with patch.object(indexer, "_ensure_collection", new_callable=AsyncMock) as mock_ensure:
             mock_ensure.return_value = None
-            result = await indexer.build_index(chunks, config)
-            assert result is False  # Should fail
+            with pytest.raises(BaseError) as exc_info:
+                await indexer.build_index(chunks, config)
+            assert exc_info.value.code == StatusCode.RETRIEVAL_INDEXING_EMBED_MODEL_NOT_FOUND.code
 
     @pytest.mark.asyncio
     @patch("openjiuwen.core.retrieval.indexing.indexer.milvus_indexer.MilvusVectorStore.create_client")

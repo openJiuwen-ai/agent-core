@@ -247,6 +247,35 @@ class AsyncProcessHandler:
                 data=f"process wait error: {str(e)}"
             )
 
+    async def background(self, grace: float = 3.0) -> tuple[int, Optional[str]]:
+        """Launch process in background and wait briefly for early failure detection.
+
+        Args:
+            grace: Seconds to wait before declaring the process successfully started.
+
+        Returns:
+            (pid, error): pid is the process ID; error is None if still running after
+                          grace period, or an error message if process exited early with
+                          non-zero code.
+
+        Raises:
+            RuntimeError: If invoke() or stream() has already been executed
+        """
+        if self._is_executed:
+            raise RuntimeError(
+                "AsyncProcessHandler: invoke() and stream() are mutually exclusive, only one can be executed once")
+
+        self._is_executed = True
+        pid = self._process.pid
+        try:
+            await asyncio.wait_for(self._process.wait(), timeout=grace)
+            code = self._process.returncode
+            if code != 0:
+                return pid, f"process exited early with code {code}"
+            return pid, None
+        except asyncio.TimeoutError:
+            return pid, None  # still running after grace period — success
+
     async def _reader(self, stream: asyncio.StreamReader, stream_type: StreamEventType):
         """Background stream reader coroutine for stdout/stderr.
 

@@ -593,10 +593,10 @@ class GraphEvent(BaseLogEvent):
 
 @dataclass
 class RunnerEvent(BaseLogEvent):
-    runner_id: Optional[str] = None,
-    inputs: Optional[Any] = None,
-    outputs: Optional[Any] = None,
-    chunk: Optional[Any] = None,
+    runner_id: Optional[str] = None
+    inputs: Optional[Any] = None
+    outputs: Optional[Any] = None
+    chunk: Optional[Any] = None
     envs: Optional[Any] = None
     resource_id: Optional[str] = None
     resource_type: Optional[str] = None
@@ -745,6 +745,12 @@ _CUSTOM_EVENT_CLASS_MAP: Dict[str, type] = {}
 _common_logger: Optional[Any] = None
 
 
+def reset_common_logger_cache() -> None:
+    """Clear the cached common logger so it can be rebound after reconfiguration."""
+    global _common_logger
+    _common_logger = None
+
+
 def _get_common_logger() -> Any:
     """
     Get common logger with lazy initialization and caching
@@ -753,15 +759,17 @@ def _get_common_logger() -> Any:
         Logger instance
     """
     global _common_logger
-    if _common_logger is None:
-        try:
-            from openjiuwen.core.common.logging.manager import LogManager
+    try:
+        from openjiuwen.core.common.logging.manager import LogManager
 
-            _common_logger = LogManager.get_logger("common")
-        except Exception:
-            # Fallback to standard logging if LogManager is not available
-            import logging
+        current_logger = LogManager.get_logger("common")
+        if _common_logger is not current_logger:
+            _common_logger = current_logger
+    except Exception:
+        # Fallback to standard logging if LogManager is not available
+        import logging
 
+        if _common_logger is None:
             _common_logger = logging.getLogger(__name__)
     return _common_logger
 

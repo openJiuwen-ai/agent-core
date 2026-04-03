@@ -26,6 +26,7 @@ MOCK_INTENT = '''```json{"intent": "true",
 
 class MockModelClient(BaseModelClient):
     """Mock 大模型，返回预定义的响应"""
+    __client_name__ = "MocKFeedbackLLM"
 
     def __init__(
             self,
@@ -117,9 +118,6 @@ class MockModelClient(BaseModelClient):
         pass
 
 
-_CLIENT_TYPE_REGISTRY["MocKFeedbackLLM"] = MockModelClient
-
-
 @pytest.mark.asyncio
 async def test_feedback_prompt_builder_general():
     builder = FeedbackPromptBuilder(
@@ -149,7 +147,7 @@ async def test_feedback_prompt_builder_insert():
     expected_messages = TEMPLATE_ZH.PROMPT_FEEDBACK_INSERT_TEMPLATE.format(
         dict(original_prompt=prompt[:3] + insert_tag + prompt[3:],
              suggestion="[优化后的反馈信息]"
-        )
+             )
     ).to_messages()
     expected_content = "".join(MOCK_INTENT + msg.content for msg in expected_messages)
     assert response == expected_content
@@ -170,7 +168,7 @@ async def test_feedback_prompt_builder_select():
         dict(original_prompt=prompt + MOCK_INTENT,
              suggestion="[优化后的反馈信息]",
              pending_optimized_prompt=prompt[0:3]
-        )
+             )
     ).to_messages()
     expected_content = "".join(MOCK_INTENT + msg.content for msg in expected_messages)
     assert response == expected_content

@@ -43,18 +43,13 @@ from openjiuwen.core.common.logging.utils import (
 )
 
 _initialized = False
+_lazy_loggers = []
 
 
 def _ensure_initialized():
     """Ensure the logging system is initialized"""
     global _initialized
     if not _initialized:
-        try:
-            from openjiuwen.core.common.logging.default.default_impl import DefaultLogger
-
-            LogManager.set_default_logger_class(DefaultLogger)
-        except ImportError:
-            pass
         LogManager.initialize()
         _initialized = True
 
@@ -76,6 +71,7 @@ class LazyLogger:
         """
         self._getter_func: Callable[[], LoggerProtocol] = getter_func
         self._logger: Optional[LoggerProtocol] = None
+        _lazy_loggers.append(self)
 
     def __getattr__(self, name: str) -> Any:
         """
@@ -89,10 +85,23 @@ class LazyLogger:
         Returns:
             Logger method or attribute
         """
-        if self._logger is None:
-            _ensure_initialized()
-            self._logger = self._getter_func()
+        _ensure_initialized()
+        current_logger = self._getter_func()
+        if self._logger is not current_logger:
+            self._logger = current_logger
         return getattr(self._logger, name)
+
+    def reset(self) -> None:
+        """Clear the cached logger so it rebinds on next access."""
+        self._logger = None
+
+
+def reset_lazy_loggers() -> None:
+    """Clear cached module-level lazy loggers so they rebind after reconfiguration."""
+    global _initialized
+    _initialized = False
+    for lazy_logger in _lazy_loggers:
+        lazy_logger.reset()
 
 
 # ========== General Loggers ==========
@@ -170,6 +179,8 @@ operator_logger = LazyLogger(lambda: LogManager.get_logger("operator"))
 # MCP protocol logger - for MCP protocol related logs
 mcp_logger = LazyLogger(lambda: LogManager.get_logger("mcp"))
 
+team_logger = LazyLogger(lambda: LogManager.get_logger("team"))
+
 
 __all__ = [
     # Protocol and base classes
@@ -204,6 +215,7 @@ __all__ = [
     "operator_logger",
     # Protocol and extension module loggers
     "mcp_logger",
+    "team_logger",
     # Event definitions
     "LogEventType",
     "LogLevel",

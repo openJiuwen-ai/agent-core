@@ -47,6 +47,7 @@ from openjiuwen.core.workflow.components.llm.intent_detection_comp import (
     IntentDetectionCompConfig
 )
 from openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp import (
+    ComponentKBConfig,
     KnowledgeRetrievalComponent,
     KnowledgeRetrievalCompConfig,
 )
@@ -128,6 +129,7 @@ _TOOL_RELATED_COMPONENTS = [
 ]
 
 _RESOURCE_RELATED_COMPONENTS = [
+    "ComponentKBConfig",
     "KnowledgeRetrievalComponent",
     "KnowledgeRetrievalCompConfig",
 ]

@@ -21,12 +21,10 @@ First, create a WorkflowAgent instance:
 
 ```python
 from openjiuwen.core.common.constants.enums import ControllerType
-from openjiuwen.core.single_agent.legacy import WorkflowSchema
 from openjiuwen.core.application.workflow_agent import WorkflowAgentConfig, WorkflowAgent
 from openjiuwen.core.workflow import End, Start, Workflow, WorkflowCard, generate_workflow_key
 from openjiuwen.core.workflow.workflow_config import WorkflowConfig
 from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.common import BaseCard
 
 
 def create_agent(runner):
@@ -48,15 +46,16 @@ def create_agent(runner):
     )
     runner.resource_mgr.add_workflow(register_card, lambda: flow)
 
-    # Create Agent
+    # Create Agent, use WorkflowCard to describe workflow input parameters
+    workflow_card = WorkflowCard(
+        id="workflow_id",
+        version="1",
+        name="Simple Workflow",
+        description="this_is_a_demo",
+        input_params={"query": {"type": "string"}},
+    )
     workflow_agent_config = WorkflowAgentConfig(id="agent_id", version="1", description="this_is_a_demo",
-                                                workflows=[WorkflowSchema(
-                                                    id="workflow_id",
-                                                    version="1",
-                                                    name="Simple Workflow",
-                                                    description="this_is_a_demo",
-                                                    inputs={"query": {"type": "string"}},
-                                                )],
+                                                workflows=[workflow_card],
                                                 controller_type=ControllerType.WorkflowController
                                                 )
     agent = WorkflowAgent(agent_config=workflow_agent_config)

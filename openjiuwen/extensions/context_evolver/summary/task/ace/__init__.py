@@ -9,6 +9,7 @@ from .update import (
     CurateOp,
     ParallelCurateOp,
     ApplyDeltaOp,
+    PersistMemoryOp,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "CurateOp",
     "ParallelCurateOp",
     "ApplyDeltaOp",
+    "PersistMemoryOp",
 ]

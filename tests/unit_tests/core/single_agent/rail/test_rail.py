@@ -2,14 +2,17 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Tests for Rail & Callback framework."""
 
+import asyncio
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.application.llm_agent.rails.memory_rail import MemoryRail
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.memory.config.config import AgentMemoryConfig
 from openjiuwen.core.single_agent import (
     AgentCard, ReActAgentConfig, ReActAgent,
 )
@@ -795,6 +798,42 @@ class TestTypedEventInputs(
         assert len(captured) == 1
         assert isinstance(captured[0], ModelCallInputs)
         assert captured[0].messages is not None
+        assert captured[0].model_context is not None
+
+    async def test_before_model_call_preview_messages_do_not_override_builder(
+        self,
+    ):
+        """Preview message edits should not override builder-driven final prompt."""
+        agent, _ = _make_agent()
+
+        class RewriteRail(AgentRail):
+            async def before_model_call(self, ctx):
+                for msg in ctx.inputs.messages:
+                    if getattr(msg, "role", None) == "system":
+                        msg.content = "preview only"
+                ctx.agent.add_prompt_builder_section(
+                    "identity",
+                    "builder final",
+                    priority=10,
+                )
+
+        await agent.register_rail(RewriteRail())
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_text_response("ok"),
+        ])
+        with patch.object(
+            agent, "_get_llm", return_value=mock_llm
+        ):
+            await agent.invoke({"query": "test"})
+
+        system_contents = [
+            msg.content
+            for msg in mock_llm.call_history[0]
+            if getattr(msg, "role", None) == "system"
+        ]
+        assert system_contents == ["builder final"]
 
     async def test_before_tool_call_receives_tool_call_inputs(
         self,
@@ -1080,6 +1119,77 @@ class TestForceFinish(
 
         second = ctx.consume_force_finish()
         assert second is None
+
+
+class TestMemoryRailPromptAssembly(
+    unittest.IsolatedAsyncioTestCase
+):
+    """Tests for memory-variable rendering under the builder-based prompt flow."""
+
+    async def test_memory_rail_rendered_prompt_survives_multiple_iterations(
+        self,
+    ):
+        """Memory placeholders should stay rendered across multi-step invoke loops."""
+        card = AgentCard(description="memory assistant")
+        config = ReActAgentConfig(
+            model_config_obj=_create_model_config(),
+            model_client_config=_create_client_config(),
+            prompt_template=[
+                {
+                    "role": "system",
+                    "content": "记忆信息：{{sys_long_term_memory}}",
+                }
+            ],
+        )
+        agent = ReActAgent(card=card).configure(config)
+        tool = _create_add_tool()
+        agent.ability_manager.add(tool.card)
+        from openjiuwen.core.runner import Runner
+        if Runner.resource_mgr.get_tool(tool.card.id) is None:
+            Runner.resource_mgr.add_tool(tool)
+
+        await agent.register_rail(MemoryRail(
+            mem_scope_id="scope_001",
+            agent_memory_config=AgentMemoryConfig(
+                enable_long_term_mem=True,
+                enable_user_profile=True,
+                enable_semantic_memory=False,
+                enable_episodic_memory=False,
+                enable_summary_memory=False,
+            ),
+        ))
+
+        memory_item = MagicMock()
+        memory_item.mem_info.content = "偏好：数学"
+
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses([
+            create_tool_call_response("add", '{"a": 1, "b": 2}'),
+            create_text_response("done"),
+        ])
+
+        with patch.object(
+            agent, "_get_llm", return_value=mock_llm
+        ), patch(
+            "openjiuwen.core.memory.long_term_memory.LongTermMemory.search_user_mem",
+            AsyncMock(return_value=[memory_item]),
+        ), patch(
+            "openjiuwen.core.memory.long_term_memory.LongTermMemory.add_messages",
+            AsyncMock(return_value=None),
+        ):
+            await agent.invoke({"query": "1+2", "user_id": "user_001"})
+            await asyncio.sleep(0)
+
+        assert len(mock_llm.call_history) == 2
+        for call in mock_llm.call_history:
+            system_contents = [
+                msg.content
+                for msg in call
+                if getattr(msg, "role", None) == "system"
+            ]
+            assert len(system_contents) == 1
+            assert "偏好：数学" in system_contents[0]
+            assert "{{sys_long_term_memory}}" not in system_contents[0]
 
 
 if __name__ == "__main__":
