@@ -113,3 +113,159 @@ class TestMessageQueue:
         mq = MessageQueueInMemory()
         await self.message_queue_common(mq)
 
+    # ------------------------------------------------------------------
+    # Regression tests for nested-send deadlock fix
+    # Bug: SubscriptionInMemory._consume_message directly awaited the handler
+    #      coroutine, blocking the consume loop. When the handler called
+    #      produce_message() on the same queue and awaited the response
+    #      (nested send), the new message could never be consumed, causing
+    #      a permanent deadlock.
+    # Fix: Use asyncio.create_task so the handler runs in a separate Task
+    #      and the consume loop remains free to process new messages.
+    # ------------------------------------------------------------------
+
+    async def test_nested_send_no_deadlock(self):
+        """
+        Handler produces a second message onto the same queue and awaits its
+        response (simulates CommunicableAgent nested send: Planner -> Coder).
+        Before fix: hangs forever. After fix: returns correct result.
+        """
+        TOPIC = "test_nested_send"
+        TIMEOUT = 5.0
+        mq = MessageQueueInMemory(queue_max_size=100, timeout=TIMEOUT)
+        call_count = 0
+
+        async def outer_handler(payload):
+            import uuid
+            inner_msg = InvokeQueueMessage()
+            inner_msg.message_id = str(uuid.uuid4())
+            inner_msg.payload = "inner"
+            await mq.produce_message(TOPIC, inner_msg)
+            inner_result = await inner_msg.response
+            return f"outer({inner_result})"
+
+        async def inner_handler(payload):
+            return "inner_done"
+
+        async def dispatch(payload):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return await outer_handler(payload)
+            return await inner_handler(payload)
+
+        subscription = mq.subscribe(TOPIC)
+        subscription.set_message_handler(dispatch)
+        subscription.activate()
+        mq.start()
+
+        import uuid
+        outer_msg = InvokeQueueMessage()
+        outer_msg.message_id = str(uuid.uuid4())
+        outer_msg.payload = "outer"
+        await mq.produce_message(TOPIC, outer_msg)
+
+        try:
+            result = await asyncio.wait_for(outer_msg.response, timeout=TIMEOUT)
+        finally:
+            await mq.stop()
+
+        assert result == "outer(inner_done)"
+        assert call_count == 2
+
+    async def test_nested_send_three_levels(self):
+        """
+        Three-level nesting: A -> B -> C.
+        Verifies the fix holds for deeper nesting chains.
+        """
+        TOPIC = "test_nested_three"
+        TIMEOUT = 5.0
+        mq = MessageQueueInMemory(queue_max_size=100, timeout=TIMEOUT)
+        call_count = 0
+        import uuid
+
+        async def level_c(payload): return "C"
+
+        async def level_b(payload):
+            msg = InvokeQueueMessage()
+            msg.message_id = str(uuid.uuid4())
+            msg.payload = "c"
+            await mq.produce_message(TOPIC, msg)
+            return f"B({await msg.response})"
+
+        async def level_a(payload):
+            msg = InvokeQueueMessage()
+            msg.message_id = str(uuid.uuid4())
+            msg.payload = "b"
+            await mq.produce_message(TOPIC, msg)
+            return f"A({await msg.response})"
+
+        async def dispatch(payload):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1: return await level_a(payload)
+            if call_count == 2: return await level_b(payload)
+            return await level_c(payload)
+
+        subscription = mq.subscribe(TOPIC)
+        subscription.set_message_handler(dispatch)
+        subscription.activate()
+        mq.start()
+
+        root_msg = InvokeQueueMessage()
+        root_msg.message_id = str(uuid.uuid4())
+        root_msg.payload = "a"
+        await mq.produce_message(TOPIC, root_msg)
+
+        try:
+            result = await asyncio.wait_for(root_msg.response, timeout=TIMEOUT)
+        finally:
+            await mq.stop()
+
+        assert result == "A(B(C))"
+        assert call_count == 3
+
+    async def test_nested_send_task_done_called_once(self):
+        """
+        Verifies task_done() is called exactly once per message.
+        asyncio.Queue raises ValueError if called more than once.
+        """
+        TOPIC = "test_task_done"
+        TIMEOUT = 5.0
+        mq = MessageQueueInMemory(queue_max_size=100, timeout=TIMEOUT)
+        call_count = 0
+        import uuid
+
+        async def outer(payload):
+            inner_msg = InvokeQueueMessage()
+            inner_msg.message_id = str(uuid.uuid4())
+            inner_msg.payload = "inner"
+            await mq.produce_message(TOPIC, inner_msg)
+            res = await inner_msg.response
+            return f"ok({res})"
+
+        async def dispatch(payload):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return await outer(payload)
+            return "inner_result"
+
+        subscription = mq.subscribe(TOPIC)
+        subscription.set_message_handler(dispatch)
+        subscription.activate()
+        mq.start()
+
+        msg = InvokeQueueMessage()
+        msg.message_id = str(uuid.uuid4())
+        msg.payload = "start"
+        await mq.produce_message(TOPIC, msg)
+
+        try:
+            result = await asyncio.wait_for(msg.response, timeout=TIMEOUT)
+            await asyncio.sleep(0.1)  # let background tasks settle
+        finally:
+            await mq.stop()
+
+        assert result == "ok(inner_result)"
+

@@ -81,10 +81,35 @@ class SubscriptionInMemory(SubscriptionBase):
     async def _consume_message(self):
         while self._is_active and self._handler:
             message = await self._queue.get()
+            dispatched_async = False
             try:
                 response = self._handler(message.payload)
                 if isinstance(response, Awaitable):
-                    response = await asyncio.wait_for(response, timeout=self._timeout)
+                    # Use create_task to prevent deadlock when the handler calls send()
+                    # internally. Awaiting the handler directly blocks this consume loop,
+                    # so any nested message produced onto the same queue can never be
+                    # consumed, causing the inner send() to hang forever.
+                    dispatched_async = True
+                    async def _run(msg=message, coro=response):
+                        try:
+                            result = await asyncio.wait_for(coro, timeout=self._timeout)
+                            await self._handle_response(msg, result)
+                        except BaseError as e:
+                            msg.error_code = e.code
+                            msg.error_msg = e.message
+                            if isinstance(msg, (InvokeQueueMessage, StreamQueueMessage)):
+                                if not msg.response.done():
+                                    msg.response.set_exception(e)
+                        except Exception as e:
+                            msg.error_code = StatusCode.MESSAGE_QUEUE_MESSAGE_CONSUME_ERROR.code
+                            msg.error_msg = build_error(StatusCode.MESSAGE_QUEUE_MESSAGE_CONSUME_ERROR, reason=str(e))
+                            if isinstance(msg, (InvokeQueueMessage, StreamQueueMessage)):
+                                if not msg.response.done():
+                                    msg.response.set_exception(e)
+                        finally:
+                            self._queue.task_done()
+                    asyncio.create_task(_run())
+                    continue
                 await self._handle_response(message, response)
             except BaseError as e:
                 message.error_code = e.code
@@ -101,7 +126,8 @@ class SubscriptionInMemory(SubscriptionBase):
                     if not message.response.done():
                         message.response.set_exception(e)
             finally:
-                self._queue.task_done()
+                if not dispatched_async:
+                    self._queue.task_done()
 
 
 class MessageQueueInMemory(MessageQueueBase):
