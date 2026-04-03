@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import random
 import shutil
 import tempfile
 import unittest
@@ -798,3 +799,301 @@ async def test_fs_write_file_append_new_file(sys_op, work_dir):
     res = await sys_op.fs().read_file(path=new_file)
     assert res.code == StatusCode.SUCCESS.code
     assert res.data.content == "First content"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_read_file(sys_op, work_dir):
+    """Test concurrent file reading (verify data consistency)"""
+    # Define test file path and content
+    test_file_path = "test_concurrent_read.txt"
+    test_content = "line1\nline2\nline3\nline4\nline5"
+
+    # Prepare test file with fixed content
+    await sys_op.fs().write_file(
+        path=str(test_file_path),
+        content=test_content,
+        mode="text",
+        append=False,
+        prepend_newline=False,
+        create_if_not_exist=True
+    )
+
+    # Define single read task for concurrency
+    async def read_task():
+        result = await sys_op.fs().read_file(path=str(test_file_path), mode="text")
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data.content == test_content
+        return result
+
+    # Create 5 concurrent read tasks
+    tasks = [read_task() for _ in range(5)]
+    # Execute all read tasks concurrently
+    await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_write_file(sys_op, work_dir):
+    """Test concurrent file writing (verify that the locking mechanism prevents data overwriting)"""
+    # Define test file path and write parameters
+    file_path = "test_concurrent_write.txt"
+    write_count = 10
+    per_write_content = "test_concurrent_write\n"
+
+    # Define single write task for concurrency
+    async def write_task():
+        write_result = await sys_op.fs().write_file(
+            path=file_path,
+            content=per_write_content,
+            mode="text",
+            append=True,
+            prepend_newline=False,
+            create_if_not_exist=True
+        )
+        assert write_result.code == StatusCode.SUCCESS.code
+        return write_result
+
+    # Create multiple concurrent write tasks
+    tasks = [write_task() for _ in range(write_count)]
+    # Execute all write tasks concurrently
+    await asyncio.gather(*tasks)
+
+    # Verify final file content integrity
+    result = await sys_op.fs().read_file(path=file_path, mode="text")
+    assert result.code == StatusCode.SUCCESS.code
+    assert len(result.data.content.strip().split("\n")) == write_count
+    assert result.data.content == per_write_content * write_count
+
+
+@pytest.mark.asyncio
+async def test_concurrent_read_write_mixed(sys_op, work_dir):
+    """Test mixed concurrent read/write (verify lock mechanism ensures data correctness)"""
+    # Define test file path and task counts
+    file_path = "test_concurrent_read_write.txt"
+    write_task_count = 8
+    read_task_count = 5
+    write_content_template = "write_task_{}"
+
+    # Initialize empty test file
+    init_result = await sys_op.fs().write_file(
+        path=str(file_path),
+        content="",
+        mode="text",
+        append=False,
+        prepend_newline=False,
+        append_newline=False,
+        create_if_not_exist=True,
+        permissions="644"
+    )
+    assert init_result.code == StatusCode.SUCCESS.code, "Failed to initialize empty file"
+
+    # Define concurrent write task with unique content
+    async def write_task(task_id: int):
+        content = write_content_template.format(task_id)
+        result = await sys_op.fs().write_file(
+            path=str(file_path),
+            content=content,
+            mode="text",
+            append=True,
+            prepend_newline=False,
+            append_newline=True,
+            create_if_not_exist=True,
+            options={"lock_timeout": 30.0}
+        )
+        assert result.code == StatusCode.SUCCESS.code, f"Write task {task_id} failed"
+        return task_id
+
+    # Define concurrent read task with random delay
+    async def read_task(task_id: int):
+        # Random delay to simulate real concurrent scheduling
+        await asyncio.sleep(random.uniform(0, 0.01))
+        result = await sys_op.fs().read_file(
+            path=str(file_path),
+            mode="text",
+            encoding="utf-8",
+            options={"lock_timeout": 30.0}
+        )
+        assert result.code == StatusCode.SUCCESS.code, f"Read task {task_id} failed"
+
+        # Validate read content is not corrupted
+        lines = [line.strip() for line in result.data.content.split("\n") if line.strip()]
+        for line in lines:
+            assert line.startswith("write_task_"), f"Read task {task_id} got corrupted data: {line}"
+        return len(lines)
+
+    # Create read and write tasks
+    write_tasks = [write_task(i) for i in range(write_task_count)]
+    read_tasks = [read_task(i) for i in range(read_task_count)]
+    mixed_tasks = write_tasks + read_tasks
+
+    # Run mixed concurrent tasks
+    await asyncio.gather(*mixed_tasks)
+
+    # Final validation of complete file content
+    final_read_result = await sys_op.fs().read_file(
+        path=str(file_path),
+        mode="text",
+        encoding="utf-8"
+    )
+    assert final_read_result.code == StatusCode.SUCCESS.code, "Failed to read final content"
+
+    # Verify no data loss after concurrent operations
+    final_lines = [line.strip() for line in final_read_result.data.content.split("\n") if line.strip()]
+    assert len(final_lines) == write_task_count, \
+        f"Mixed read/write lost data: expected {write_task_count} lines, got {len(final_lines)} lines"
+
+    # Ensure all write task records are complete
+    written_task_ids = [int(line.replace("write_task_", "")) for line in final_lines]
+    assert set(written_task_ids) == set(range(write_task_count)), \
+        "Some write task content is missing in mixed read/write scenario"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_upload_file(sys_op, work_dir):
+    """Test concurrent file upload (verify lock and data integrity)"""
+    # Prepare source file
+    src_file = os.path.join(work_dir, "upload_source.txt")
+    target_file = os.path.join(work_dir, "upload_target.txt")
+    upload_content = "concurrent_upload_test_content"
+
+    # Create source file
+    await sys_op.fs().write_file(
+        path=src_file,
+        content=upload_content,
+        mode="text",
+        append=False,
+        prepend_newline=False,
+        create_if_not_exist=True
+    )
+
+    async def upload_task(task_id: int):
+        """Single concurrent upload task"""
+        result = await sys_op.fs().upload_file(
+            local_path=src_file,
+            target_path=target_file,
+            overwrite=True,
+            create_parent_dirs=True,
+            preserve_permissions=True,
+            options={"lock_timeout": 30.0}
+        )
+        assert result.code == StatusCode.SUCCESS.code, f"Upload task {task_id} failed"
+        return result
+
+    # Run 8 concurrent uploads
+    upload_tasks = [upload_task(i) for i in range(8)]
+    await asyncio.gather(*upload_tasks)
+
+    # Verify final target content is correct
+    final_result = await sys_op.fs().read_file(path=target_file, mode="text")
+    assert final_result.data.content == upload_content, "Concurrent upload data corrupted"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_download_file(sys_op, work_dir):
+    """Test concurrent file download (verify data consistency)"""
+    # Prepare source file
+    src_file = os.path.join(work_dir, "download_source.txt")
+    target_file = os.path.join(work_dir, "download_target.txt")
+    download_content = "concurrent_download_test_content"
+
+    # Create source file
+    await sys_op.fs().write_file(
+        path=src_file,
+        content=download_content,
+        mode="text",
+        append=False,
+        prepend_newline=False,
+        create_if_not_exist=True
+    )
+
+    async def download_task(task_id: int):
+        """Single concurrent download task"""
+        result = await sys_op.fs().download_file(
+            source_path=src_file,
+            local_path=target_file,
+            overwrite=True,
+            create_parent_dirs=True,
+            preserve_permissions=True,
+            options={"lock_timeout": 30.0}
+        )
+        assert result.code == StatusCode.SUCCESS.code, f"Download task {task_id} failed"
+
+        # Verify content not corrupted
+        check = await sys_op.fs().read_file(path=target_file, mode="text")
+        assert check.data.content == download_content, "Downloaded content corrupted"
+        return result
+
+    # Run 8 concurrent downloads
+    download_tasks = [download_task(i) for i in range(8)]
+    await asyncio.gather(*download_tasks)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_upload_download_mixed(sys_op, work_dir):
+    """Test mixed concurrent upload & download (verify lock ensures data safety)"""
+    # Prepare files
+    src_file = os.path.join(work_dir, "mixed_src.txt")
+    dst_file = os.path.join(work_dir, "mixed_dst.txt")
+    base_content = "initial_content"
+
+    # Write initial source
+    await sys_op.fs().write_file(
+        path=src_file,
+        content=base_content,
+        mode="text",
+        append=False,
+        prepend_newline=False,
+        create_if_not_exist=True
+    )
+
+    async def upload_task(task_id: int):
+        """Upload task: overwrite source with new unique content"""
+        new_content = f"upload_task_{task_id}"
+        # Update source first
+        await sys_op.fs().write_file(
+            path=src_file,
+            content=new_content,
+            mode="text",
+            append=False,
+            prepend_newline=False
+        )
+        # Upload to destination
+        result = await sys_op.fs().upload_file(
+            local_path=src_file,
+            target_path=dst_file,
+            overwrite=True,
+            options={"lock_timeout": 30.0}
+        )
+        assert result.code == StatusCode.SUCCESS.code, f"Upload task {task_id} failed"
+        return task_id
+
+    async def download_task(task_id: int):
+        """Download task: read and validate content not broken"""
+        await asyncio.sleep(random.uniform(0, 0.01))
+        result = await sys_op.fs().download_file(
+            source_path=src_file,
+            local_path=dst_file,
+            overwrite=True,
+            options={"lock_timeout": 30.0}
+        )
+        assert result.code == StatusCode.SUCCESS.code, f"Download task {task_id} failed"
+
+        # Ensure content is valid format (no corruption)
+        check = await sys_op.fs().read_file(path=dst_file, mode="text")
+        content = check.data.content.strip()
+        assert content == "" or content.startswith("upload_task_") or content == base_content, \
+            f"Download task {task_id} got invalid data: {content}"
+        return result
+
+    # Create mixed tasks
+    upload_tasks = [upload_task(i) for i in range(6)]
+    download_tasks = [download_task(i) for i in range(4)]
+    mixed_tasks = upload_tasks + download_tasks
+
+    await asyncio.gather(*mixed_tasks)
+
+    # Final check: target file exists and content valid
+    final_check = await sys_op.fs().read_file(path=dst_file, mode="text")
+    final_content = final_check.data.content.strip()
+    assert final_content != "", "Final content empty after mixed upload/download"
+    assert final_content.startswith("upload_task_") or final_content == base_content, \
+        "Final content corrupted after mixed concurrency"
