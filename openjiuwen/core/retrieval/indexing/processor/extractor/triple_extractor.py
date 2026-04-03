@@ -12,7 +12,7 @@ from typing import Any, List
 from json_repair import repair_json
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.common.document import TextChunk
 from openjiuwen.core.retrieval.common.triple import Triple
@@ -50,22 +50,37 @@ class TripleExtractor(Extractor):
         **kwargs,
     ) -> List[Triple]:
         """
-        Extract triples
+        Extract triples from chunks via parallel LLM calls.
+
+        On any failure, raises the first error in chunk order (``BaseError`` is re-raised
+        unchanged; other exceptions are wrapped).
 
         Args:
-            chunks: List of text chunks
-            **kwargs: Additional parameters
+            chunks: Text chunks to process.
+            **kwargs: Reserved for extractor API compatibility.
 
         Returns:
-            List of triples
+            All triples merged from successful chunk results.
+
+        Raises:
+            BaseError: Including ``RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR`` when
+                extraction or parsing fails.
         """
 
-        async def _extract_chunk(chunk: TextChunk) -> tuple[List[Triple], bool]:
-            """Process triple extraction for a single chunk
+        async def _extract_chunk(chunk: TextChunk) -> List[Triple]:
+            """
+            Invoke LLM and parse triples for a single chunk.
+
+            Args:
+                chunk: Text chunk to process.
 
             Returns:
-                Tuple of (triples, success): triples extracted and whether extraction succeeded
+                Extracted triples for this chunk.
+
+            Raises:
+                BaseError: On invalid LLM output or failed invoke (after wrapping).
             """
+
             async with self.limiter:
                 try:
                     # Build prompt
@@ -80,55 +95,66 @@ class TripleExtractor(Extractor):
 
                     # Parse result
                     triples, parse_success = self._parse_triples(completion.content, chunk.doc_id, chunk.id_)
-                    return triples, parse_success
+                    if not parse_success:
+                        raise build_error(
+                            StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
+                            error_msg=(
+                                f"{chunk.id_}: LLM response could not be parsed as valid triple JSON"
+                            ),
+                        )
+                    return triples
 
+                except BaseError:
+                    raise
                 except Exception as e:
                     logger.error(f"Failed to extract triples from chunk {chunk.id_}: {e}")
-                    return [], False
+                    raise build_error(
+                        StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
+                        error_msg=f"{chunk.id_}: {e}",
+                        cause=e,
+                    ) from e
 
-        # Create parallel tasks using create_task
         tasks = [asyncio.create_task(_extract_chunk(chunk)) for chunk in chunks]
-
-        # Wait for all tasks to complete and collect results
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Merge all results and check for failures
-        all_triples = []
-        total_chunks = len(chunks)
-        failed_chunks = []
+        all_triples: List[Triple] = []
+        first_error: BaseError | Exception | None = None
+        first_error_chunk_id: str | None = None
 
         for idx, result in enumerate(results):
+            chunk_id = chunks[idx].id_
+            if isinstance(result, BaseException) and not isinstance(result, Exception):
+                raise result
             if isinstance(result, Exception):
-                # Task-level exception (e.g., from asyncio)
-                chunk_id = chunks[idx].id_ if idx < len(chunks) else f"chunk_{idx}"
-                logger.error(f"Task failed with exception for chunk {chunk_id}: {result}")
-                failed_chunks.append(chunk_id)
-            elif isinstance(result, tuple):
-                # Result from _extract_chunk: (triples, success)
-                triples, success = result
-                if not success:
-                    chunk_id = chunks[idx].id_ if idx < len(chunks) else f"chunk_{idx}"
-                    failed_chunks.append(chunk_id)
-                all_triples.extend(triples)
-            else:
-                # Unexpected result type
-                chunk_id = chunks[idx].id_ if idx < len(chunks) else f"chunk_{idx}"
-                logger.warning(f"Unexpected result type from extraction task for chunk {chunk_id}: {type(result)}")
-                failed_chunks.append(chunk_id)
+                logger.error(f"Task failed for chunk {chunk_id}: {result}")
+                if first_error is None:
+                    first_error = result
+                    first_error_chunk_id = chunk_id
+                continue
+            all_triples.extend(result)
 
-        # If any chunk extraction failed, raise exception immediately
-        if failed_chunks:
-            error_msg = (
-                f"Triple extraction failed for {len(failed_chunks)}/{total_chunks} chunks. "
-                f"Recent Failed chunks: {', '.join(failed_chunks[:5])}{'...' if len(failed_chunks) > 5 else ''}. "
-                f"This may be due to rate limiting, API errors, or model issues."
-            )
-            raise build_error(StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR, error_msg=error_msg)
+        if first_error is not None:
+            if isinstance(first_error, BaseError):
+                raise first_error
+            raise build_error(
+                StatusCode.RETRIEVAL_KB_TRIPLE_EXTRACTION_PROCESS_ERROR,
+                error_msg=f"{first_error_chunk_id}: {first_error}",
+                cause=first_error,
+            ) from first_error
 
         return all_triples
 
     def _build_prompt(self, passage: str, title: str = "") -> str:
-        """Build prompt for triple extraction"""
+        """
+        Build the OpenIE triple-extraction prompt for the LLM.
+
+        Args:
+            passage: Chunk body text.
+            title: Optional document or section title from chunk metadata.
+
+        Returns:
+            Rendered prompt string.
+        """
         prompt_template = """# Instruction
 
 Your task is to construct an RDF-style graph from the given title and passage.
@@ -237,13 +263,17 @@ Passage:
         return prompt_template.format(passage=passage, title=title or "Untitled")
 
     def _parse_triples(self, content: str, doc_id: str, chunk_id: str) -> tuple[List[Triple], bool]:
-        """Parse triples returned by LLM
+        """
+        Parse LLM output into ``Triple`` objects.
+
+        Args:
+            content: Raw model output (JSON or markdown-fenced JSON).
+            doc_id: Document id for triple metadata.
+            chunk_id: Chunk id for triple metadata.
 
         Returns:
-            Tuple of (triples, parse_success):
-            - triples: List of extracted triples
-            - parse_success: True if parsing succeeded (even if no triples found),
-                            False if parsing failed (JSON decode error, etc.)
+            ``(triples, parse_success)``: ``parse_success`` is True when JSON was valid
+            and structure was acceptable (empty triple list allowed); False on hard parse errors.
         """
         triples = []
 
