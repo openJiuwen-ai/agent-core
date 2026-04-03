@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -595,7 +597,17 @@ class RoundLevelCompressor(ContextProcessor):
             )
             return None
 
-        response = await self._get_model().invoke(model_messages, output_parser=JsonOutputParser())
+        try:
+            response = await self._get_model().invoke(model_messages, output_parser=JsonOutputParser())
+        except Exception as exc:
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=(
+                    f"{self.processor_type()} failed to invoke compression model "
+                    f"during phase={phase_name}"
+                ),
+                cause=exc,
+            ) from exc
         replacements = await self._build_json_replacements(context, targets, response.parser_content)
         if not replacements and isinstance(response.content, str) and response.content.strip():
             fallback = await self._build_raw_fallback_replacement(context, targets, response.content.strip())

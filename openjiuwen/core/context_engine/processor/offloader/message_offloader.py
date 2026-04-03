@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import List, Dict, Any, Literal, Tuple
+from typing import List, Dict, Any, Literal, Tuple, Optional
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
@@ -12,7 +12,7 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor, Cont
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage, ToolMessage
 
 
 class MessageOffloaderConfig(BaseModel):
@@ -46,6 +46,9 @@ class MessageOffloaderConfig(BaseModel):
 
     offload_message_type: list[Literal["user", "assistant", "tool"]] = Field(default=["tool"])
     """Roles eligible for offloading. Messages whose role is not in this list are always kept."""
+
+    protected_tool_names: list[str] = Field(default=["reload_original_context_messages"])
+    """Tool messages produced by these tools are never offloaded, even if they are large."""
 
     trim_size: int = Field(default=100, gt=0)
     """Number of tokens to retain when a message is offloaded. The remainder is replaced with an omission marker."""
@@ -89,13 +92,16 @@ class MessageOffloader(ContextProcessor):
             **kwargs
     ) -> bool:
         config = self.config
-        message_size = len(context) + len(messages_to_add)
+        all_messages = context.get_messages() + messages_to_add
+        message_size = len(all_messages)
         # Skip if total length is below the keep-floor
         if config.messages_to_keep and message_size <= config.messages_to_keep:
             return False
 
         # Trigger when message count exceeds hard ceiling
         if config.messages_threshold and message_size > config.messages_threshold:
+            if not self._has_offload_candidate(all_messages, context):
+                return False
             logger.info(f"[{self.processor_type()} triggered] context messages num {message_size} "
                         f"exceeds threshold of {config.messages_threshold}")
             return True
@@ -108,6 +114,8 @@ class MessageOffloader(ContextProcessor):
             messages_to_add_token = token_counter.count_messages(messages_to_add)
             tokens = messages_to_add_token + context_token
         if tokens > config.tokens_threshold:
+            if not self._has_offload_candidate(all_messages, context):
+                return False
             logger.info(f"[{self.processor_type()} triggered] context tokens {tokens} "
                         f"exceeds threshold of {config.tokens_threshold}")
             return True
@@ -119,28 +127,12 @@ class MessageOffloader(ContextProcessor):
             context: ModelContext
     ) -> Tuple[ContextEvent, List[BaseMessage]]:
         processed_messages = messages[:]
-        last_ai_msg_index = None
-        if self.config.keep_last_round:
-            last_ai_msg_index = ContextUtils.find_last_ai_message_without_tool_call(messages)
-        keep_index = (
-            len(messages)
-            if not self.config.messages_to_keep
-            else len(messages) - self.config.messages_to_keep
-        )
-        offload_range = (
-            keep_index
-            if last_ai_msg_index is None
-            else min(last_ai_msg_index, keep_index)
-        )
+        offload_range = self._get_offload_range(messages)
 
         event = ContextEvent(event_type=self.processor_type())
         for idx in range(offload_range - 1, -1, -1):
             msg = processed_messages[idx]
-            if (
-                msg.role not in self.config.offload_message_type
-                or len(msg.content) <= self.config.large_message_threshold
-                or isinstance(msg, OffloadMixin)
-            ):
+            if not self._should_offload_message(msg, processed_messages, context):
                 continue
             offload_msg = await self._offload_message(msg, context)
             processed_messages = ContextUtils.replace_messages(
@@ -187,3 +179,94 @@ class MessageOffloader(ContextProcessor):
                 error_msg=f"messages_to_keep {self.config.messages_to_keep} cannot larger than "
                           f"messages_threshold {self.config.messages_threshold}"
             )
+
+    def _get_offload_range(self, messages: List[BaseMessage]) -> int:
+        last_ai_msg_index = None
+        if self.config.keep_last_round:
+            last_ai_msg_index = ContextUtils.find_last_ai_message_without_tool_call(messages)
+        keep_index = (
+            len(messages)
+            if not self.config.messages_to_keep
+            else len(messages) - self.config.messages_to_keep
+        )
+        return keep_index if last_ai_msg_index is None else min(last_ai_msg_index, keep_index)
+
+    def _has_offload_candidate(self, messages: List[BaseMessage], context: ModelContext) -> bool:
+        offload_range = self._get_offload_range(messages)
+        for idx in range(offload_range - 1, -1, -1):
+            if self._should_offload_message(messages[idx], messages, context):
+                return True
+        return False
+
+    def _should_offload_message(
+        self,
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+        context: ModelContext,
+    ) -> bool:
+        if message.role not in self.config.offload_message_type:
+            return False
+        if not isinstance(getattr(message, "content", None), str):
+            return False
+        if len(message.content) <= self.config.large_message_threshold:
+            return False
+        if isinstance(message, OffloadMixin):
+            return False
+        if self._is_protected_tool_message(message, context_messages):
+            return False
+        return True
+
+    def _is_protected_tool_message(
+        self,
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+    ) -> bool:
+        if not isinstance(message, ToolMessage):
+            return False
+        tool_name = self._resolve_tool_name_from_message(message, context_messages)
+        if not tool_name:
+            return False
+        return tool_name in set(self.config.protected_tool_names)
+
+    def _resolve_tool_name_from_message(
+        self,
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+    ) -> Optional[str]:
+        if not isinstance(message, ToolMessage):
+            return None
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if not tool_call_id:
+            return None
+        for context_message in reversed(context_messages):
+            if not isinstance(context_message, AssistantMessage):
+                continue
+            tool_calls = getattr(context_message, "tool_calls", None) or []
+            for tool_call in tool_calls:
+                if not self._tool_call_matches_id(tool_call, tool_call_id):
+                    continue
+                return self._extract_tool_name(tool_call)
+        return None
+
+    @staticmethod
+    def _tool_call_matches_id(tool_call: Any, tool_call_id: str) -> bool:
+        if isinstance(tool_call, dict):
+            return tool_call.get("id") == tool_call_id
+        return getattr(tool_call, "id", None) == tool_call_id
+
+    @staticmethod
+    def _extract_tool_name(tool_call: Any) -> Optional[str]:
+        if isinstance(tool_call, dict):
+            function = tool_call.get("function")
+            if isinstance(function, dict):
+                function_name = function.get("name")
+                if isinstance(function_name, str) and function_name:
+                    return function_name
+            name = tool_call.get("name")
+            return name if isinstance(name, str) and name else None
+        function = getattr(tool_call, "function", None)
+        function_name = getattr(function, "name", None) if function is not None else None
+        if isinstance(function_name, str) and function_name:
+            return function_name
+        name = getattr(tool_call, "name", None)
+        return name if isinstance(name, str) and name else None

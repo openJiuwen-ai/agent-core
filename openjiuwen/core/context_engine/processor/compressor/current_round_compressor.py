@@ -488,23 +488,6 @@ class CurrentRoundCompressor(ContextProcessor):
         self._prior_context_window_size = config.prior_context_window_size
         self._offload_writeback_enabled = config.offload_writeback_enabled
         self._model = Model(self.config.model_client, self.config.model)
-        self._stats: dict[str, Any] = {
-            "compress_trigger_count": 0,
-            "summary_merge_trigger_count": 0,
-            "compress_model_calls": 0,
-            "summary_merge_model_calls": 0,
-            "compress_model_input_tokens": [],
-            "compress_model_output_tokens": [],
-            "summary_merge_model_input_tokens": [],
-            "summary_merge_model_output_tokens": [],
-            "processor_time": [],
-            "processor_time_": [],
-        }
-        self.logger = logging.getLogger("minisweagent.environment")
-
-    def get_stats(self) -> dict[str, Any]:
-        """Return a shallow copy of runtime statistics collected by this processor."""
-        return dict(self._stats)
 
     def _count_response_tokens(self, token_counter, response) -> int:
         """Estimate response token usage for stats recording.
@@ -769,7 +752,6 @@ class CurrentRoundCompressor(ContextProcessor):
         token_counter = context.token_counter()
         tokens = self._count_messages_tokens(context.get_messages() + messages_to_add, token_counter)
         if tokens > self._token_threshold:
-            self._stats["compress_trigger_count"] += 1
             logger.info(
                 f"[{self.processor_type()} triggered] context tokens {tokens} "
                 f"exceeds threshold of {config.tokens_threshold}"
@@ -833,8 +815,6 @@ class CurrentRoundCompressor(ContextProcessor):
                 messages_to_compress, context, context_messages, end_idx, current_query_idx=last_user_idx
             )
             if compressed_msg:
-                self.logger.info(
-                    f"CurrentRoundCompressor multi_compress compressed_msg: {compressed_msg}")
                 context_messages = ContextUtils.replace_messages(
                     context_messages, [compressed_msg], start_idx, end_idx
                 )
@@ -842,14 +822,11 @@ class CurrentRoundCompressor(ContextProcessor):
         summary_indices = self._collect_prior_summary_indices(context_messages)
 
         if len(summary_indices) >= self._summary_merge_min_blocks:
-            self._stats["summary_merge_trigger_count"] += 1
             start_idx_ = summary_indices[0]
             end_idx_ = summary_indices[-1]
             old_compress_messages = context_messages[start_idx_:end_idx_ + 1]
             compressed_msg = await self.compress_(context, old_compress_messages)
             if compressed_msg:
-                self.logger.info(
-                    f"CurrentRoundCompressor multi_compress compressed_msg_: {compressed_msg}")
                 context_messages = ContextUtils.replace_messages(
                     context_messages, [compressed_msg], start_idx_, end_idx_
                 )
@@ -924,14 +901,15 @@ class CurrentRoundCompressor(ContextProcessor):
         processed_messages = "\n".join([f"role:{msg.role}, content:{msg}"
             for msg in messages_to_compress])
         filled_prompt = filled_prompt.replace("{selected_messages}", str(processed_messages))
-        self.logger.info(
-            f"CurrentRoundCompressor compress filled_prompt: {filled_prompt}")
-        model_input_tokens = self._count_messages_tokens([UserMessage(content=filled_prompt)], token_counter)
-        self._stats["compress_model_calls"] += 1
-        self._stats["compress_model_input_tokens"].append(model_input_tokens)
 
-        response = await self._model.invoke([UserMessage(content=filled_prompt)])
-        self._stats["compress_model_output_tokens"].append(self._count_response_tokens(token_counter, response))
+        try:
+            response = await self._model.invoke([UserMessage(content=filled_prompt)])
+        except Exception as exc:
+            logger.warning(
+                f"[{self.processor_type()}] compression model invoke failed during current-round compression, "
+                f"skip current processor and continue remaining processors: {exc}"
+            )
+            return None
 
         summary = response.content or ""
         if summary:
@@ -978,8 +956,6 @@ class CurrentRoundCompressor(ContextProcessor):
         total_tokens = self._count_messages_tokens(old_compress_messages or [], token_counter)
         if total_tokens <= self._accumulated_summary_token_limit:
             return None
-        self.logger.info(
-            f"CurrentRoundCompressor compress_: {old_compress_messages}")
         merged_blocks = "\n\n".join(
             f"[MEMORY_BLOCK_{i}]\n{msg.content}"
             for i, msg in enumerate(old_compress_messages or [], 1)
@@ -990,44 +966,41 @@ class CurrentRoundCompressor(ContextProcessor):
             .replace("{compressed_blocks}", merged_blocks if merged_blocks else "(none)")
         )
         model_messages = [UserMessage(content=filled_prompt)]
-        model_input_tokens = self._count_messages_tokens(model_messages, token_counter)
-        self._stats["summary_merge_model_calls"] += 1
-        self._stats["summary_merge_model_input_tokens"].append(model_input_tokens)
 
         try:
             response = await self._model.invoke(model_messages)
-            self._stats["summary_merge_model_output_tokens"].append(
-                self._count_response_tokens(token_counter, response)
+        except Exception as exc:
+            logger.warning(
+                f"[{self.processor_type()}] compression model invoke failed during summary merge, "
+                f"skip summary merge and continue remaining processors: {exc}"
             )
-            summary_text = response.content or ""
-            if summary_text:
-                memory_summary = (
-                    f"{self._build_memory_metadata(merged_memory_blocks=len(old_compress_messages or []))}\n\n"
-                    f"{summary_text}"
-                )
-                compressed_msg = await self._build_writeback_message(
-                    content=self._wrap_memory_block(memory_summary),
-                    source_messages=old_compress_messages or [],
-                    context=context,
-                )
-                logger.info(
-                    f"[{self.processor_type()}] compressed "
-                    f"{len(old_compress_messages or [])} old compressed messages into one"
-                )
-            else:
-                logger.info(
-                    f"[{self.processor_type()}] failed to compress, removed "
-                    f"{len(old_compress_messages or [])} old compressed messages"
-                )
-                compressed_msg = await self._build_writeback_message(
-                    content=self._wrap_memory_block(
-                        f"{self._build_memory_metadata(merged_memory_blocks=len(old_compress_messages or []))}\n\n"
-                        f"{response.content or ''}"
-                    ),
-                    source_messages=old_compress_messages or [],
-                    context=context,
-                )
-        except Exception as e:
-            logger.info(f"[{self.processor_type()}] failed to compress old messages: {e}")
             return None
+        summary_text = response.content or ""
+        if summary_text:
+            memory_summary = (
+                f"{self._build_memory_metadata(merged_memory_blocks=len(old_compress_messages or []))}\n\n"
+                f"{summary_text}"
+            )
+            compressed_msg = await self._build_writeback_message(
+                content=self._wrap_memory_block(memory_summary),
+                source_messages=old_compress_messages or [],
+                context=context,
+            )
+            logger.info(
+                f"[{self.processor_type()}] compressed "
+                f"{len(old_compress_messages or [])} old compressed messages into one"
+            )
+        else:
+            logger.info(
+                f"[{self.processor_type()}] failed to compress, removed "
+                f"{len(old_compress_messages or [])} old compressed messages"
+            )
+            compressed_msg = await self._build_writeback_message(
+                content=self._wrap_memory_block(
+                    f"{self._build_memory_metadata(merged_memory_blocks=len(old_compress_messages or []))}\n\n"
+                    f"{response.content or ''}"
+                ),
+                source_messages=old_compress_messages or [],
+                context=context,
+            )
         return compressed_msg

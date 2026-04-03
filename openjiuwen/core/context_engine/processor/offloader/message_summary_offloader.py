@@ -177,6 +177,9 @@ class MessageSummaryOffloaderConfig(BaseModel):
     offload_message_type: list[Literal["user", "assistant", "tool"]] = Field(default=["tool"])
     """White-list of **roles** that may be compressed or off-loaded.  Roles absent here are **protected**."""
 
+    protected_tool_names: list[str] = Field(default=["reload_original_context_messages"])
+    """Tool messages produced by these tools are always kept in full and never offloaded."""
+
     messages_to_keep: int | None = Field(default=None, gt=0)
     """Guarantee that the **newest** *N* messages are **never** off-loaded."""
 
@@ -287,7 +290,8 @@ class MessageSummaryOffloader(MessageOffloader):
         """
         if not self.config.enable_adaptive_compression:
             return await super().trigger_add_messages(context, messages_to_add, **kwargs)
-        return any(self._should_offload_message(message, context) for message in messages_to_add)
+        context_messages = context.get_messages() + messages_to_add
+        return any(self._should_offload_message(message, context, context_messages) for message in messages_to_add)
 
     async def on_add_messages(
         self,
@@ -316,7 +320,7 @@ class MessageSummaryOffloader(MessageOffloader):
         base_index = len(context)
 
         for index, message in enumerate(messages_to_add):
-            if not self._should_offload_message(message, context):
+            if not self._should_offload_message(message, context, context.get_messages() + messages_to_add):
                 continue
             processed_messages[index] = await self._offload_message_adaptive(message, context)
             event.messages_to_modify.append(base_index + index)
@@ -446,7 +450,12 @@ class MessageSummaryOffloader(MessageOffloader):
             **extra_fields,
         )
 
-    def _should_offload_message(self, message: BaseMessage, context: ModelContext) -> bool:
+    def _should_offload_message(
+        self,
+        message: BaseMessage,
+        context: ModelContext,
+        context_messages: list[BaseMessage] | None = None,
+    ) -> bool:
         """Check if a message should be offloaded.
 
         **When adaptive mode is enabled:**
@@ -464,6 +473,10 @@ class MessageSummaryOffloader(MessageOffloader):
         if message.role != "tool":
             return False
         if isinstance(message, OffloadMixin):
+            return False
+        if context_messages is None:
+            context_messages = context.get_messages()
+        if self._is_protected_tool_message(message, context_messages):
             return False
         length = self._message_size(message, context)
         return length > self.config.large_message_threshold
@@ -512,24 +525,14 @@ class MessageSummaryOffloader(MessageOffloader):
         Returns:
             The matched raw tool_call object/dict, or None if not found.
         """
-        tool_call_id = getattr(tool_message, "tool_call_id", None)
-        if not tool_call_id:
-            return None
-
         for message in reversed(context_messages):
             if message.role != "assistant":
                 continue
             tool_calls = getattr(message, "tool_calls", None) or []
             for tool_call in tool_calls:
-                if self._tool_call_matches_id(tool_call, tool_call_id):
+                if self._tool_call_matches_id(tool_call, getattr(tool_message, "tool_call_id", None)):
                     return tool_call
         return None
-
-    def _tool_call_matches_id(self, tool_call: Any, tool_call_id: str) -> bool:
-        """Check if a tool call matches the given tool_call_id."""
-        if isinstance(tool_call, dict):
-            return tool_call.get("id") == tool_call_id
-        return getattr(tool_call, "id", None) == tool_call_id
 
     def _get_step_from_chain_default(
         self,

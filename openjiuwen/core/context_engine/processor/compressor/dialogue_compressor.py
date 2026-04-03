@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -154,7 +156,17 @@ class DialogueCompressor(ContextProcessor):
         if not targets:
             return None, messages_to_add
 
-        response = await self._invoke_multi_block_compression(context_messages, targets)
+        try:
+            response = await self._invoke_multi_block_compression(context_messages, targets)
+        except BaseError as exc:
+            if exc.code == StatusCode.MODEL_CALL_FAILED.code:
+                logger.warning(
+                    f"[{self.processor_type()}] compression model invoke failed, "
+                    "skip current processor and continue remaining processors: "
+                    f"{exc}"
+                )
+                return None, messages_to_add
+            raise
 
         replacements, modified_indices = await self._build_json_replacements(context, targets, response.parser_content)
         if replacements:
@@ -293,7 +305,17 @@ class DialogueCompressor(ContextProcessor):
             UserMessage(content=self._build_split_context_payload(context_messages, targets)),
             UserMessage(content=self._build_targets_payload(targets)),
         ]
-        return await self._model.invoke(model_messages, output_parser=JsonOutputParser())
+        try:
+            return await self._model.invoke(model_messages, output_parser=JsonOutputParser())
+        except Exception as exc:
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=(
+                    f"{self.processor_type()} failed to invoke compression model "
+                    "during multi-block dialogue compression"
+                ),
+                cause=exc,
+            ) from exc
 
     def _build_split_context_payload(
         self,
