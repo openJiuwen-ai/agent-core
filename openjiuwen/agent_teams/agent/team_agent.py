@@ -284,7 +284,8 @@ class TeamAgent(BaseAgent):
         fs_rail = FileSystemRail()
         self._first_iter_gate = FirstIterationGate()
         rails = [fs_rail, self._first_iter_gate]
-        if ctx.role == TeamRole.TEAMMATE and self._team_backend and self._messager and ctx.team_spec:
+        is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
+        if is_coordinated_teammate and self._team_backend and self._messager:
             from openjiuwen.agent_teams.agent.rails import TeamToolApprovalRail
             approval_tools = agent_spec.approval_required_tools or []
             if approval_tools:
@@ -703,10 +704,10 @@ class TeamAgent(BaseAgent):
             next_resume = self._dequeue_valid_interrupt_resume()
             if next_resume is not None and self._stream_queue is not None:
                 await self._start_agent(next_resume, session)
-                return
-            await self._wake_mailbox_if_interrupt_cleared()
-            if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
-                self._close_stream()
+            else:
+                await self._wake_mailbox_if_interrupt_cleared()
+                if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
+                    self._close_stream()
 
     async def _execute_round(
         self,

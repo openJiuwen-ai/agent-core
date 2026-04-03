@@ -15,6 +15,7 @@ from typing import (
     List,
 )
 
+
 def _get_loguru():
     """Lazy-load loguru to avoid import failure when the package is absent."""
     from loguru import logger as _logger
@@ -49,6 +50,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
     _SERIALIZE_MODE_LOGURU: ClassVar[str] = "loguru"
     _SERIALIZE_MODE_EVENT: ClassVar[str] = "event"
     _MODULE_TYPES_BY_VALUE: ClassVar[Dict[str, ModuleType]] = {member.value: member for member in ModuleType}
+    _EVENT_FORMAT_FUNC = staticmethod(lambda _record: "{extra[event_serialized]}\n")
 
     def __init__(self, log_type: str, config: Dict[str, Any]) -> None:
         self.log_type = log_type
@@ -106,7 +108,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         sink_options: Dict[str, Any] = {
             "sink": target,
             "level": sink_level,
-            "format": "{extra[event_serialized]}" if is_event_mode else self._get_sink_format(sink_config),
+            "format": self._EVENT_FORMAT_FUNC if is_event_mode else self._get_sink_format(sink_config),
             "filter": self._record_filter,
             "serialize": serialize and serialize_mode == self._SERIALIZE_MODE_LOGURU,
             "colorize": False if is_event_mode else sink_config.get("colorize"),

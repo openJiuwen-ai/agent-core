@@ -13,7 +13,7 @@ import pytest
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
-from openjiuwen.agent_teams.agent.coordination import InnerEventType
+from openjiuwen.agent_teams.agent.coordinator import InnerEventType
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
