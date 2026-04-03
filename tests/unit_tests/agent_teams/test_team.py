@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.tools.status import (
 from openjiuwen.agent_teams.tools.team import (
     TeamBackend,
 )
+from openjiuwen.agent_teams.tools.team_events import TeamEvent
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
@@ -288,6 +289,45 @@ class TestApprovePlan:
             call_args = mock_send.call_args
             content = call_args.kwargs.get('content') or call_args[1].get('content')
             assert "Your plan has been APPROVED" in content
+
+
+class TestApproveTool:
+    """Test approve_tool functionality."""
+
+    @pytest.mark.asyncio
+    async def test_approve_tool_success(self, agent_team, sample_agent_card):
+        await agent_team.spawn_member(
+            member_id="member1",
+            name="Member One",
+            agent_card=sample_agent_card,
+        )
+
+        result = await agent_team.approve_tool(
+            member_id="member1",
+            tool_call_id="call-1",
+            approved=True,
+            feedback="Looks safe",
+            auto_confirm=True,
+        )
+
+        assert result is True
+        agent_team.messager.publish.assert_awaited()
+        published_message = agent_team.messager.publish.await_args.kwargs["message"]
+        assert published_message.event_type == TeamEvent.TOOL_APPROVAL_RESULT
+        assert published_message.payload["member_id"] == "member1"
+        assert published_message.payload["tool_call_id"] == "call-1"
+        assert published_message.payload["approved"] is True
+        assert published_message.payload["auto_confirm"] is True
+
+    @pytest.mark.asyncio
+    async def test_approve_tool_member_not_found(self, agent_team):
+        result = await agent_team.approve_tool(
+            member_id="missing",
+            tool_call_id="call-1",
+            approved=False,
+        )
+
+        assert result is False
 
 
 class TestShutdownMember:

@@ -286,6 +286,7 @@ class DeepAgentSpec(BaseModel):
     auto_create_workspace: bool = True
     completion_timeout: float = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
+    approval_required_tools: Optional[list[str]] = None
 
     def build(self) -> "DeepAgent":
         """Materialize a live DeepAgent from this spec."""

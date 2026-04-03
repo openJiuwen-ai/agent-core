@@ -13,6 +13,7 @@ import pytest
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
+from openjiuwen.agent_teams.agent.coordination import InnerEventType
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
@@ -27,7 +28,9 @@ from openjiuwen.agent_teams.schema.team import (
 from openjiuwen.agent_teams.tools.team_events import (
     EventMessage,
     TeamEvent,
+    ToolApprovalResultEvent,
 )
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
@@ -135,6 +138,33 @@ def _make_leader_with_teammate() -> TeamAgent:
     return agent
 
 
+def _make_teammate() -> TeamAgent:
+    member_spec = TeamMemberSpec(
+        member_id="dev-1",
+        name="Dev",
+        role_type=TeamRole.TEAMMATE,
+        persona="dev",
+        domain="backend",
+    )
+    team_spec = TeamSpec(
+        team_id="test-team",
+        name="test-team",
+        leader_member_id="leader-1",
+    )
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="test-team",
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_spec=member_spec,
+        team_spec=team_spec,
+    )
+    agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
+    agent.configure(spec, ctx)
+    return agent
+
+
 @pytest.mark.asyncio
 async def test_mention_routes_direct_message():
     """@member_id pattern sends a direct message from 'user', bypassing leader agent."""
@@ -206,3 +236,102 @@ async def test_mention_no_body_falls_through():
 
     agent._message_manager.send_message.assert_not_called()
     agent._start_agent.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_event_resumes_interrupt():
+    """Tool approval result event should resume teammate HITL with InteractiveInput."""
+    member_spec = TeamMemberSpec(
+        member_id="dev-1",
+        name="Dev",
+        role_type=TeamRole.TEAMMATE,
+        persona="dev",
+        domain="backend",
+    )
+    team_spec = TeamSpec(team_id="test-team", name="test-team", leader_member_id="leader-1")
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="test-team")
+    ctx = TeamRuntimeContext(role=TeamRole.TEAMMATE, member_spec=member_spec, team_spec=team_spec)
+    agent = TeamAgent(AgentCard(id="dev-1", name="dev", description="test"))
+    agent.configure(spec, ctx)
+    agent.resume_interrupt = AsyncMock()
+
+    event = EventMessage.from_event(ToolApprovalResultEvent(
+        team_id="test-team",
+        member_id="dev-1",
+        tool_call_id="call-1",
+        approved=True,
+        feedback="ok",
+        auto_confirm=True,
+    ))
+    await agent._dispatcher.dispatch(event)
+
+    agent.resume_interrupt.assert_awaited_once()
+    interactive_input = agent.resume_interrupt.await_args.args[0]
+    assert interactive_input.user_inputs["call-1"]["approved"] is True
+    assert interactive_input.user_inputs["call-1"]["feedback"] == "ok"
+    assert interactive_input.user_inputs["call-1"]["auto_confirm"] is True
+
+
+@pytest.mark.asyncio
+async def test_mailbox_messages_deferred_while_interrupt_pending():
+    """Normal mailbox messages should not preempt a pending tool interrupt."""
+    agent = _make_leader_with_teammate()
+    agent._message_manager = MagicMock()
+    agent._message_manager.mark_message_read = AsyncMock(return_value=True)
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+    agent.follow_up = AsyncMock()
+    agent.has_pending_interrupt = lambda: True
+
+    fake_msg = MagicMock()
+    fake_msg.message_id = "msg-normal"
+    fake_msg.from_member = "dev-2"
+    fake_msg.broadcast = False
+    fake_msg.timestamp = 1000
+    fake_msg.content = "normal mailbox message"
+    agent._dispatcher._read_all_unread = AsyncMock(side_effect=[[fake_msg]])
+
+    await agent._dispatcher._process_unread_messages("leader-1")
+
+    agent._message_manager.mark_message_read.assert_not_called()
+    agent._start_agent.assert_not_called()
+    agent.steer.assert_not_called()
+    agent.follow_up.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_interrupt_queues_while_agent_running():
+    """Approval resume should queue when teammate is already running another round."""
+    agent = _make_leader()
+    fake_entry = MagicMock()
+    fake_entry.interrupt_requests = {"call-1": MagicMock()}
+    fake_state = MagicMock()
+    fake_state.interrupted_tools = {"call-1": fake_entry}
+    agent._session = MagicMock()
+    agent._session.get_state = MagicMock(return_value=fake_state)
+    agent._agent_task = MagicMock()
+    agent._agent_task.done.return_value = False
+    agent._start_agent = AsyncMock()
+
+    interactive_input = InteractiveInput()
+    interactive_input.update("call-1", {"approved": True, "feedback": "ok", "auto_confirm": False})
+
+    await agent.resume_interrupt(interactive_input)
+
+    assert agent._pending_interrupt_resumes == [interactive_input]
+    agent._start_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
+    """Deferred mailbox messages should be retried immediately after interrupt clears."""
+    agent = _make_teammate()
+    agent._coordination_loop.enqueue = AsyncMock()
+    agent._execute_round = AsyncMock(return_value=None)
+    agent.has_pending_interrupt = lambda: False
+
+    await agent._run_one_round("continue work", session=None)
+
+    agent._coordination_loop.enqueue.assert_awaited_once()
+    event = agent._coordination_loop.enqueue.await_args.args[0]
+    assert event.event_type == InnerEventType.POLL_MAILBOX

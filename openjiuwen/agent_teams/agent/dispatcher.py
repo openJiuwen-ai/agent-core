@@ -62,6 +62,9 @@ class DispatcherHost(Protocol):
     def is_agent_running(self) -> bool:
         ...
 
+    def has_pending_interrupt(self) -> bool:
+        ...
+
     async def start_agent(self, content: str) -> None:
         ...
 
@@ -78,6 +81,9 @@ class DispatcherHost(Protocol):
         ...
 
     async def steer(self, content: str) -> None:
+        ...
+
+    async def resume_interrupt(self, user_input) -> None:
         ...
 
 
@@ -139,6 +145,10 @@ class EventDispatcher:
         if event_type == TeamEvent.STANDBY:
             team_logger.info("[{}] received TEAM_STANDBY, pausing polls", member_id)
             await host.pause_polls()
+            return
+
+        if event_type == TeamEvent.TOOL_APPROVAL_RESULT:
+            await self._handle_tool_approval_result(event)
             return
 
         if event_type in self._MEMBER_EVENTS:
@@ -279,6 +289,35 @@ class EventDispatcher:
     # Message handling
     # ------------------------------------------------------------------
 
+    async def _handle_tool_approval_result(self, event: CoordinationEvent) -> None:
+        """Resume a teammate HITL interrupt from a structured approval event."""
+        host = self._host
+        member_id = host.member_id
+        payload = event.get_payload()
+        target_id = payload.member_id
+
+        if target_id is None or target_id != member_id:
+            return
+
+        from openjiuwen.core.session import InteractiveInput
+
+        interactive_input = InteractiveInput()
+        interactive_input.update(
+            payload.tool_call_id,
+            {
+                "approved": payload.approved,
+                "feedback": payload.feedback,
+                "auto_confirm": payload.auto_confirm,
+            },
+        )
+        team_logger.info(
+            "[{}] received tool approval result for tool_call_id={}, approved={}",
+            member_id,
+            payload.tool_call_id,
+            payload.approved,
+        )
+        await host.resume_interrupt(interactive_input)
+
     async def _process_unread_messages(self, member_id: str, *, use_steer: bool = True) -> None:
         """Read unread messages, feed to agent one by one, loop until no new messages.
 
@@ -299,6 +338,13 @@ class EventDispatcher:
             team_logger.info("[{}] processing {} unread messages (steer={})", member_id, len(new_messages), use_steer)
             for msg in new_messages:
                 seen_ids.add(msg.message_id)
+                if host.has_pending_interrupt():
+                    team_logger.info(
+                        "[{}] deferring mailbox message {} until pending interrupt is resolved",
+                        member_id,
+                        msg.message_id,
+                    )
+                    return
                 text = self._format_message(msg)
                 team_logger.info("[{}] message from={}, id={}", member_id, msg.from_member, msg.message_id)
 

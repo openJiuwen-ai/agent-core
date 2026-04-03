@@ -50,6 +50,7 @@ LEADER_ONLY_TOOLS: Set[str] = {
     "spawn_member",            # Create a new team member
     "shutdown_member",         # Shutdown a team member
     "approve_plan",            # Approve or reject a member's plan
+    "approve_tool",            # Approve or reject a teammate tool call
     "task_manager",            # Manager task (unified - supports:
                                # add single/batch/priority/top task or cancel/cancel_all/update task)
 }
@@ -253,6 +254,47 @@ class ApprovePlanTool(TeamTool):
         return ToolOutput(
             success=success,
             error=None if success else "Failed to approve/reject plan"
+        )
+
+
+class ApproveToolCallTool(TeamTool):
+    """Approve or reject one teammate tool call."""
+
+    def __init__(self, team: TeamBackend):
+        super().__init__(
+            ToolCard(
+                id="ApproveToolCallTool",
+                name="approve_tool",
+                description=(
+                    "审批或拒绝 teammate 被 rail 中断的工具调用。"
+                    "收到工具审批请求后，Leader 应调用此工具反馈 approved、feedback 和 auto_confirm。"
+                ),
+            )
+        )
+        self.team = team
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_id": {"type": "string", "description": "发起工具审批请求的成员 ID"},
+                "tool_call_id": {"type": "string", "description": "待恢复的中断 tool_call_id"},
+                "approved": {"type": "boolean", "description": "是否批准这次工具调用"},
+                "feedback": {"type": "string", "description": "可选审批反馈"},
+                "auto_confirm": {"type": "boolean", "description": "后续同名工具是否自动批准"},
+            },
+            "required": ["member_id", "tool_call_id", "approved"],
+        }
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        success = await self.team.approve_tool(
+            member_id=inputs.get("member_id"),
+            tool_call_id=inputs.get("tool_call_id"),
+            approved=inputs.get("approved"),
+            feedback=inputs.get("feedback"),
+            auto_confirm=inputs.get("auto_confirm", False),
+        )
+        return ToolOutput(
+            success=success,
+            error=None if success else "Failed to approve/reject tool call",
         )
 
 
@@ -657,6 +699,7 @@ def create_team_tools(
         "spawn_member": SpawnMemberTool(agent_team),
         "shutdown_member": ShutdownMemberTool(agent_team),
         "approve_plan": ApprovePlanTool(agent_team),
+        "approve_tool": ApproveToolCallTool(agent_team),
         "list_members": ListMembersTool(agent_team),
         # Task management
         "task_manager": TaskManagerToolV2(agent_team),

@@ -46,6 +46,8 @@ from openjiuwen.core.runner.spawn.process_manager import (
     SpawnConfig,
     SpawnedProcessHandle,
 )
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.harness import create_deep_agent
@@ -81,6 +83,7 @@ class TeamAgent(BaseAgent):
         self._spawned_handles: dict[str, SpawnedProcessHandle] = {}
         self._member_port_map: dict[str, int] = {}
         self._first_iter_gate: Optional["FirstIterationGate"] = None
+        self._pending_interrupt_resumes: list[InteractiveInput] = []
 
     # ------------------------------------------------------------------
     # Properties
@@ -173,6 +176,12 @@ class TeamAgent(BaseAgent):
         """Whether the agent is in an active round."""
         return self._is_agent_running()
 
+    def has_pending_interrupt(self) -> bool:
+        """Whether the current session still has an unresolved tool interrupt."""
+        if self._session is None:
+            return False
+        return self._session.get_state(INTERRUPTION_KEY) is not None
+
     async def start_agent(self, content: str) -> None:
         """Start a new agent round with the given content."""
         await self._start_agent(content, self._session)
@@ -203,6 +212,17 @@ class TeamAgent(BaseAgent):
         if self._deep_agent is not None:
             team_logger.debug("[{}] steer: {:.120}", self._member_id() or "?", content)
             await self._deep_agent.steer(content, self._session)
+
+    async def resume_interrupt(self, user_input) -> None:
+        """Resume a pending HITL interrupt with structured input."""
+        if not self._is_valid_interrupt_resume(user_input):
+            team_logger.info("[{}] dropping stale interrupt resume input", self._member_id() or "?")
+            return
+        if self._is_agent_running():
+            team_logger.info("[{}] queueing interrupt resume until current round completes", self._member_id() or "?")
+            self._pending_interrupt_resumes.append(user_input)
+            return
+        await self._start_agent(user_input, self._session)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure
@@ -263,6 +283,21 @@ class TeamAgent(BaseAgent):
         from openjiuwen.agent_teams.agent.rails import FirstIterationGate
         fs_rail = FileSystemRail()
         self._first_iter_gate = FirstIterationGate()
+        rails = [fs_rail, self._first_iter_gate]
+        if ctx.role == TeamRole.TEAMMATE and self._team_backend and self._messager and ctx.team_spec:
+            from openjiuwen.agent_teams.agent.rails import TeamToolApprovalRail
+            approval_tools = agent_spec.approval_required_tools or []
+            if approval_tools:
+                rails.append(
+                    TeamToolApprovalRail(
+                        team_id=ctx.team_spec.team_id,
+                        member_id=member_id or "",
+                        db=self._team_backend.db,
+                        messager=self._messager,
+                        leader_id=ctx.team_spec.leader_member_id or "",
+                        tool_names=approval_tools,
+                    )
+                )
 
         system_prompt = build_system_prompt(
             role=ctx.role,
@@ -283,7 +318,7 @@ class TeamAgent(BaseAgent):
             card=self.card,
             system_prompt=system_prompt,
             tools=self._tool_cards,
-            rails=[fs_rail, self._first_iter_gate],
+            rails=rails,
             workspace=workspace_obj,
             enable_task_loop=True,
             max_iterations=agent_spec.max_iterations,
@@ -508,7 +543,7 @@ class TeamAgent(BaseAgent):
 
     async def _enqueue_user_input(self, inputs: Any) -> None:
         """Extract query from inputs and enqueue as USER_INPUT event."""
-        query = inputs.get("query", "") if isinstance(inputs, dict) else str(inputs)
+        query = inputs.get("query", "") if isinstance(inputs, dict) else inputs
         if self._coordination_loop is None:
             return
         await self._coordination_loop.enqueue(
@@ -624,7 +659,7 @@ class TeamAgent(BaseAgent):
 
     async def _start_agent(
         self,
-        initial_message: str,
+        initial_message: Any,
         session=None,
     ) -> None:
         """Run one round of DeepAgent via Runner in background.
@@ -634,7 +669,8 @@ class TeamAgent(BaseAgent):
         """
         if self._deep_agent is None or self._stream_queue is None:
             return
-        team_logger.info("[{}] start_agent: {:.120}", self._member_id() or "?", initial_message)
+        preview = initial_message if isinstance(initial_message, str) else type(initial_message).__name__
+        team_logger.info("[{}] start_agent: {:.120}", self._member_id() or "?", str(preview))
         self._agent_task = asyncio.create_task(
             self._run_one_round(initial_message, session),
         )
@@ -651,7 +687,7 @@ class TeamAgent(BaseAgent):
 
     async def _run_one_round(
         self,
-        message: str,
+        message: Any,
         session=None,
     ) -> None:
         """Execute one DeepAgent stream round via Runner."""
@@ -664,12 +700,17 @@ class TeamAgent(BaseAgent):
             await self._update_status(MemberStatus.ERROR)
         finally:
             self._agent_task = None
+            next_resume = self._dequeue_valid_interrupt_resume()
+            if next_resume is not None and self._stream_queue is not None:
+                await self._start_agent(next_resume, session)
+                return
+            await self._wake_mailbox_if_interrupt_cleared()
             if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
                 self._close_stream()
 
     async def _execute_round(
         self,
-        message: str,
+        message: Any,
         session=None,
     ) -> None:
         """Execute the agent invocation and manage execution status."""
@@ -693,6 +734,45 @@ class TeamAgent(BaseAgent):
             raise
         finally:
             await self._update_execution(ExecutionStatus.IDLE)
+
+    def _is_valid_interrupt_resume(self, user_input: Any) -> bool:
+        """Return True when the supplied InteractiveInput still targets a pending interrupt."""
+        if not isinstance(user_input, InteractiveInput):
+            return False
+        if self._session is None:
+            return False
+        state = self._session.get_state(INTERRUPTION_KEY)
+        if state is None:
+            return False
+        interrupted = getattr(state, "interrupted_tools", {}) or {}
+        pending_ids = set()
+        for entry in interrupted.values():
+            requests = getattr(entry, "interrupt_requests", {}) or {}
+            pending_ids.update(requests.keys())
+        if not pending_ids:
+            return False
+        resume_ids = set(user_input.user_inputs.keys())
+        return bool(resume_ids) and resume_ids.issubset(pending_ids)
+
+    def _dequeue_valid_interrupt_resume(self) -> Optional[InteractiveInput]:
+        """Pop the next still-valid queued interrupt resume input."""
+        while self._pending_interrupt_resumes:
+            candidate = self._pending_interrupt_resumes.pop(0)
+            if self._is_valid_interrupt_resume(candidate):
+                return candidate
+        return None
+
+    async def _wake_mailbox_if_interrupt_cleared(self) -> None:
+        """Nudge mailbox processing once an interrupt gate has been cleared."""
+        if self.role != TeamRole.TEAMMATE:
+            return
+        if self.has_pending_interrupt():
+            return
+        if self._coordination_loop is None:
+            return
+        await self._coordination_loop.enqueue(
+            InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
+        )
 
     def _member_id(self) -> Optional[str]:
         """Return the current agent's member_id."""
