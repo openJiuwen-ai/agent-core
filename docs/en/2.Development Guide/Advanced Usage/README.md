@@ -1,6 +1,7 @@
 # Advanced Usage
 
 - [Session](Session/README.md)
+- [Human-in-the-Loop](Human-in-the-Loop.md)
 - [ReactAgent Reinforcement Learning](ReactAgent%20Reinforcement%20Learning.md)
 - [Develop Custom Components](Develop%20Custom%20Components.md)
 - [Context Engine](Context%20Engine.md)
