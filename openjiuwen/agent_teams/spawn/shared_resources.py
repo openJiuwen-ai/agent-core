@@ -1,41 +1,82 @@
 # coding: utf-8
-"""Module-level registries for shared in-process resources.
+"""Process-global shared resources for agent teams.
 
-In single-process mode, leader and all teammates share the same
-TeamRuntime and InMemoryTeamDatabase instances, keyed by team_id.
+Database and TeamRuntime are **process-global singletons** — they are
+NOT partitioned by team_id or session_id.  Multiple teams and sessions
+coexist inside the same instance; data isolation is handled internally
+via team_id / session_id fields.
+
+This applies to both single-process (in-process) mode and multi-process
+mode: within a single OS process, all TeamAgent instances must share the
+same database engine and the same runtime to avoid duplicated state.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Union
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.tools.database import TeamDatabase
     from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
     from openjiuwen.core.multi_agent.team_runtime.team_runtime import TeamRuntime
 
-_shared_runtimes: dict[str, "TeamRuntime"] = {}
-_shared_dbs: dict[str, "InMemoryTeamDatabase"] = {}
+# ---- process-global singletons ------------------------------------------
+
+_runtime: "TeamRuntime | None" = None
+_memory_db: "InMemoryTeamDatabase | None" = None
+# SQLite instances keyed by connection_string (same file → same engine)
+_sqlite_dbs: dict[str, "TeamDatabase"] = {}
 
 
-def get_or_create_runtime(team_id: str) -> "TeamRuntime":
-    """Return the shared TeamRuntime for *team_id*, creating it on first call."""
-    if team_id not in _shared_runtimes:
+# ---- public API ----------------------------------------------------------
+
+def get_shared_runtime() -> "TeamRuntime":
+    """Return the process-global TeamRuntime, creating it on first call."""
+    global _runtime
+    if _runtime is None:
         from openjiuwen.core.multi_agent.team_runtime.team_runtime import TeamRuntime
 
-        _shared_runtimes[team_id] = TeamRuntime()
-    return _shared_runtimes[team_id]
+        _runtime = TeamRuntime()
+    return _runtime
 
 
-def get_or_create_memory_db(team_id: str) -> "InMemoryTeamDatabase":
-    """Return the shared InMemoryTeamDatabase for *team_id*, creating it on first call."""
-    if team_id not in _shared_dbs:
+def get_shared_db(config: Any) -> Union["TeamDatabase", "InMemoryTeamDatabase"]:
+    """Return a process-global database instance matching *config*.
+
+    * ``db_type == "memory"`` → single global InMemoryTeamDatabase.
+    * ``db_type == "sqlite"``  → one TeamDatabase per connection_string.
+
+    Multiple teams and sessions share the same instance; row-level
+    isolation is provided by team_id / session_id columns.
+    """
+    if config.db_type == "memory":
+        return _get_shared_memory_db()
+    return _get_shared_sqlite_db(config)
+
+
+def cleanup_shared_resources() -> None:
+    """Reset all process-global singletons (e.g. between test runs)."""
+    global _runtime, _memory_db
+    _runtime = None
+    _memory_db = None
+    _sqlite_dbs.clear()
+
+
+# ---- internals -----------------------------------------------------------
+
+def _get_shared_memory_db() -> "InMemoryTeamDatabase":
+    global _memory_db
+    if _memory_db is None:
         from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
 
-        _shared_dbs[team_id] = InMemoryTeamDatabase()
-    return _shared_dbs[team_id]
+        _memory_db = InMemoryTeamDatabase()
+    return _memory_db
 
 
-def cleanup_shared_resources(team_id: str) -> None:
-    """Remove cached runtime and database for *team_id*."""
-    _shared_runtimes.pop(team_id, None)
-    _shared_dbs.pop(team_id, None)
+def _get_shared_sqlite_db(config: Any) -> "TeamDatabase":
+    key = config.connection_string
+    if key not in _sqlite_dbs:
+        from openjiuwen.agent_teams.tools.database import TeamDatabase
+
+        _sqlite_dbs[key] = TeamDatabase(config)
+    return _sqlite_dbs[key]

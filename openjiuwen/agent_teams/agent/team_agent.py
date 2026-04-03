@@ -260,10 +260,9 @@ class TeamAgent(BaseAgent):
             messager_config = messager_config.model_copy(update={"node_id": member_id})
 
         if messager_config and messager_config.backend == "team_runtime":
-            from openjiuwen.agent_teams.spawn.shared_resources import get_or_create_runtime
+            from openjiuwen.agent_teams.spawn.shared_resources import get_shared_runtime
 
-            runtime = get_or_create_runtime(messager_config.team_id)
-            self._messager = create_messager(messager_config, runtime=runtime)
+            self._messager = create_messager(messager_config, runtime=get_shared_runtime())
         elif messager_config:
             self._messager = create_messager(messager_config)
         else:
@@ -392,17 +391,12 @@ class TeamAgent(BaseAgent):
         messager: Messager,
     ) -> List[ToolCard]:
         """Register role-appropriate team tools driven by permission sets."""
-        from openjiuwen.agent_teams.tools.database import TeamDatabase
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
         from openjiuwen.agent_teams.tools.team_tools import create_team_tools
         from openjiuwen.agent_teams.tools.status import MemberMode
 
         team_id = (ctx.team_spec.team_id if ctx.team_spec else None) or "default"
-        if ctx.db_config.db_type == "memory":
-            from openjiuwen.agent_teams.spawn.shared_resources import get_or_create_memory_db
-
-            db = get_or_create_memory_db(team_id)
-        else:
-            db = TeamDatabase(ctx.db_config)
+        db = get_shared_db(ctx.db_config)
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_id = ctx.member_id or (
