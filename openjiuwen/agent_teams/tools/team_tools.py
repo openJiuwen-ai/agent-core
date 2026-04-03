@@ -96,21 +96,19 @@ class BuildTeamTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": t("build_team", "name")},
-                "desc": {"type": "string", "description": t("build_team", "desc")},
-                "prompt": {"type": "string", "description": t("build_team", "prompt")},
+                "team_name": {"type": "string", "description": t("build_team", "team_name")},
+                "team_desc": {"type": "string", "description": t("build_team", "team_desc")},
                 "leader_name": {"type": "string", "description": t("build_team", "leader_name")},
                 "leader_desc": {"type": "string", "description": t("build_team", "leader_desc")},
             },
-            "required": ["name", "desc", "leader_name", "leader_desc"]
+            "required": ["team_name", "team_desc", "leader_name", "leader_desc"]
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        team_name = inputs.get("name")
+        team_name = inputs.get("team_name")
         await self.team.build_team(
             name=team_name,
-            desc=inputs.get("desc"),
-            prompt=inputs.get("prompt"),
+            desc=inputs.get("team_desc"),
             leader_name=inputs["leader_name"],
             leader_desc=inputs["leader_desc"],
         )

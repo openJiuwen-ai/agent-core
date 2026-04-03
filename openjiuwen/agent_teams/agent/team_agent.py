@@ -367,7 +367,6 @@ class TeamAgent(BaseAgent):
             team_info = {
                 "name": team_info_obj.name,
                 "desc": team_info_obj.desc or "",
-                "prompt": team_info_obj.prompt or "",
             }
 
         all_members = await self._team_backend.list_members()

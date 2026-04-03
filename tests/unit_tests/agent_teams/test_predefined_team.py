@@ -93,7 +93,7 @@ class TestBuildTeamWithPredefinedMembers:
         await team_with_predefined.build_team(
             name="Test Team",
             desc="A predefined team",
-            prompt="Team prompt",
+
             leader_name="Leader",
             leader_desc="PM",
         )
@@ -112,7 +112,7 @@ class TestBuildTeamWithPredefinedMembers:
         await team_with_predefined.build_team(
             name="Test Team",
             desc="desc",
-            prompt="prompt",
+
             leader_name="Leader",
             leader_desc="PM",
         )
@@ -130,7 +130,7 @@ class TestBuildTeamWithPredefinedMembers:
         await team_with_predefined.build_team(
             name="Test Team",
             desc="desc",
-            prompt="prompt",
+
             leader_name="Leader",
             leader_desc="PM",
         )
@@ -148,7 +148,7 @@ class TestBuildTeamWithPredefinedMembers:
         await team_with_predefined.build_team(
             name="Test Team",
             desc="desc",
-            prompt="prompt",
+
             leader_name="Leader",
             leader_desc="PM",
         )
@@ -176,7 +176,7 @@ class TestBuildTeamWithoutPredefinedMembers:
         await team_no_predefined.build_team(
             name="Auto Team",
             desc="desc",
-            prompt="prompt",
+
             leader_name="Leader",
             leader_desc="PM",
         )

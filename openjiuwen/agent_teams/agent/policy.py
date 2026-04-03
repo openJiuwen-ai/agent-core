@@ -24,8 +24,7 @@ _I18N_LABELS: dict[str, dict[str, str]] = {
         "member_id": "你的成员ID",
         "team_info_heading": "团队信息",
         "team_name": "团队名称",
-        "team_desc": "团队描述",
-        "team_prompt": "团队指令",
+        "team_desc": "团队目标与指令",
         "relationships_heading": "成员关系",
     },
     "en": {
@@ -34,8 +33,7 @@ _I18N_LABELS: dict[str, dict[str, str]] = {
         "member_id": "Your Member ID",
         "team_info_heading": "Team Info",
         "team_name": "Team Name",
-        "team_desc": "Team Description",
-        "team_prompt": "Team Directive",
+        "team_desc": "Team Goal & Directives",
         "relationships_heading": "Relationships",
     },
 }
@@ -66,9 +64,6 @@ def _format_team_info(team_info: dict[str, Any], labels: dict[str, str]) -> str:
     desc = team_info.get("desc")
     if desc:
         lines.append(f"- {labels['team_desc']}: {desc}")
-    prompt = team_info.get("prompt")
-    if prompt:
-        lines.append(f"- {labels['team_prompt']}: {prompt}")
     return "\n".join(lines)
 
 

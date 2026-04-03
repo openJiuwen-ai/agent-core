@@ -12,43 +12,64 @@ Key convention
 
 STRINGS: dict[str, str] = {
     # ===== build_team ==========================================================
-    "build_team._desc": (
-        "组建团队，设置团队名称和协作目标。"
-        "这是启动协作的第一步，必须在 spawn_member 和"
-        "add_task 之前调用"
-    ),
-    "build_team.name": "团队名称，体现团队职能方向",
-    "build_team.desc": "团队协作目标和任务范围的描述",
-    "build_team.prompt": "团队级别的全局协作提示词，所有成员可见",
+    "build_team._desc": """\
+组建团队并注册自己为 Leader。拿到目标后就调用，不要犹豫。
+
+## 调用顺序
+build_team → task_manager(add) → spawn_member → send_message(to="*")。
+build_team 之前不能调用任何其他团队工具。
+
+## 任务设计原则
+- 描述目标，不描述步骤：content 写目标、验收标准、技术约束，不写具体操作
+- 单人认领：每个任务只允许一个 teammate 认领并负责交付
+- 粗粒度拆分：一个任务对应一个可独立交付的成果
+- 成员自主规划：成员领取任务后自行制定计划，Leader 通过 approve_plan 审批
+
+## 团队工作流
+1. 分析问题，明确目标。需求有歧义时必须先向用户提问
+2. 调用 build_team 组建团队（系统自动注册你为成员）
+3. 用 task_manager(add) 创建任务 DAG。**必须先创建好所有任务，再创建成员**
+4. 任务自检：逐一检查依赖关系、依赖链合理性、覆盖完整性
+5. 用 spawn_member 按领域创建专业成员
+6. 用 send_message(to="*") 发送启动指令，系统自动拉起所有未启动成员
+7. 成员自主领取任务、制定计划、执行交付
+8. 收到通知时响应：审批计划、解答疑问、裁决冲突
+9. 按需 spawn_member 补充新成员，再 send_message(to="*") 启动
+10. 全部完成后 shutdown_member 关闭成员，临时团队用 clean_team 解散
+
+## 消息自动投递
+发送消息后不需要轮询回复或查看任务进度，系统会在新消息到达或任务状态变化时主动通知你。\
+没有待处理事项时停下来等待通知。
+
+## 成员 Idle 状态
+成员启动后不会立即回复——需要时间查看任务、制定计划、执行工作。\
+idle 是正常状态，不要催促、重发消息或关闭成员。\
+只有长时间无进展且未汇报阻塞时才考虑干预。""",
+    "build_team.team_name": "团队名称，体现团队职能方向，不要用泛化名称",
+    "build_team.team_desc": "团队目标、交付范围和全局协作指令。所有成员可见此描述，写清协作目标和约束",
     "build_team.leader_name": "Leader 的显示名称",
-    "build_team.leader_desc": "Leader 的人设描述（专业背景、领域专长）",
+    "build_team.leader_desc": "Leader 的人设描述（专业背景、领域专长），影响成员的信任和沟通方式",
 
     # ===== clean_team ==========================================================
-    "clean_team._desc": (
-        "解散团队并清理所有资源。前置条件："
-        "所有成员已通过 shutdown_member 关闭。"
-        "在所有任务完成、结果汇总后调用"
-    ),
+    "clean_team._desc": """\
+解散团队并清理所有资源。前置条件：所有成员已通过 shutdown_member 关闭。\
+在所有任务完成、结果汇总后调用""",
 
     # ===== spawn_member ========================================================
-    "spawn_member._desc": (
-        "按领域专长创建新的团队成员。"
-        "每个成员应有明确的人设和专业方向，"
-        "用于领取并执行匹配领域的任务。"
-        "创建后成员处于未启动状态，"
-        "需调用 startup_members 统一拉起"
-    ),
+    "spawn_member._desc": """\
+按领域专长创建新的团队成员。每个成员应有明确的人设和专业方向，用于领取并执行匹配领域的任务。
+
+创建后成员处于未启动状态，首次调用 send_message 时系统自动拉起所有未启动成员。
+
+desc 写法：写清专业背景和领域专长，成员据此判断该领取哪些任务。专才比通才更高效""",
     "spawn_member.member_id": "成员唯一标识符，建议使用有语义的 ID（如 backend-dev-1）",
     "spawn_member.name": "成员名称，体现其角色定位（如「后端开发专家」）",
     "spawn_member.desc": "成员的人设描述，包括专业背景、领域专长、行为风格和工作方式，用于任务匹配和角色定位",
     "spawn_member.prompt": "成员的启动指令。应引导成员通过 view_task 工具查看任务列表，认领任务",
 
     # ===== shutdown_member =====================================================
-    "shutdown_member._desc": (
-        "关闭团队成员并释放资源。"
-        "在成员完成所有任务后调用；"
-        "若成员持续无法交付，可强制关闭"
-    ),
+    "shutdown_member._desc": """\
+关闭团队成员并释放资源。在成员完成所有任务后调用；若成员持续无法交付，可强制关闭""",
     "shutdown_member.member_id": "要关闭的成员ID",
     "shutdown_member.force": "是否强制关闭（忽略未完成任务），默认 false",
 
@@ -59,7 +80,9 @@ STRINGS: dict[str, str] = {
     "approve_plan.feedback": "审批反馈，拒绝时应说明原因和修改方向",
 
     # ===== approve_tool ========================================================
-    "approve_tool._desc": "审批或拒绝 teammate 被 rail 中断的工具调用。收到工具审批请求后，Leader 应调用此工具反馈 approved、feedback 和 auto_confirm。",
+    "approve_tool._desc": """\
+审批或拒绝 teammate 被 rail 中断的工具调用。\
+收到工具审批请求后，Leader 应调用此工具反馈 approved、feedback 和 auto_confirm。""",
     "approve_tool.member_id": "发起工具审批请求的成员 ID",
     "approve_tool.tool_call_id": "待恢复的中断 tool_call_id",
     "approve_tool.approved": "是否批准这次工具调用",
@@ -70,12 +93,11 @@ STRINGS: dict[str, str] = {
     "list_members._desc": "列出所有团队成员及其状态，用于评估团队人员构成和是否需要创建新成员",
 
     # ===== task_manager ========================================================
-    "task_manager._desc": (
-        "团队任务管理工具（仅Leader可用）。"
-        "action: add（添加）、insert（插入已有DAG）、update（更新）、cancel（取消）、cancel_all（全部取消）。"
-        "add 时通过 tasks 数组传入，支持单个或批量；"
-        "insert 用于将任务插入已有 DAG 中间，支持 depended_by 反向依赖"
-    ),
+    "task_manager._desc": """\
+团队任务管理工具（仅Leader可用）。\
+action: add（添加）、insert（插入已有DAG）、update（更新）、cancel（取消）、cancel_all（全部取消）。\
+add 时通过 tasks 数组传入，支持单个或批量；\
+insert 用于将任务插入已有 DAG 中间，支持 depended_by 反向依赖""",
     "task_manager.action": "操作类型，默认 add",
     "task_manager.tasks": "add 时传入的任务列表（单个任务也用数组包裹）",
     "task_manager.task_id": "任务ID（insert 时为自定义ID，update/cancel 时为目标任务ID）",
@@ -100,30 +122,25 @@ STRINGS: dict[str, str] = {
     "claim_task.task_id": "要领取的任务ID，需为 pending 状态",
 
     # ===== complete_task =======================================================
-    "complete_task._desc": (
-        "标记任务完成。"
-        "完成后会自动解锁依赖本任务的下游任务，"
-        "使其变为 pending 可领取状态。"
-        "调用后应通过 send_message 向 Leader 汇报"
-        "结果摘要"
-    ),
+    "complete_task._desc": """\
+标记任务完成。完成后会自动解锁依赖本任务的下游任务，使其变为 pending 可领取状态。\
+调用后应通过 send_message 向 Leader 汇报结果摘要""",
     "complete_task.task_id": "要标记完成的任务ID，需为自己已领取（claimed）的任务",
 
     # ===== send_message ========================================================
-    "send_message._desc": (
-        "向团队成员发送消息。"
-        "用于通知成员领取任务、回复进度汇报、升级阻塞问题或协调成员间依赖。\n\n"
-        "| `to` 值 | 含义 |\n"
-        "|---|---|\n"
-        "| 成员名称 | 点对点消息 |\n"
-        "| `\"*\"` | 广播给所有成员 — 开销与团队规模成正比，"
-        "仅用于宣布全局决策、约束变更或需要所有人知晓的信息 |\n\n"
-        "你的普通文本输出对其他成员不可见 — 要通信必须调用此工具。"
-        "来自队友的消息会自动送达，无需轮询。"
-        "用名称称呼成员，不要使用内部 ID。"
-        "转发消息时不要引用原文 — 原文已经渲染给了用户。"
-    ),
-    "send_message.to": "收件人：填成员名称发送点对点消息，填 \"*\" 广播给所有成员",
+    "send_message._desc": """\
+向团队成员发送消息。用于通知成员领取任务、回复进度汇报、升级阻塞问题或协调成员间依赖。
+
+| `to` 值 | 含义 |
+|---|---|
+| 成员名称 | 点对点消息 |
+| `"*"` | 广播给所有成员 — 开销与团队规模成正比，仅用于宣布全局决策、约束变更或需要所有人知晓的信息 |
+
+你的普通文本输出对其他成员不可见 — 要通信必须调用此工具。\
+来自队友的消息会自动送达，无需轮询。\
+用名称称呼成员，不要使用内部 ID。\
+转发消息时不要引用原文 — 原文已经渲染给了用户。""",
+    "send_message.to": '收件人：填成员名称发送点对点消息，填 "*" 广播给所有成员',
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
 }

@@ -132,9 +132,8 @@ class TestBuildTeamTool:
         """Test invoking build team tool successfully"""
         tool = BuildTeamTool(agent_team_without_team, t)
         result = await tool.invoke({
-            "name": "My Team",
-            "desc": "Test team description",
-            "prompt": "Team prompt",
+            "team_name": "My Team",
+            "team_desc": "Test team description",
             "leader_name": "Lead",
             "leader_desc": "Project manager",
         })
@@ -155,8 +154,8 @@ class TestBuildTeamTool:
         """Test invoking build team tool with minimal arguments"""
         tool = BuildTeamTool(agent_team_without_team, t)
         result = await tool.invoke({
-            "name": "Minimal Team",
-            "desc": "A minimal team",
+            "team_name": "Minimal Team",
+            "team_desc": "A minimal team",
             "leader_name": "Lead",
             "leader_desc": "PM",
         })

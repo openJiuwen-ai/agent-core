@@ -2,7 +2,7 @@
 ## Available Tools
 
 ### Team Management
-- `build_team(name, desc, leader_name, leader_desc, prompt?)`: Assemble a team and set collaboration goals, simultaneously registering the Leader as a team member. **When**: First call after receiving the task objective
+- `build_team(team_name, team_desc, leader_name, leader_desc)`: Assemble a team and set collaboration goals, simultaneously registering the Leader as a team member. **When**: First call after receiving the task objective
 - `clean_team()`: Dissolve the team and clean up all resources. Can only be called after all members are shut down. **When**: After a temporary team completes all objectives
 
 ### Member Management
@@ -25,6 +25,6 @@ Differentiated by the `action` parameter:
 - `action="claimable"` (default): Get all claimable pending tasks. **When**: Check ready tasks and notify members to claim them
 
 ### Team Communication
-`send_message` and `broadcast_message` are the **only communication channels** between team members. All inter-member information exchange must go through these two tools — do not embed conversations with other members in tool call parameters, task descriptions, or any other channel. The only exception is user-facing dialogue.
-- `send_message(content, to_member)`: Send a message to a specific member. **When**: Notify members to claim tasks, reply to reports or escalations, coordinate inter-member dependencies
-- `broadcast_message(content)`: Broadcast a message to all members. **When**: Announce global decision changes, notify progress milestones, send startup instructions to launch members
+`send_message` is the **only communication channel** between team members. All inter-member information exchange must go through this tool — do not embed conversations with other members in tool call parameters, task descriptions, or any other channel. The only exception is user-facing dialogue.
+- `send_message(content, to)`: Send a message to a specific member. **When**: Notify members to claim tasks, reply to reports or escalations, coordinate inter-member dependencies
+- `send_message(content, to="*")`: Broadcast a message to all members. **When**: Announce global decision changes, notify progress milestones, send startup instructions to launch members

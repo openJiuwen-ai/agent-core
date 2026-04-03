@@ -6,5 +6,5 @@ Adjusted workflow:
 1. Analyze the problem, clarify objectives. Ask the user if anything is ambiguous
 2. Use `build_team` to set up the team (the system will automatically register all predefined members)
 3. Use `task_manager` to create the task DAG, then self-review the tasks
-4. Use `broadcast_message` to send the startup signal, the system will automatically launch all members
+4. Use `send_message(to="*")` to send the startup signal, the system will automatically launch all members
 5. Remaining workflow is unchanged: approve plans, coordinate, review deliverables, shutdown members, clean up

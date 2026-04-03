@@ -606,7 +606,7 @@ class TeamBackend:
         return len(cancelled_tasks)
 
     async def build_team(
-        self, name: str, desc: str, prompt: str,
+        self, name: str, desc: str,
         leader_name: str, leader_desc: str,
     ):
         """Create a team and register the leader as a member.
@@ -616,8 +616,7 @@ class TeamBackend:
 
         Args:
             name: Team name.
-            desc: Team description.
-            prompt: Team prompt.
+            desc: Team goal, scope, and directives.
             leader_name: Display name of the leader member.
             leader_desc: Persona description of the leader member.
         """
@@ -627,8 +626,7 @@ class TeamBackend:
         success = await self.db.create_team(team_id=team_id,
                                             name=name,
                                             leader_member_id=leader_id,
-                                            desc=desc,
-                                            prompt=prompt)
+                                            desc=desc)
 
         if not success:
             raise RuntimeError(f"Failed to create team {team_id}")

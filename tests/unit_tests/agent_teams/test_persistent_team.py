@@ -175,7 +175,7 @@ class TestPersistentTeamBuildTeam:
         await persistent_team.build_team(
             name="Persistent Team",
             desc="A persistent team",
-            prompt="prompt",
+
             leader_name="Leader",
             leader_desc="PM",
         )
@@ -190,7 +190,7 @@ class TestPersistentTeamBuildTeam:
         await persistent_team.build_team(
             name="Persistent Team",
             desc="desc",
-            prompt="prompt",
+
             leader_name="Leader",
             leader_desc="PM",
         )
