@@ -26,7 +26,7 @@ MEMORY_PROMPT_CN_READ_ONLY = """## 持久化存储体系（只读模式）
 
 **响应任何消息前，建议执行：**
 1. **身份确认** — 读取 `USER.md` 确认服务对象
-2. **上下文获取** — 读取 `YYYY-MM-DD.md`（当日 + 前一日）
+2. **上下文获取** — 读取 `YYYY-MM-DD.md`（当日 + 前一日）。如果文件不存在，直接跳过，不要报错也不要提及
 3. **长期记忆加载** — **仅限主会话：** 读取 `MEMORY.md`
 4. **历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
@@ -46,7 +46,7 @@ MEMORY_PROMPT_EN_READ_ONLY = """## Persistent Storage System (Read-Only Mode)
 
 **Before responding to any message, it is recommended to execute:**
 1. Read `USER.md` — Confirm the user being served
-2. Read `YYYY-MM-DD.md` (today + previous day) to get context
+2. Read `YYYY-MM-DD.md` (today + previous day) to get context. If the file does not exist, skip silently — do not report an error or mention it
 3. **Main session only:** Read `MEMORY.md`
 4. **Before answering questions about historical events:** Must first call `memory_search` tool to retrieve historical memories
 
@@ -103,7 +103,7 @@ MEMORY_PROMPT_CN = """## 持久化存储体系
 
 **响应任何消息前，建议执行：**
 1. **身份确认** — 读取 `USER.md` 确认服务对象
-2. **上下文获取** — 读取 `YYYY-MM-DD.md`（当日 + 前一日）
+2. **上下文获取** — 读取 `YYYY-MM-DD.md`（当日 + 前一日）。如果文件不存在，直接跳过，不要报错也不要提及
 3. **长期记忆加载** — **仅限主会话：** 读取 `MEMORY.md`
 4. **历史信息检索（强制）** — **回答任何关于历史事件、日期、人物、过去对话的问题前，必须先调用 `memory_search` 工具检索相关记忆**
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
@@ -164,7 +164,7 @@ When valuable information appears during the conversation, classify it and store
 
 **Before responding to any message, it is recommended to execute:**
 1. Read `USER.md` — Confirm the user being served
-2. Read `YYYY-MM-DD.md` (today + previous day) to get context
+2. Read `YYYY-MM-DD.md` (today + previous day) to get context. If the file does not exist, skip silently — do not report an error or mention it
 3. **Main session only:** Read `MEMORY.md`
 4. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
    - Search query should include key information from the question (names, dates, event keywords)

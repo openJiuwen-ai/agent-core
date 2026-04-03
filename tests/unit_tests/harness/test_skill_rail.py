@@ -477,3 +477,100 @@ async def test_skill_rail_reload_updated_skill_by_update_at(tmp_path: Path):
     )
     await skill_rail.before_invoke(ctx2)
     assert skill_rail.load_calls == ["invoice-parser"]
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_skips_nonexistent_directories(tmp_path: Path):
+    """SkillUseRail should silently skip directories that do not exist."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    _write_skill(skills_root, "my-skill", "Real skill")
+
+    nonexistent = tmp_path / "does_not_exist"
+    another_nonexistent = tmp_path / "also_missing"
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=[str(nonexistent), str(skills_root), str(another_nonexistent)],
+        skill_mode="all",
+        include_tools=False,
+    )
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await skill_rail.before_invoke(ctx)
+
+    assert _sorted_skill_names(skill_rail.skills) == ["my-skill"]
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_all_dirs_nonexistent_produces_empty_skills(tmp_path: Path):
+    """SkillUseRail should produce empty skills when all directories are missing."""
+    nonexistent_a = tmp_path / "missing_a"
+    nonexistent_b = tmp_path / "missing_b"
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=[str(nonexistent_a), str(nonexistent_b)],
+        skill_mode="all",
+        include_tools=False,
+    )
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await skill_rail.before_invoke(ctx)
+
+    assert skill_rail.skills == []
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_priority_dedup_first_dir_wins(tmp_path: Path):
+    """When multiple dirs contain a skill with the same name, the first dir wins."""
+    high_prio = tmp_path / "high"
+    low_prio = tmp_path / "low"
+
+    _write_skill(high_prio, "shared-skill", "High priority version")
+    _write_skill(low_prio, "shared-skill", "Low priority version")
+    _write_skill(low_prio, "unique-skill", "Only in low")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=[str(high_prio), str(low_prio)],
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_sys_operation(sys_operation)
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await skill_rail.before_invoke(ctx)
+
+    names = _sorted_skill_names(skill_rail.skills)
+    assert names == ["shared-skill", "unique-skill"]
+
+    # Verify the "shared-skill" comes from high_prio directory
+    shared = [s for s in skill_rail.skills if s.name == "shared-skill"][0]
+    assert str(high_prio.resolve()) in str(shared.directory.resolve())
+    assert shared.description == "High priority version"
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_multi_dir_with_missing_dirs(tmp_path: Path):
+    """SkillUseRail loads skills from existing dirs and skips missing ones."""
+    existing_a = tmp_path / "dir_a"
+    missing_b = tmp_path / "dir_b"
+    existing_c = tmp_path / "dir_c"
+
+    _write_skill(existing_a, "skill-a", "From dir A")
+    # dir_b does not exist
+    _write_skill(existing_c, "skill-c", "From dir C")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=[str(existing_a), str(missing_b), str(existing_c)],
+        skill_mode="all",
+        include_tools=False,
+    )
+
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    await skill_rail.before_invoke(ctx)
+
+    assert _sorted_skill_names(skill_rail.skills) == ["skill-a", "skill-c"]

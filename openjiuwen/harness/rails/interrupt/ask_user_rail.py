@@ -115,6 +115,12 @@ class AskUserRail(BaseInterruptRail):
         query = ""
         if tool_call is not None:
             args = tool_call.arguments
+            if isinstance(args, str):
+                import json
+                try:
+                    args = json.loads(args)
+                except (ValueError, TypeError):
+                    pass
             if isinstance(args, Mapping):
                 query = str(args.get("query", ""))
         message = query or self.request.message

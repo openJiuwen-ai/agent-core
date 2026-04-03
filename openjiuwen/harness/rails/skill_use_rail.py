@@ -121,9 +121,19 @@ class SkillUseRail(DeepAgentRail):
 
         for root in roots:
             if not root.exists():
-                raise FileNotFoundError(f"skills_dir does not exist: {root}")
+                logger.debug(
+                    "[SkillUseRail] skills_dir does not exist, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
             if not root.is_dir():
-                raise NotADirectoryError(f"skills_dir is not a directory: {root}")
+                logger.debug(
+                    "[SkillUseRail] skills_dir is not a directory, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
 
             for item in sorted(root.iterdir(), key=lambda p: p.name):
                 if not item.is_dir():
@@ -489,9 +499,19 @@ class SkillUseRail(DeepAgentRail):
 
         for root in roots:
             if not root.exists():
-                raise FileNotFoundError(f"skills_dir does not exist: {root}")
+                logger.debug(
+                    "[SkillUseRail] skills_dir does not exist, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
             if not root.is_dir():
-                raise NotADirectoryError(f"skills_dir is not a directory: {root}")
+                logger.debug(
+                    "[SkillUseRail] skills_dir is not a directory, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
 
             for item in sorted(root.iterdir(), key=lambda p: p.name):
                 if not item.is_dir():

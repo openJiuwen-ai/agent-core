@@ -76,6 +76,8 @@ all-mq = ["openjiuwen[pulsar]"]
 all-storage = ["openjiuwen[sqlite,mysql,redis,obs]"]
 all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
 
+cli = ["click>=8.0", "rich>=13.0", "prompt-toolkit>=3.0"]
+
 default = []
 all = ["openjiuwen[all-mq,all-storage,all-vector]"]
 
@@ -103,6 +105,9 @@ docs = [
 
 dev = [{ include-group = "test" }, { include-group = "lint" }, { include-group = "docs" }]
 
+[project.scripts]
+openjiuwen = "openjiuwen.harness.cli.cli:cli"
+
 [project.urls]
 Homepage = "https://openjiuwen.com"
 Documentation = "https://openjiuwen.com/docs-page"
@@ -116,6 +121,9 @@ default-groups = ['dev']
 name = "aliyun"
 url = "https://mirrors.aliyun.com/pypi/simple"
 default = true
+
+[tool.setuptools.packages.find]
+include = ["openjiuwen*"]
 
 [tool.setuptools.package-data]
 openjiuwen = ["**/prompts/**/*.md"]
