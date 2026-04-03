@@ -4,7 +4,7 @@
 DEFAULT_INNER_LOG_CONFIG = {
     "backend": "loguru",
     "defaults": {
-        "level": "WARN",
+        "level": "INFO",
         "enqueue": True,
         "catch": False,
         "backtrace": False,
@@ -12,27 +12,10 @@ DEFAULT_INNER_LOG_CONFIG = {
     },
     "sinks": {
         "console": {
-            "target": "/Users/alan/Developer/PycharmProjects/agent_team/logs/run/jiuwen_console.log",
-            "level": "DEBUG",
+            "target": "stdout",
+            "level": "INFO",
             "serialize": False,
             "colorize": True,
-            "enqueue": False,
-            "backtrace": True,
-            "diagnose": False,
-            "format": (
-                "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-                "<magenta>{process.id}</magenta> | "
-                "<level>{level: <8}</level> | "
-                "<cyan>{extra[log_type]}</cyan> | "
-                "<yellow>{extra[trace_id]}</yellow> | "
-                "<blue>{extra[short_path]}:{line}</blue> | "
-                "<level>{message}</level>"
-            ),
-        },
-        "console-log": {
-            "target": "/Users/alan/Developer/PycharmProjects/agent_team/logs/run/jiuwen.log",
-            "level": "DEBUG",
-            "serialize": False,
             "enqueue": False,
             "backtrace": True,
             "diagnose": False,
@@ -68,19 +51,16 @@ DEFAULT_INNER_LOG_CONFIG = {
         },
     },
     "routes": {
-        # "common": ["console", "app_json"],
-        # "interface": ["console", "app_json"],
-        # "prompt_builder": ["console", "app_json"],
-        # "performance": ["perf_json"],
-        "*": ["console", "console-log"],
+        "common": ["console", "app_json"],
+        "interface": ["console", "app_json"],
+        "prompt_builder": ["console", "app_json"],
+        "performance": ["perf_json"],
+        "*": ["console", "app_json"],
     },
     "loggers": {
-        "team": {
-            "level": "DEBUG",
+        "common": {
+            "level": "INFO",
         },
-        # "test": {
-        #     "level": "INFO",
-        # },
         "agent": {
             "level": "INFO",
         }

@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.tools.status import (
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
+    ApproveToolCallTool,
     ApprovePlanTool,
     BroadcastMessageTool,
     BuildTeamTool,
@@ -346,6 +347,36 @@ class TestApprovePlanTool:
         })
 
         assert result.success is False
+
+
+class TestApproveToolCallTool:
+    """Test ApproveToolCallTool."""
+
+    def test_initialization(self, agent_team):
+        tool = ApproveToolCallTool(agent_team)
+        assert tool.card.name == "approve_tool"
+        assert tool.card.id == "ApproveToolCallTool"
+        assert tool.team == agent_team
+
+    @pytest.mark.asyncio
+    async def test_invoke_approve(self, agent_team, sample_agent_card):
+        await agent_team.spawn_member(
+            member_id="member1",
+            name="Member One",
+            agent_card=sample_agent_card,
+        )
+
+        tool = ApproveToolCallTool(agent_team)
+        result = await tool.invoke({
+            "member_id": "member1",
+            "tool_call_id": "call-1",
+            "approved": True,
+            "feedback": "approved",
+            "auto_confirm": True,
+        })
+
+        assert result.success is True
+        assert result.error is None
 
 
 class TestListMembersTool:

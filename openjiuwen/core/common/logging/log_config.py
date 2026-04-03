@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import copy
+import os
 from typing import Any, Dict, Optional
 
 import yaml
@@ -14,6 +15,7 @@ from openjiuwen.core.common.logging.default.config_provider import (
 from openjiuwen.core.common.logging.default.constant import (
     DEFAULT_INNER_LOG_CONFIG as DEFAULT_DEFAULT_LOG_CONFIG,
 )
+from openjiuwen.core.common.logging.log_levels import extract_backend
 from openjiuwen.core.common.logging.loguru.config_provider import (
     build_loguru_logger_config,
     load_loguru_backend_config,
@@ -49,8 +51,21 @@ class LogConfig:
 
     @classmethod
     def _load_config(cls, config_path: str) -> Dict[str, Any]:
+        from openjiuwen.core.common.security.path_checker import is_sensitive_path
+
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            try:
+                real_path = os.path.realpath(config_path)
+            except OSError:
+                real_path = os.path.abspath(os.path.expanduser(config_path))
+
+            if is_sensitive_path(real_path):
+                raise build_error(
+                    StatusCode.COMMON_LOG_PATH_INVALID,
+                    error_msg=f"the path is {real_path}"
+                )
+
+            with open(real_path, "r", encoding="utf-8") as f:
                 config = yaml.safe_load(f)
 
             if "logging" not in config:
@@ -80,7 +95,7 @@ class LogConfig:
 
     @classmethod
     def _normalize_loaded_config(cls, logging_config: Dict[str, Any]) -> Dict[str, Any]:
-        backend = cls._extract_backend(logging_config)
+        backend = extract_backend(logging_config)
         loader = _BACKEND_LOADERS.get(backend)
         if loader is None:
             raise build_error(
@@ -88,13 +103,6 @@ class LogConfig:
                 error_msg=f"unsupported logging backend '{backend}'"
             )
         return loader(copy.deepcopy(logging_config))
-
-    @staticmethod
-    def _extract_backend(logging_config: Dict[str, Any]) -> str:
-        backend = logging_config.get("backend", "default")
-        if not isinstance(backend, str) or not backend.strip():
-            return "default"
-        return backend.strip().lower()
 
     def get_logger_config(self, log_type: str, backend: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
         resolved_backend = (backend or self.get_backend()).strip().lower()
@@ -125,7 +133,7 @@ class LogConfig:
         return self.get_logger_config(log_type, backend=backend, **kwargs)
 
     def get_backend(self) -> str:
-        return self._extract_backend(self._log_config)
+        return extract_backend(self._log_config)
 
     def get_all_configs(self, backend: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         return {

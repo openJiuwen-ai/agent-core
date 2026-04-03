@@ -16,8 +16,6 @@ from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
     ModelRequestConfig,
 )
-
-from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -67,6 +65,25 @@ def _ensure_builtin_rails_registered() -> None:
         "subagent": SubagentRail,
         "tool_prompt": ToolPromptRail,
     })
+
+
+# ---------------------------------------------------------------------------
+# TeamModelConfig (must precede specs that reference it)
+# ---------------------------------------------------------------------------
+
+
+class TeamModelConfig(BaseModel):
+    """Serializable model configuration for a team role."""
+
+    model_client_config: ModelClientConfig
+    model_request_config: Optional[ModelRequestConfig] = None
+
+    def build(self) -> "Model":
+        """Create a Model instance from this config."""
+        return Model(
+            model_client_config=self.model_client_config,
+            model_config=self.model_request_config,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +199,14 @@ class SubAgentSpec(BaseModel):
     model: Optional[TeamModelConfig] = None
     rails: Optional[list[RailSpec]] = None
     skills: Optional[list[str]] = None
+    workspace: Optional[WorkspaceSpec] = None
+    sys_operation: Optional[SysOperationSpec] = None
+    language: Optional[str] = None
+    prompt_mode: Optional[str] = None
+    enable_task_loop: bool = False
+    max_iterations: Optional[int] = None
+    factory_name: Optional[str] = None
+    factory_kwargs: dict[str, Any] = {}
 
     def build(self, *, parent_model: Model, language: str) -> SubAgentConfig:
         """Materialize into a runtime SubAgentConfig.
@@ -196,6 +221,16 @@ class SubAgentSpec(BaseModel):
             if self.rails
             else None
         )
+        resolved_workspace = self.workspace.build() if self.workspace else None
+
+        resolved_sys_op = None
+        if self.sys_operation:
+            from openjiuwen.core.runner.runner import Runner
+
+            card = self.sys_operation.build_card()
+            Runner.resource_mgr.add_sys_operation(card)
+            resolved_sys_op = Runner.resource_mgr.get_sys_operation(card.id)
+
         return SubAgentConfig(
             agent_card=self.agent_card,
             system_prompt=self.system_prompt,
@@ -204,6 +239,14 @@ class SubAgentSpec(BaseModel):
             model=resolved_model,
             rails=resolved_rails,
             skills=self.skills,
+            workspace=resolved_workspace,
+            sys_operation=resolved_sys_op,
+            language=self.language,
+            prompt_mode=self.prompt_mode,
+            enable_task_loop=self.enable_task_loop,
+            max_iterations=self.max_iterations,
+            factory_name=self.factory_name,
+            factory_kwargs=dict(self.factory_kwargs),
         )
 
 
@@ -228,6 +271,8 @@ class DeepAgentSpec(BaseModel):
     subagents: Optional[list[SubAgentSpec]] = None
     rails: Optional[list[RailSpec]] = None
     enable_task_loop: bool = False
+    enable_async_subagent: bool = False
+    add_general_purpose_agent: bool = False
     max_iterations: int = 15
     workspace: Optional[WorkspaceSpec] = None
     skills: Optional[list[str]] = None
@@ -237,8 +282,11 @@ class DeepAgentSpec(BaseModel):
     vision_model: Optional[VisionModelSpec] = None
     audio_model: Optional[AudioModelSpec] = None
     enable_task_planning: bool = False
+    restrict_to_work_dir: bool = True
+    auto_create_workspace: bool = True
     completion_timeout: float = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
+    approval_required_tools: Optional[list[str]] = None
 
     def build(self) -> "DeepAgent":
         """Materialize a live DeepAgent from this spec."""
@@ -279,6 +327,8 @@ class DeepAgentSpec(BaseModel):
             subagents=subagents,
             rails=rails,
             enable_task_loop=self.enable_task_loop,
+            enable_async_subagent=self.enable_async_subagent,
+            add_general_purpose_agent=self.add_general_purpose_agent,
             max_iterations=self.max_iterations,
             workspace=workspace,
             skills=self.skills,
@@ -288,6 +338,8 @@ class DeepAgentSpec(BaseModel):
             vision_model_config=vision_config,
             audio_model_config=audio_config,
             enable_task_planning=self.enable_task_planning,
+            restrict_to_work_dir=self.restrict_to_work_dir,
+            auto_create_workspace=self.auto_create_workspace,
             completion_timeout=self.completion_timeout,
             **self._progressive_tool_kwargs(),
         )
@@ -311,21 +363,8 @@ __all__ = [
     "RailSpec",
     "SubAgentSpec",
     "SysOperationSpec",
+    "TeamModelConfig",
     "VisionModelSpec",
     "WorkspaceSpec",
     "register_rail_type",
 ]
-
-
-class TeamModelConfig(BaseModel):
-    """Serializable model configuration for a team role."""
-
-    model_client_config: ModelClientConfig
-    model_request_config: Optional[ModelRequestConfig] = None
-
-    def build(self) -> "Model":
-        """Create a Model instance from this config."""
-        return Model(
-            model_client_config=self.model_client_config,
-            model_config=self.model_request_config,
-        )

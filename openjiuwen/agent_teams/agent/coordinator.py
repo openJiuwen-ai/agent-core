@@ -56,7 +56,7 @@ WakeCallback = Callable[[CoordinationEvent], Awaitable[None]]
 """Called with the full event when the loop is woken up."""
 
 
-class CoordinationLoop:
+class CoordinatorLoop:
     """Event-driven wake-up loop for team coordination.
 
     Two wake-up paths, same callback:
@@ -115,7 +115,7 @@ class CoordinationLoop:
         """Start the event loop and polling timer."""
         if self._running:
             return
-        team_logger.info("CoordinationLoop[{}] starting", self._role.value)
+        team_logger.info("CoordinatorLoop[{}] starting", self._role.value)
         self._running = True
         self._loop_task = asyncio.create_task(self._run_loop())
         self._mailbox_poll_task = asyncio.create_task(
@@ -129,7 +129,7 @@ class CoordinationLoop:
         """Stop loops, cancel poll timer, unsubscribe."""
         if not self._running:
             return
-        team_logger.info("CoordinationLoop[{}] stopping", self._role.value)
+        team_logger.info("CoordinatorLoop[{}] stopping", self._role.value)
         self._running = False
 
         # Cancel polling timers
@@ -168,7 +168,7 @@ class CoordinationLoop:
         """
         if self._polls_paused:
             return
-        team_logger.info("CoordinationLoop[{}] pausing polls", self._role.value)
+        team_logger.info("CoordinatorLoop[{}] pausing polls", self._role.value)
         for task in (self._mailbox_poll_task, self._task_poll_task):
             if task is not None:
                 task.cancel()
@@ -184,7 +184,7 @@ class CoordinationLoop:
         """Restart periodic poll tasks after a pause."""
         if not self._polls_paused or not self._running:
             return
-        team_logger.info("CoordinationLoop[{}] resuming polls", self._role.value)
+        team_logger.info("CoordinatorLoop[{}] resuming polls", self._role.value)
         self._mailbox_poll_task = asyncio.create_task(
             self._poll_loop(InnerEventType.POLL_MAILBOX, self._mailbox_poll_interval),
         )
@@ -233,7 +233,7 @@ class CoordinationLoop:
             except Exception:
                 event_type = getattr(event, "event_type", "unknown")
                 team_logger.exception(
-                    "CoordinationLoop: error in wake_callback for %s",
+                    "CoordinatorLoop: error in wake_callback for %s",
                     event_type,
                 )
             finally:
@@ -261,7 +261,7 @@ class CoordinationLoop:
 
 __all__ = [
     "CoordinationEvent",
-    "CoordinationLoop",
+    "CoordinatorLoop",
     "InnerEventMessage",
     "InnerEventType",
     "WakeCallback",

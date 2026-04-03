@@ -65,29 +65,19 @@ def write_yaml_config(config_file_path: str, config_content: Dict[str, Any]) -> 
 @contextmanager
 def patched_logging_config(config_file_path: str):
     """Patch module-level logging config objects for tests."""
-    config_manager_module = importlib.import_module("openjiuwen.core.common.logging.config_manager")
     log_config_module = importlib.import_module("openjiuwen.core.common.logging.log_config")
 
     original_log_config = log_config_module.log_config
-    original_config_manager = config_manager_module.config_manager
-    original_config = config_manager_module.config
-
     test_log_config = log_config_module.LogConfig(config_file_path)
-    test_config_manager = config_manager_module.ConfigManager(config_file_path)
-    test_config = config_manager_module.ConfigDict(test_config_manager)
 
     LogManager.reset()
     log_config_module.log_config = test_log_config
-    config_manager_module.config_manager = test_config_manager
-    config_manager_module.config = test_config
 
     try:
-        yield test_log_config, test_config_manager
+        yield test_log_config, None
     finally:
         LogManager.reset()
         log_config_module.log_config = original_log_config
-        config_manager_module.config_manager = original_config_manager
-        config_manager_module.config = original_config
 
 
 @pytest.fixture
@@ -417,27 +407,22 @@ class TestLogConfig:
 
         assert test_log_config.get_common_config()["structured_output_format"] == "text"
 
-    def test_config_manager_normalizes_per_logger_levels(self, temp_config_dir):
-        """ConfigManager should normalize both root and per-logger levels."""
-        from openjiuwen.core.common.logging.config_manager import ConfigManager
+    def test_normalize_logging_config_normalizes_per_logger_levels(self):
+        """normalize_logging_config should normalize both root and per-logger levels."""
+        from openjiuwen.core.common.logging.log_levels import normalize_logging_config
 
-        config_file_path = os.path.join(temp_config_dir.name, "per_logger_levels.yaml")
-        config_content = {
-            "logging": {
-                "level": "INFO",
-                "loggers": {
-                    "agent": {"level": "DEBUG"},
-                    "invalid_logger": {"level": "NOT_A_LEVEL"},
-                },
-            }
+        raw_config = {
+            "level": "INFO",
+            "loggers": {
+                "agent": {"level": "DEBUG"},
+                "invalid_logger": {"level": "NOT_A_LEVEL"},
+            },
         }
-        write_yaml_config(config_file_path, config_content)
+        result = normalize_logging_config(raw_config)
 
-        test_config_manager = ConfigManager(config_file_path)
-
-        assert test_config_manager.get("logging.level") == logging.INFO
-        assert test_config_manager.get("logging.loggers.agent.level") == logging.DEBUG
-        assert test_config_manager.get("logging.loggers.invalid_logger.level") == logging.WARNING
+        assert result["level"] == logging.INFO
+        assert result["loggers"]["agent"]["level"] == logging.DEBUG
+        assert result["loggers"]["invalid_logger"]["level"] == logging.WARNING
 
     def test_per_logger_level_override_is_loaded_from_yaml(self, temp_config_dir):
         """Per-logger level overrides should beat the global level."""

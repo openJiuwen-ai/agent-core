@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.tools.team_events import (
     MemberShutdownEvent,
     MemberSpawnedEvent,
     PlanApprovalEvent,
+    ToolApprovalResultEvent,
     TeamCleanedEvent,
     TeamCreatedEvent,
     TeamTopic,
@@ -251,6 +252,54 @@ class TeamBackend:
             team_logger.error(f"Failed to publish plan approval event for {member_id}: {e}")
 
         team_logger.info(f"Plan approval sent to member {member_id}")
+        return True
+
+    async def approve_tool(
+        self,
+        member_id: str,
+        tool_call_id: str,
+        approved: bool,
+        feedback: Optional[str] = None,
+        auto_confirm: bool = False,
+    ) -> bool:
+        """Approve or reject one interrupted teammate tool call."""
+        member_data = await self.db.get_member(member_id)
+        if member_data is None:
+            team_logger.error(f"Member {member_id} not found")
+            return False
+
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_id),
+                message=EventMessage.from_event(ToolApprovalResultEvent(
+                    team_id=self.team_id,
+                    member_id=member_id,
+                    tool_call_id=tool_call_id,
+                    approved=approved,
+                    feedback=feedback or "",
+                    auto_confirm=auto_confirm,
+                )),
+            )
+            team_logger.debug(
+                "Tool approval result event published for member {}, tool_call_id={}",
+                member_id,
+                tool_call_id,
+            )
+        except Exception as e:
+            team_logger.error(
+                "Failed to publish tool approval result event for {} / {}: {}",
+                member_id,
+                tool_call_id,
+                e,
+            )
+
+        team_logger.info(
+            "Tool approval event sent to member {} for tool_call_id={}, approved={}, auto_confirm={}",
+            member_id,
+            tool_call_id,
+            approved,
+            auto_confirm,
+        )
         return True
 
     async def shutdown_member(self, member_id: str, force: bool = False) -> bool:

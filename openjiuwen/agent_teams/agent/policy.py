@@ -2,7 +2,7 @@
 """Role-aware prompt and policy helpers.
 
 The system prompt is the primary driver of team behavior —
-the CoordinationLoop only wakes the DeepAgent and injects
+the CoordinatorLoop only wakes the DeepAgent and injects
 unread messages; all decision logic comes from these prompts.
 
 Policy text lives in external Markdown templates under

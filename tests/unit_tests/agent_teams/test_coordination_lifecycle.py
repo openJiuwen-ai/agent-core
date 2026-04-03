@@ -1,14 +1,14 @@
 # coding: utf-8
-"""Tests for CoordinationLoop lifecycle."""
+"""Tests for CoordinatorLoop lifecycle."""
 from __future__ import annotations
 
 import asyncio
 
 import pytest
 
-from openjiuwen.agent_teams.agent.coordination import (
+from openjiuwen.agent_teams.agent.coordinator import (
     CoordinationEvent,
-    CoordinationLoop,
+    CoordinatorLoop,
     InnerEventMessage,
     InnerEventType,
 )
@@ -22,7 +22,7 @@ from openjiuwen.agent_teams.tools.team_events import (
 @pytest.mark.asyncio
 async def test_start_stop_sets_running_flag():
     """start() sets is_running, stop() clears it."""
-    loop = CoordinationLoop(role=TeamRole.LEADER)
+    loop = CoordinatorLoop(role=TeamRole.LEADER)
     assert loop.is_running is False
 
     await loop.start()
@@ -35,7 +35,7 @@ async def test_start_stop_sets_running_flag():
 @pytest.mark.asyncio
 async def test_stop_is_idempotent():
     """Calling stop() twice does not raise."""
-    loop = CoordinationLoop(role=TeamRole.LEADER)
+    loop = CoordinatorLoop(role=TeamRole.LEADER)
     await loop.start()
     await loop.stop()
     await loop.stop()
@@ -50,7 +50,7 @@ async def test_wake_callback_invoked_on_event():
     async def on_wake(event: CoordinationEvent) -> None:
         woke.append(event)
 
-    loop = CoordinationLoop(
+    loop = CoordinatorLoop(
         role=TeamRole.LEADER,
         wake_callback=on_wake,
     )
@@ -76,7 +76,7 @@ async def test_poll_timer_fires_periodically():
     async def on_wake(event: CoordinationEvent) -> None:
         woke.append(event)
 
-    loop = CoordinationLoop(
+    loop = CoordinatorLoop(
         role=TeamRole.LEADER,
         wake_callback=on_wake,
         mailbox_poll_interval=0.05,

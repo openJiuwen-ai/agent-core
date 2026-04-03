@@ -62,6 +62,7 @@ class TeamEvent:
 
     # Collaboration events
     PLAN_APPROVAL = "plan_approval"
+    TOOL_APPROVAL_RESULT = "tool_approval_result"
 
     # Messaging events
     MESSAGE = "message"
@@ -141,6 +142,14 @@ class PlanApprovalEvent(BaseEventMessage):
     approved: bool = Field(..., description="Whether the plan was approved")
 
 
+class ToolApprovalResultEvent(BaseEventMessage):
+    """Event published when leader approves or rejects one tool call."""
+    tool_call_id: str = Field(..., description="Interrupted tool call ID")
+    approved: bool = Field(..., description="Whether the tool call was approved")
+    feedback: str = Field(default="", description="Leader feedback for the teammate")
+    auto_confirm: bool = Field(default=False, description="Whether to auto-confirm future same-name tool calls")
+
+
 class MessageEvent(BaseEventMessage):
     """Event published when a point-to-point message is sent"""
     message_id: str = Field(..., description="Message unique identifier")
@@ -196,6 +205,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.MEMBER_SHUTDOWN: MemberShutdownEvent,
     TeamEvent.MEMBER_CANCELED: MemberCanceledEvent,
     TeamEvent.PLAN_APPROVAL: PlanApprovalEvent,
+    TeamEvent.TOOL_APPROVAL_RESULT: ToolApprovalResultEvent,
     TeamEvent.MESSAGE: MessageEvent,
     TeamEvent.BROADCAST: BroadcastEvent,
     TeamEvent.TASK_CREATED: TaskCreatedEvent,

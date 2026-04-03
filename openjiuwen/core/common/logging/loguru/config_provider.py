@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging.config_manager import (
+from openjiuwen.core.common.logging.log_levels import (
     INFO,
     normalize_log_level,
 )

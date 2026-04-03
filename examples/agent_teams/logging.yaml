@@ -1,0 +1,64 @@
+logging:
+  backend: loguru
+  defaults:
+    level: INFO
+    enqueue: true
+    catch: false
+    backtrace: false
+    diagnose: false
+  sinks:
+    console:
+      target: ./logs/jiuwen_console.log
+      level: DEBUG
+      serialize: false
+      colorize: true
+      enqueue: false
+      backtrace: true
+      diagnose: false
+      format: >-
+        <green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> |
+        <magenta>{process.id}</magenta> |
+        <level>{level: <8}</level> |
+        <cyan>{extra[log_type]}</cyan> |
+        <yellow>{extra[trace_id]}</yellow> |
+        <blue>{extra[short_path]}:{line}</blue> |
+        <level>{message}</level>
+    app_json:
+      target: ./logs/jiuwen.log
+      level: DEBUG
+      enqueue: true
+      rotation: 500 MB
+      retention: 14 days
+      compression: gz
+      encoding: utf-8
+    perf_json:
+      target: ./logs/performance/jiuwen_performance.jsonl
+      level: INFO
+      serialize: true
+      enqueue: true
+      rotation: 200 MB
+      retention: 7 days
+      compression: gz
+      encoding: utf-8
+  routes:
+#    common:
+#      - console
+#      - app_json
+#    interface:
+#      - console
+#      - app_json
+#    prompt_builder:
+#      - console
+#      - app_json
+#    performance:
+#      - perf_json
+    "*":
+      - console
+      - app_json
+  loggers:
+    common:
+      level: INFO
+    agent:
+      level: INFO
+    team:
+      level: DEBUG
