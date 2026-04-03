@@ -44,8 +44,10 @@ def _ensure_builtin_infra_registered() -> None:
 
     if not _STORAGE_REGISTRY:
         from openjiuwen.agent_teams.tools.database import DatabaseConfig
+        from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
         _STORAGE_REGISTRY["sqlite"] = DatabaseConfig
+        _STORAGE_REGISTRY["memory"] = MemoryDatabaseConfig
 
 
 class TransportSpec(BaseModel):
@@ -117,6 +119,7 @@ class TeamAgentSpec(BaseModel):
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
     teammate_mode: str = "plan_mode"
+    spawn_mode: str = "process"
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[TeamMemberSpec] = []
     transport: Optional[TransportSpec] = None

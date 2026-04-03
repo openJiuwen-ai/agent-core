@@ -258,7 +258,16 @@ class TeamAgent(BaseAgent):
         member_id = ctx.member_id
         if member_id and messager_config and messager_config.node_id != member_id:
             messager_config = messager_config.model_copy(update={"node_id": member_id})
-        self._messager = create_messager(messager_config) if messager_config else None
+
+        if messager_config and messager_config.backend == "team_runtime":
+            from openjiuwen.agent_teams.spawn.shared_resources import get_or_create_runtime
+
+            runtime = get_or_create_runtime(messager_config.team_id)
+            self._messager = create_messager(messager_config, runtime=runtime)
+        elif messager_config:
+            self._messager = create_messager(messager_config)
+        else:
+            self._messager = None
 
         self._tool_cards = self._register_team_tools(spec, ctx, self._messager)
 
@@ -388,7 +397,12 @@ class TeamAgent(BaseAgent):
         from openjiuwen.agent_teams.tools.status import MemberMode
 
         team_id = (ctx.team_spec.team_id if ctx.team_spec else None) or "default"
-        db = TeamDatabase(ctx.db_config)
+        if ctx.db_config.db_type == "memory":
+            from openjiuwen.agent_teams.spawn.shared_resources import get_or_create_memory_db
+
+            db = get_or_create_memory_db(team_id)
+        else:
+            db = TeamDatabase(ctx.db_config)
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_id = ctx.member_id or (
@@ -985,8 +999,8 @@ class TeamAgent(BaseAgent):
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
-    ) -> SpawnedProcessHandle:
-        """Spawn one teammate process via Runner.spawn_agent.
+    ):
+        """Spawn one teammate via subprocess or in-process coroutine.
 
         The returned handle is tracked internally and an on_unhealthy
         callback is registered so the leader can auto-restart the
@@ -994,15 +1008,27 @@ class TeamAgent(BaseAgent):
         """
         member_id = member_spec.member_id
         team_logger.info("[{}] spawning teammate: {}", self._member_id() or "?", member_id)
-        handle = await Runner.spawn_agent(
-            self.build_spawn_config(member_spec),
-            self.build_spawn_payload(
-                member_spec,
+
+        if self._spec and self._spec.spawn_mode == "inprocess":
+            from openjiuwen.agent_teams.spawn.inprocess_spawn import inprocess_spawn
+
+            handle = await inprocess_spawn(
+                team_agent=self,
+                member_spec=member_spec,
                 initial_message=initial_message,
-            ),
-            session=session,
-            spawn_config=spawn_config,
-        )
+                session_id=self._session.get_session_id() if self._session else session,
+            )
+        else:
+            handle = await Runner.spawn_agent(
+                self.build_spawn_config(member_spec),
+                self.build_spawn_payload(
+                    member_spec,
+                    initial_message=initial_message,
+                ),
+                session=session,
+                spawn_config=spawn_config,
+            )
+
         self._spawned_handles[member_id] = handle
 
         def _trigger_unhealthy_recovery() -> asyncio.Task:
