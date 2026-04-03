@@ -15,10 +15,11 @@ from typing import (
     List,
 )
 
-from loguru import (
-    _file_sink,
-    logger as loguru_logger,
-)
+def _get_loguru():
+    """Lazy-load loguru to avoid import failure when the package is absent."""
+    from loguru import logger as _logger
+    return _logger
+
 
 from openjiuwen.core.common.logging.base_impl import (
     resolve_log_type_label,
@@ -32,47 +33,6 @@ from openjiuwen.core.common.logging.events import (
 )
 from openjiuwen.core.common.logging.protocol import LoggerProtocol
 from openjiuwen.core.common.logging.utils import get_session_id
-
-
-class _EventStreamSink:
-    def __init__(self, stream: Any) -> None:
-        self._stream = stream
-
-    def write(self, message: Any) -> None:
-        self._stream.write(message.record["extra"]["event_serialized"] + "\n")
-        self._stream.flush()
-
-    @staticmethod
-    def stop() -> None:
-        return
-
-
-class _EventFileSink:
-    def __init__(
-        self,
-        path: str,
-        *,
-        rotation: Any = None,
-        retention: Any = None,
-        compression: Any = None,
-        encoding: str | None = None,
-    ) -> None:
-        self._sink = _file_sink.FileSink(
-            path,
-            rotation=rotation,
-            retention=retention,
-            compression=compression,
-            encoding=encoding or "utf-8",
-        )
-
-    def write(self, message: Any) -> None:
-        self._sink.write(message.record["extra"]["event_serialized"] + "\n")
-
-    def stop(self) -> None:
-        self._sink.stop()
-
-    def tasks_to_complete(self) -> list[Any]:
-        return self._sink.tasks_to_complete()
 
 
 class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
@@ -107,7 +67,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
     def _ensure_default_sink_removed(cls) -> None:
         if cls._DEFAULT_SINK_REMOVED:
             return
-        loguru_logger.remove()
+        _get_loguru().remove()
         cls._DEFAULT_SINK_REMOVED = True
 
     def _patch_record(self, record: Dict[str, Any]) -> None:
@@ -124,7 +84,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         extra["short_path"] = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
 
     def _build_logger(self):
-        return loguru_logger.patch(self._patch_record).bind(log_type=self._log_type_label)
+        return _get_loguru().patch(self._patch_record).bind(log_type=self._log_type_label)
 
     def _setup_logger(self) -> None:
         self.close()
@@ -141,42 +101,24 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         sink_level = self._get_loguru_level(sink_config.get("level", logging.INFO))
         serialize_mode = self._get_serialize_mode(sink_config)
         serialize = bool(sink_config.get("serialize", False))
-
-        if serialize and serialize_mode == self._SERIALIZE_MODE_EVENT:
-            return {
-                "sink": self._build_event_sink(target, sink_config),
-                "level": sink_level,
-                "format": "{message}",
-                "filter": self._record_filter,
-                "serialize": False,
-                "colorize": False,
-                "enqueue": bool(sink_config.get("enqueue", False)),
-                "catch": bool(sink_config.get("catch", False)),
-                "backtrace": bool(sink_config.get("backtrace", False)),
-                "diagnose": bool(sink_config.get("diagnose", False)),
-            }
+        is_event_mode = serialize and serialize_mode == self._SERIALIZE_MODE_EVENT
 
         sink_options: Dict[str, Any] = {
             "sink": target,
             "level": sink_level,
-            "format": self._get_sink_format(sink_config),
+            "format": "{extra[event_serialized]}" if is_event_mode else self._get_sink_format(sink_config),
             "filter": self._record_filter,
             "serialize": serialize and serialize_mode == self._SERIALIZE_MODE_LOGURU,
-            "colorize": sink_config.get("colorize"),
+            "colorize": False if is_event_mode else sink_config.get("colorize"),
             "enqueue": bool(sink_config.get("enqueue", False)),
             "catch": bool(sink_config.get("catch", False)),
             "backtrace": bool(sink_config.get("backtrace", False)),
             "diagnose": bool(sink_config.get("diagnose", False)),
         }
 
-        if sink_config.get("rotation") is not None:
-            sink_options["rotation"] = sink_config["rotation"]
-        if sink_config.get("retention") is not None:
-            sink_options["retention"] = sink_config["retention"]
-        if sink_config.get("compression") is not None:
-            sink_options["compression"] = sink_config["compression"]
-        if sink_config.get("encoding") is not None:
-            sink_options["encoding"] = sink_config["encoding"]
+        for key in ("rotation", "retention", "compression", "encoding"):
+            if sink_config.get(key) is not None:
+                sink_options[key] = sink_config[key]
 
         return sink_options
 
@@ -187,18 +129,6 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         if target == "stderr":
             return sys.stderr
         return target
-
-    @staticmethod
-    def _build_event_sink(target: Any, sink_config: Dict[str, Any]) -> Any:
-        if hasattr(target, "write"):
-            return _EventStreamSink(target)
-        return _EventFileSink(
-            target,
-            rotation=sink_config.get("rotation"),
-            retention=sink_config.get("retention"),
-            compression=sink_config.get("compression"),
-            encoding=sink_config.get("encoding"),
-        )
 
     def _get_serialize_mode(self, sink_config: Dict[str, Any]) -> str:
         serialize_mode = sink_config.get("serialize_mode", self._SERIALIZE_MODE_LOGURU)
@@ -535,7 +465,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         sink_id = self._handler_sink_ids.pop(handler, None)
         if sink_id is None:
             return
-        loguru_logger.remove(sink_id)
+        _get_loguru().remove(sink_id)
 
     def add_filter(self, log_filter) -> None:
         self._filters.append(log_filter)
@@ -560,7 +490,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
 
         for sink_id in self._sink_ids + handler_sink_ids:
             try:
-                loguru_logger.remove(sink_id)
+                _get_loguru().remove(sink_id)
             except ValueError:
                 continue
 
