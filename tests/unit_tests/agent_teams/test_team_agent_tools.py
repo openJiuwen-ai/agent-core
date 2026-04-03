@@ -48,7 +48,6 @@ def test_leader_gets_management_tools():
     assert "build_team" in names
     assert "spawn_member" in names
     assert "approve_tool" in names
-    assert "broadcast_message" in names
     assert "send_message" in names
     assert "view_task" in names
 

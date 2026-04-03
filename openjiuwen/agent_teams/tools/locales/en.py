@@ -120,16 +120,23 @@ STRINGS: dict[str, str] = {
 
     # ===== send_message ========================================================
     "send_message._desc": (
-        "Send a point-to-point message to a member. "
-        "Use for task notifications, progress replies, escalations, or dependency coordination."
+        "Send a message to team members. "
+        "Use for task assignment notifications, progress reports, "
+        "escalation of blockers, or dependency coordination.\n\n"
+        "| `to` | |\n"
+        "|---|---|\n"
+        "| member name | Point-to-point message |\n"
+        '| `"*"` | Broadcast — expensive (linear in team size), '
+        "use only for global decisions, constraint changes, "
+        "or announcements everyone needs |\n\n"
+        "Your plain text output is NOT visible to other agents "
+        "— to communicate, you MUST call this tool. "
+        "Messages from teammates are delivered automatically; you don't poll. "
+        "Refer to members by name, never by internal ID. "
+        "When relaying, don't quote the original "
+        "— it's already rendered to the user."
     ),
+    "send_message.to": 'Recipient: member name for point-to-point, "*" for broadcast',
     "send_message.content": "Message content with clear action guidance or information",
-    "send_message.to_member": "Recipient member ID",
-
-    # ===== broadcast_message ===================================================
-    "broadcast_message._desc": (
-        "Broadcast a message to all team members. "
-        "Use for global decisions, constraint changes, or announcements."
-    ),
-    "broadcast_message.content": "Broadcast content — all members will receive it",
+    "send_message.summary": "5-10 word summary for message preview and logging",
 }

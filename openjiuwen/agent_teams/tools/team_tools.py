@@ -71,8 +71,7 @@ SHARED_TOOLS: Set[str] = {
 
     "view_task",              # View tasks (unified - supports get/list/claimable)
     # Messaging tools
-    "send_message",            # Send a point-to-point message
-    "broadcast_message",       # Send a broadcast message
+    "send_message",            # Send a message (point-to-point or broadcast)
 }
 
 # All tools available to leader
@@ -561,34 +560,7 @@ class CompleteTaskTool(TeamTool):
 # ========== Messaging ==========
 
 class SendMessageTool(TeamTool):
-    """Send a point-to-point message"""
-
-    def __init__(self, message_manager: TeamMessageManager, t: Translator):
-        super().__init__(
-            ToolCard(id="team.send_message", name="send_message", description=t("send_message"))
-        )
-        self.message_manager = message_manager
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "content": {"type": "string", "description": t("send_message", "content")},
-                "to_member": {"type": "string", "description": t("send_message", "to_member")},
-            },
-            "required": ["content", "to_member"]
-        }
-
-    async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        message_id = await self.message_manager.send_message(
-            content=inputs.get("content"),
-            to_member=inputs.get("to_member"),
-        )
-        if message_id:
-            return ToolOutput(success=True)
-        return ToolOutput(success=False, error="Failed to send message")
-
-
-class BroadcastMessageTool(TeamTool):
-    """Send a broadcast message"""
+    """Send a message to team members (point-to-point or broadcast)."""
 
     def __init__(
         self,
@@ -598,7 +570,7 @@ class BroadcastMessageTool(TeamTool):
         on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     ):
         super().__init__(
-            ToolCard(id="team.broadcast_message", name="broadcast_message", description=t("broadcast_message"))
+            ToolCard(id="team.send_message", name="send_message", description=t("send_message"))
         )
         self.message_manager = message_manager
         self._team = team
@@ -606,24 +578,64 @@ class BroadcastMessageTool(TeamTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": t("broadcast_message", "content")},
+                "to": {"type": "string", "description": t("send_message", "to")},
+                "content": {"type": "string", "description": t("send_message", "content")},
+                "summary": {"type": "string", "description": t("send_message", "summary")},
             },
-            "required": ["content"]
+            "required": ["to", "content"]
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        # Leader broadcast: start all unstarted members first
+        to = inputs.get("to", "").strip()
+        content = inputs.get("content", "").strip()
+        summary = inputs.get("summary", "").strip()
+
+        if not to:
+            return ToolOutput(success=False, error="'to' is required")
+        if not content:
+            return ToolOutput(success=False, error="'content' is required")
+
+        try:
+            if to == "*":
+                return await self._broadcast(content, summary)
+            return await self._send(to, content, summary)
+        except Exception as e:
+            team_logger.error(f"send_message failed: {e}")
+            return ToolOutput(success=False, error=f"Internal error: {e}")
+
+    async def _broadcast(self, content: str, summary: str) -> ToolOutput:
+        await self._auto_start_members()
+        msg_id = await self.message_manager.broadcast_message(content=content)
+        if not msg_id:
+            return ToolOutput(success=False, error="Failed to broadcast message")
+        return ToolOutput(success=True, data={
+            "type": "broadcast",
+            "from": self.message_manager.member_id,
+            "summary": summary or None,
+        })
+
+    async def _send(self, to: str, content: str, summary: str) -> ToolOutput:
+        if self._team:
+            member = await self._team.get_member(to)
+            if not member:
+                return ToolOutput(success=False, error=f"Member '{to}' not found")
+        await self._auto_start_members()
+        msg_id = await self.message_manager.send_message(content=content, to_member=to)
+        if not msg_id:
+            return ToolOutput(success=False, error=f"Failed to send message to '{to}'")
+        return ToolOutput(success=True, data={
+            "type": "message",
+            "from": self.message_manager.member_id,
+            "to": to,
+            "summary": summary or None,
+        })
+
+    async def _auto_start_members(self) -> None:
+        """Auto-start unstarted members if leader with startup callback."""
         if self._team and self._on_teammate_created and self._team.is_leader:
             started = await self._team.startup(on_created=self._on_teammate_created)
             if started:
-                team_logger.info(f"Auto-started members before broadcast: {started}")
-
-        message_id = await self.message_manager.broadcast_message(
-            content=inputs.get("content"),
-        )
-        if message_id:
-            return ToolOutput(success=True)
-        return ToolOutput(success=False, error="Failed to broadcast message")
+                team_logger.info(f"Auto-started members: {started}")
 
 
 # ========== Tool Factory ==========
@@ -668,8 +680,7 @@ def create_team_tools(
         "claim_task": ClaimTaskTool(task_mgr, t),
         "complete_task": CompleteTaskTool(task_mgr, t),
         # Messaging
-        "send_message": SendMessageTool(msg_mgr, t),
-        "broadcast_message": BroadcastMessageTool(
+        "send_message": SendMessageTool(
             msg_mgr, t, team=agent_team, on_teammate_created=on_teammate_created,
         ),
     }

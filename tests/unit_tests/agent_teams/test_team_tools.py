@@ -25,7 +25,6 @@ from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApproveToolCallTool,
     ApprovePlanTool,
-    BroadcastMessageTool,
     BuildTeamTool,
     ClaimTaskTool,
     CleanTeamTool,
@@ -685,44 +684,76 @@ class TestCompleteTaskTool:
 
 
 class TestSendMessageTool:
-    """Test SendMessageTool"""
+    """Test SendMessageTool (merged send + broadcast)"""
 
     def test_initialization(self, agent_team, t):
         """Test tool initialization"""
-        tool = SendMessageTool(agent_team.message_manager, t)
+        tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
         assert tool.card.name == "send_message"
         assert tool.card.id == "team.send_message"
+        props = tool.card.input_params["properties"]
+        assert "to" in props
+        assert "content" in props
+        assert "summary" in props
 
     @pytest.mark.asyncio
-    async def test_invoke_success(self, agent_team, t):
-        """Test invoking send message tool successfully"""
+    async def test_invoke_point_to_point(self, agent_team, t):
+        """Test point-to-point message"""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "member2", "content": "Hello"})
+
+        assert result.success is True
+        assert result.data["type"] == "message"
+        assert result.data["to"] == "member2"
+
+    @pytest.mark.asyncio
+    async def test_invoke_broadcast(self, agent_team, t):
+        """Test broadcast message with to='*'"""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "*", "content": "Hello everyone"})
+
+        assert result.success is True
+        assert result.data["type"] == "broadcast"
+
+    @pytest.mark.asyncio
+    async def test_invoke_with_summary(self, agent_team, t):
+        """Test message with summary field"""
         tool = SendMessageTool(agent_team.message_manager, t)
         result = await tool.invoke({
-            "content": "Hello",
-            "to_member": "member2"
+            "to": "member2",
+            "content": "Please claim task-1",
+            "summary": "assign task-1",
         })
 
         assert result.success is True
-
-
-class TestBroadcastMessageTool:
-    """Test BroadcastMessageTool"""
-
-    def test_initialization(self, agent_team, t):
-        """Test tool initialization"""
-        tool = BroadcastMessageTool(agent_team.message_manager, t)
-        assert tool.card.name == "broadcast_message"
-        assert tool.card.id == "team.broadcast_message"
+        assert result.data["summary"] == "assign task-1"
 
     @pytest.mark.asyncio
-    async def test_invoke_success(self, agent_team, t):
-        """Test invoking broadcast message tool successfully"""
-        tool = BroadcastMessageTool(agent_team.message_manager, t)
-        result = await tool.invoke({
-            "content": "Hello everyone"
-        })
+    async def test_invoke_empty_to(self, agent_team, t):
+        """Test validation: empty 'to' field"""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "", "content": "Hello"})
 
-        assert result.success is True
+        assert result.success is False
+        assert "'to'" in result.error
+
+    @pytest.mark.asyncio
+    async def test_invoke_empty_content(self, agent_team, t):
+        """Test validation: empty 'content' field"""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "member2", "content": ""})
+
+        assert result.success is False
+        assert "'content'" in result.error
+
+    @pytest.mark.asyncio
+    async def test_invoke_member_not_found(self, agent_team, t):
+        """Test validation: target member does not exist"""
+        tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
+        result = await tool.invoke({"to": "nonexistent", "content": "Hello"})
+
+        assert result.success is False
+        assert "not found" in result.error
 
 
 # ========== Skipped Tests (tools temporarily removed) ==========
