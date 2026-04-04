@@ -45,16 +45,6 @@ def role_policy(role: TeamRole, language: str = "cn") -> str:
     return load_template(name, language).content
 
 
-def leader_tool_guide(language: str = "cn") -> str:
-    """Return the leader tool catalog."""
-    return load_template("leader_tool_guide", language).content
-
-
-def teammate_tool_guide(language: str = "cn") -> str:
-    """Return the teammate tool catalog."""
-    return load_template("teammate_tool_guide", language).content
-
-
 def _format_team_info(team_info: dict[str, Any], labels: dict[str, str]) -> str:
     """Format team information from database TeamInfo into a prompt section."""
     lines = [f"\n## {labels['team_info_heading']}"]
@@ -125,10 +115,7 @@ def build_system_prompt(
 
     # Role-specific sub-templates
     policy_name = "leader_policy" if role == TeamRole.LEADER else "teammate_policy"
-    tool_guide_name = "leader_tool_guide" if role == TeamRole.LEADER else "teammate_tool_guide"
-
     role_policy_text = load_template(policy_name, language).content
-    tool_guide_text = load_template(tool_guide_name, language).content
 
     # Conditional sections
     member_id_section = f"{labels['member_id']}: {member_id}\n" if member_id else ""
@@ -152,7 +139,6 @@ def build_system_prompt(
         "member_id_section": member_id_section,
         "role_policy": role_policy_text,
         "predefined_team_section": predefined_team_section,
-        "tool_guide": tool_guide_text,
         "lifecycle_section": lifecycle_section,
         "persona_label": labels["persona"],
         "persona": persona,
@@ -166,7 +152,5 @@ def build_system_prompt(
 
 __all__ = [
     "build_system_prompt",
-    "leader_tool_guide",
     "role_policy",
-    "teammate_tool_guide",
 ]

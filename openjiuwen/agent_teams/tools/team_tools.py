@@ -130,11 +130,18 @@ class CleanTeamTool(TeamTool):
         }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
-        success = await self.team.clean_team()
-        return ToolOutput(
-            success=success,
-            error=None if success else "Failed to clean team"
-        )
+        try:
+            team_id = self.team.team_id
+            success = await self.team.clean_team()
+            if not success:
+                return ToolOutput(
+                    success=False,
+                    error="Active members remain. Use shutdown_member to close all members first.",
+                )
+            return ToolOutput(success=True, data={"team_id": team_id})
+        except Exception as e:
+            team_logger.error(f"clean_team failed: {e}")
+            return ToolOutput(success=False, error=f"Internal error: {e}")
 
 
 # ========== Member Management ==========

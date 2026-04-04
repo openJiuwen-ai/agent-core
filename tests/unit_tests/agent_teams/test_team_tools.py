@@ -192,7 +192,7 @@ class TestCleanTeamTool:
         result = await tool.invoke({})
 
         assert result.success is True
-        assert result.error is None
+        assert result.data["team_id"] == agent_team.team_id
 
     @pytest.mark.asyncio
     async def test_invoke_fails_when_members_not_shutdown(self, agent_team, t, sample_agent_card):
@@ -207,7 +207,7 @@ class TestCleanTeamTool:
         result = await tool.invoke({})
 
         assert result.success is False
-        assert result.error is not None
+        assert "shutdown_member" in result.error
 
 
 # ========== Member Management Tools ==========

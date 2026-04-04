@@ -52,8 +52,13 @@ idle 是正常状态，不要催促、重发消息或关闭成员。\
 
     # ===== clean_team ==========================================================
     "clean_team._desc": """\
-解散团队并清理所有资源。前置条件：所有成员已通过 shutdown_member 关闭。\
-在所有任务完成、结果汇总后调用""",
+解散团队并删除所有资源（团队记录、成员、任务 — 级联删除）。
+
+**重要**：如果任何成员未处于 SHUTDOWN 状态，clean_team 将失败。\
+请先用 shutdown_member 关闭所有成员，再调用 clean_team。
+
+在所有任务完成、结果汇总后调用。\
+返回：成功时 {success, data: {team_id}}。""",
 
     # ===== spawn_member ========================================================
     "spawn_member._desc": """\
@@ -90,14 +95,28 @@ desc 写法：写清专业背景和领域专长，成员据此判断该领取哪
     "approve_tool.auto_confirm": "后续同名工具是否自动批准",
 
     # ===== list_members ========================================================
-    "list_members._desc": "列出所有团队成员及其状态，用于评估团队人员构成和是否需要创建新成员",
+    "list_members._desc": """\
+列出所有团队成员及其状态。\
+**场景**: 收到启动指令后第一步调用，了解团队组成和各成员专长""",
 
     # ===== task_manager ========================================================
     "task_manager._desc": """\
-团队任务管理工具（仅Leader可用）。\
-action: add（添加）、insert（插入已有DAG）、update（更新）、cancel（取消）、cancel_all（全部取消）。\
-add 时通过 tasks 数组传入，支持单个或批量；\
-insert 用于将任务插入已有 DAG 中间，支持 depended_by 反向依赖""",
+团队任务管理工具（仅 Leader 可用）。\
+**任务应聚焦于可交付成果和验收标准，不要规划具体执行步骤。**
+
+- **add**（默认）: 通过 `tasks` 数组传入（单个任务也用数组包裹）。\
+每个 task 含 title、content（目标和验收标准）、可选 task_id、depends_on。\
+**场景**: 项目初始批量创建任务 DAG，或执行中补充新任务
+- **insert**: 将任务插入已有 DAG 中间。\
+传 title、content，可选 task_id、depends_on、depended_by（反向依赖）。\
+**场景**: 发现遗漏的前置任务需要插入已有依赖链中
+- **update**: 传 task_id、title/content。\
+若任务已被认领，系统自动取消该成员执行并重置任务状态。\
+**场景**: 根据成员反馈调整任务范围或补充细节
+- **cancel**: 传 task_id。若任务已被认领，系统自动取消该成员执行。\
+**场景**: 需求变更导致任务不再需要
+- **cancel_all**: 取消所有任务和所有执行中的成员。\
+**场景**: 目标根本性变更需要全部重新规划""",
     "task_manager.action": "操作类型，默认 add",
     "task_manager.tasks": "add 时传入的任务列表（单个任务也用数组包裹）",
     "task_manager.task_id": "任务ID（insert 时为自定义ID，update/cancel 时为目标任务ID）",
@@ -112,7 +131,15 @@ insert 用于将任务插入已有 DAG 中间，支持 depended_by 反向依赖"
     "task_manager.task.depends_on": "前置依赖的任务ID列表",
 
     # ===== view_task ===========================================================
-    "view_task._desc": "查看任务信息。action: get（单个任务详情）、list（按状态列出任务）、claimable（默认，可认领任务）",
+    "view_task._desc": """\
+查看任务信息。
+
+- **get**: 传 task_id 获取单个任务详情。\
+**场景**: 成员汇报进度后查看任务状态，或执行中回顾验收标准
+- **list**: 传 status（可选）过滤任务列表 (pending/claimed/completed/cancelled/blocked)。\
+**场景**: 查看整体进度、识别瓶颈任务、查找依赖任务的执行者以便协调
+- **claimable**（默认）: 获取所有可认领的 pending 任务。\
+**场景**: 查看就绪任务通知成员领取，或完成当前任务后寻找下一个""",
     "view_task.action": "查看模式，默认 claimable",
     "view_task.task_id": "get 时的任务ID",
     "view_task.status": "list 时按状态过滤：pending/claimed/plan_approved/completed/cancelled/blocked",

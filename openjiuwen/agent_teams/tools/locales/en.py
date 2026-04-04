@@ -62,9 +62,13 @@ influences how members trust and communicate with you""",
 
     # ===== clean_team ==========================================================
     "clean_team._desc": """\
-Disband the team and release all resources. \
-Precondition: every member has been shut down via shutdown_member. \
-Call after all tasks are completed and results are summarised.""",
+Disband the team and delete all resources (team record, members, tasks — cascade delete).
+
+**IMPORTANT**: clean_team will fail if any member is not in SHUTDOWN status. \
+Use shutdown_member to close every member first, then call clean_team.
+
+Call after all tasks are completed and results are summarised. \
+Returns: {success, data: {team_id}} on success.""",
 
     # ===== spawn_member ========================================================
     "spawn_member._desc": """\
@@ -108,14 +112,29 @@ Leader should respond with approved, feedback, and auto_confirm.""",
     "approve_tool.auto_confirm": "Auto-approve future calls to the same tool",
 
     # ===== list_members ========================================================
-    "list_members._desc": "List all team members and their status to assess team composition",
+    "list_members._desc": """\
+List all team members and their status. \
+**When**: First call after startup to understand team composition and each member's expertise""",
 
     # ===== task_manager ========================================================
     "task_manager._desc": """\
 Team task management tool (Leader only). \
-action: add, insert (into existing DAG), update, cancel, cancel_all. \
-For add, pass tasks as an array (single or batch); \
-insert supports depended_by for reverse dependencies.""",
+**Tasks should focus on deliverable outcomes and acceptance criteria, not execution steps.**
+
+- **add** (default): Pass via `tasks` array (wrap single tasks in an array too). \
+Each task contains title, content (goals and acceptance criteria), optional task_id, depends_on. \
+**When**: Batch-create the task DAG at project start, or add new tasks during execution
+- **insert**: Insert a task into the middle of an existing DAG. \
+Pass title, content, optional task_id, depends_on, depended_by (reverse dependency). \
+**When**: A missing prerequisite needs to be inserted into an existing dependency chain
+- **update**: Pass task_id, title/content. \
+If the task is already claimed, the system automatically cancels the member and resets task state. \
+**When**: Adjust task scope or add details based on member feedback
+- **cancel**: Pass task_id. \
+If the task is already claimed, the system automatically cancels the member. \
+**When**: Requirement changes make a task unnecessary
+- **cancel_all**: Cancel all tasks and all executing members. \
+**When**: Fundamental goal changes require complete re-planning""",
     "task_manager.action": "Operation type, default add",
     "task_manager.tasks": "Task list for add action (wrap single task in an array too)",
     "task_manager.task_id": "Task ID (custom ID for insert; target ID for update/cancel)",
@@ -131,8 +150,14 @@ insert supports depended_by for reverse dependencies.""",
 
     # ===== view_task ===========================================================
     "view_task._desc": """\
-View task information. \
-action: get (single task detail), list (by status), claimable (default, ready to claim)""",
+View task information.
+
+- **get**: Pass task_id for single task detail. \
+**When**: Check task state after a member reports progress, or review acceptance criteria
+- **list**: Pass status (optional) to filter (pending/claimed/completed/cancelled/blocked). \
+**When**: Review overall progress, identify bottleneck tasks, find dependency task executors
+- **claimable** (default): Get all pending tasks ready to claim. \
+**When**: Find ready tasks to notify members, or after completing a task to find the next one""",
     "view_task.action": "View mode, default claimable",
     "view_task.task_id": "Task ID for get action",
     "view_task.status": "Status filter for list: pending/claimed/plan_approved/completed/cancelled/blocked",
