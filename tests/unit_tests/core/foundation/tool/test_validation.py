@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+import socket
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import httpx
@@ -166,14 +167,17 @@ class TestToolValidation:
             )
             assert valid_card_with_path.url == "https://api.example.com/users/{id}"
         
-        # Test invalid URL outside of mock
-        with pytest.raises(BaseError):
-            RestfulApiCard(
-                name="test_api",
-                url="http://invalid-url-test",
-                method="GET",
-                headers={"Content-Type": "application/json"}
-            )
+        # Test invalid URL: mock DNS resolution failure to avoid
+        # environment-dependent behavior (macOS search domains may resolve
+        # arbitrary hostnames).
+        with patch("socket.gethostbyname", side_effect=socket.error("DNS resolution failed")):
+            with pytest.raises(BaseError):
+                RestfulApiCard(
+                    name="test_api",
+                    url="http://invalid-url-test",
+                    method="GET",
+                    headers={"Content-Type": "application/json"}
+                )
             
             
     

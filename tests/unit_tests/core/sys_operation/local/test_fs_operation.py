@@ -18,8 +18,10 @@ from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, Local
 
 @pytest.fixture
 def work_dir():
-    # Create a temporary directory for tests
-    temp_dir = tempfile.mkdtemp()
+    # Create a temporary directory for tests.
+    # realpath resolves macOS /var -> /private/var symlink so the path
+    # matches what SysOperation path security checks resolve to.
+    temp_dir = os.path.realpath(tempfile.mkdtemp())
     yield temp_dir
     # Cleanup after tests
     shutil.rmtree(temp_dir)
