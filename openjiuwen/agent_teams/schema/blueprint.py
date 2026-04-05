@@ -12,7 +12,8 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from openjiuwen.agent_teams.schema.team import TeamLifecycle, TeamMemberSpec
-from openjiuwen.agent_teams.worktree.models import TeamWorkspaceConfig, WorktreeConfig
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
+from openjiuwen.agent_teams.worktree.models import WorktreeConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec

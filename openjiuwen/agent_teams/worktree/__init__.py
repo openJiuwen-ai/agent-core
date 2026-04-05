@@ -2,10 +2,6 @@
 """Agent Teams Worktree — Git worktree isolation for team members."""
 
 from openjiuwen.agent_teams.worktree.models import (
-    ConflictStrategy,
-    TeamWorkspaceConfig,
-    WorkspaceFileLock,
-    WorkspaceMode,
     WorktreeChangeSummary,
     WorktreeConfig,
     WorktreeCreateResult,
@@ -37,16 +33,13 @@ from openjiuwen.agent_teams.worktree.session import (
 )
 from openjiuwen.agent_teams.worktree.cleanup import cleanup_stale_worktrees
 from openjiuwen.agent_teams.worktree.notice import build_worktree_notice
-from openjiuwen.agent_teams.worktree.workspace import TeamWorkspaceManager
 from openjiuwen.agent_teams.worktree.tools import (
     EnterWorktreeTool,
     ExitWorktreeTool,
-    WorkspaceMetaTool,
 )
 from openjiuwen.agent_teams.worktree.rails import (
     AutoSetupRail,
     DiffSummaryRail,
-    TeamWorkspaceRail,
 )
 
 __all__ = [
@@ -56,10 +49,6 @@ __all__ = [
     "WorktreeCreateResult",
     "WorktreeChangeSummary",
     "WorktreeLifecyclePolicy",
-    "TeamWorkspaceConfig",
-    "ConflictStrategy",
-    "WorkspaceFileLock",
-    "WorkspaceMode",
     # Slug
     "validate_slug",
     "worktree_branch_name",
@@ -84,14 +73,10 @@ __all__ = [
     "cleanup_stale_worktrees",
     # Notice
     "build_worktree_notice",
-    # Workspace
-    "TeamWorkspaceManager",
     # Tools
     "EnterWorktreeTool",
     "ExitWorktreeTool",
-    "WorkspaceMetaTool",
     # Rails
     "AutoSetupRail",
     "DiffSummaryRail",
-    "TeamWorkspaceRail",
 ]

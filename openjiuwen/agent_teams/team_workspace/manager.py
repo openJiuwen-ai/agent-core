@@ -24,12 +24,12 @@ from openjiuwen.agent_teams.schema.events import (
     WorkspaceLockRequestEvent,
     WorkspaceLockResponseEvent,
 )
-from openjiuwen.agent_teams.worktree.git import _run_git, rev_parse
-from openjiuwen.agent_teams.worktree.models import (
+from openjiuwen.agent_teams.team_workspace.models import (
     TeamWorkspaceConfig,
     WorkspaceFileLock,
     WorkspaceMode,
 )
+from openjiuwen.agent_teams.worktree.git import _run_git, rev_parse
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -127,7 +127,27 @@ class TeamWorkspaceManager:
                 )
                 team_logger.info("Added remote origin %s", remote_url)
 
-    # ── Worktree mount ───────────────────────────────────────
+    # ── Workspace / worktree mount ─────────────────────────────
+
+    def mount_into_workspace(self, workspace_root: str) -> None:
+        """Create .team/{team_id} symlink in an agent workspace.
+
+        Mounts this team workspace into the agent's workspace hub so
+        the agent can access shared files via ``.team/{team_id}/...``.
+
+        Args:
+            workspace_root: Absolute path to the agent workspace root.
+        """
+        team_dir = os.path.join(workspace_root, ".team")
+        os.makedirs(team_dir, exist_ok=True)
+        link_path = os.path.join(team_dir, self.team_id)
+        if not os.path.exists(link_path):
+            os.symlink(self.workspace_path, link_path, target_is_directory=True)
+            team_logger.debug(
+                "Mounted team workspace %s into %s",
+                self.team_id,
+                link_path,
+            )
 
     def mount_into_worktree(self, worktree_path: str) -> None:
         """Create .team symlink inside a worktree pointing to this workspace.
