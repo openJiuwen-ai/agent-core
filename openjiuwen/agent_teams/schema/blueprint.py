@@ -12,6 +12,7 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from openjiuwen.agent_teams.schema.team import TeamLifecycle, TeamMemberSpec
+from openjiuwen.agent_teams.worktree.models import TeamWorkspaceConfig, WorktreeConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
@@ -124,6 +125,10 @@ class TeamAgentSpec(BaseModel):
     predefined_members: list[TeamMemberSpec] = []
     transport: Optional[TransportSpec] = None
     storage: Optional[StorageSpec] = None
+    worktree: Optional[WorktreeConfig] = None
+    """Optional worktree isolation config for team members."""
+    workspace: Optional[TeamWorkspaceConfig] = None
+    """Optional shared workspace config for team members."""
     metadata: dict[str, Any] = {}
 
     def build(self) -> "TeamAgent":

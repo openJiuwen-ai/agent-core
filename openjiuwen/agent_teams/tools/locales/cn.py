@@ -170,4 +170,30 @@ desc 写法：写清专业背景和领域专长，成员据此判断该领取哪
     "send_message.to": '收件人：填成员名称发送点对点消息，填 "*" 广播给所有成员',
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+
+    # ===== enter_worktree =====================================================
+    "enter_worktree._desc": """\
+创建或进入一个隔离的 git worktree，给调用者独立的仓库工作副本。\
+多成员并行修改同一仓库时使用，避免分支冲突和文件竞争。
+
+进入 worktree 后所有文件操作限定在该副本内，退出前不影响主仓库。""",
+    "enter_worktree.name": "worktree 名称（slug 格式，可选）。不提供则自动生成",
+
+    # ===== exit_worktree ======================================================
+    "exit_worktree._desc": """\
+退出当前 worktree 会话。\
+任务完成或需要切换工作上下文时调用。""",
+    "exit_worktree.action": """\
+退出策略：keep 保留 worktree 供后续使用，remove 删除并丢弃变更""",
+    "exit_worktree.discard_changes": """\
+当 action="remove" 且 worktree 有未提交变更时，必须设为 true 确认丢弃。\
+防止意外丢失工作成果""",
+
+    # ===== workspace_meta =====================================================
+    "workspace_meta._desc": """\
+团队共享工作空间的元数据操作（文件锁管理和版本历史查询）。\
+多成员协作修改共享文件时使用，通过文件锁避免写冲突。""",
+    "workspace_meta.action": """\
+操作类型：lock（获取文件锁）、unlock（释放文件锁）、locks（列出所有活跃锁）、history（查看文件版本历史）""",
+    "workspace_meta.path": "目标文件的相对路径（lock/unlock/history 时必填）",
 }

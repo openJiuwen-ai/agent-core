@@ -1043,22 +1043,31 @@ class FsOperation(BaseFsOperation):
         return items
 
     def _resolve_path(self, path: str, create_parent: bool = False) -> pathlib.Path:
-        """Resolve path, enforce work_dir sandbox (if configured), and sanitize filenames."""
+        """Resolve path, enforce work_dir sandbox, and sanitize filenames.
+
+        Uses normpath (not resolve) to avoid dereferencing symlinks.
+        This means the sandbox checks the LOGICAL path -- ".team/foo"
+        stays within work_dir -- while the OS follows the symlink
+        transparently at I/O time.
+        """
         work_dir_val = getattr(self._run_config, 'work_dir', None)
 
         if work_dir_val is None:
-            # if work_dir is not configured
             final_path = pathlib.Path(path).expanduser().resolve()
         else:
             work_dir = pathlib.Path(work_dir_val).expanduser().resolve()
+            # normpath: collapses ".." without following symlinks
+            raw = work_dir / path
+            normalized = pathlib.Path(os.path.normpath(raw))
             try:
-                raw_resolved = (work_dir / path).resolve()
-                rel_path = raw_resolved.relative_to(work_dir)
+                rel_path = normalized.relative_to(work_dir)
             except ValueError as e:
-                raise build_error(status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
-                                  execution="resolve_path",
-                                  error_msg=f"Access denied: Path {path} traverses outside {work_dir}",
-                                  cause=e) from e
+                raise build_error(
+                    status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                    execution="resolve_path",
+                    error_msg=f"Access denied: Path {path} traverses outside {work_dir}",
+                    cause=e,
+                ) from e
 
             sanitized_parts = [re.sub(r'[^\w.-]', '_', part) for part in rel_path.parts]
             final_path = work_dir.joinpath(*sanitized_parts)

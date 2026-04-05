@@ -72,6 +72,10 @@ SHARED_TOOLS: Set[str] = {
     "view_task",              # View tasks (unified - supports get/list/claimable)
     # Messaging tools
     "send_message",            # Send a message (point-to-point or broadcast)
+    # Worktree tools
+    "enter_worktree",          # Enter an isolated git worktree
+    "exit_worktree",           # Exit the current worktree session
+    "workspace_meta",          # Workspace lock management and version history
 }
 
 # All tools available to leader

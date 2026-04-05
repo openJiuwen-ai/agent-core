@@ -14,6 +14,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
 )
 from openjiuwen.agent_teams.schema.team import TeamMemberSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
+from openjiuwen.agent_teams.worktree.models import WorktreeConfig
 
 
 def create_agent_team(
@@ -27,6 +28,7 @@ def create_agent_team(
     predefined_members: list[TeamMemberSpec] | None = None,
     transport: Optional[TransportSpec] = None,
     storage: Optional[StorageSpec] = None,
+    worktree: Optional[WorktreeConfig] = None,
     metadata: Optional[dict] = None,
 ) -> TeamAgent:
     """Create a leader-configured TeamAgent.
@@ -50,6 +52,7 @@ def create_agent_team(
             all members automatically.
         transport: Pluggable transport layer for inter-agent messaging.
         storage: Pluggable storage layer for task/state persistence.
+        worktree: Optional worktree isolation config for team members.
         metadata: Arbitrary metadata attached to the team config.
     """
     spec = TeamAgentSpec(
@@ -62,6 +65,7 @@ def create_agent_team(
         predefined_members=predefined_members or [],
         transport=transport,
         storage=storage,
+        worktree=worktree,
         metadata=metadata or {},
     )
     return spec.build()

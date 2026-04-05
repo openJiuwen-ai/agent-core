@@ -194,4 +194,31 @@ When relaying, don't quote the original — it's already rendered to the user.""
     "send_message.to": 'Recipient: member name for point-to-point, "*" for broadcast',
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+
+    # ===== enter_worktree =====================================================
+    "enter_worktree._desc": """\
+Create or enter an isolated git worktree, giving the caller an independent repository working copy. \
+Use when multiple members modify the same repository in parallel to avoid branch conflicts and file contention.
+
+All file operations are scoped to this worktree while inside; the main repository is unaffected until exit.""",
+    "enter_worktree.name": "Worktree name (slug format, optional). Auto-generated if omitted",
+
+    # ===== exit_worktree ======================================================
+    "exit_worktree._desc": """\
+Exit the current worktree session. \
+Call when the task is done or you need to switch working context.""",
+    "exit_worktree.action": """\
+Exit strategy: keep retains the worktree for later use, remove deletes it and discards changes""",
+    "exit_worktree.discard_changes": """\
+When action="remove" and the worktree has uncommitted changes, must be set to true to confirm discard. \
+Prevents accidental loss of work""",
+
+    # ===== workspace_meta =====================================================
+    "workspace_meta._desc": """\
+Metadata operations for the team shared workspace (file lock management and version history queries). \
+Use when multiple members collaborate on shared files — file locks prevent write conflicts.""",
+    "workspace_meta.action": """\
+Operation type: lock (acquire file lock), unlock (release file lock), \
+locks (list all active locks), history (view file version history)""",
+    "workspace_meta.path": "Relative path of the target file (required for lock/unlock/history)",
 }

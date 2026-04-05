@@ -76,6 +76,16 @@ class TeamEvent:
     TASK_CANCELLED = "task_cancelled"
     TASK_UNBLOCKED = "task_unblocked"
 
+    # Worktree events
+    WORKTREE_CREATED = "worktree_created"
+    WORKTREE_REMOVED = "worktree_removed"
+
+    # Workspace events
+    WORKSPACE_ARTIFACT_UPDATED = "workspace_artifact_updated"
+    WORKSPACE_CONFLICT = "workspace_conflict"
+    WORKSPACE_LOCK_REQUEST = "workspace_lock_request"
+    WORKSPACE_LOCK_RESPONSE = "workspace_lock_response"
+
 
 # ============== Event Message Schemas ==============
 # These schemas are used for Messager.publish() messages
@@ -194,6 +204,46 @@ class TaskUnblockedEvent(BaseEventMessage):
     task_id: str = Field(..., description="Task unique identifier")
 
 
+class WorktreeCreatedEvent(BaseEventMessage):
+    """Published when a worktree is created or recovered."""
+    worktree_name: str = Field(..., description="Worktree slug name")
+    worktree_path: str = Field(..., description="Absolute path to worktree")
+    existed: bool = Field(default=False, description="True if recovered from existing worktree")
+
+
+class WorktreeRemovedEvent(BaseEventMessage):
+    """Published when a worktree is removed."""
+    worktree_name: str = Field(..., description="Worktree slug name")
+    worktree_path: str = Field(..., description="Absolute path to worktree")
+
+
+class WorkspaceArtifactEvent(BaseEventMessage):
+    """Published when a workspace artifact is created or updated."""
+    artifact_path: str = Field(..., description="Relative path within workspace")
+    commit_sha: str | None = Field(default=None, description="Git commit SHA if versioned")
+
+
+class WorkspaceConflictEvent(BaseEventMessage):
+    """Published when a merge conflict or push failure is detected."""
+    file_path: str = Field(..., description="Conflicting file path")
+    conflicting_commit: str | None = Field(default=None, description="Conflicting commit SHA")
+
+
+class WorkspaceLockRequestEvent(BaseEventMessage):
+    """Lock request sent from remote node to leader."""
+    action: str = Field(..., description="Lock action: 'acquire' or 'release'")
+    file_path: str = Field(..., description="File to lock/unlock")
+    holder_name: str | None = Field(default=None, description="Name of lock requester")
+    timeout_seconds: int | None = Field(default=None, description="Lock timeout in seconds")
+
+
+class WorkspaceLockResponseEvent(BaseEventMessage):
+    """Lock response from leader to requesting node."""
+    file_path: str = Field(..., description="File that was locked/unlocked")
+    granted: bool = Field(..., description="Whether the lock was granted")
+    holder: dict | None = Field(default=None, description="Current lock holder info if not granted")
+
+
 _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model class
     TeamEvent.CREATED: TeamCreatedEvent,
     TeamEvent.CLEANED: TeamCleanedEvent,
@@ -214,6 +264,12 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.TASK_COMPLETED: TaskCompletedEvent,
     TeamEvent.TASK_CANCELLED: TaskCancelledEvent,
     TeamEvent.TASK_UNBLOCKED: TaskUnblockedEvent,
+    TeamEvent.WORKTREE_CREATED: WorktreeCreatedEvent,
+    TeamEvent.WORKTREE_REMOVED: WorktreeRemovedEvent,
+    TeamEvent.WORKSPACE_ARTIFACT_UPDATED: WorkspaceArtifactEvent,
+    TeamEvent.WORKSPACE_CONFLICT: WorkspaceConflictEvent,
+    TeamEvent.WORKSPACE_LOCK_REQUEST: WorkspaceLockRequestEvent,
+    TeamEvent.WORKSPACE_LOCK_RESPONSE: WorkspaceLockResponseEvent,
 }
 
 _EVENT_CLASS_MAP: Dict[Type[BaseEventMessage], str] = {  # model class -> event_type

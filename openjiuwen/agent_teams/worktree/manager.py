@@ -1,0 +1,577 @@
+# coding: utf-8
+
+"""Worktree lifecycle manager.
+
+Coordinates worktree creation, removal, session state, post-creation
+setup, event publishing, and rail dispatch. This is the single business
+logic entry point -- tools and spawn code delegate here.
+"""
+
+import fnmatch
+import os
+import shutil
+import time
+from collections.abc import Awaitable
+from typing import Any, Callable
+
+from openjiuwen.agent_teams.schema.events import (
+    BaseEventMessage,
+    TeamEvent,
+    WorktreeCreatedEvent,
+    WorktreeRemovedEvent,
+)
+from openjiuwen.agent_teams.worktree.backend import WorktreeBackend, create_backend
+from openjiuwen.agent_teams.worktree.git import (
+    _run_git,
+    count_commits_since,
+    find_canonical_git_root,
+    get_current_branch,
+    read_worktree_head_sha,
+    status_porcelain,
+    worktree_prune,
+)
+from openjiuwen.agent_teams.worktree.models import (
+    WorktreeChangeSummary,
+    WorktreeConfig,
+    WorktreeCreateResult,
+    WorktreeLifecyclePolicy,
+    WorktreeSession,
+)
+from openjiuwen.agent_teams.worktree.session import (
+    require_current_session,
+    set_current_session,
+)
+from openjiuwen.agent_teams.worktree.slug import (
+    validate_slug,
+    worktree_path_for,
+    worktrees_dir,
+)
+from openjiuwen.core.common.logging import team_logger
+
+
+class WorktreeManager:
+    """Coordinates worktree lifecycle for a team.
+
+    Responsibilities:
+    - Create/remove worktrees via backend
+    - Manage session state (ContextVar)
+    - Post-creation setup (symlinks, config copy)
+    - Publish events to messager
+    - Change detection before removal
+    - Rail dispatch for Phase 3 hooks
+    """
+
+    def __init__(
+        self,
+        config: WorktreeConfig,
+        backend: WorktreeBackend | None = None,
+        publish_event: Callable[[str, BaseEventMessage], Awaitable[None]] | None = None,
+        rails: list[Any] | None = None,
+    ):
+        self._config = config
+        self._backend = backend or create_backend("git", config)
+        self._publish_event = publish_event
+        self._rails = rails or []
+
+    # -- Session-level worktree (tool calls) ----------------------------------
+
+    async def enter(
+        self,
+        slug: str,
+        *,
+        member_id: str | None = None,
+        team_id: str | None = None,
+    ) -> WorktreeSession:
+        """Create or recover a worktree and enter it.
+
+        Sets the ContextVar session. Called by EnterWorktreeTool.
+
+        Args:
+            slug: Worktree name (validated for safety).
+            member_id: Team member this worktree belongs to.
+            team_id: Team this worktree belongs to.
+
+        Returns:
+            The active WorktreeSession.
+
+        Raises:
+            ValueError: If slug is invalid.
+            RuntimeError: If not in a git repository.
+        """
+        validate_slug(slug)
+
+        repo_root = await find_canonical_git_root(os.getcwd())
+        if not repo_root:
+            raise RuntimeError("Cannot create worktree: not in a git repository")
+
+        original_cwd = os.getcwd()
+        original_branch = await get_current_branch(repo_root)
+
+        start = time.monotonic()
+        result = await self._backend.create(slug, repo_root)
+        duration_ms = (time.monotonic() - start) * 1000
+
+        if not result.existed:
+            await self._post_creation_setup(repo_root, result.worktree_path)
+
+        session = WorktreeSession(
+            original_cwd=original_cwd,
+            worktree_path=result.worktree_path,
+            worktree_name=slug,
+            worktree_branch=result.worktree_branch,
+            original_branch=original_branch,
+            original_head_commit=result.head_commit,
+            member_id=member_id,
+            team_id=team_id,
+            hook_based=result.hook_based,
+            creation_duration_ms=duration_ms,
+            used_sparse_paths=bool(self._config.sparse_paths),
+        )
+
+        set_current_session(session)
+
+        team_logger.info(
+            "Entered worktree '%s' at %s (%s, %.0fms)",
+            slug,
+            result.worktree_path,
+            "recovered" if result.existed else "created",
+            duration_ms,
+        )
+
+        if self._publish_event:
+            await self._publish_event(
+                TeamEvent.WORKTREE_CREATED,
+                WorktreeCreatedEvent(
+                    team_id=team_id or "",
+                    member_id=member_id or "",
+                    worktree_name=slug,
+                    worktree_path=result.worktree_path,
+                    existed=result.existed,
+                ),
+            )
+
+        return session
+
+    async def exit(
+        self,
+        action: str,
+        *,
+        discard_changes: bool = False,
+    ) -> dict[str, str | None]:
+        """Exit the current worktree session.
+
+        Args:
+            action: "keep" to preserve worktree, "remove" to delete it.
+            discard_changes: Required True when action="remove" and
+                worktree has uncommitted changes.
+
+        Returns:
+            Summary dict with action taken and metadata.
+
+        Raises:
+            RuntimeError: If no worktree session is active.
+            ValueError: If action is "remove" and there are unsaved
+                changes without discard_changes=True.
+        """
+        session = require_current_session()
+
+        if action == "remove" and not discard_changes:
+            summary = await self.count_changes(session)
+            if summary and (summary.changed_files > 0 or summary.commits > 0):
+                parts = []
+                if summary.changed_files > 0:
+                    parts.append(f"{summary.changed_files} uncommitted files")
+                if summary.commits > 0:
+                    parts.append(f"{summary.commits} commits on {session.worktree_branch}")
+                raise ValueError(
+                    f"Worktree has {' and '.join(parts)}. "
+                    f"Set discard_changes=True to proceed."
+                )
+
+        repo_root = await find_canonical_git_root(session.original_cwd)
+
+        if action == "keep":
+            set_current_session(None)
+            team_logger.info(
+                "Kept worktree '%s' at %s",
+                session.worktree_name,
+                session.worktree_path,
+            )
+            return {
+                "action": "keep",
+                "original_cwd": session.original_cwd,
+                "worktree_path": session.worktree_path,
+                "worktree_branch": session.worktree_branch,
+            }
+
+        # action == "remove"
+        if repo_root:
+            await self._backend.remove(session.worktree_path, repo_root)
+
+        set_current_session(None)
+
+        if self._publish_event:
+            await self._publish_event(
+                TeamEvent.WORKTREE_REMOVED,
+                WorktreeRemovedEvent(
+                    team_id=session.team_id or "",
+                    member_id=session.member_id or "",
+                    worktree_name=session.worktree_name,
+                    worktree_path=session.worktree_path,
+                ),
+            )
+
+        team_logger.info(
+            "Removed worktree '%s' at %s",
+            session.worktree_name,
+            session.worktree_path,
+        )
+        return {
+            "action": "remove",
+            "original_cwd": session.original_cwd,
+            "worktree_path": session.worktree_path,
+            "worktree_branch": session.worktree_branch,
+        }
+
+    # -- Agent worktree (member isolation) ------------------------------------
+
+    async def create_agent_worktree(self, slug: str) -> WorktreeCreateResult:
+        """Create a lightweight worktree for a team member.
+
+        Unlike enter(), this does NOT modify the ContextVar session
+        or change process cwd. The caller is responsible for passing
+        the worktree_path to the spawned member.
+
+        Used by spawn logic to give each subprocess member its own
+        working copy.
+
+        Args:
+            slug: Worktree name (validated for safety).
+
+        Returns:
+            WorktreeCreateResult with path and metadata.
+
+        Raises:
+            ValueError: If slug is invalid.
+            RuntimeError: If not in a git repository.
+        """
+        validate_slug(slug)
+
+        repo_root = await find_canonical_git_root(os.getcwd())
+        if not repo_root:
+            raise RuntimeError("Cannot create agent worktree: not in a git repository")
+
+        result = await self._backend.create(slug, repo_root)
+
+        if not result.existed:
+            await self._post_creation_setup(repo_root, result.worktree_path)
+        else:
+            # Touch mtime to prevent cleanup
+            now = time.time()
+            os.utime(result.worktree_path, (now, now))
+
+        return result
+
+    # -- Change detection -----------------------------------------------------
+
+    async def count_changes(
+        self,
+        session: WorktreeSession,
+    ) -> WorktreeChangeSummary | None:
+        """Count uncommitted changes and new commits.
+
+        Args:
+            session: The worktree session to inspect.
+
+        Returns:
+            WorktreeChangeSummary, or None if state cannot be determined
+            (fail-closed).
+        """
+        changes = await status_porcelain(session.worktree_path)
+        changed_files = len(changes)
+
+        if not session.original_head_commit:
+            return None
+
+        commits = await count_commits_since(
+            session.original_head_commit,
+            session.worktree_path,
+        )
+        if commits is None:
+            return None
+
+        return WorktreeChangeSummary(
+            changed_files=changed_files,
+            commits=commits,
+        )
+
+    # -- Post-creation setup --------------------------------------------------
+
+    async def _post_creation_setup(
+        self,
+        repo_root: str,
+        worktree_path: str,
+    ) -> None:
+        """Post-creation setup for new worktrees.
+
+        1. Symlink configured directories
+        2. Copy gitignored include files
+        3. Configure git hooks path
+
+        Args:
+            repo_root: Repository root directory.
+            worktree_path: Newly created worktree directory.
+        """
+        # 1. Symlink directories
+        dirs = self._config.symlink_directories or []
+        for d in dirs:
+            if ".." in d or d.startswith("/"):
+                team_logger.warning("Skipping symlink for '%s': path traversal detected", d)
+                continue
+            src = os.path.join(repo_root, d)
+            dst = os.path.join(worktree_path, d)
+            try:
+                os.symlink(src, dst, target_is_directory=True)
+                team_logger.debug("Symlinked %s to worktree", d)
+            except FileExistsError:
+                pass
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                team_logger.warning("Failed to symlink %s: %s", d, e)
+
+        # 2. Copy gitignored include files
+        patterns = self._config.include_patterns
+        if patterns:
+            await self._copy_include_files(repo_root, worktree_path, patterns)
+
+        # 3. Configure hooks path
+        await self._configure_hooks_path(repo_root, worktree_path)
+
+    async def _copy_include_files(
+        self,
+        repo_root: str,
+        worktree_path: str,
+        patterns: list[str],
+    ) -> list[str]:
+        """Copy gitignored files matching include patterns to worktree.
+
+        Uses ``git ls-files --others --ignored --exclude-standard --directory``
+        for efficient listing, then applies pattern matching and copies.
+
+        Args:
+            repo_root: Repository root directory.
+            worktree_path: Target worktree directory.
+            patterns: Glob patterns for files to include.
+
+        Returns:
+            List of relative paths that were copied.
+        """
+        r = await _run_git(
+            ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
+            cwd=repo_root,
+        )
+        if not r.ok or not r.stdout:
+            return []
+
+        entries = [e for e in r.stdout.splitlines() if e]
+        copied: list[str] = []
+
+        for entry in entries:
+            if entry.endswith("/"):
+                continue
+            if any(fnmatch.fnmatch(entry, p) for p in patterns):
+                src = os.path.join(repo_root, entry)
+                dst = os.path.join(worktree_path, entry)
+                try:
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+                    copied.append(entry)
+                except OSError as e:
+                    team_logger.warning("Failed to copy %s: %s", entry, e)
+
+        return copied
+
+    async def _configure_hooks_path(
+        self,
+        repo_root: str,
+        worktree_path: str,
+    ) -> None:
+        """Configure core.hooksPath to resolve relative hook paths.
+
+        Husky and similar tools use relative paths that break in worktrees.
+        Point to the main repo's hooks directory.
+
+        Args:
+            repo_root: Repository root directory.
+            worktree_path: Worktree directory to configure.
+        """
+        for candidate in (
+            os.path.join(repo_root, ".husky"),
+            os.path.join(repo_root, ".git", "hooks"),
+        ):
+            if os.path.isdir(candidate):
+                await _run_git(
+                    ["config", "core.hooksPath", candidate],
+                    cwd=worktree_path,
+                )
+                team_logger.debug("Configured worktree hooks path: %s", candidate)
+                return
+
+    # -- Persistent team recovery (Section 21.4) ------------------------------
+
+    async def recover_worktree_for_member(
+        self,
+        member_id: str,
+        team_id: str,
+    ) -> WorktreeSession | None:
+        """Recover an existing worktree session for a persistent team member.
+
+        Looks up the member's worktree by slug pattern, validates it still
+        exists, and restores the session state.
+
+        Called during resume_persistent_team() for each re-launched member.
+
+        Args:
+            member_id: Team member identifier.
+            team_id: Team identifier.
+
+        Returns:
+            Recovered WorktreeSession, or None if worktree was cleaned up.
+        """
+        slug = self._member_slug(member_id)
+        repo_root = await find_canonical_git_root(os.getcwd())
+        if not repo_root:
+            return None
+
+        wt_path = worktree_path_for(repo_root, slug)
+        head_sha = await read_worktree_head_sha(wt_path)
+        if not head_sha:
+            return None
+
+        branch = await get_current_branch(wt_path)
+        return WorktreeSession(
+            original_cwd=repo_root,
+            worktree_path=wt_path,
+            worktree_name=slug,
+            worktree_branch=branch,
+            original_head_commit=head_sha,
+            member_id=member_id,
+            team_id=team_id,
+            lifecycle_policy=self._resolve_policy(),
+        )
+
+    # -- Team cleanup (Section 21.5) ------------------------------------------
+
+    async def cleanup_team_worktrees(
+        self,
+        team_id: str,
+        *,
+        force: bool = False,
+    ) -> list[str]:
+        """Clean up all worktrees belonging to a team.
+
+        Called by CleanTeamTool or TeamAgent shutdown for TEMPORARY teams.
+        For DURABLE policy, requires force=True to proceed.
+
+        Args:
+            team_id: Team identifier.
+            force: If True, remove even durable worktrees with changes.
+
+        Returns:
+            List of removed worktree paths.
+        """
+        policy = self._resolve_policy()
+        if policy == WorktreeLifecyclePolicy.DURABLE and not force:
+            team_logger.info(
+                "Skipping worktree cleanup for team %s: durable policy active",
+                team_id,
+            )
+            return []
+
+        repo_root = await find_canonical_git_root(os.getcwd())
+        if not repo_root:
+            return []
+
+        wt_dir = worktrees_dir(repo_root)
+        try:
+            entries = os.listdir(wt_dir)
+        except FileNotFoundError:
+            return []
+
+        removed: list[str] = []
+        for slug in entries:
+            if not slug.startswith("teammate-"):
+                continue
+            wt_path = os.path.join(wt_dir, slug)
+
+            if not force:
+                summary = await self._check_changes(wt_path)
+                if summary and (summary.changed_files > 0 or summary.commits > 0):
+                    team_logger.warning("Skipping worktree '%s': has uncommitted changes", slug)
+                    continue
+
+            if await self._backend.remove(wt_path, repo_root):
+                removed.append(wt_path)
+
+        if removed:
+            await worktree_prune(repo_root)
+
+        return removed
+
+    # -- Internal helpers -----------------------------------------------------
+
+    def _member_slug(self, member_id: str) -> str:
+        """Derive worktree slug from member ID.
+
+        Args:
+            member_id: Team member identifier.
+
+        Returns:
+            Slug in the format "teammate-<first 8 chars>".
+        """
+        return f"teammate-{member_id[:8]}"
+
+    def _resolve_policy(self) -> WorktreeLifecyclePolicy:
+        """Resolve the effective lifecycle policy.
+
+        Returns:
+            The resolved WorktreeLifecyclePolicy.
+        """
+        if self._config.lifecycle_policy != WorktreeLifecyclePolicy.AUTO:
+            return self._config.lifecycle_policy
+        return WorktreeLifecyclePolicy.EPHEMERAL
+
+    async def _fire_rail(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Invoke a rail hook method on all registered rails.
+
+        Returns the last non-None result (for hooks that can modify values).
+
+        Args:
+            method: Hook method name to call.
+            *args: Positional arguments for the hook.
+            **kwargs: Keyword arguments for the hook.
+
+        Returns:
+            Last non-None result from any rail, or None.
+        """
+        result = None
+        for rail in self._rails:
+            handler = getattr(rail, method, None)
+            if handler:
+                r = await handler(*args, **kwargs)
+                if r is not None:
+                    result = r
+        return result
+
+    async def _check_changes(self, wt_path: str) -> WorktreeChangeSummary | None:
+        """Check for uncommitted changes in a worktree path.
+
+        Args:
+            wt_path: Absolute path to the worktree.
+
+        Returns:
+            WorktreeChangeSummary, or None if check fails.
+        """
+        changes = await status_porcelain(wt_path)
+        return WorktreeChangeSummary(changed_files=len(changes), commits=0)
