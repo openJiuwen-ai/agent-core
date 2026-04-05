@@ -67,11 +67,13 @@ class WorktreeManager:
         backend: WorktreeBackend | None = None,
         publish_event: Callable[[str, BaseEventMessage], Awaitable[None]] | None = None,
         rails: list[Any] | None = None,
+        workspace_root: str | None = None,
     ):
         self._config = config
         self._backend = backend or create_backend("git", config)
         self._publish_event = publish_event
         self._rails = rails or []
+        self._workspace_root = workspace_root
 
     # -- Session-level worktree (tool calls) ----------------------------------
 
@@ -129,6 +131,7 @@ class WorktreeManager:
         )
 
         set_current_session(session)
+        self._link_worktree_to_workspace(slug, result.worktree_path)
 
         team_logger.info(
             "Entered worktree '%s' at %s (%s, %.0fms)",
@@ -208,6 +211,7 @@ class WorktreeManager:
         if repo_root:
             await self._backend.remove(session.worktree_path, repo_root)
 
+        self._unlink_worktree_from_workspace(session.worktree_name)
         set_current_session(None)
 
         if self._publish_event:
@@ -270,7 +274,30 @@ class WorktreeManager:
             now = time.time()
             os.utime(result.worktree_path, (now, now))
 
+        self._link_worktree_to_workspace(slug, result.worktree_path)
         return result
+
+    # -- Workspace link management ---------------------------------------------
+
+    def _link_worktree_to_workspace(self, slug: str, worktree_path: str) -> None:
+        """Create .worktree/{slug} symlink in workspace if workspace_root is set."""
+        if not self._workspace_root:
+            return
+        wt_dir = os.path.join(self._workspace_root, ".worktree")
+        os.makedirs(wt_dir, exist_ok=True)
+        link = os.path.join(wt_dir, slug)
+        if not os.path.exists(link):
+            os.symlink(worktree_path, link, target_is_directory=True)
+            team_logger.debug("Linked worktree '%s' into workspace at %s", slug, link)
+
+    def _unlink_worktree_from_workspace(self, slug: str) -> None:
+        """Remove .worktree/{slug} symlink from workspace if it exists."""
+        if not self._workspace_root:
+            return
+        link = os.path.join(self._workspace_root, ".worktree", slug)
+        if os.path.islink(link):
+            os.unlink(link)
+            team_logger.debug("Unlinked worktree '%s' from workspace", slug)
 
     # -- Change detection -----------------------------------------------------
 

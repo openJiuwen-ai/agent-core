@@ -125,10 +125,18 @@ class WorkspaceSpec(BaseModel):
     """Serializable workspace specification.
 
     Directories are auto-populated at build time based on language.
+
+    When ``stable_base`` is True (default for team members), the workspace
+    root is resolved to ``{repo_root}/.agent_teams/workspaces/`` so that it
+    survives ephemeral worktree cleanup.  The caller (factory or team_agent)
+    is responsible for resolving ``repo_root`` and rewriting ``root_path``
+    before calling ``build()``.
     """
 
     root_path: str = "./"
     language: str = "cn"
+    stable_base: bool = False
+    """When True, workspace path is anchored under .agent_teams/workspaces/."""
 
     def build(self) -> Workspace:
         return Workspace(root_path=self.root_path, language=self.language)

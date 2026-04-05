@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -285,6 +287,10 @@ class TeamAgent(BaseAgent):
 
         workspace_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
         workspace_obj = workspace_spec.build() if workspace_spec else None
+        if workspace_obj and workspace_spec and workspace_spec.stable_base:
+            workspace_obj.root_path = str(
+                Path(os.getcwd()) / ".agent_teams" / "workspaces"
+            )
         model = agent_spec.model.build() if agent_spec.model else None
         member_id = ctx.member_id
 
