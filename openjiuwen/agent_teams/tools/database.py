@@ -7,12 +7,13 @@ Asynchronous database manager with full CRUD for team data.
 Model definitions live in models.py.
 """
 
+import asyncio
 import time
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 from sqlalchemy import select, update, event
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine, async_sessionmaker
 
 from sqlmodel import SQLModel
@@ -50,6 +51,12 @@ class DatabaseConfig(BaseModel):
     """Database configuration class"""
     db_type: str = DatabaseType.SQLITE
     connection_string: str = ":memory:"
+    db_timeout: int = 30
+    db_enable_wal: bool = True
+
+
+_DB_RETRY_ATTEMPTS = 3
+_DB_RETRY_BASE_DELAY = 0.5
 
 
 # ----------------- Asynchronous Database Manager -----------------
@@ -77,14 +84,16 @@ class TeamDatabase:
             self.engine = create_async_engine(
                 f"sqlite+aiosqlite:///{self.config.connection_string}",
                 echo=False,
-                future=True
+                future=True,
+                connect_args={"timeout": self.config.db_timeout},
             )
 
-            # Enable foreign key constraints for SQLite
             @event.listens_for(self.engine.sync_engine, "connect")
             def set_sqlite_pragma(dbapi_connection, connection_record):
                 cursor = dbapi_connection.cursor()
                 cursor.execute("PRAGMA foreign_keys=ON")
+                if self.config.db_enable_wal:
+                    cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.close()
         else:
             raise NotImplementedError(
@@ -1257,25 +1266,36 @@ class TeamDatabase:
         """Create a new team message"""
         await self._ensure_initialized()
         message_model = _get_message_model()
-        async with self.session_local() as session:
-            try:
-                message = message_model(
-                    message_id=message_id,
-                    team_id=team_id,
-                    from_member=from_member,
-                    to_member=to_member,
-                    content=content,
-                    timestamp=self.get_current_time(),
-                    broadcast=broadcast
-                )
-                session.add(message)
-                await session.commit()
-                team_logger.info(f"Message {message_id} created")
-                return True
-            except IntegrityError as e:
-                await session.rollback()
-                team_logger.error(f"Failed to create {message_id}, reason is {e}")
-                return False
+        for attempt in range(_DB_RETRY_ATTEMPTS):
+            async with self.session_local() as session:
+                try:
+                    message = message_model(
+                        message_id=message_id,
+                        team_id=team_id,
+                        from_member=from_member,
+                        to_member=to_member,
+                        content=content,
+                        timestamp=self.get_current_time(),
+                        broadcast=broadcast
+                    )
+                    session.add(message)
+                    await session.commit()
+                    team_logger.info(f"Message {message_id} created")
+                    return True
+                except IntegrityError as e:
+                    await session.rollback()
+                    team_logger.error(f"Failed to create {message_id}, reason is {e}")
+                    return False
+                except OperationalError as e:
+                    await session.rollback()
+                    if attempt < _DB_RETRY_ATTEMPTS - 1:
+                        delay = _DB_RETRY_BASE_DELAY * (2 ** attempt)
+                        team_logger.warning(f"Database locked on create_message (attempt {attempt + 1}), retrying in {delay}s")
+                        await asyncio.sleep(delay)
+                    else:
+                        team_logger.error(f"Failed to create message {message_id} after {_DB_RETRY_ATTEMPTS} attempts: {e}")
+                        return False
+        return False
 
     async def get_messages(
         self,
