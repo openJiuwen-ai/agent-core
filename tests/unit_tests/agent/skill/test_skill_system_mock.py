@@ -98,12 +98,10 @@ class MockFS:
     Key points:
     - Use dicts to simulate directory trees, file lists, and file contents
     - Normalize mixed Windows/Unix paths by converting '\\\\' to '/'
-    - For `list_directories`, return a real existing root_path (real_dir_for_isdir_check)
-      so that Path(...).is_dir() checks pass
+    - list_directories returns code=1 for known file paths, mirroring real remote API behaviour
     """
 
-    def __init__(self, real_dir_for_isdir_check: str):
-        self._real_dir_for_isdir_check = real_dir_for_isdir_check
+    def __init__(self):
         self.dirs: Dict[str, List[str]] = {}
         self.files: Dict[str, List[str]] = {}
         self.content: Dict[str, Any] = {}
@@ -144,11 +142,14 @@ class MockFS:
         if path in self.fail_list_dirs:
             return _MockRes(code=1, message=f"list_directories failed: {path}", data=_MockData())
 
+        # Known file paths are not directories — return an error, mirroring real remote API behaviour
+        if path in self.content:
+            return _MockRes(code=1, message=f"not a directory: {path}", data=_MockData())
+
         if path in self.dirs:
-            resolved_root = self._real_dir_for_isdir_check
             subs = self.dirs.get(path, [])
             items = [_MockItem(name=Path(p).name, path=p) for p in subs]
-            return _MockRes(code=0, data=_MockData(root_path=resolved_root, list_items=items))
+            return _MockRes(code=0, data=_MockData(root_path=path, list_items=items))
 
         return _MockRes(code=0, data=_MockData(root_path=path, list_items=[]))
 
@@ -263,7 +264,7 @@ class TestSkillCapability(unittest.IsolatedAsyncioTestCase):
         self.files_dir = "/virtual/files"
         self.sample_txt = f"{self.files_dir}/a.txt"
 
-        self.mock_fs = MockFS(real_dir_for_isdir_check=self.real_dir)
+        self.mock_fs = MockFS()
 
         # good root
         self.mock_fs.add_dir(self.skills_root_ok)
@@ -427,6 +428,17 @@ class TestSkillCapability(unittest.IsolatedAsyncioTestCase):
         """Verify SkillManager: register a single skill.md file directly (happy path)"""
         mgr = SkillManager(self.sys_operation_id)
         await mgr.register(Path(self.single_skill_md))
+
+        self.assertTrue(mgr.has(self.single_skill_name))
+        sk = mgr.get(self.single_skill_name)
+        self.assertIsNotNone(sk)
+        self.assertEqual(sk.description, "SINGLE desc")
+
+    @pytest.mark.asyncio
+    async def test_skill_manager_register_skill_dir_ok(self):
+        """Verify SkillManager: register by passing the skill directory (containing skill.md) directly"""
+        mgr = SkillManager(self.sys_operation_id)
+        await mgr.register(Path(self.single_skill_dir))
 
         self.assertTrue(mgr.has(self.single_skill_name))
         sk = mgr.get(self.single_skill_name)
