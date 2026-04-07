@@ -125,7 +125,6 @@ class DeepAgent(BaseAgent):
         self._task_completion_rail: Optional[TaskCompletionRail] = None
         self._initialized = False
         self.system_prompt_builder: Optional[SystemPromptBuilder] = None
-        self._workspace_initialized: bool = False
         self._invoke_active: bool = False
         self._auto_invoke_scheduled: bool = False
         self._bound_session_id: Optional[str] = None
@@ -139,22 +138,12 @@ class DeepAgent(BaseAgent):
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
 
-        # Pre-calculate the workspace root path (per-agent isolation)
-        # Only do this if factory hasn't already processed it
-        if config.workspace is not None:
-            agent_id = self.card.id or "default"
-            root = Path(config.workspace.root_path)
-            expected_suffix = f"{agent_id}_workspace"
-            if root.name != expected_suffix:
-                config.workspace.root_path = str(root / expected_suffix)
-
         if self._deep_config is None:
             self._initial_configure(config)
         else:
             self._hot_reconfigure(config)
 
         self._initialized = False
-        self._workspace_initialized = False
         return self
 
     def _initial_configure(self, config: DeepAgentConfig) -> None:
@@ -499,7 +488,6 @@ class DeepAgent(BaseAgent):
 
         if self._needs_workspace_init():
             await self.init_workspace()
-            self._workspace_initialized = True
 
         # Unregister stale rails left over from a previous configure() cycle.
         for stale_rail in self._stale_rails:
@@ -525,7 +513,6 @@ class DeepAgent(BaseAgent):
                     config.workspace is not None
                     and config.sys_operation is not None
                     and config.auto_create_workspace
-                    and not self._workspace_initialized
             )
         return False
 
@@ -536,12 +523,16 @@ class DeepAgent(BaseAgent):
     async def init_workspace(self) -> None:
         """Initialize the workspace with directory structure and default content.
 
-        The root_path is pre-calculated in configure(), so we only need to
-        create the directory structure here.
+        Only creates directories/files if they don't exist, so it's safe to call
+        multiple times.
         """
         from openjiuwen.harness.workspace.directory_builder import DirectoryBuilder
 
         if self._deep_config and self._deep_config.workspace:
+            root = Path(self._deep_config.workspace.root_path)
+            if (root / ".workspace").exists():
+                return
+
             builder = DirectoryBuilder(
                 sys_operation=self._deep_config.sys_operation,
                 root_path=self._deep_config.workspace.root_path,

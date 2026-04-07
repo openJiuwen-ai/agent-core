@@ -7,6 +7,10 @@ from typing import List, Tuple, Union, Optional, Dict
 
 from pydantic import BaseModel
 
+from openjiuwen.core.context_engine import MessageSummaryOffloaderConfig, CurrentRoundCompressorConfig, \
+    RoundLevelCompressorConfig
+from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import ROUND_LEVEL_FALLBACK_MARKER
+from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import TRUNCATED_MARKER
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -107,6 +111,8 @@ class ContextEngineeringRail(DeepAgentRail):
 
         支持 BaseModel 对象（整对象替换）和 dict（字段级别合并）两种格式。
 
+        顺序保持：base 中的顺序不变，被覆盖的用 override 配置替换，新增的追加到后面。
+
         Args:
             base: 基础 processor 列表（预置 processors）。
             overrides: 增量配置列表，dict 格式会与 base 中同名 key 的配置做字段级别合并，
@@ -117,20 +123,10 @@ class ContextEngineeringRail(DeepAgentRail):
         Returns:
             合并后的 processor 列表。
         """
-        result: List[Tuple[str, BaseModel]] = []
-        override_keys = {key for key, _ in overrides}
+        override_map: Dict[str, Union[BaseModel, Dict]] = {key: cfg for key, cfg in overrides}
+        base_override_keys = {key for key, _ in base if key in override_map}
 
-        for key, cfg in base:
-            if key not in override_keys:
-                result.append((key, cfg))
-
-        for key, override_cfg in overrides:
-            base_cfg = None
-            for k, c in base:
-                if k == key:
-                    base_cfg = c
-                    break
-
+        def _build_merged_cfg(key: str, override_cfg: Union[BaseModel, Dict], base_cfg: BaseModel = None) -> BaseModel:
             if base_cfg is not None:
                 if isinstance(override_cfg, dict):
                     merged_cfg = ContextEngineeringRail._merge_config_with_overrides(base_cfg, override_cfg)
@@ -148,8 +144,21 @@ class ContextEngineeringRail(DeepAgentRail):
                 merged_cfg.model = model_config
             if hasattr(merged_cfg, "model_client") and getattr(merged_cfg, "model_client", None) is None:
                 merged_cfg.model_client = model_client_config
+            return merged_cfg
 
-            result.append((key, merged_cfg))
+        result: List[Tuple[str, BaseModel]] = []
+
+        for key, base_cfg in base:
+            if key in override_map:
+                merged_cfg = _build_merged_cfg(key, override_map[key], base_cfg)
+                result.append((key, merged_cfg))
+            else:
+                result.append((key, base_cfg))
+
+        for key, override_cfg in overrides:
+            if key not in base_override_keys:
+                merged_cfg = _build_merged_cfg(key, override_cfg)
+                result.append((key, merged_cfg))
 
         return result
 
@@ -176,25 +185,75 @@ class ContextEngineeringRail(DeepAgentRail):
 
         presets: List[Tuple[str, BaseModel]] = [
             (
-                "MessageOffloader",
-                MessageOffloaderConfig(
-                    messages_threshold=40,
-                    tokens_threshold=5000,
+                "MessageSummaryOffloader",
+                MessageSummaryOffloaderConfig(
+                    messages_threshold=None,
+                    tokens_threshold=60000,
                     large_message_threshold=20000,
-                    trim_size=5000,
                     offload_message_type=["tool"],
+                    protected_tool_names=["view_file", "reload_original_context_messages"],
+                    messages_to_keep=None,
                     keep_last_round=False,
+                    model=model_cfg,
+                    model_client=model_client_config,
+                    customized_summary_prompt=None,
+                    enable_adaptive_compression=True,
+                    summary_max_tokens=900,
+                    enable_precise_step=False,
+                    step_summary_max_context_messages=8,
+                    content_max_chars_for_compression=200000,
                 ),
             ),
             (
                 "DialogueCompressor",
                 DialogueCompressorConfig(
-                    messages_threshold=40,
+                    messages_threshold=None,
                     tokens_threshold=100000,
+                    messages_to_keep=10,
                     keep_last_round=False,
+                    compression_target_tokens=1800,
+                    offload_writeback_enabled=False,
                     model=model_cfg,
                     model_client=model_client_config,
                 ),
+            ),
+            (
+                "CurrentRoundCompressor",
+                CurrentRoundCompressorConfig(
+                    tokens_threshold=100000,
+                    messages_to_keep=6,
+                    min_selected_tokens_for_compression=20000,
+                    compression_target_tokens=4000,
+                    summary_merge_target_tokens=4000,
+                    accumulated_summary_token_limit=20000,
+                    summary_merge_min_blocks=3,
+                    prior_context_window_size=10,
+                    offload_writeback_enabled=False,
+                    model=model_cfg,
+                    model_client=model_client_config,
+                ),
+            ),
+            (
+                "RoundLevelCompressor",
+                RoundLevelCompressorConfig(
+                    rounds_threshold=2,
+                    tokens_threshold=230000,
+                    trigger_total_tokens=230000,
+                    target_total_tokens=160000,
+                    compression_call_max_tokens=250000,
+                    keep_last_round=True,
+                    keep_recent_messages=6,
+                    messages_to_keep=6,
+                    first_pass_target_tokens=30000,
+                    second_pass_target_tokens=20000,
+                    third_pass_target_tokens=10000,
+                    truncate_head_ratio=0.2,
+                    truncated_marker=TRUNCATED_MARKER,
+                    compression_marker=ROUND_LEVEL_FALLBACK_MARKER,
+                    offload_writeback_enabled=False,
+                    model=model_cfg,
+                    model_client=model_client_config,
+                )
             ),
         ]
         return presets

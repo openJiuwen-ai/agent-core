@@ -223,13 +223,6 @@ def create_deep_agent(
     else:
         workspace_obj = workspace
 
-    # Pre-calculate workspace root path for per-agent isolation
-    if workspace_obj is not None:
-        agent_id = card.id or "default"
-        base_path = Path(workspace_obj.root_path)
-        new_base = f"{agent_id}_workspace"
-        workspace_obj.root_path = str(base_path / new_base)
-
     if not isinstance(sys_operation, SysOperation):
         sysop_card = SysOperationCard(
                 id=f"{card.name}_{card.id}",

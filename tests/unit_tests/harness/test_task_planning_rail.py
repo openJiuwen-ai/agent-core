@@ -90,13 +90,12 @@ def test_init_registers_tools_with_workspace() -> None:
     """init registers todo tools when workspace is set."""
     rail = _make_rail()
     agent = _make_agent(workspace="/tmp/test_ws")
-    agent_id = agent.card.id
     rail.init(agent)
 
     assert rail.tools is not None
     assert len(rail.tools) > 0
     assert rail.workspace is not None
-    assert rail.workspace.root_path == f"/tmp/test_ws/{agent_id}_workspace"
+    assert rail.workspace.root_path == f"/tmp/test_ws"
 
 
 def test_init_registers_without_workspace() -> None:

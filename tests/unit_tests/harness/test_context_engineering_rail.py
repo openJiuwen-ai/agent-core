@@ -9,6 +9,8 @@ from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 import pytest
 
+from openjiuwen.core.context_engine import MessageSummaryOffloaderConfig, CurrentRoundCompressorConfig, \
+    RoundLevelCompressorConfig
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
 )
@@ -128,13 +130,13 @@ async def test_init_processors_merge(tmp_path: Path):
         (False, None, []),
         (False, [("custom", DialogueCompressorConfig(messages_threshold=25))], ["custom"]),
         (False, [("d", DialogueCompressorConfig(messages_to_keep=5))], ["d"]),
-        (True, None, ["MessageOffloader", "DialogueCompressor"]),
+        (True, None, ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"]),
         (True, [("d", DialogueCompressorConfig(messages_threshold=99))],
-         ["MessageOffloader", "DialogueCompressor", "d"]),
+         ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor", "d"]),
         (True, [("c", DialogueCompressorConfig(messages_to_keep=5))],
-         ["MessageOffloader", "DialogueCompressor", "c"]),
+         ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor", "c"]),
         (True, [("DialogueCompressor", DialogueCompressorConfig(messages_threshold=99))],
-         ["MessageOffloader", "DialogueCompressor"]),
+         ["MessageSummaryOffloader", "DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"]),
     ]
     for preset, processors, expected_keys in cases:
         sys_operation = _make_sys_operation(tmp_path)
@@ -158,16 +160,41 @@ async def test_init_preset_defaults(tmp_path: Path):
     await agent.ensure_initialized()
 
     procs = dict(agent.react_config.context_processors)
-    comp = procs.get("DialogueCompressor")
-    off = procs.get("MessageOffloader")
-    assert comp is not None
-    assert comp.messages_threshold == 40
-    assert comp.tokens_threshold == 100000
-    assert comp.keep_last_round is False
+
+    # MessageSummaryOffloader tests
+    off = procs.get("MessageSummaryOffloader")
     assert off is not None
-    assert off.messages_threshold == 40
-    assert off.tokens_threshold == 5000
+    assert off.messages_threshold is None
+    assert off.tokens_threshold == 60000
+    assert off.large_message_threshold == 20000
     assert off.offload_message_type == ["tool"]
+    assert off.protected_tool_names == ["view_file", "reload_original_context_messages"]
+    assert off.enable_adaptive_compression is True
+    assert off.summary_max_tokens == 900
+
+    # DialogueCompressor tests
+    comp = procs.get("DialogueCompressor")
+    assert comp is not None
+    assert comp.messages_threshold is None
+    assert comp.tokens_threshold == 100000
+    assert comp.messages_to_keep == 10
+    assert comp.keep_last_round is False
+    assert comp.compression_target_tokens == 1800
+
+    # CurrentRoundCompressor tests
+    curr = procs.get("CurrentRoundCompressor")
+    assert curr is not None
+    assert curr.tokens_threshold == 100000
+    assert curr.messages_to_keep == 6
+    assert curr.compression_target_tokens == 4000
+
+    # RoundLevelCompressor tests
+    round_lvl = procs.get("RoundLevelCompressor")
+    assert round_lvl is not None
+    assert round_lvl.rounds_threshold == 2
+    assert round_lvl.tokens_threshold == 230000
+    assert round_lvl.target_total_tokens == 160000
+    assert round_lvl.keep_last_round is True
 
 
 # =============================================================================
