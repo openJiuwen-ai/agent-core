@@ -15,7 +15,7 @@ from openjiuwen.harness.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.harness.tools.bash import BashTool
 
 
 class FileSystemRail(DeepAgentRail):

@@ -47,7 +47,7 @@ from openjiuwen.harness.tools.audio import (
 )
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.filesystem import ReadFileTool
-from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.vision import (
     ImageOCRTool,
     VisualQuestionAnsweringTool,

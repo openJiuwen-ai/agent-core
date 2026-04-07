@@ -1,5 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+#
+# DEPRECATED: Use openjiuwen.harness.tools.bash.BashTool instead.
+# This module is kept for backward compatibility only.
+#
 from pathlib import Path
 from typing import Dict, Any, AsyncIterator, Optional
 

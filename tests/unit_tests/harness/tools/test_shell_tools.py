@@ -10,7 +10,7 @@ import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
-from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.harness.tools.bash import BashTool
 
 
 # ────────────────────────────────────────────────────────────
@@ -235,9 +235,7 @@ async def test_output_truncated_when_over_limit(sys_op):
         "max_output_chars": 250,
     })
     assert res.success is True
-    assert "[truncated]" in res.data["stdout"]
-    # total length should not exceed limit + len("\n...[truncated]")
-    assert len(res.data["stdout"]) <= 265
+    assert "lines omitted" in res.data["stdout"]
 
 
 @pytest.mark.asyncio

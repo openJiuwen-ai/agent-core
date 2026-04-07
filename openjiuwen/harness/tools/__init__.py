@@ -24,7 +24,7 @@ from openjiuwen.harness.tools.filesystem import (
 from openjiuwen.harness.tools.list_skill import ListSkillTool
 from openjiuwen.harness.tools.load_tools import LoadToolsTool
 from openjiuwen.harness.tools.search_tools import SearchToolsTool
-from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.todo import (
     TodoCreateTool,
     TodoListTool,

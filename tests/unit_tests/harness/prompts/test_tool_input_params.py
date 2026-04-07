@@ -55,7 +55,7 @@ from openjiuwen.harness.tools.filesystem import (
     WriteFileTool,
 )
 from openjiuwen.harness.tools.list_skill import ListSkillTool
-from openjiuwen.harness.tools.shell import BashTool
+from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.vision import (
     ImageOCRTool,
     VisualQuestionAnsweringTool,
