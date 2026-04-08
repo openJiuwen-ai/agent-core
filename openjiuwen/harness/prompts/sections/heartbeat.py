@@ -43,6 +43,30 @@ HEARTBEAT_SYSTEM_PROMPT: Dict[str, str] = {
 }
 
 
+def _clean_heartbeat_content(content: str) -> str:
+    """Clean HEARTBEAT.md content.
+
+    Args:
+        content: Raw content from HEARTBEAT.md file.
+
+    Returns:
+        Cleaned content with HTML comments and empty lines removed.
+    """
+    lines = content.splitlines()
+    cleaned_lines = []
+
+    for line in lines:
+        stripped_line = line.strip()
+
+        if stripped_line.startswith("<!--") and stripped_line.endswith("-->"):
+            continue
+
+        if stripped_line:
+            cleaned_lines.append(line.strip())
+
+    return "\n".join(cleaned_lines)
+
+
 def build_heartbeat_section(
     language: str = "cn",
     heartbeat_content: Optional[str] = None,
@@ -58,10 +82,11 @@ def build_heartbeat_section(
     """
 
     prompt_content = HEARTBEAT_SYSTEM_PROMPT.get(language, HEARTBEAT_SYSTEM_PROMPT["cn"])
+    cleaned_content = _clean_heartbeat_content(heartbeat_content) if heartbeat_content else ""
 
     return PromptSection(
         name="heartbeat",
-        content={language: prompt_content.format(heartbeat=heartbeat_content)},
+        content={language: prompt_content.format(heartbeat=cleaned_content)},
         priority=80,
     )
 
