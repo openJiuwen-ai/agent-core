@@ -207,6 +207,14 @@ class TestBuildToolCard:
         assert card.input_params == get_tool_input_params("bash", "cn")
 
     @staticmethod
+    def test_returns_correct_powershell_card():
+        card = build_tool_card("powershell", "PowerShellTool", "en")
+        assert card.id == "PowerShellTool"
+        assert card.name == "powershell"
+        assert card.description == get_tool_description("powershell", "en")
+        assert card.input_params == get_tool_input_params("powershell", "en")
+
+    @staticmethod
     def test_en_language():
         card = build_tool_card("code", "CodeTool", "en")
         assert card.description == get_tool_description("code", "en")

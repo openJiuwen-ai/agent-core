@@ -24,6 +24,9 @@ from openjiuwen.harness.prompts.sections.tools.ask_user import (
 from openjiuwen.harness.prompts.sections.tools.bash import (
     BashMetadataProvider,
 )
+from openjiuwen.harness.prompts.sections.tools.powershell import (
+    PowerShellMetadataProvider,
+)
 from openjiuwen.harness.prompts.sections.tools.audio import (
     AudioMetadataMetadataProvider,
     AudioQuestionAnsweringMetadataProvider,
@@ -84,6 +87,7 @@ from openjiuwen.harness.prompts.sections.tools.web_tools import (
 _PROVIDERS: List[ToolMetadataProvider] = [
     AskUserMetadataProvider(),
     BashMetadataProvider(),
+    PowerShellMetadataProvider(),
     AudioTranscriptionMetadataProvider(),
     AudioQuestionAnsweringMetadataProvider(),
     AudioMetadataMetadataProvider(),
