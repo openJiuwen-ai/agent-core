@@ -192,11 +192,15 @@ class DeepAgent(BaseAgent):
                 else:
                     retained.append(rail)
             self._registered_rails = retained
+            self._pending_rails = [
+                rail for rail in self._pending_rails
+                if type(rail) not in replacing_types
+            ]
         else:
             # Full replacement: all existing rails become stale.
             self._stale_rails.extend(self._registered_rails)
             self._registered_rails.clear()
-        self._pending_rails.clear()
+            self._pending_rails.clear()
 
     def _hot_reload_model(self, config: DeepAgentConfig) -> None:
         """Apply updated model/iteration config to the live inner ReActAgent.
