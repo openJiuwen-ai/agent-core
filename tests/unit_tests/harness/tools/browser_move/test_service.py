@@ -259,6 +259,132 @@ def test_max_iteration_resume_requires_opt_in_guardrail() -> None:
     assert "Continuation context:" in observed_tasks[1]
 
 
+
+
+def test_max_iteration_failure_includes_observed_tool_progress() -> None:
+    service = _make_service()
+    service._update_progress_from_tool_observation(
+        session_id="session-progress",
+        request_id="req-progress-1",
+        tool_name="browser_click",
+        tool_result={
+            "message": "Clicked Add to cart",
+            "page": {"url": "https://example.com/cart", "title": "Cart"},
+        },
+    )
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
+        del task, session_id, request_id
+        return {
+            "ok": False,
+            "final": "Max iterations reached without completion",
+            "page": {"url": "https://example.com/cart", "title": "Cart"},
+            "screenshot": None,
+            "error": "max_iterations_reached",
+        }
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ):
+        result = _run(
+            service.run_task(
+                task="Add item to cart",
+                session_id="session-progress",
+                request_id="req-progress-1",
+            )
+        )
+
+    assert result["ok"] is False
+    assert "Known progress for continuation:" in str(result["failure_summary"])
+    assert "Clicked Add to cart" in str(result["failure_summary"])
+    assert result["progress_state"]["recent_tool_steps"][-1].startswith("browser_click:")
+
+
+def test_structured_progress_is_reused_on_next_invocation() -> None:
+    service = _make_service()
+    observed_tasks: list[str] = []
+    responses = [
+        {
+            "ok": False,
+            "final": "Reached review page but coupon still not applied.",
+            "page": {"url": "https://example.com/review", "title": "Review"},
+            "screenshot": None,
+            "error": "max_iterations_reached",
+            "status": "partial",
+            "progress": {
+                "completed_steps": ["Opened cart", "Reached review page"],
+                "remaining_steps": ["Apply coupon", "Submit order"],
+                "next_step": "Open the coupon panel and apply the saved code",
+                "missing_requirements": ["Coupon code not applied yet"],
+            },
+        },
+        {
+            "ok": True,
+            "final": "Coupon applied and order submitted.",
+            "page": {"url": "https://example.com/done", "title": "Done"},
+            "screenshot": None,
+            "error": None,
+        },
+    ]
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
+        del session_id, request_id
+        observed_tasks.append(task)
+        return responses[len(observed_tasks) - 1]
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ):
+        first = _run(service.run_task(task="Checkout cart", session_id="session-reuse", request_id="req-1"))
+        second = _run(service.run_task(task="Checkout cart", session_id="session-reuse", request_id="req-2"))
+
+    assert first["ok"] is False
+    assert first["progress_state"]["status"] == "partial"
+    assert "Opened cart" in first["progress_state"]["completed_steps"]
+    assert second["ok"] is True
+    assert second["failure_summary"] is None
+    assert second["progress_state"] is None
+    assert "Known progress for continuation:" in observed_tasks[1]
+    assert "Opened cart" in observed_tasks[1]
+    assert "Apply coupon" in observed_tasks[1]
+
+
+def test_completed_status_overrides_false_ok_when_evidence_is_present() -> None:
+    service = _make_service()
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(*, task: str, session_id: str, request_id: str):
+        del task, session_id, request_id
+        return {
+            "ok": False,
+            "final": "The confirmation page shows order #12345.",
+            "page": {"url": "https://example.com/done", "title": "Done"},
+            "screenshot": None,
+            "error": "worker_marked_incomplete",
+            "status": "completed",
+            "progress": {
+                "completion_evidence": ["Confirmation page shows order #12345"],
+                "missing_requirements": [],
+            },
+        }
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ):
+        result = _run(service.run_task(task="Place order", session_id="session-complete", request_id="req-complete"))
+
+    assert result["ok"] is True
+    assert result["error"] is None
+    assert result["failure_summary"] is None
+
 def test_run_task_once_uses_fresh_worker_conversation_ids() -> None:
     service = _make_service()
     service.browser_agent = object()

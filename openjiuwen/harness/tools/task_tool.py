@@ -46,6 +46,13 @@ class TaskTool(Tool):
         self.parent_agent = parent_agent
         self.language = language
 
+    @staticmethod
+    def _build_sub_session_id(parent_session_id: str, subagent_type: str) -> str:
+        normalized_type = str(subagent_type or "").strip()
+        if normalized_type == "browser_agent":
+            return f"{parent_session_id}_sub_{normalized_type}"
+        return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
+
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         """Execute task by delegating to a subagent.
 
@@ -83,7 +90,7 @@ class TaskTool(Tool):
             )
 
         parent_session_id = parent_session.get_session_id()
-        sub_session_id = f"{parent_session_id}_sub_{subagent_type}_{uuid.uuid4().hex[:8]}"
+        sub_session_id = self._build_sub_session_id(parent_session_id, str(subagent_type))
         logger.info(
             f"[TaskTool] Creating subagent: {subagent_type}, "
             f"parent_session={parent_session_id}, sub_session={sub_session_id}"

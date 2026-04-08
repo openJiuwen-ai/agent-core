@@ -73,7 +73,7 @@ async def main() -> None:
             if query.lower() in {"exit", "quit"}:
                 break
 
-            answer = await runtime.handle_request(query=query, session_id=session_id)
+            answer = await runtime.run_browser_task(task=query, session_id=session_id)
             logger.info("Result:")
             logger.info(json.dumps(answer, ensure_ascii=False, indent=2))
             query = ""

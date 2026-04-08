@@ -194,32 +194,14 @@ def build_browser_worker_system_prompt(
         "Final output MUST be a single JSON object with keys:\n"
         "ok (boolean), final (string), page (object with url and title), "
         "screenshot (string|null), error (string|null).\n"
+        "Also include status (completed|partial|blocked|failed) whenever possible. "
+        "If the task is not fully complete, include progress as an object with "
+        "completed_steps, remaining_steps, next_step, completion_evidence, and missing_requirements.\n"
+        "Set ok=true only when the exact user-visible goal is fully satisfied and you can cite concrete evidence "
+        "from the page or generated artifacts. If the task is incomplete or blocked, set ok=false and fill the "
+        "progress fields so a continuation can resume with minimal repetition.\n"
         "Return JSON only, even on failures. "
         "Do not output markdown, code fences, or plain text outside the JSON object."
-    )
-
-
-def _build_main_agent_system_prompt(default_timeout_s: float, artifacts_subdir: str) -> str:
-    timeout_text = f"{int(default_timeout_s)}" if default_timeout_s.is_integer() else f"{default_timeout_s:.1f}"
-    return (
-        "You are the main orchestration agent.\n"
-        "For browser tasks, prefer browser_run_task.\n"
-        "Default to one comprehensive browser_run_task call per user request.\n"
-        "Do not split work into many small browser_run_task calls unless a prior browser result shows "
-        "a concrete blocking error that requires a narrower retry.\n"
-        "Reuse the same session_id across retries to preserve browser continuity.\n"
-        f"Use a long browser timeout. Do not pass timeout_s below {timeout_text}s. "
-        "Prefer omitting timeout_s so the default long timeout is used.\n"
-        "When a request is not straightforward and needs custom logic, call browser_custom_action first.\n"
-        "If action names or params are unclear, call browser_list_custom_actions first and "
-        "then call browser_custom_action with the matching action and params.\n"
-        "Do not simulate browser actions yourself.\n"
-        "Pass through the full user goal clearly as browser task text.\n"
-        "Keep user-facing answer concise and factual.\n"
-        "If a browser tool returns an error, report it explicitly.\n"
-        f"If you produce any output files (reports, notes, summaries, markdown, text files, etc.), "
-        f"write them to the '{artifacts_subdir}/' directory relative to the working directory. "
-        "Never write output files to the project root or any other location."
     )
 
 
@@ -352,65 +334,3 @@ def build_browser_worker_agent(
     ensure_execute_signature_compat(agent, tool_result_observer=tool_result_observer)
     return agent
 
-
-# pylint: disable=too-many-arguments
-def build_main_agent(
-    provider: str,
-    api_key: str,
-    *,
-    api_base: str,
-    model_name: str,
-    browser_tool_card,
-    custom_action_tool_card=None,
-    list_actions_tool_card=None,
-    artifacts_subdir: str = "artifacts",
-    tool_result_observer: ToolResultObserver | None = None,
-) -> ReActAgent:
-    default_timeout_s = _resolve_tool_timeout_s()
-    artifacts_subdir = (
-        (artifacts_subdir or "artifacts").strip().replace("\\", "/").strip("/") or "artifacts"
-    )
-    card = AgentCard(
-        id="agent.playwright.main_runtime",
-        name="playwright_main_runtime",
-        description="Main runtime agent that delegates browser work to browser_run_task.",
-        input_params={},
-    )
-    config = (
-        ReActAgentConfig()
-        .configure_model_client(
-            provider=provider,
-            api_key=api_key,
-            api_base=api_base,
-            model_name=model_name,
-        )
-        .configure_max_iterations(8)
-        .configure_prompt_template(
-            [
-                {
-                    "role": "system",
-                    "content": _build_main_agent_system_prompt(default_timeout_s, artifacts_subdir),
-                }
-            ]
-        )
-    )
-    compressor_config = _build_dialogue_compressor_config(provider, api_key, api_base, model_name)
-    if compressor_config is not None:
-        config.configure_context_processors([("DialogueCompressor", compressor_config)])
-    main_temperature, main_top_p = _resolve_sampling_params(
-        temperature_keys=("BROWSER_MAIN_TEMPERATURE", "BROWSER_MODEL_TEMPERATURE", "MODEL_TEMPERATURE"),
-        top_p_keys=("BROWSER_MAIN_TOP_P", "BROWSER_MODEL_TOP_P", "MODEL_TOP_P"),
-        default_temperature=0.2,
-        default_top_p=0.1,
-    )
-    if config.model_config_obj is not None:
-        config.model_config_obj.temperature = main_temperature
-        config.model_config_obj.top_p = main_top_p
-    agent = ReActAgent(card=card).configure(config)
-    agent.ability_manager.add(browser_tool_card)
-    if custom_action_tool_card is not None:
-        agent.ability_manager.add(custom_action_tool_card)
-    if list_actions_tool_card is not None:
-        agent.ability_manager.add(list_actions_tool_card)
-    ensure_execute_signature_compat(agent, tool_result_observer=tool_result_observer)
-    return agent

@@ -105,6 +105,43 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "required"):
             await tool.invoke({"subagent_type": "code"}, session=session)
 
+    async def test_task_tool_reuses_sticky_browser_subsession_id(self) -> None:
+        called_inputs: dict[str, str] = {}
+
+        class FakeSubAgent:
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
+                called_inputs.update(inputs)
+                return {"output": "done"}
+
+        browser_spec = SubAgentConfig(
+            agent_card=AgentCard(name="browser_agent", description="browser subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[browser_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+
+        card = ToolCard(id="task_tool_test", name="task_tool", description="test")
+        tool = TaskTool(card=card, parent_agent=parent_agent)
+
+        session = Session(session_id="parent_session")
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
+            result = await tool.invoke(
+                {"subagent_type": "browser_agent", "task_description": "continue browser task"},
+                session=session,
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(called_inputs["conversation_id"], "parent_session_sub_browser_agent")
+
 
 class TestTaskToolSync(unittest.TestCase):
     def test_create_task_tool(self) -> None:

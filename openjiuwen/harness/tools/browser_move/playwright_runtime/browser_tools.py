@@ -150,6 +150,11 @@ def _ensure_openjiuwen_client_patch() -> None:
     _OPENJIUWEN_CLIENTS_PATCHED = True
 
 
+def ensure_browser_runtime_client_patch() -> None:
+    """Ensure MCP client creation is patched for browser runtime transports."""
+    _ensure_openjiuwen_client_patch()
+
+
 def _build_child_env() -> dict[str, str]:
     env = dict(os.environ)
     passthrough_keys = [

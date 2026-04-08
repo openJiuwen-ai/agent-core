@@ -42,10 +42,14 @@ if TYPE_CHECKING:
 BROWSER_AGENT_FACTORY_NAME = "browser_agent"
 
 DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
-    "You are a browser automation agent responsible for executing web tasks. "
-    "Use browser tools to navigate, interact with, and extract information from websites. "
-    "Prefer one comprehensive browser task call per user request. "
-    "Report results factually and concisely."
+    "You are a browser automation agent responsible for executing web tasks directly. "
+    "Plan and decide at this agent level, then use Playwright browser tools to navigate, click, type, "
+    "select, inspect, and extract information. "
+    "Use browser_custom_action only for deterministic helper actions that are awkward to express with "
+    "the primitive browser tools. "
+    "Do not assume a nested browser worker or browser_run_task wrapper exists. "
+    "Avoid redundant actions, preserve session continuity, and only claim completion when the "
+    "requested browser outcome is actually evidenced."
 )
 
 DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
@@ -61,9 +65,9 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT: Dict[str, str] = {
 }
 
 DEFAULT_BROWSER_AGENT_DESCRIPTION_EN = (
-    "Dedicated browser subagent that executes web tasks with Playwright runtime tools."
+    "Dedicated browser subagent that directly controls the browser with Playwright MCP tools."
 )
-DEFAULT_BROWSER_AGENT_DESCRIPTION_CN = "专用浏览器子代理，使用 Playwright runtime 工具执行网页任务。"
+DEFAULT_BROWSER_AGENT_DESCRIPTION_CN = "专用浏览器子代理，直接使用 Playwright MCP 工具执行网页任务。"
 DEFAULT_BROWSER_AGENT_DESCRIPTION: Dict[str, str] = {
     "cn": DEFAULT_BROWSER_AGENT_DESCRIPTION_CN,
     "en": DEFAULT_BROWSER_AGENT_DESCRIPTION_EN,
@@ -105,7 +109,7 @@ def build_browser_agent_config(
     mcps: Optional[List[McpServerConfig]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 25,
     workspace: Optional[str | "Workspace"] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,
@@ -156,7 +160,7 @@ def create_browser_agent(
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 25,
     workspace: Optional[str | "Workspace"] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,
@@ -166,7 +170,7 @@ def create_browser_agent(
     settings: Optional[RuntimeSettings] = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
-    """Create the browser subagent itself with runtime tools registered directly."""
+    """Create the browser subagent with direct browser MCP tools and helper tools."""
     resolved_language = resolve_language(language)
     resolved_settings = _resolve_runtime_settings(model, settings)
 
@@ -193,6 +197,7 @@ def create_browser_agent(
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     injected_rails = [BrowserRuntimeRail(browser_backend)]
     final_tools = list(tools or []) + injected_tools
+    final_mcps = list(mcps or [])
     final_rails = list(rails or [FileSystemRail()]) + injected_rails
 
     return create_deep_agent(
@@ -200,7 +205,7 @@ def create_browser_agent(
         card=final_card,
         system_prompt=final_prompt,
         tools=final_tools,
-        mcps=mcps,
+        mcps=final_mcps,
         subagents=subagents,
         rails=final_rails,
         enable_task_loop=enable_task_loop,

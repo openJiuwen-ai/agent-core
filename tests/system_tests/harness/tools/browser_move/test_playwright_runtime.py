@@ -46,12 +46,14 @@ async def _run_live_check(query: str, session_id: str, cancel_after_s: float = 0
     try:
         await runtime.ensure_started()
         if cancel_after_s > 0:
-            request_task = asyncio.create_task(runtime.handle_request(query=query, session_id=session_id))
+            request_task = asyncio.create_task(
+                runtime.run_browser_task(task=query, session_id=session_id)
+            )
             await asyncio.sleep(cancel_after_s)
             await runtime.cancel_run(session_id=session_id)
             result = await request_task
         else:
-            result = await runtime.handle_request(query=query, session_id=session_id)
+            result = await runtime.run_browser_task(task=query, session_id=session_id)
         return {
             "ok": bool(result.get("ok", False)),
             "mode": "live",

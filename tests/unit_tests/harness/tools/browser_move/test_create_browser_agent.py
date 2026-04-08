@@ -48,7 +48,7 @@ def _fake_settings() -> RuntimeSettings:
 
 
 def _make_fake_tools():
-    tools = [MagicMock() for _ in range(4)]
+    tools = [MagicMock() for _ in range(3)]
     for tool in tools:
         tool.card = MagicMock()
     return tools
@@ -110,7 +110,7 @@ def test_default_wiring_main_agent_has_no_subagents() -> None:
     assert calls[0].get("subagents", []) in (None, [])
 
 
-def test_default_wiring_main_agent_receives_four_browser_tool_cards() -> None:
+def test_default_wiring_main_agent_receives_browser_helper_tools() -> None:
     calls, fake = _capture_create_deep_agent()
     fake_tools = _make_fake_tools()
     with _patch_all(fake, fake_tools=fake_tools)[0]:
@@ -119,6 +119,15 @@ def test_default_wiring_main_agent_receives_four_browser_tool_cards() -> None:
     tool_cards = calls[0].get("tools", [])
     for tool in fake_tools:
         assert tool in tool_cards
+
+
+def test_default_wiring_does_not_pre_register_playwright_mcp_on_subagent() -> None:
+    calls, fake = _capture_create_deep_agent()
+    settings = _fake_settings()
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=settings)
+
+    assert settings.mcp_cfg not in calls[0]["mcps"]
 
 
 def test_default_wiring_main_agent_has_browser_runtime_rail() -> None:
@@ -192,7 +201,7 @@ def test_user_tools_are_merged_with_browser_tools() -> None:
 
     tool_cards = calls[0].get("tools", [])
     assert user_tool in tool_cards
-    assert len(tool_cards) == 5
+    assert len(tool_cards) == 4
 
 
 def test_build_browser_agent_config_uses_browser_factory() -> None:
