@@ -66,6 +66,23 @@ from openjiuwen.core.workflow.components.tool.http import (
     HttpContentType,
     HttpResponseFormat
 )
+from openjiuwen.core.workflow.components.tool.ftp import (
+    FTPComponent,
+    FTPComponentConfig,
+    FTPOperationConfig,
+    FTPOperationType,
+    FTPProtocol,
+    FTPCredentials,
+    FTPConnectionConfig,
+    FTPSSLConfig,
+    FTPUploadConfig,
+    FTPDownloadConfig,
+    FTPListConfig,
+    FTPDeleteConfig,
+    FTPRenameConfig,
+    FTPCreateDirectoryConfig,
+    FTPGetInfoConfig,
+)
 from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter, Branch
 from openjiuwen.core.workflow.components.condition.condition import Condition, FuncCondition, AlwaysTrue
 from openjiuwen.core.workflow.components.condition.expression import ExpressionCondition
@@ -149,6 +166,24 @@ _HTTP_RELATED_COMPONENTS = [
     "HttpResponseFormat"
 ]
 
+_FTP_RELATED_COMPONENTS = [
+    "FTPComponent",
+    "FTPComponentConfig",
+    "FTPOperationConfig",
+    "FTPOperationType",
+    "FTPProtocol",
+    "FTPCredentials",
+    "FTPConnectionConfig",
+    "FTPSSLConfig",
+    "FTPUploadConfig",
+    "FTPDownloadConfig",
+    "FTPListConfig",
+    "FTPDeleteConfig",
+    "FTPRenameConfig",
+    "FTPCreateDirectoryConfig",
+    "FTPGetInfoConfig",
+]
+
 
 _CONDITION_CLASSES = [
     "Condition",
@@ -171,6 +206,7 @@ __all__ = (
         _FLOW_RELATED_COMPONENTS +
         _TOOL_RELATED_COMPONENTS +
         _HTTP_RELATED_COMPONENTS +
+        _FTP_RELATED_COMPONENTS +
         _RESOURCE_RELATED_COMPONENTS +
         _CONDITION_CLASSES +
         _WORKFLOW_METHODS +

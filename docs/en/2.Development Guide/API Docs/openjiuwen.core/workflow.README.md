@@ -25,6 +25,10 @@
 | [FieldInfo](./workflow/components/llm/questioner_comp.md)           | Data class for metadata information of parameters to be extracted by the questioner component.                          |
 | [ToolComponent](./workflow/components/tool/tool_comp.md)            | Pre-built plugin component in openJiuwen.                                          |
 | [ToolComponentConfig](./workflow/components/tool/tool_comp.md)      | Data class for plugin component configuration information.                                          |
+| [HTTPRequestComponent](./workflow/components/tool/http_request_comp.md) | Pre-built HTTP request component for making HTTP/HTTPS requests.                              |
+| [HttpComponentConfig](./workflow/components/tool/http_request_comp.md) | Data class for HTTP component configuration information.                                       |
+| [FTPComponent](./workflow/components/tool/ftp_comp.md)              | Pre-built FTP component for file transfer operations (FTP/FTPS/SFTP).                         |
+| [FTPComponentConfig](./workflow/components/tool/ftp_comp.md)        | Data class for FTP component configuration information.                                       |
 | [Start](./workflow/components/flow/start_comp.md)                   | Pre-built workflow start component in openJiuwen.                                    |
 | [End](./workflow/components/flow/end_comp.md)                       | Pre-built workflow end component in openJiuwen.                                    |
 | [EndConfig](./workflow/components/flow/end_comp.md)                 | Data class for end component configuration information.                                          |
