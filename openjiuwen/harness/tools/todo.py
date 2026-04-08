@@ -176,30 +176,28 @@ class TodoTool(Tool):
         """
         await _global_lock_manager.acquire_lock(self._file)
         try:
+            file_path = os.path.abspath(self._file)
+            if not os.path.isfile(file_path):
+                raise build_error(
+                    StatusCode.TOOL_TODOS_LOAD_FAILED,
+                    reason=f"Todo file not found: {file_path}"
+                )
+
             read_res = await self.fs.read_file(self._file, mode="text")
-            if read_res.code == 0:
-                data = json.loads(read_res.data.content)
-                todos = [TodoItem.from_dict(item) for item in data]
-                tool_logger.info(
-                    "Successfully loaded todo items",
-                    event_type=LogEventType.TOOL_CALL_START
-                )
-                return todos
-            else:
-                tool_logger.error(
-                    "Failed to load todo list, because read_file fail",
-                    event_type=LogEventType.TOOL_CALL_ERROR,
-                )
+            if read_res.code != 0:
                 raise build_error(
                     StatusCode.TOOL_TODOS_LOAD_FAILED,
                     reason=f"Failed to load todo list, because read_file fail"
                 )
-        except Exception as e:
-            tool_logger.error(
-                "Failed to load todo list",
-                event_type=LogEventType.TOOL_CALL_ERROR,
-                exception=str(e)
+
+            data = json.loads(read_res.data.content)
+            todos = [TodoItem.from_dict(item) for item in data]
+            tool_logger.info(
+                "Successfully loaded todo items",
+                event_type=LogEventType.TOOL_CALL_END
             )
+            return todos
+        except Exception as e:
             raise build_error(
                 StatusCode.TOOL_TODOS_LOAD_FAILED,
                 reason=f"Failed to load todo list: {str(e)}"
