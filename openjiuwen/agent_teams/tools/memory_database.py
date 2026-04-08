@@ -10,27 +10,28 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Dict, List, Optional
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+)
 
 from pydantic import BaseModel
 
+from openjiuwen.agent_teams.schema.status import (
+    EXECUTION_TRANSITIONS,
+    ExecutionStatus,
+    is_valid_transition,
+    MEMBER_TRANSITIONS,
+    MemberMode,
+    MemberStatus,
+    TASK_TRANSITIONS,
+    TaskStatus,
+)
 from openjiuwen.agent_teams.tools.models import (
     Team,
     TeamMember,
-    TeamTaskBase,
-    TeamTaskDependencyBase,
-    TeamMessageBase,
-    MessageReadStatusBase,
-)
-from openjiuwen.agent_teams.schema.status import (
-    TaskStatus,
-    MemberStatus,
-    MemberMode,
-    ExecutionStatus,
-    is_valid_transition,
-    TASK_TRANSITIONS,
-    MEMBER_TRANSITIONS,
-    EXECUTION_TRANSITIONS,
 )
 from openjiuwen.core.common.logging import team_logger
 
@@ -344,7 +345,8 @@ class InMemoryTeamDatabase:
                 team_logger.error(f"Task {task_id} not found")
                 return False
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.CLAIMED, TASK_TRANSITIONS):
-                team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}")
+                team_logger.error(
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CLAIMED.value}")
                 return False
             if task.assignee:
                 team_logger.warning(f"Task {task_id} is already claimed by member {task.assignee}")
@@ -366,7 +368,8 @@ class InMemoryTeamDatabase:
                 )
                 return None
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.PENDING, TASK_TRANSITIONS):
-                team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PENDING.value}")
+                team_logger.error(
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.PENDING.value}")
                 return None
             task.status = TaskStatus.PENDING.value
             task.assignee = None
@@ -514,13 +517,14 @@ class InMemoryTeamDatabase:
                         ]
                         return False
                     if dep_task.status in (
-                        TaskStatus.COMPLETED.value,
-                        TaskStatus.CANCELLED.value,
-                        TaskStatus.CLAIMED.value,
-                        TaskStatus.PLAN_APPROVED.value,
+                            TaskStatus.COMPLETED.value,
+                            TaskStatus.CANCELLED.value,
+                            TaskStatus.CLAIMED.value,
+                            TaskStatus.PLAN_APPROVED.value,
                     ):
                         team_logger.error(
-                            f"Cannot add dependency to {dependent_id} in terminal or executing status: {dep_task.status}"
+                            f"Cannot add dependency to {dependent_id} in terminal "
+                            f"or executing status: {dep_task.status}"
                         )
                         del self._tasks[task_id]
                         return False
@@ -560,7 +564,8 @@ class InMemoryTeamDatabase:
                 team_logger.error(f"Task {task_id} not found")
                 return None
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.CANCELLED, TASK_TRANSITIONS):
-                team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CANCELLED.value}")
+                team_logger.error(
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.CANCELLED.value}")
                 return None
             task.status = TaskStatus.CANCELLED.value
             team_logger.info(f"Task {task_id} cancelled")
@@ -589,7 +594,8 @@ class InMemoryTeamDatabase:
             if task.status == TaskStatus.COMPLETED.value:
                 return {"task": task, "unblocked_tasks": []}
             if not is_valid_transition(TaskStatus(task.status), TaskStatus.COMPLETED, TASK_TRANSITIONS):
-                team_logger.error(f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.COMPLETED.value}")
+                team_logger.error(
+                    f"Invalid state transition for task {task_id}: {task.status} -> {TaskStatus.COMPLETED.value}")
                 return None
 
             now = self.get_current_time()

@@ -9,34 +9,53 @@ Model definitions live in models.py.
 
 import asyncio
 import time
-from typing import Dict, List, Optional
+from typing import (
+    Dict,
+    List,
+    Optional,
+)
 
 from pydantic import BaseModel
-from sqlalchemy import select, update, event
-from sqlalchemy.exc import IntegrityError, OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine, async_sessionmaker
-
+from sqlalchemy import (
+    event,
+    select,
+    update,
+)
+from sqlalchemy.exc import (
+    IntegrityError,
+    OperationalError,
+)
+from sqlalchemy.ext.asyncio import (
+    async_sessionmaker,
+    AsyncEngine,
+    AsyncSession,
+    create_async_engine,
+)
 from sqlmodel import SQLModel
 
+from openjiuwen.agent_teams.schema.status import (
+    EXECUTION_TRANSITIONS,
+    ExecutionStatus,
+    is_valid_transition,
+    MEMBER_TRANSITIONS,
+    MemberMode,
+    MemberStatus,
+    TASK_TRANSITIONS,
+    TaskStatus,
+)
 from openjiuwen.agent_teams.spawn.context import get_session_id
-from openjiuwen.core.common.logging import team_logger
 from openjiuwen.agent_teams.tools.models import (
-    Team,
-    TeamMember,
-    TeamTaskBase,
-    TeamTaskDependencyBase,
-    TeamMessageBase,
-    _get_task_model,
-    _get_task_dependency_model,
     _get_message_model,
     _get_message_read_status_model,
+    _get_task_dependency_model,
+    _get_task_model,
+    Team,
+    TeamMember,
+    TeamMessageBase,
+    TeamTaskBase,
+    TeamTaskDependencyBase,
 )
-from openjiuwen.agent_teams.schema.status import (
-    TaskStatus, is_valid_transition, TASK_TRANSITIONS,
-    MemberStatus, MEMBER_TRANSITIONS,
-    ExecutionStatus, EXECUTION_TRANSITIONS,
-    MemberMode,
-)
+from openjiuwen.core.common.logging import team_logger
 
 
 # ----------------- Database Configuration -----------------
@@ -317,9 +336,9 @@ class TeamDatabase:
 
             # Validate state transition
             if not is_valid_transition(
-                    MemberStatus(member.status),
-                    MemberStatus(status),
-                    MEMBER_TRANSITIONS
+                MemberStatus(member.status),
+                MemberStatus(status),
+                MEMBER_TRANSITIONS
             ):
                 team_logger.error(
                     f"Invalid state transition for member {member_id}: "
@@ -346,9 +365,9 @@ class TeamDatabase:
 
             # Validate state transition
             if not is_valid_transition(
-                    ExecutionStatus(member.execution_status),
-                    ExecutionStatus(execution_status),
-                    EXECUTION_TRANSITIONS
+                ExecutionStatus(member.execution_status),
+                ExecutionStatus(execution_status),
+                EXECUTION_TRANSITIONS
             ):
                 team_logger.error(
                     f"Invalid state transition for member {member_id}: "
@@ -451,9 +470,9 @@ class TeamDatabase:
 
             # Validate state transition
             if not is_valid_transition(
-                    TaskStatus(task.status),
-                    TaskStatus.CLAIMED,
-                    TASK_TRANSITIONS
+                TaskStatus(task.status),
+                TaskStatus.CLAIMED,
+                TASK_TRANSITIONS
             ):
                 team_logger.error(
                     f"Invalid state transition for task {task_id}: "
@@ -505,9 +524,9 @@ class TeamDatabase:
 
             # Validate state transition using state machine
             if not is_valid_transition(
-                    TaskStatus(task.status),
-                    TaskStatus.PENDING,
-                    TASK_TRANSITIONS
+                TaskStatus(task.status),
+                TaskStatus.PENDING,
+                TASK_TRANSITIONS
             ):
                 team_logger.error(
                     f"Invalid state transition for task {task_id}: "
@@ -548,9 +567,9 @@ class TeamDatabase:
 
             # Validate state transition using state machine
             if not is_valid_transition(
-                    TaskStatus(task.status),
-                    TaskStatus.PLAN_APPROVED,
-                    TASK_TRANSITIONS
+                TaskStatus(task.status),
+                TaskStatus.PLAN_APPROVED,
+                TASK_TRANSITIONS
             ):
                 team_logger.error(
                     f"Invalid state transition for task {task_id}: "
@@ -580,9 +599,9 @@ class TeamDatabase:
 
             # Validate state transition
             if not is_valid_transition(
-                    TaskStatus(task.status),
-                    TaskStatus(status),
-                    TASK_TRANSITIONS
+                TaskStatus(task.status),
+                TaskStatus(status),
+                TASK_TRANSITIONS
             ):
                 team_logger.error(
                     f"Invalid state transition for task {task_id}: "
@@ -983,9 +1002,9 @@ class TeamDatabase:
 
             # Validate state transition
             if not is_valid_transition(
-                    TaskStatus(task.status),
-                    TaskStatus.CANCELLED,
-                    TASK_TRANSITIONS
+                TaskStatus(task.status),
+                TaskStatus.CANCELLED,
+                TASK_TRANSITIONS
             ):
                 team_logger.error(
                     f"Invalid state transition for task {task_id}: "
@@ -1036,9 +1055,9 @@ class TeamDatabase:
             for task in tasks:
                 # Validate state transition one more time (defense in depth)
                 if not is_valid_transition(
-                        TaskStatus(task.status),
-                        TaskStatus.CANCELLED,
-                        TASK_TRANSITIONS
+                    TaskStatus(task.status),
+                    TaskStatus.CANCELLED,
+                    TASK_TRANSITIONS
                 ):
                     team_logger.debug(
                         f"Skipping task {task.task_id}: invalid state transition "
@@ -1096,9 +1115,9 @@ class TeamDatabase:
                 return {"task": task, "unblocked_tasks": []}
 
             if not is_valid_transition(
-                    TaskStatus(task.status),
-                    TaskStatus.COMPLETED,
-                    TASK_TRANSITIONS
+                TaskStatus(task.status),
+                TaskStatus.COMPLETED,
+                TASK_TRANSITIONS
             ):
                 team_logger.error(
                     f"Invalid state transition for task {task_id}: "
@@ -1290,10 +1309,12 @@ class TeamDatabase:
                     await session.rollback()
                     if attempt < _DB_RETRY_ATTEMPTS - 1:
                         delay = _DB_RETRY_BASE_DELAY * (2 ** attempt)
-                        team_logger.warning(f"Database locked on create_message (attempt {attempt + 1}), retrying in {delay}s")
+                        team_logger.warning(
+                            f"Database locked on create_message (attempt {attempt + 1}), retrying in {delay}s")
                         await asyncio.sleep(delay)
                     else:
-                        team_logger.error(f"Failed to create message {message_id} after {_DB_RETRY_ATTEMPTS} attempts: {e}")
+                        team_logger.error(
+                            f"Failed to create message {message_id} after {_DB_RETRY_ATTEMPTS} attempts: {e}")
                         return False
         return False
 

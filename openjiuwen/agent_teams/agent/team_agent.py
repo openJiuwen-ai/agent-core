@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.coordinator import (
     InnerEventMessage,
     InnerEventType,
 )
+from openjiuwen.agent_teams.agent.member import TeamMember
 from openjiuwen.agent_teams.agent.policy import (
     build_system_prompt,
     role_policy,
@@ -27,14 +28,16 @@ from openjiuwen.agent_teams.messager import (
     Messager,
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+from openjiuwen.agent_teams.schema.status import (
+    ExecutionStatus,
+    MemberStatus,
+)
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
+    TeamRuntimeContext,
     TeamSpec,
 )
-from openjiuwen.agent_teams.agent.member import TeamMember
-from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
@@ -49,8 +52,8 @@ from openjiuwen.core.runner.spawn.process_manager import (
     SpawnedProcessHandle,
 )
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -843,7 +846,7 @@ class TeamAgent(BaseAgent):
             "query": initial_message or "Join the team and wait for your first assignment.",
         }
 
-    def _build_member_context(self, member_spec: TeamMemberSpec) -> TeamRuntimeContext:
+    def build_member_context(self, member_spec: TeamMemberSpec) -> TeamRuntimeContext:
         """Build runtime context for one teammate from leader state."""
         return TeamRuntimeContext(
             role=member_spec.role_type,
@@ -884,7 +887,7 @@ class TeamAgent(BaseAgent):
 
     def build_spawn_config(self, member_spec: TeamMemberSpec) -> SpawnAgentConfig:
         """Build JSON-safe spawn config for one teammate process."""
-        context = self._build_member_context(member_spec)
+        context = self.build_member_context(member_spec)
         logging_config = self._build_member_logging_config(member_spec)
         return SpawnAgentConfig(
             agent_kind=SpawnAgentKind.TEAM_AGENT,

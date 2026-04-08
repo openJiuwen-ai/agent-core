@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from openjiuwen.agent_teams.worktree.git import _run_git
 from openjiuwen.core.common.logging import team_logger
@@ -214,6 +214,7 @@ class AutoSetupRail(WorktreeRail):
     """
 
     def __init__(self, commands: list[str] | None = None):
+        super().__init__()
         self._commands = commands
 
     async def after_worktree_create(

@@ -12,7 +12,10 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from openjiuwen.agent_teams.team_workspace.models import ConflictStrategy, WorkspaceMode
+from openjiuwen.agent_teams.team_workspace.models import (
+    ConflictStrategy,
+    WorkspaceMode,
+)
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -39,7 +42,7 @@ class TeamWorkspaceRail(DeepAgentRail):
         super().__init__()
         self._ws = workspace_manager
         self._member_id = member_id
-        self._last_pull_time: float = 0
+        self._last_pull_time: float = 0.0
         self._pull_interval: float = 5.0
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -75,8 +78,6 @@ class TeamWorkspaceRail(DeepAgentRail):
         if self._ws.config.conflict_strategy == ConflictStrategy.LOCK:
             lock = self._ws.get_lock(path)
             if lock and lock.holder_id != self._member_id and not lock.is_expired():
-                from openjiuwen.harness.rails.interrupt.interrupt_base import RejectResult
-
                 tool_msg_text = (
                     f"File '{path}' is locked by {lock.holder_name} ({lock.holder_id})"
                 )

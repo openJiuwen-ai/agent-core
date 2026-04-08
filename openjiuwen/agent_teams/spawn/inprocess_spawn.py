@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-from typing import TYPE_CHECKING, Any, Optional
+from typing import (
+    Any,
+    Optional,
+    TYPE_CHECKING,
+)
 
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
@@ -42,7 +46,7 @@ async def inprocess_spawn(
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
     spec = team_agent.spec
-    context = team_agent._build_member_context(member_spec)
+    context = team_agent.build_member_context(member_spec)
 
     agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
     card = agent_spec.card or AgentCard(

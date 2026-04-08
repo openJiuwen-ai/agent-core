@@ -12,7 +12,10 @@ import os
 import shutil
 import time
 from collections.abc import Awaitable
-from typing import Any, Callable
+from typing import (
+    Any,
+    Callable,
+)
 
 from openjiuwen.agent_teams.schema.events import (
     BaseEventMessage,
@@ -20,7 +23,10 @@ from openjiuwen.agent_teams.schema.events import (
     WorktreeCreatedEvent,
     WorktreeRemovedEvent,
 )
-from openjiuwen.agent_teams.worktree.backend import WorktreeBackend, create_backend
+from openjiuwen.agent_teams.worktree.backend import (
+    create_backend,
+    WorktreeBackend,
+)
 from openjiuwen.agent_teams.worktree.git import (
     _run_git,
     count_commits_since,
@@ -74,6 +80,11 @@ class WorktreeManager:
         self._publish_event = publish_event
         self._rails = rails or []
         self._workspace_root = workspace_root
+
+    @property
+    def backend(self) -> WorktreeBackend:
+        """Public accessor for the worktree backend."""
+        return self._backend
 
     # -- Session-level worktree (tool calls) ----------------------------------
 
@@ -546,9 +557,22 @@ class WorktreeManager:
 
         return removed
 
+    async def remove_worktree(self, worktree_path: str, repo_root: str) -> bool:
+        """Remove a single worktree by path.
+
+        Args:
+            worktree_path: Absolute path to the worktree directory.
+            repo_root: Root of the repository that owns the worktree.
+
+        Returns:
+            True if the worktree was successfully removed.
+        """
+        return await self._backend.remove(worktree_path, repo_root)
+
     # -- Internal helpers -----------------------------------------------------
 
-    def _member_slug(self, member_id: str) -> str:
+    @staticmethod
+    def _member_slug(member_id: str) -> str:
         """Derive worktree slug from member ID.
 
         Args:

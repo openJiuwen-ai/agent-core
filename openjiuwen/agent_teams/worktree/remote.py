@@ -16,8 +16,15 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from openjiuwen.agent_teams.worktree.git import _run_git, fetch_ref, get_default_branch
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig, WorktreeCreateResult
+from openjiuwen.agent_teams.worktree.git import (
+    _run_git,
+    fetch_ref,
+    get_default_branch,
+)
+from openjiuwen.agent_teams.worktree.models import (
+    WorktreeConfig,
+    WorktreeCreateResult,
+)
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -268,7 +275,7 @@ class WorktreeRemoteHandler:
         repo_root = await find_canonical_git_root(wt_path)
         if not repo_root:
             return WorktreeRemoteResponse(success=False, error="Cannot find repo root for worktree")
-        ok = await self._manager._backend.remove(wt_path, repo_root)
+        ok = await self._manager.remove_worktree(wt_path, repo_root)
         return WorktreeRemoteResponse(success=ok)
 
     async def _handle_exists(self, request: WorktreeRemoteRequest) -> WorktreeRemoteResponse:
@@ -281,7 +288,7 @@ class WorktreeRemoteHandler:
             Response with exists flag.
         """
         wt_path = request.worktree_path or ""
-        found = await self._manager._backend.exists(wt_path)
+        found = await self._manager.backend.exists(wt_path)
         return WorktreeRemoteResponse(exists=found)
 
     async def _ensure_repo(self, repo_url: str) -> str:

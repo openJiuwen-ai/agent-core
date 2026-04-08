@@ -10,7 +10,11 @@ with no uncommitted changes and no unpushed commits.
 import asyncio
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
 
 from openjiuwen.agent_teams.worktree.backend import WorktreeBackend
 from openjiuwen.agent_teams.worktree.git import (
@@ -75,7 +79,7 @@ async def cleanup_stale_worktrees(
     except FileNotFoundError:
         return 0
 
-    cutoff = datetime.now() - timedelta(days=config.cleanup_after_days)
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=config.cleanup_after_days)
     cutoff_ts = cutoff.timestamp()
     removed = 0
 

@@ -108,9 +108,11 @@ def classify_command(command: str) -> CommandKind:
     return _KIND_LOOKUP.get(base, CommandKind.OTHER)
 
 
+_READ_KINDS = frozenset({CommandKind.SEARCH, CommandKind.READ, CommandKind.LIST})
+
+
 def is_read_only(command: str) -> bool:
     """Return True when every non-neutral segment is a read-like command."""
-    _READ_KINDS = frozenset({CommandKind.SEARCH, CommandKind.READ, CommandKind.LIST})
     parts = _split_pipeline(command)
     if not parts:
         return False
