@@ -89,6 +89,7 @@ class TeamAgent(BaseAgent):
         self._member_port_map: dict[str, int] = {}
         self._first_iter_gate: Optional["FirstIterationGate"] = None
         self._pending_interrupt_resumes: list[InteractiveInput] = []
+        self._event_listeners: list = []
 
     # ------------------------------------------------------------------
     # Properties
@@ -166,6 +167,33 @@ class TeamAgent(BaseAgent):
     def task_manager(self):
         """Return the task manager, if configured."""
         return self._task_manager
+
+    @property
+    def team_backend(self) -> Optional[TeamBackend]:
+        """Return the team backend, if configured."""
+        return self._team_backend
+
+    def add_event_listener(self, handler) -> None:
+        """Register an external event listener.
+
+        Listeners receive every EventMessage from the transport,
+        including self-published events, before any filtering.
+
+        Args:
+            handler: Async callable accepting an EventMessage.
+        """
+        self._event_listeners.append(handler)
+
+    def remove_event_listener(self, handler) -> None:
+        """Remove a previously registered event listener.
+
+        Args:
+            handler: The handler to remove.
+        """
+        try:
+            self._event_listeners.remove(handler)
+        except ValueError:
+            pass
 
     async def has_team_member(self, member_id: str) -> bool:
         """Check whether a team member exists in the database."""
@@ -633,6 +661,11 @@ class TeamAgent(BaseAgent):
         local_member_id = self._member_id() or ""
 
         async def _filter_self(event: EventMessage) -> None:
+            for listener in self._event_listeners:
+                try:
+                    await listener(event)
+                except Exception as e:
+                    team_logger.error("Event listener error: {}", e)
             if local_member_id and event.sender_id == local_member_id:
                 team_logger.debug("ignoring self-published event: {}", event.event_type)
                 return
