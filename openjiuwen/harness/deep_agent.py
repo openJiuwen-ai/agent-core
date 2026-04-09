@@ -157,6 +157,7 @@ class DeepAgent(BaseAgent):
 
     def _hot_reconfigure(self, config: DeepAgentConfig) -> None:
         """Hot-reconfigure an already-running agent without restarting it."""
+        previous_config = self._deep_config
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
@@ -167,7 +168,10 @@ class DeepAgent(BaseAgent):
             self._hot_reload_model(config)
 
         if config.tools is not None and self._react_agent is not None:
-            self._hot_reload_tools(config)
+            self._hot_reload_tools(
+                config,
+                previous_tools=(previous_config.tools if previous_config is not None else None),
+            )
 
         if config.system_prompt is not None and self._react_agent is not None:
             self._hot_reload_system_prompt(config)
@@ -235,7 +239,12 @@ class DeepAgent(BaseAgent):
         self._react_agent.configure(new_react_config)
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
-    def _hot_reload_tools(self, config: DeepAgentConfig) -> None:
+    def _hot_reload_tools(
+        self,
+        config: DeepAgentConfig,
+        *,
+        previous_tools: Optional[List[ToolCard]] = None,
+    ) -> None:
         """Sync tool cards in the shared AbilityManager during hot-reconfigure.
 
         Tools are matched by id: a card whose id already exists in the
@@ -246,11 +255,14 @@ class DeepAgent(BaseAgent):
         """
         new_by_name = {card.name: card for card in (config.tools or [])}
 
-        # Remove tools that are no longer in the new config.
-        existing_tool_names = {
-            a.name for a in self.ability_manager.list() if isinstance(a, ToolCard)
+        # Only remove tools that were previously managed by config.tools.
+        # Rail-registered tools such as task_tool must survive hot reload.
+        managed_tool_names = {
+            card.name for card in (previous_tools or []) if isinstance(card, ToolCard)
         }
-        stale = [name for name in existing_tool_names if name not in new_by_name]
+        if not managed_tool_names:
+            managed_tool_names = set(new_by_name)
+        stale = [name for name in managed_tool_names if name not in new_by_name]
         if stale:
             self.ability_manager.remove(stale)
 
