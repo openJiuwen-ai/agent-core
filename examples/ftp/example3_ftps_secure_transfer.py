@@ -35,10 +35,10 @@ async def example_3_ftps_secure_transfer(input_data: {} = {}):
     print("=" * 60)
 
     ftp_credentials = FTPCredentials(
-        host=os.getenv("FTPS_HOST", "ftps.secure-server.com"),
-        port=21,
-        username=os.getenv("FTPS_USERNAME", "secure_user"),
-        password=os.getenv("FTPS_PASSWORD", "secure_pass"),
+        host=os.getenv("FTP_HOST", "eu-central-1.sftpcloud.io"),
+        port=int(os.getenv("FTP_PORT", "21")),
+        username=os.getenv("FTP_USERNAME", "some_username"),
+        password=os.getenv("FTP_PASSWORD", "some_password"),
         protocol=FTPProtocol.FTPS,
     )
 
@@ -65,10 +65,14 @@ async def example_3_ftps_secure_transfer(input_data: {} = {}):
     )
 
     # Upload sensitive file
+    file_name = "test_file.txt"
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    local_file = os.path.join(base_dir, file_name)
+
     operation_upload = FTPOperationConfig(
         operation_type=FTPOperationType.UPLOAD,
         upload=FTPUploadConfig(
-            local_path="/tmp/sensitive_data.json",
+            local_path=local_file,
             remote_path="/secure_uploads/sensitive_data.json",
             overwrite=True,
         ),

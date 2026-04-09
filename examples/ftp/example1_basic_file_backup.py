@@ -33,10 +33,10 @@ async def example_1_basic_file_backup(input_data: {} = {}):
     print("=" * 60)
 
     ftp_credentials = FTPCredentials(
-        host=os.getenv("FTP_HOST", "ftp.example.com"),
+        host=os.getenv("FTP_HOST", "eu-central-1.sftpcloud.io"),
         port=int(os.getenv("FTP_PORT", "21")),
-        username=os.getenv("FTP_USERNAME", "backup_user"),
-        password=os.getenv("FTP_PASSWORD", "secure_password"),
+        username=os.getenv("FTP_USERNAME", "some_username"),
+        password=os.getenv("FTP_PASSWORD", "some_password"),
         protocol=FTPProtocol.FTP,
     )
 
@@ -47,12 +47,16 @@ async def example_1_basic_file_backup(input_data: {} = {}):
         retry_delay=2.0,
     )
 
-    # Upload backup file
+    # Upload test file
+    file_name = "test_file.txt"
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    local_file = os.path.join(base_dir, file_name)
+
     operation_upload = FTPOperationConfig(
         operation_type=FTPOperationType.UPLOAD,
         upload=FTPUploadConfig(
-            local_path="/tmp/backup.tar.gz",
-            remote_path="/backups/backup_2026-04-08.tar.gz",
+            local_path=local_file,
+            remote_path="/",
             create_directories=True,
             overwrite=True,
         ),

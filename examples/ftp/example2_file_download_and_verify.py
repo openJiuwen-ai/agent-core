@@ -26,7 +26,7 @@ async def example_2_file_download_and_verify(input_data: {} = {}):
 
     Demonstrates:
     - Listing directory contents
-    - Downloading specific file
+    - Downloading a specific file
     - Getting file information
     """
     print("\n" + "=" * 60)
@@ -34,9 +34,9 @@ async def example_2_file_download_and_verify(input_data: {} = {}):
     print("=" * 60)
 
     ftp_credentials = FTPCredentials(
-        host=os.getenv("FTP_HOST", "ftp.example.com"),
-        username=os.getenv("FTP_USERNAME", "user"),
-        password=os.getenv("FTP_PASSWORD", "pass"),
+        host=os.getenv("FTP_HOST", "eu-central-1.sftpcloud.io"),
+        username=os.getenv("FTP_USERNAME", "some_username"),
+        password=os.getenv("FTP_PASSWORD", "some_password"),
         protocol=FTPProtocol.FTP,
     )
 
@@ -44,18 +44,22 @@ async def example_2_file_download_and_verify(input_data: {} = {}):
     operation_list = FTPOperationConfig(
         operation_type=FTPOperationType.LIST,
         list=FTPListConfig(
-            remote_path="/data",
-            pattern="*.csv",
+            remote_path="/",
+            pattern="*.*",
             recursive=False,
         ),
     )
 
     # Download the specific file
+    file_name = "test_file.txt"
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    local_save_file = os.path.join(base_dir, "results")
+
     operation_download = FTPOperationConfig(
         operation_type=FTPOperationType.DOWNLOAD,
         download=FTPDownloadConfig(
-            remote_path="/data/report.csv",
-            local_path="/tmp/downloaded_report.csv",
+            remote_path="/" + file_name,
+            local_path=local_save_file,
             overwrite=True,
         ),
     )
@@ -64,7 +68,7 @@ async def example_2_file_download_and_verify(input_data: {} = {}):
     operation_get_info = FTPOperationConfig(
         operation_type=FTPOperationType.GET_INFO,
         get_info=FTPGetInfoConfig(
-            remote_path="/data/report.csv",
+            remote_path="/" + file_name,
         ),
     )
 

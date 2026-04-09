@@ -33,9 +33,9 @@ async def example_5_directory_cleanup(input_data: {} = {}):
     print("=" * 60)
 
     ftp_credentials = FTPCredentials(
-        host=os.getenv("FTP_HOST", "ftp.example.com"),
-        username=os.getenv("FTP_USERNAME", "user"),
-        password=os.getenv("FTP_PASSWORD", "pass"),
+        host=os.getenv("FTP_HOST", "eu-central-1.sftpcloud.io"),
+        username=os.getenv("FTP_USERNAME", "some_username"),
+        password=os.getenv("FTP_PASSWORD", "some_password"),
     )
 
     # List old backup files

@@ -34,9 +34,9 @@ async def example_4_sftp_with_ssh_key(input_data: {} = {}):
     print("=" * 60)
 
     ftp_credentials = FTPCredentials(
-        host=os.getenv("SFTP_HOST", "sftp.example.com"),
+        host=os.getenv("SFTP_HOST", "eu-central-1.sftpcloud.io"),
         port=22,
-        username=os.getenv("SFTP_USERNAME", "deploy_user"),
+        username=os.getenv("SFTP_USERNAME", "some_username"),
         private_key=os.getenv("SSH_KEY_PATH", "/home/user/.ssh/id_rsa"),
         private_key_passphrase=os.getenv("SSH_KEY_PASSPHRASE"),
         protocol=FTPProtocol.SFTP,
