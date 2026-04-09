@@ -29,7 +29,7 @@ def _save_run(name: str, workflow_output) -> Path:
 
     summary = {
         "state": str(workflow_output.state),
-        "result": serializable,
+        "result": inner,
     }
     (run_dir / "result.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False, default=str),

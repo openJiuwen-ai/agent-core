@@ -11,7 +11,11 @@ from openjiuwen.core.workflow import (
     FTPOperationConfig,
     FTPOperationType,
     FTPUploadConfig,
+    create_workflow_session
 )
+from ._print_result_summary import _print_result_summary
+from ._save_run import _save_run
+
 
 
 async def example_6_content_upload(input_data: {} = {}):
@@ -42,7 +46,7 @@ async def example_6_content_upload(input_data: {} = {}):
         ),
     )
 
-    ftp_operations = [operation_upload],
+    ftp_operations = [operation_upload]
 
     ftp_config = FTPComponentConfig(credentials=ftp_credentials, operations=ftp_operations)
 

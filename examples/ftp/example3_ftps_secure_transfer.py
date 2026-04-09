@@ -15,7 +15,10 @@ from openjiuwen.core.workflow import (
     FTPProtocol,
     FTPUploadConfig,
     FTPCreateDirectoryConfig,
+    create_workflow_session
 )
+from ._print_result_summary import _print_result_summary
+from ._save_run import _save_run
 
 
 async def example_3_ftps_secure_transfer(input_data: {} = {}):

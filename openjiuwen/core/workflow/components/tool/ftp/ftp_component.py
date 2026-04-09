@@ -62,7 +62,7 @@ class FTPExecutable(ComponentExecutable):
                 )
                 operation_results.append(result)
             except Exception as e:
-                workflow_logger.error(f"FTP operation failed: {e}", event_type=LogEventType.COMPONENT_ERROR)
+                workflow_logger.error(f"FTP operation failed: {e}", event_type=LogEventType.WORKFLOW_COMPONENT_ERROR)
                 operation_results.append({
                     "ok": False,
                     "operation": operation.operation_type.value,
@@ -110,7 +110,7 @@ class FTPExecutable(ComponentExecutable):
                     "error": result.get("error"),
                 }
             except Exception as e:
-                workflow_logger.error(f"FTP operation failed: {e}", event_type=LogEventType.COMPONENT_ERROR)
+                workflow_logger.error(f"FTP operation failed: {e}", event_type=LogEventType.WORKFLOW_COMPONENT_ERROR)
                 yield {
                     "ok": False,
                     "operation": operation.operation_type.value,
