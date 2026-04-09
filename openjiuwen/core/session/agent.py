@@ -79,14 +79,17 @@ class Session:
         return self._inner.state().dump()
 
     async def write_stream(self, data: Union[dict, OutputSchema]):
+        stream_data = self._normalize_output_stream(self._tag_stream_payload(data))
+        from openjiuwen.core.runner.callback import trigger
+        await trigger(self._session_id + "write_stream", data=stream_data)
         await self._inner.stream_writer_manager().get_writer(BaseStreamMode.OUTPUT).write(
-            self._normalize_output_stream(self._tag_stream_payload(data))
-        )
+            stream_data)
 
     async def write_custom_stream(self, data: dict):
-        await self._inner.stream_writer_manager().get_writer(BaseStreamMode.CUSTOM).write(
-            self._tag_stream_payload(data)
-        )
+        stream_data = self._tag_stream_payload(data)
+        from openjiuwen.core.runner.callback import trigger
+        await trigger(self._session_id + "write_stream", data=stream_data)
+        await self._inner.stream_writer_manager().get_writer(BaseStreamMode.CUSTOM).write(stream_data)
 
     def stream_iterator(self) -> AsyncIterator[Any]:
         return self._inner.stream_writer_manager(
@@ -97,10 +100,11 @@ class Session:
 
     async def pre_run(self, **kwargs):
         if self._pre_run_done:
-            return
+            return self
         inputs = kwargs.get("inputs")
         await CheckpointerFactory.get_checkpointer().pre_agent_execute(self._inner, inputs)
         self._pre_run_done = True
+        return self
 
     async def close_stream(self):
         """Close the stream emitter to send END_FRAME.
@@ -110,14 +114,17 @@ class Session:
         the caller (e.g. Runner) manages the session lifecycle.
         """
         await self._inner.stream_writer_manager().stream_emitter().close()
+        from openjiuwen.core.runner.runner import Runner
+        await Runner.callback_framework.unregister_event(event=self._session_id + "write_stream")
 
     async def post_run(self):
         if self._post_run_done:
-            return
+            return self
         if self._close_stream_on_post_run:
             await self.close_stream()
         await self._inner.checkpointer().post_agent_execute(self._inner)
         self._post_run_done = True
+        return self
 
     def create_workflow_session(self) -> WorkflowSession:
         return WorkflowSession(parent=self._inner, session_id=self.get_session_id())
@@ -158,8 +165,9 @@ def create_agent_session(session_id: str = None,
                          card: "AgentCard" = None,
                          *,
                          stream_writer_manager: StreamWriterManager | None = None,
-                         close_stream_on_post_run: bool = True,
-                         source_metadata: dict[str, Any] | None = None) -> Session:
+                         source_metadata: dict[str, Any] | None = None,
+                         **kwargs) -> Session:
+    close_stream_on_post_run = kwargs.get("close_stream_on_post_run", True)
     return Session(
         session_id=session_id,
         envs=envs,

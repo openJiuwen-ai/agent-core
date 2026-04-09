@@ -2,9 +2,10 @@ import asyncio
 
 import pytest
 
-from openjiuwen.core.single_agent.legacy import AgentConfig, AgentSession
+from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.single_agent.legacy import AgentConfig
 from openjiuwen.core.session import Config
-from openjiuwen.core.single_agent import Session
+from openjiuwen.core.single_agent import AgentCard, Session
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.stream import CustomSchema
 from openjiuwen.core.workflow import Workflow
@@ -126,10 +127,9 @@ class TestAgent:
         # context手动初始化tracer，agent和workflow共用一个tracer
         config = Config()
         config.set_agent_config(AgentConfig(id="test_agent_checkpoint"))
-        agent_session = AgentSession(config)
-
-        context = await agent_session.pre_run(session_id="test")
-        self.tracer = context.tracer()
+        agent_session = create_agent_session(session_id="test", card=AgentCard(id="test_agent_checkpoint"))
+        await agent_session.pre_run()
+        self.tracer = agent_session._inner.tracer()
 
         agent_span = self.tracer.tracer_agent_span_manager.create_agent_span()
         try:
@@ -143,7 +143,7 @@ class TestAgent:
                 await runner.stream(runner_span)
 
             # 模拟运行workflow
-            await self.run_workflow_seq_exec_stream_workflow_with_tracer(context)
+            await self.run_workflow_seq_exec_stream_workflow_with_tracer(agent_session)
 
             await self.tracer.trigger("tracer_agent", "on_chain_end", span=agent_span,
                                       outputs={"outputs": "mock chain"},
@@ -154,7 +154,7 @@ class TestAgent:
                                       )
             raise e
         finally:
-            await context.post_run()
+            await agent_session.post_run()
 
     async def get_stream_output(self):
         async for item in self.tracer._stream_writer_manager.stream_output(need_close=True):

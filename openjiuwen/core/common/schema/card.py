@@ -21,5 +21,5 @@ class BaseCard(BaseModel):
     def tool_info(self):
         ...
 
-    def str(self):
+    def to_str(self):
         return f'id={self.id},name={self.name}'

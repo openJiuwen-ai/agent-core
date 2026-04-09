@@ -14,7 +14,6 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.legacy import (
     AgentConfig,
     ControllerAgent,
-    AgentSession,
     WorkflowFactory,
     workflow_provider,
     create_react_agent_config,

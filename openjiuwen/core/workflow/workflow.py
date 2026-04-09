@@ -662,7 +662,8 @@ class Workflow(metaclass=_WorkflowMeta):
                 workflow_name=self._card.name,
                 exception=e
             )
-            raise build_error(StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=e, workflow=self._card.str()) from e
+            raise build_error(StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=e,
+                              workflow=self._card.to_str()) from e
         except BaseError as e:
             raise e
         finally:
@@ -716,13 +717,13 @@ class Workflow(metaclass=_WorkflowMeta):
             except Exception as e:
                 raise build_error(StatusCode.WORKFLOW_EXECUTE_INPUT_INVALID, cause=e, inputs=inputs,
                                   reason=f"input validation failed against schema: {str(e) if e else 'Unknown error'}",
-                                  workflow=self._card.str())
+                                  workflow=self._card.to_str())
 
     def _validate_session(self, session):
         if not session:
             raise build_error(StatusCode.WORKFLOW_EXECUTE_SESSION_INVALID,
                               reason="session is required for workflow execution",
-                              workflow=self._card.str())
+                              workflow=self._card.to_str())
 
 
     @staticmethod
