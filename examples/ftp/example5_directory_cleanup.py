@@ -28,39 +28,42 @@ async def example_5_directory_cleanup():
     print("Example 5: Directory Cleanup")
     print("=" * 60)
 
-    ftp_config = FTPComponentConfig(
-        credentials=FTPCredentials(
-            host=os.getenv("FTP_HOST", "ftp.example.com"),
-            username=os.getenv("FTP_USERNAME", "user"),
-            password=os.getenv("FTP_PASSWORD", "pass"),
-        ),
-        operations=[
-            # List old backup files
-            FTPOperationConfig(
-                operation_type=FTPOperationType.LIST,
-                list=FTPListConfig(
-                    remote_path="/backups",
-                    pattern="backup_old_*.tar.gz",
-                ),
-            ),
-            # Delete old backup (example)
-            FTPOperationConfig(
-                operation_type=FTPOperationType.DELETE,
-                delete=FTPDeleteConfig(
-                    remote_path="/backups/backup_old_2026-01-01.tar.gz",
-                    ignore_missing=True,
-                ),
-            ),
-            # Rename current backup
-            FTPOperationConfig(
-                operation_type=FTPOperationType.RENAME,
-                rename=FTPRenameConfig(
-                    old_path="/backups/backup_current.tar.gz",
-                    new_path="/backups/backup_2026-04-08.tar.gz",
-                ),
-            ),
-        ],
+    ftp_credentials = FTPCredentials(
+        host=os.getenv("FTP_HOST", "ftp.example.com"),
+        username=os.getenv("FTP_USERNAME", "user"),
+        password=os.getenv("FTP_PASSWORD", "pass"),
     )
+
+    # List old backup files
+    operation_list = FTPOperationConfig(
+        operation_type=FTPOperationType.LIST,
+        list=FTPListConfig(
+            remote_path="/backups",
+            pattern="backup_old_*.tar.gz",
+        ),
+    )
+
+    # Delete old backup (example)
+    operation_delete = FTPOperationConfig(
+        operation_type=FTPOperationType.DELETE,
+        delete=FTPDeleteConfig(
+            remote_path="/backups/backup_old_2026-01-01.tar.gz",
+            ignore_missing=True,
+        ),
+    )
+
+    # Rename current backup
+    operation_rename = FTPOperationConfig(
+        operation_type=FTPOperationType.RENAME,
+        rename=FTPRenameConfig(
+            old_path="/backups/backup_current.tar.gz",
+            new_path="/backups/backup_2026-04-08.tar.gz",
+        ),
+    )
+
+    ftp_operations = [operation_list, operation_delete, operation_rename]
+
+    ftp_config = FTPComponentConfig(credentials=ftp_credentials, operations=ftp_operations)
 
     workflow = Workflow(card=WorkflowCard(name="ftp_cleanup"))
     workflow.set_start_comp("start", Start())

@@ -26,24 +26,25 @@ async def example_6_content_upload():
     print("Example 6: Direct Content Upload")
     print("=" * 60)
 
-    ftp_config = FTPComponentConfig(
-        credentials=FTPCredentials(
-            host=os.getenv("FTP_HOST", "ftp.example.com"),
-            username=os.getenv("FTP_USERNAME", "user"),
-            password=os.getenv("FTP_PASSWORD", "pass"),
-        ),
-        operations=[
-            # Upload text content directly
-            FTPOperationConfig(
-                operation_type=FTPOperationType.UPLOAD,
-                upload=FTPUploadConfig(
-                    content="This is a test file created by FTP component.\nGenerated at: 2026-04-08",
-                    remote_path="/logs/test_log.txt",
-                    create_directories=True,
-                ),
-            ),
-        ],
+    ftp_credentials = FTPCredentials(
+        host=os.getenv("FTP_HOST", "ftp.example.com"),
+        username=os.getenv("FTP_USERNAME", "user"),
+        password=os.getenv("FTP_PASSWORD", "pass"),
     )
+
+    # Upload text content directly
+    operation_upload = FTPOperationConfig(
+        operation_type=FTPOperationType.UPLOAD,
+        upload=FTPUploadConfig(
+            content="This is a test file created by FTP component.\nGenerated at: 2026-04-08",
+            remote_path="/logs/test_log.txt",
+            create_directories=True,
+        ),
+    )
+
+    ftp_operations = [operation_upload],
+
+    ftp_config = FTPComponentConfig(credentials=ftp_credentials, operations=ftp_operations)
 
     workflow = Workflow(card=WorkflowCard(name="content_upload"))
     workflow.set_start_comp("start", Start())

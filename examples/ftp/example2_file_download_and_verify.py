@@ -30,41 +30,44 @@ async def example_2_file_download_and_verify():
     print("Example 2: File Download and Verify")
     print("=" * 60)
 
-    ftp_config = FTPComponentConfig(
-        credentials=FTPCredentials(
-            host=os.getenv("FTP_HOST", "ftp.example.com"),
-            username=os.getenv("FTP_USERNAME", "user"),
-            password=os.getenv("FTP_PASSWORD", "pass"),
-            protocol=FTPProtocol.FTP,
-        ),
-        operations=[
-            # List available files
-            FTPOperationConfig(
-                operation_type=FTPOperationType.LIST,
-                list=FTPListConfig(
-                    remote_path="/data",
-                    pattern="*.csv",
-                    recursive=False,
-                ),
-            ),
-            # Download specific file
-            FTPOperationConfig(
-                operation_type=FTPOperationType.DOWNLOAD,
-                download=FTPDownloadConfig(
-                    remote_path="/data/report.csv",
-                    local_path="/tmp/downloaded_report.csv",
-                    overwrite=True,
-                ),
-            ),
-            # Verify downloaded file
-            FTPOperationConfig(
-                operation_type=FTPOperationType.GET_INFO,
-                get_info=FTPGetInfoConfig(
-                    remote_path="/data/report.csv",
-                ),
-            ),
-        ],
+    ftp_credentials = FTPCredentials(
+        host=os.getenv("FTP_HOST", "ftp.example.com"),
+        username=os.getenv("FTP_USERNAME", "user"),
+        password=os.getenv("FTP_PASSWORD", "pass"),
+        protocol=FTPProtocol.FTP,
     )
+
+    # List available files
+    operation_list = FTPOperationConfig(
+        operation_type=FTPOperationType.LIST,
+        list=FTPListConfig(
+            remote_path="/data",
+            pattern="*.csv",
+            recursive=False,
+        ),
+    )
+
+    # Download the specific file
+    operation_download = FTPOperationConfig(
+        operation_type=FTPOperationType.DOWNLOAD,
+        download=FTPDownloadConfig(
+            remote_path="/data/report.csv",
+            local_path="/tmp/downloaded_report.csv",
+            overwrite=True,
+        ),
+    )
+
+    # Verify the downloaded file
+    operation_get_info = FTPOperationConfig(
+        operation_type=FTPOperationType.GET_INFO,
+        get_info=FTPGetInfoConfig(
+            remote_path="/data/report.csv",
+        ),
+    )
+
+    ftp_operations = [operation_list, operation_download, operation_get_info]
+
+    ftp_config = FTPComponentConfig(credentials=ftp_credentials, operations=ftp_operations)
 
     workflow = Workflow(card=WorkflowCard(name="ftp_download_workflow"))
     workflow.set_start_comp("start", Start())

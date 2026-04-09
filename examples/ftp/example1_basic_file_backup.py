@@ -29,34 +29,36 @@ async def example_1_basic_file_backup():
     print("Example 1: Basic File Backup to FTP Server")
     print("=" * 60)
 
-    # Create FTP component configuration
-    ftp_config = FTPComponentConfig(
-        credentials=FTPCredentials(
-            host=os.getenv("FTP_HOST", "ftp.example.com"),
-            port=int(os.getenv("FTP_PORT", "21")),
-            username=os.getenv("FTP_USERNAME", "backup_user"),
-            password=os.getenv("FTP_PASSWORD", "secure_password"),
-            protocol=FTPProtocol.FTP,
-        ),
-        connection=FTPConnectionConfig(
-            timeout=60,
-            passive_mode=True,
-            max_retries=3,
-            retry_delay=2.0,
-        ),
-        operations=[
-            # Upload backup file
-            FTPOperationConfig(
-                operation_type=FTPOperationType.UPLOAD,
-                upload=FTPUploadConfig(
-                    local_path="/tmp/backup.tar.gz",
-                    remote_path="/backups/backup_2026-04-08.tar.gz",
-                    create_directories=True,
-                    overwrite=True,
-                ),
-            ),
-        ],
+    ftp_credentials = FTPCredentials(
+        host=os.getenv("FTP_HOST", "ftp.example.com"),
+        port=int(os.getenv("FTP_PORT", "21")),
+        username=os.getenv("FTP_USERNAME", "backup_user"),
+        password=os.getenv("FTP_PASSWORD", "secure_password"),
+        protocol=FTPProtocol.FTP,
     )
+
+    ftp_connection = FTPConnectionConfig(
+        timeout=60,
+        passive_mode=True,
+        max_retries=3,
+        retry_delay=2.0,
+    )
+
+    # Upload backup file
+    operation_upload = FTPOperationConfig(
+        operation_type=FTPOperationType.UPLOAD,
+        upload=FTPUploadConfig(
+            local_path="/tmp/backup.tar.gz",
+            remote_path="/backups/backup_2026-04-08.tar.gz",
+            create_directories=True,
+            overwrite=True,
+        ),
+    )
+
+    ftp_operations = [operation_upload]
+
+    # Create FTP component configuration
+    ftp_config = FTPComponentConfig(credentials=ftp_credentials, connection=ftp_connection, operations=ftp_operations)
 
     # Create workflow
     workflow = Workflow(card=WorkflowCard(name="ftp_backup_workflow"))
