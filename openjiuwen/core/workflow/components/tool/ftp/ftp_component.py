@@ -4,8 +4,7 @@
 import re
 from typing import Dict, Any, AsyncIterator, Optional
 
-from loguru import logger
-
+from openjiuwen.core.common.logging import workflow_logger, LogEventType
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Input, Output
 from openjiuwen.core.session.node import Session
@@ -63,7 +62,7 @@ class FTPExecutable(ComponentExecutable):
                 )
                 operation_results.append(result)
             except Exception as e:
-                logger.error(f"FTP operation failed: {e}")
+                workflow_logger.error(f"FTP operation failed: {e}", event_type=LogEventType.COMPONENT_ERROR)
                 operation_results.append({
                     "ok": False,
                     "operation": operation.operation_type.value,
@@ -111,7 +110,7 @@ class FTPExecutable(ComponentExecutable):
                     "error": result.get("error"),
                 }
             except Exception as e:
-                logger.error(f"FTP operation failed: {e}")
+                workflow_logger.error(f"FTP operation failed: {e}", event_type=LogEventType.COMPONENT_ERROR)
                 yield {
                     "ok": False,
                     "operation": operation.operation_type.value,
