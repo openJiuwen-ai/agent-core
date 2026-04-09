@@ -78,7 +78,7 @@ from openjiuwen.core.single_agent.legacy.schema import (
 
 # From legacy.react_agent
 from openjiuwen.core.single_agent.legacy.react_agent import (
-    AgentSession, LegacyReActAgent as _LegacyReActAgent,
+    LegacyReActAgent as _LegacyReActAgent,
     create_react_agent_config,
 )
 
@@ -154,7 +154,6 @@ __all__ = [
     # Legacy base classes
     "LegacyBaseAgent",
     "ControllerAgent",
-    "AgentSession",
     "WorkflowFactory",
     "workflow_provider",
     # Legacy configs
