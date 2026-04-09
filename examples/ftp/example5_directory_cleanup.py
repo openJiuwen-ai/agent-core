@@ -15,7 +15,7 @@ from openjiuwen.core.workflow import (
     FTPRenameConfig,
 )
 
-async def example_5_directory_cleanup():
+async def example_5_directory_cleanup(input_data: {} = {}):
     """
     Example 5: Directory Cleanup
 
@@ -71,6 +71,13 @@ async def example_5_directory_cleanup():
     workflow.set_end_comp("end", End())
     workflow.add_connection("start", "ftp_cleanup")
     workflow.add_connection("ftp_cleanup", "end")
+
+    # Execute workflow
+    session = create_workflow_session()
+    result = await workflow.invoke(input_data, session=session)
+
+    run_dir = _save_run("example_5_directory_cleanup", result)
+    _print_result_summary("Example 5: Directory Cleanup", result, run_dir)
 
     print("\nWorkflow created successfully!")
     print("Operations:")

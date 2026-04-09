@@ -14,7 +14,7 @@ from openjiuwen.core.workflow import (
 )
 
 
-async def example_6_content_upload():
+async def example_6_content_upload(input_data: {} = {}):
     """
     Example 6: Direct Content Upload
 
@@ -52,6 +52,13 @@ async def example_6_content_upload():
     workflow.set_end_comp("end", End())
     workflow.add_connection("start", "ftp_upload")
     workflow.add_connection("ftp_upload", "end")
+
+    # Execute workflow
+    session = create_workflow_session()
+    result = await workflow.invoke(input_data, session=session)
+
+    run_dir = _save_run("example_6_content_upload", result)
+    _print_result_summary("Example 2: Content Upload", result, run_dir)
 
     print("\nWorkflow created successfully!")
     print("Operation: Upload text content directly to /logs/test_log.txt")

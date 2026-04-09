@@ -14,7 +14,7 @@ import asyncio
 
 from examples.ftp.example1_basic_file_backup import example_1_basic_file_backup
 from examples.ftp.example2_file_download_and_verify import example_2_file_download_and_verify
-from examples.ftp.example3_ftp_secure_transfer import example_3_ftps_secure_transfer
+from examples.ftp.example3_ftps_secure_transfer import example_3_ftps_secure_transfer
 from examples.ftp.example4_sftp_with_ssh_key import example_4_sftp_with_ssh_key
 from examples.ftp.example5_directory_cleanup import example_5_directory_cleanup
 from examples.ftp.example6_content_upload import example_6_content_upload

@@ -18,7 +18,7 @@ from openjiuwen.core.workflow import (
 )
 
 
-async def example_3_ftps_secure_transfer():
+async def example_3_ftps_secure_transfer(input_data: {} = {}):
     """
     Example 3: FTPS Secure File Transfer
 
@@ -82,6 +82,13 @@ async def example_3_ftps_secure_transfer():
     workflow.set_end_comp("end", End())
     workflow.add_connection("start", "ftps_upload")
     workflow.add_connection("ftps_upload", "end")
+
+    # Execute workflow
+    session = create_workflow_session()
+    result = await workflow.invoke(input_data, session=session)
+
+    run_dir = _save_run("example_3_ftps_secure_transfer", result)
+    _print_result_summary("Example 3: FTPS Secure Transfer", result, run_dir)
 
     print("\nWorkflow created successfully!")
     print(f"Protocol: FTPS (FTP over SSL/TLS)")

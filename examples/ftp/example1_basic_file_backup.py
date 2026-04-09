@@ -15,8 +15,11 @@ from openjiuwen.core.workflow import (
     create_workflow_session,
 )
 
+from ._print_result_summary import _print_result_summary
+from ._save_run import _save_run
 
-async def example_1_basic_file_backup():
+
+async def example_1_basic_file_backup(input_data: {} = {}):
     """
     Example 1: Basic File Backup to FTP Server
 
@@ -80,6 +83,10 @@ async def example_1_basic_file_backup():
 
     # Execute workflow
     session = create_workflow_session()
+    result = await workflow.invoke(input_data, session=session)
+
+    run_dir = _save_run("example_1_basic_file_backup", result)
+    _print_result_summary("Example 1: Basic File Backup", result, run_dir)
 
     print("\nWorkflow created successfully!")
     print(f"FTP Host: {ftp_config.credentials.host}")

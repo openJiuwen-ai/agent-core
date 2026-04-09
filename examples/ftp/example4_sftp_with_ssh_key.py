@@ -16,7 +16,7 @@ from openjiuwen.core.workflow import (
     FTPListConfig,
 )
 
-async def example_4_sftp_with_ssh_key():
+async def example_4_sftp_with_ssh_key(input_data: {} = {}):
     """
     Example 4: SFTP with SSH Key Authentication
 
@@ -71,6 +71,13 @@ async def example_4_sftp_with_ssh_key():
     workflow.set_end_comp("end", End())
     workflow.add_connection("start", "sftp_deploy")
     workflow.add_connection("sftp_deploy", "end")
+
+    # Execute workflow
+    session = create_workflow_session()
+    result = await workflow.invoke(input_data, session=session)
+
+    run_dir = _save_run("example_4_sftp_with_ssh_key", result)
+    _print_result_summary("Example 4: SFTP with ssh key", result, run_dir)
 
     print("\nWorkflow created successfully!")
     print(f"Protocol: SFTP (SSH File Transfer)")

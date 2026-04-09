@@ -17,7 +17,7 @@ from openjiuwen.core.workflow import (
 )
 
 
-async def example_2_file_download_and_verify():
+async def example_2_file_download_and_verify(input_data: {} = {}):
     """
     Example 2: Download File and Verify
 
@@ -83,6 +83,13 @@ async def example_2_file_download_and_verify():
     )
     workflow.add_connection("start", "ftp_download")
     workflow.add_connection("ftp_download", "end")
+
+    # Execute workflow
+    session = create_workflow_session()
+    result = await workflow.invoke(input_data, session=session)
+
+    run_dir = _save_run("example_2_file_download_and_verify", result)
+    _print_result_summary("Example 2: File Download And Verify", result, run_dir)
 
     print("\nWorkflow created successfully!")
     print("Operations:")
