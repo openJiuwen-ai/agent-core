@@ -1,0 +1,56 @@
+import os
+
+from openjiuwen.core.workflow import (
+    Workflow,
+    WorkflowCard,
+    Start,
+    End,
+    FTPComponent,
+    FTPComponentConfig,
+    FTPCredentials,
+    FTPOperationConfig,
+    FTPOperationType,
+    FTPUploadConfig,
+)
+
+
+async def example_6_content_upload():
+    """
+    Example 6: Direct Content Upload
+
+    Demonstrates:
+    - Uploading content directly without a file
+    - Creating files from strings
+    """
+    print("\n" + "=" * 60)
+    print("Example 6: Direct Content Upload")
+    print("=" * 60)
+
+    ftp_config = FTPComponentConfig(
+        credentials=FTPCredentials(
+            host=os.getenv("FTP_HOST", "ftp.example.com"),
+            username=os.getenv("FTP_USERNAME", "user"),
+            password=os.getenv("FTP_PASSWORD", "pass"),
+        ),
+        operations=[
+            # Upload text content directly
+            FTPOperationConfig(
+                operation_type=FTPOperationType.UPLOAD,
+                upload=FTPUploadConfig(
+                    content="This is a test file created by FTP component.\nGenerated at: 2026-04-08",
+                    remote_path="/logs/test_log.txt",
+                    create_directories=True,
+                ),
+            ),
+        ],
+    )
+
+    workflow = Workflow(card=WorkflowCard(name="content_upload"))
+    workflow.set_start_comp("start", Start())
+    workflow.add_workflow_comp("ftp_upload", FTPComponent(config=ftp_config))
+    workflow.set_end_comp("end", End())
+    workflow.add_connection("start", "ftp_upload")
+    workflow.add_connection("ftp_upload", "end")
+
+    print("\nWorkflow created successfully!")
+    print("Operation: Upload text content directly to /logs/test_log.txt")
