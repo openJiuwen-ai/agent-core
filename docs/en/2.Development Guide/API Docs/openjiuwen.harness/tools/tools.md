@@ -20,6 +20,7 @@ Built-in tools available to `DeepAgent`. Tools are registered via `ToolCard` ent
 | Tool | Description |
 |---|---|
 | `BashTool` | Execute a bash command and return its output. |
+| `PowerShellTool` | Execute a PowerShell command and return its output. |
 | `CodeTool` | Execute a code snippet in a sandboxed environment. |
 
 ### Audio

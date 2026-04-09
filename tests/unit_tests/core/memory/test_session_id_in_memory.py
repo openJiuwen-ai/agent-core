@@ -156,6 +156,7 @@ async def test_stream_with_session_id(agent_fixture):
     
     # Create a mock session instead of accessing agent._session directly
     mock_session = Mock()
+    mock_session.get_session_id.return_value = test_session_id
     
     # Create an async iterator
     async def async_stream_iterator():

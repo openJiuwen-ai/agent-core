@@ -20,14 +20,9 @@ from openjiuwen.core.common.utils.hash_util import generate_key
 from openjiuwen.core.common.utils.message_utils import MessageUtils
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session import Config, with_session
-from openjiuwen.core.session.workflow import Session as WorkflowSession
-from openjiuwen.core.session.agent import Session
-from openjiuwen.core.session.checkpointer import CheckpointerFactory
-from openjiuwen.core.session.interaction.interaction import SimpleAgentInteraction
-from openjiuwen.core.session.internal.agent import AgentSession as InternalAgentSession
-from openjiuwen.core.session.internal.wrapper import StateSession
-from openjiuwen.core.session.tracer import Tracer
+from openjiuwen.core.session import with_session
+from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.single_agent.legacy.agent import BaseAgent
 from openjiuwen.core.single_agent.legacy.config import (
     LegacyReActAgentConfig,
@@ -38,73 +33,6 @@ from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, ModelC
     ModelRequestConfig, Model
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool
-
-
-class TaskSession(StateSession):
-    """
-    deprecated
-    """
-    def __init__(self, session_id: str = None, config: Config = None, resource_mgr=None, card=None):
-        if config is None:
-            config = Config()
-        super().__init__(InternalAgentSession(session_id, config, resource_mgr, card=card))
-        self._interaction = None
-
-    async def trace(self, data: dict):
-        pass
-
-    async def trace_error(self, error: Exception):
-        pass
-
-    async def interact(self, value):
-        if self._interaction is None:
-            self._interaction = SimpleAgentInteraction(self._inner)
-        await self._interaction.wait_user_inputs(value)
-
-    def get_inner_session(self):
-        return self._inner
-
-    def stream_iterator(self) -> AsyncIterator[Any]:
-        return self._inner.stream_writer_manager().stream_output()
-
-    async def post_run(self):
-        if isinstance(self._inner, InternalAgentSession):
-            await self._inner.stream_writer_manager().stream_emitter().close()
-            await self._inner.checkpointer().post_agent_execute(self._inner)
-
-    def tracer(self) -> Tracer:
-        return self._inner.tracer()
-
-    def get_envs(self):
-        return getattr(self._inner.config(), "_env")
-
-    def create_workflow_session(self) -> WorkflowSession:
-        return WorkflowSession(parent=self._inner, session_id=self.session_id())
-
-    def get_session_id(self):
-        return self.session_id()
-
-
-class AgentSession:
-    """
-    deprecated
-    """
-
-    def __init__(self, config: Config = None):
-        self._config = config if config is not None else Config()
-        self._checkpointer = CheckpointerFactory.get_checkpointer()
-
-    async def pre_run(self, **kwargs) -> Session:
-        session_id = kwargs.get("session_id")
-        if session_id is None:
-            session_id = kwargs.get("trace_id")
-        inputs = kwargs.get("inputs")
-        session = TaskSession(session_id=session_id, config=self._config)
-        await self._checkpointer.pre_agent_execute(session.base(), inputs)
-        return session
-
-    async def release(self, session_id: str):
-        await self._checkpointer.release(session_id)
 
 
 class LegacyReActAgent(BaseAgent):
@@ -130,7 +58,6 @@ class LegacyReActAgent(BaseAgent):
         """
         super().__init__(agent_config)
         # 2. Create Session
-        self._session = AgentSession(config=self._config)
         self._llm = None
 
         if tools:
@@ -233,7 +160,10 @@ class LegacyReActAgent(BaseAgent):
         session_id = inputs.get("conversation_id", "default_session")
         session_created = False
         if session is None:
-            session = await self._session.pre_run(session_id=session_id, inputs=inputs)
+            session = create_agent_session(session_id=session_id,
+                                           card=AgentCard(id=self.agent_config.id, name=self.agent_config.id,
+                                                          description=self.agent_config.description))
+            await session.pre_run(inputs=inputs)
             session_created = True
         return await self._inner_invoke(session=session, inputs=inputs, session_created=session_created)
 
@@ -287,9 +217,10 @@ class LegacyReActAgent(BaseAgent):
         """Stream call - minimal version"""
         session_id = inputs.get("conversation_id", "default_session")
         if session is None:
-            agent_session = await self._session.pre_run(
-                session_id=session_id, inputs=inputs
-            )
+            agent_session = create_agent_session(session_id=session_id,
+                                                 card=AgentCard(id=self.agent_config.id, name=self.agent_config.id,
+                                                                description=self.agent_config.description))
+            await agent_session.pre_run(inputs=inputs)
             need_cleanup = True
             own_stream = True
         else:

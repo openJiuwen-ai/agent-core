@@ -4,14 +4,15 @@
 import asyncio
 import datetime
 from datetime import timezone
-from typing import Dict, List, Any, AsyncIterator, Optional
+from typing import Dict, List, Any, AsyncIterator, Optional, Callable
 
 from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import with_session
-from openjiuwen.core.single_agent import Session
+from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.single_agent import AgentCard, Session
 from openjiuwen.core.single_agent.legacy import (
-    AgentSession, ControllerAgent,
+    ControllerAgent,
     PluginSchema,
     LegacyReActAgentConfig as ReActAgentConfig,
     WorkflowSchema,
@@ -117,7 +118,6 @@ class LLMAgent(ControllerAgent):
 
         # Initialize base class (pass controller)
         super().__init__(agent_config, controller=None)
-        self._session = AgentSession(config=self._config)
         self._long_term_memory_instance = LongTermMemory()
         self._memory_scope_id = agent_config.memory_scope_id
         self._enable_memory = (self._memory_scope_id and (agent_config.agent_memory_config.enable_long_term_mem
@@ -127,7 +127,6 @@ class LLMAgent(ControllerAgent):
         self.controller = LLMController(
             config=agent_config,
             context_engine=self.context_engine,
-            session=self._session
         )
 
     async def invoke(self, inputs: Dict, session: Session = None) -> Dict:
@@ -145,7 +144,7 @@ class LLMAgent(ControllerAgent):
 
         if self._enable_memory:
             # Async write AI result message memory
-            agent_memory_task = asyncio.create_task(self._write_messages_to_memory(inputs, result))
+            agent_memory_task = asyncio.create_task(self._write_messages_to_memory(inputs, result, session))
             agent_memory_task.set_name("invoke_add_memory_task")
             agent_memory_task.add_done_callback(_memory_log_task_exception)
         return result
@@ -169,7 +168,10 @@ class LLMAgent(ControllerAgent):
         # If session not provided, create one
         session_id = inputs.get("conversation_id", "default_session")
         if session is None:
-            agent_session = await self._session.pre_run(session_id=session_id)
+            agent_session = create_agent_session(session_id=session_id,
+                                                 card=AgentCard(id=self.agent_config.id, name=self.agent_config.id,
+                                                                description=self.agent_config.description))
+            await agent_session.pre_run(inputs=inputs)
             need_cleanup = True
             own_stream = True  # Own stream lifecycle
         else:
@@ -192,26 +194,34 @@ class LLMAgent(ControllerAgent):
     @with_session()
     async def _inner_stream(self, inputs, session, need_cleanup, own_stream):
         # Store final result for send_to_agent
+        event_name = session.get_session_id() + "write_stream"
         final_result_holder = {"result": None}
+
         await self.context_engine.create_context(session=session)
+        result_for_memory_list = []
+        if self._enable_memory:
+            # Register callback for write_stream event if callback provided
+            @Runner.callback_framework.on(event_name)
+            async def collect_stream(data):
+                result_for_memory_list.append(_extract_answer_output(data))
 
         # Fully delegate to controller
         async def stream_process():
             try:
                 result = await self.controller.invoke(inputs, session)
                 final_result_holder["result"] = result
+                if self._enable_memory:
+                    await self._write_memory(inputs, result_for_memory_list, session)
             finally:
                 if need_cleanup:
                     await session.post_run()
 
         task = asyncio.create_task(stream_process())
-        result_for_memory_list = []
 
         if own_stream:
             # Only read from stream_iterator when owning stream
             # If external session passed, external caller handles reading
             async for result in session.stream_iterator():
-                result_for_memory_list.append(_extract_answer_output(result))
                 yield result
 
         await task
@@ -226,12 +236,14 @@ class LLMAgent(ControllerAgent):
             else:
                 yield res
 
-        if self._enable_memory:
-            # Async write AI result message memory
-            result_for_memory = ''.join(result_for_memory_list[:-1])
-            agent_memory_task = asyncio.create_task(self._write_messages_to_memory(inputs, result_for_memory))
-            agent_memory_task.set_name("stream_add_memory_task")
-            agent_memory_task.add_done_callback(_memory_log_task_exception)
+    async def _write_memory(self, inputs, result_for_memory_list, session):
+        # Async write AI result message memory
+        result_for_memory = ''.join(result_for_memory_list[:-1])
+        agent_memory_task = asyncio.create_task(
+            self._write_messages_to_memory(inputs, result_for_memory, session))
+        agent_memory_task.set_name("stream_add_memory_task")
+        agent_memory_task.add_done_callback(_memory_log_task_exception)
+        await agent_memory_task
 
     def set_prompt_template(self, prompt_template: List[Dict]):
         self.agent_config.prompt_template = prompt_template
@@ -239,9 +251,9 @@ class LLMAgent(ControllerAgent):
         self._config = self._config_wrapper
         self.controller.set_llm_controller_prompt_template(prompt_template)
 
-    async def _write_messages_to_memory(self, inputs, result=None):
+    async def _write_messages_to_memory(self, inputs, result=None, session=None):
         user_id = inputs.get("user_id")
-        session_id = inputs.get("conversation_id", "default_session")
+        session_id = session.get_session_id() if session else inputs.get("conversation_id", "default_session")
 
         if not user_id or not self._long_term_memory_instance:
             return

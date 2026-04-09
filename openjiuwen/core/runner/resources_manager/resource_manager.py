@@ -1317,7 +1317,7 @@ class ResourceMgr:
                         resource_id=resource_id,
                         resource_type=resource_type,
                         tag=tag if tag else GLOBAL,
-                        card=resource_card.str() if resource_card else None)
+                        card=resource_card.to_str() if resource_card else None)
             return Ok(resource_card if resource_card else resource_id)
         except Exception as e:
             logger.error(f"add resource failed",
@@ -1326,7 +1326,7 @@ class ResourceMgr:
                          resource_type=resource_type,
                          exception=e,
                          tag=tag if tag else GLOBAL,
-                         card=resource_card.str() if resource_card else None)
+                         card=resource_card.to_str() if resource_card else None)
 
             return Error(e)
 
@@ -1392,7 +1392,7 @@ class ResourceMgr:
                              resource_type=resource_type,
                              exception=error,
                              tag=tag if tag else GLOBAL,
-                             card=removed_card.str() if removed_card else None)
+                             card=removed_card.to_str() if removed_card else None)
                 results.append(Error(error))
             elif resource_type in ["tool", "prompt"]:
                 results.append(Ok(remove_id))
@@ -1405,7 +1405,7 @@ class ResourceMgr:
                             resource_id=remove_id,
                             resource_type=resource_type,
                             tag=tag if tag else GLOBAL,
-                            card=removed_card.str() if removed_card else None)
+                            card=removed_card.to_str() if removed_card else None)
         return results if not isinstance(resource_id, str) else results[0]
 
     def _inner_find_resource_ids(self, *, resource_id: Optional[str | list[str]], tag: Tag | list[Tag],

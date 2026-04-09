@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner.resources_manager.base import Ok
 from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.single_agent.agents.react_agent import ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -25,7 +26,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent, Workspace
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
-from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.subagents import create_code_agent
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
@@ -59,6 +60,9 @@ class FakeReactAgent:
         self.stream_calls: List[Dict[str, Any]] = []
         self.registered_callbacks: List[Tuple[AgentCallbackEvent, Any, int]] = []
         self.agent_callback_manager = FakeInnerCallbackManager()
+        self.config = ReActAgentConfig()
+        self.prompt_builder = None
+        self.system_prompt_builder = None
 
     async def register_callback(
         self,
@@ -111,6 +115,9 @@ class FakeReactAgent:
                     "result_type": result.get("result_type", ""),
                 },
             ))
+
+    def configure(self, config: ReActAgentConfig) -> None:
+        self.config = config
 
 
 class CountingRail(AgentRail):
@@ -630,6 +637,41 @@ def test_create_deep_agent_auto_add_task_planning_rail() -> None:
 
     rail_types = [type(rail).__name__ for rail in pending_rails if rail is not None]
     assert "TaskPlanningRail" in rail_types
+
+
+@pytest.mark.asyncio
+async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
+    tool = _build_tool_card("factory_tool")
+    subagent = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser subagent"),
+        system_prompt="browser prompt",
+        model=_create_dummy_model(),
+    )
+
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        tools=[tool],
+        subagents=[subagent],
+        enable_task_loop=False,
+    )
+    fake_react = FakeReactAgent()
+    agent.set_react_agent(fake_react, initialized=False)
+
+    await agent.invoke("initialize subagent rail")
+    assert agent.ability_manager.get("task_tool") is not None
+
+    agent.configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            tools=[tool],
+            subagents=[subagent],
+            rails=[],
+            enable_task_loop=False,
+            system_prompt="updated prompt",
+        )
+    )
+
+    assert agent.ability_manager.get("task_tool") is not None
 
 
 def test_create_deep_agent_auto_add_skill_rail() -> None:
