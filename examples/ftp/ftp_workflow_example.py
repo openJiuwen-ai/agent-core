@@ -33,6 +33,7 @@ from openjiuwen.core.workflow import (
     FTPDownloadConfig,
     FTPListConfig,
     FTPDeleteConfig,
+    FTPRenameConfig,
     FTPCreateDirectoryConfig,
     FTPGetInfoConfig,
     create_workflow_session,
@@ -100,7 +101,7 @@ async def example_1_basic_file_backup():
     workflow.add_connection("ftp_upload", "end")
 
     # Execute workflow
-    session = create_workflow_session(workflow_name="ftp_backup")
+    session = create_workflow_session()
 
     print("\nWorkflow created successfully!")
     print(f"FTP Host: {ftp_config.credentials.host}")

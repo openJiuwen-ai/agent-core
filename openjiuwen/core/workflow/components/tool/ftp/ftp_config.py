@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.workflow.components.base import ComponentConfig, WorkflowComponentMetadata
+from openjiuwen.core.workflow.components.base import WorkflowComponentMetadata
 
 
 class FTPProtocol(str, Enum):
@@ -120,7 +120,7 @@ class FTPOperationConfig(BaseModel):
     get_info: Optional[FTPGetInfoConfig] = Field(None, description="Get info operation config")
 
 
-class FTPComponentConfig(ComponentConfig):
+class FTPComponentConfig(BaseModel):
     """Main configuration for FTP workflow component."""
     credentials: FTPCredentials = Field(..., description="FTP server credentials")
     connection: FTPConnectionConfig = Field(
