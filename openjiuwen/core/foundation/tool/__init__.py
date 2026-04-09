@@ -11,6 +11,7 @@ from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 from openjiuwen.core.foundation.tool.mcp.client.playwright_client import PlaywrightClient
 from openjiuwen.core.foundation.tool.mcp.client.sse_client import SseClient
 from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
+from openjiuwen.core.foundation.tool.mcp.client.openapi_client import OpenApiClient
 from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import StreamableHttpClient
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.foundation.tool.service_api.restful_api import RestfulApi, RestfulApiCard
@@ -38,6 +39,7 @@ __all__ = [
     "McpClient",
     "SseClient",
     "StdioClient",
+    "OpenApiClient",
     "PlaywrightClient",
     "StreamableHttpClient",
     # tool form handler and handler manager
