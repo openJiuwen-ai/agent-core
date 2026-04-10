@@ -21,7 +21,11 @@ WORKSPACE_HEADER: Dict[str, str] = {
 # Context header
 # ---------------------------------------------------------------------------
 CONTEXT_HEADER_CN = "# 项目上下文\n\n以下文件已加载到上下文中，无需再次读取。\n\n"
-CONTEXT_HEADER_EN = "# Project Context\n\nThe following files are already loaded into context, so you do not need to read them again.\n\n"
+CONTEXT_HEADER_EN = (
+    "# Project Context\n\n"
+    "The following files are already loaded into context, so you do not need to "
+    "read them again.\n\n"
+)
 
 CONTEXT_HEADER: Dict[str, str] = {
     "cn": CONTEXT_HEADER_CN,

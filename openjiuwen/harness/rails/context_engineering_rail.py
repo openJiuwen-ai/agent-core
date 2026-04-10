@@ -22,7 +22,11 @@ from openjiuwen.core.context_engine.processor.offloader.message_offloader import
     MessageOffloaderConfig
 )
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
-from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, build_tools_content, build_tools_section
+from openjiuwen.harness.prompts.sections.context import (
+    build_context_section as _build_context,
+    build_tools_content,
+    build_tools_section,
+)
 
 logger = logging.getLogger(__name__)
 

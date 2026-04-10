@@ -34,13 +34,15 @@ GENERAL_PURPOSE_AGENT_DESC: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Tool description (bilingual) - for tool registration ONLY
 # ---------------------------------------------------------------------------
-TASK_TOOL_DESCRIPTION_EN = """Launch an ephemeral subagent to handle complex, multi-step independent tasks with isolated context windows.
-
-Available agent types and the tools they have access to:
-{available_agents}
-
-Important: When using the Task tool, you must specify the subagent_type and task_description parameters to select the agent type and describe the task. Do not specify agents you do not have access to!
-"""
+TASK_TOOL_DESCRIPTION_EN = (
+    "Launch an ephemeral subagent to handle complex, multi-step independent tasks "
+    "with isolated context windows.\n\n"
+    "Available agent types and the tools they have access to:\n"
+    "{available_agents}\n\n"
+    "Important: When using the Task tool, you must specify the subagent_type and "
+    "task_description parameters to select the agent type and describe the task. "
+    "Do not specify agents you do not have access to!\n"
+)
 
 TASK_TOOL_DESCRIPTION_CN = """启动临时子代理，处理复杂、多步骤、独立的隔离上下文任务。
 

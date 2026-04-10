@@ -191,7 +191,10 @@ async def _build_context_content(
     if language == "cn":
         parts.append("[以下文件仅在有实际内容时注入，空文件跳过]\n\n")
     else:
-        parts.append("[The following files are injected only when they contain real content; empty files are skipped]\n\n")
+        parts.append(
+            "[The following files are injected only when they contain real content; "
+            "empty files are skipped]\n\n"
+        )
 
     daily_content = await _read_daily_memory(sys_operation, workspace, timezone)
     if daily_content:
@@ -362,6 +365,10 @@ def build_tools_content(
     }
     summary_overrides = summary_overrides_cn if language == "cn" else summary_overrides_en
 
+    def _tool_summary(name: str) -> str:
+        """Return concise tool summary with safe dict access."""
+        return summary_overrides.get(name, tool_descriptions.get(name, "").strip())
+
     header = "# 可用工具" if language == "cn" else "# Available Tools"
     lines = [header, ""]
     rendered_names: set[str] = set()
@@ -383,7 +390,7 @@ def build_tools_content(
 
     for name in preferred_order:
         if name in tool_descriptions and name not in hidden_tools:
-            lines.append(f"- {name}: {summary_overrides.get(name, tool_descriptions[name].strip())}")
+            lines.append(f"- {name}: {_tool_summary(name)}")
             rendered_names.add(name)
 
     for group_names, label, summary in grouped_labels:
@@ -393,16 +400,16 @@ def build_tools_content(
             rendered_names.update(existing)
         else:
             for name in existing:
-                lines.append(f"- {name}: {summary_overrides.get(name, tool_descriptions[name].strip())}")
+                lines.append(f"- {name}: {_tool_summary(name)}")
                 rendered_names.add(name)
 
     for name in ("bash", "code"):
         if name in tool_descriptions and name not in hidden_tools and name not in rendered_names:
-            lines.append(f"- {name}: {summary_overrides.get(name, tool_descriptions[name].strip())}")
+            lines.append(f"- {name}: {_tool_summary(name)}")
             rendered_names.add(name)
 
     if "list_skill" in tool_descriptions and "list_skill" not in rendered_names:
-        lines.append(f"- list_skill: {summary_overrides.get('list_skill', tool_descriptions['list_skill'].strip())}")
+        lines.append(f"- list_skill: {_tool_summary('list_skill')}")
         rendered_names.add("list_skill")
 
     group_names, label, summary = memory_group
@@ -412,11 +419,11 @@ def build_tools_content(
         rendered_names.update(existing)
     else:
         for name in existing:
-            lines.append(f"- {name}: {summary_overrides.get(name, tool_descriptions[name].strip())}")
+            lines.append(f"- {name}: {_tool_summary(name)}")
             rendered_names.add(name)
 
     if "task_tool" in tool_descriptions and "task_tool" not in rendered_names:
-        lines.append(f"- task_tool: {summary_overrides.get('task_tool', tool_descriptions['task_tool'].strip())}")
+        lines.append(f"- task_tool: {_tool_summary('task_tool')}")
         rendered_names.add("task_tool")
 
     if "bash" in rendered_names:
@@ -426,7 +433,8 @@ def build_tools_content(
                     "",
                     "## bash 使用原则",
                     "",
-                    "- 优先使用专用工具完成文件搜索、内容搜索、读取、编辑和写入，不要用 bash 替代 `glob` / `grep` / `read_file` / `edit_file` / `write_file`",
+                    "- 优先使用专用工具完成文件搜索、内容搜索、读取、编辑和写入，不要用 bash 替代 `glob` / `grep` / "
+                    "`read_file` / `edit_file` / `write_file`",
                     "- 独立命令尽量并行调用；多步依赖命令才在单次调用里用 `&&` 串联，仅在不关心前序失败时才用 `;`",
                     "- 长时间运行命令使用 `background: true`，不要用 `sleep` 轮询等待",
                     "- 尽量使用绝对路径并避免频繁 `cd`；路径包含空格时使用双引号",
@@ -439,8 +447,11 @@ def build_tools_content(
                     "",
                     "## bash Guidelines",
                     "",
-                    "- Prefer dedicated tools for file search, content search, reading, editing, and writing instead of using bash as a substitute for `glob` / `grep` / `read_file` / `edit_file` / `write_file`",
-                    "- Run independent commands in parallel; only chain dependent commands with `&&`, and use `;` only when earlier failures do not matter",
+                    "- Prefer dedicated tools for file search, content search, reading, editing, and writing "
+                    "instead of using bash as a substitute for `glob` / `grep` / `read_file` / `edit_file` / "
+                    "`write_file`",
+                    "- Run independent commands in parallel; only chain dependent commands with `&&`, and "
+                    "use `;` only when earlier failures do not matter",
                     "- Use `background: true` for long-running commands instead of polling with `sleep`",
                     "- Prefer absolute paths and avoid frequent `cd`; quote paths with spaces using double quotes",
                     "- Consider safer alternatives before destructive Git operations",
