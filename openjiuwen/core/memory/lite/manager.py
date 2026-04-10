@@ -421,7 +421,7 @@ class MemoryIndexManager:
         Watches:
         - workspace_dir (memory directory for *.md files)
         - workspace_dir/daily_memory (for daily logs)
-        - workspace root (for User.md at root level)
+        - workspace root (for USER.md at root level)
         """
         try:
             from watchdog.observers import Observer
@@ -662,7 +662,7 @@ class MemoryIndexManager:
 
     def _get_base_dir_for_file(self, filepath: str) -> str:
         """Get the base directory for calculating relative path of a file."""
-        user_md_path = self.workspace.get_node_path("User.md")
+        user_md_path = self.workspace.get_node_path("USER.md")
         if user_md_path and os.path.normpath(filepath) == os.path.normpath(str(user_md_path)):
             return str(self.workspace.root_path)
         return self.memory_dir
@@ -1136,8 +1136,8 @@ class MemoryIndexManager:
         """
         if os.path.isabs(rel_path):
             full_path = rel_path
-        elif rel_path == "User.md":
-            full_path = str(self.workspace.get_node_path("User.md"))
+        elif rel_path == "USER.md":
+            full_path = str(self.workspace.get_node_path("USER.md"))
         else:
             full_path = os.path.join(self.memory_dir, rel_path)
 

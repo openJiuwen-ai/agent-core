@@ -290,6 +290,7 @@ class DeepAgent(BaseAgent):
             prompt_builder.add_section(PromptSection(
                 name=SectionName.IDENTITY,
                 content={"cn": config.system_prompt, "en": config.system_prompt},
+                priority=10,
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
@@ -419,6 +420,7 @@ class DeepAgent(BaseAgent):
             prompt_builder.add_section(PromptSection(
                 name=SectionName.IDENTITY,
                 content={"cn": cfg.system_prompt, "en": cfg.system_prompt},
+                priority=10,
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
@@ -604,8 +606,8 @@ class DeepAgent(BaseAgent):
             "model": spec.model or self._deep_config.model,
             "card": spec.agent_card,
             "system_prompt": spec.system_prompt,
-            "tools": spec.tools or [],
-            "mcps": spec.mcps or [],
+            "tools": spec.tools,
+            "mcps": spec.mcps,
             "rails": spec.rails,
             "enable_task_loop": spec.enable_task_loop,
             "max_iterations": (
@@ -652,6 +654,24 @@ class DeepAgent(BaseAgent):
                 )
 
                 return create_browser_agent(
+                    **create_kwargs,
+                    **dict(spec.factory_kwargs or {}),
+                )
+            if normalized_factory == "code_agent":
+                from openjiuwen.harness.subagents.code_agent import (
+                    create_code_agent,
+                )
+
+                return create_code_agent(
+                    **create_kwargs,
+                    **dict(spec.factory_kwargs or {}),
+                )
+            if normalized_factory == "research_agent":
+                from openjiuwen.harness.subagents.research_agent import (
+                    create_research_agent,
+                )
+
+                return create_research_agent(
                     **create_kwargs,
                     **dict(spec.factory_kwargs or {}),
                 )

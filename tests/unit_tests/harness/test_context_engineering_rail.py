@@ -209,12 +209,14 @@ async def test_build_workspace_section(tmp_path: Path):
 
     section_cn = await build_workspace_section(sys_operation, workspace, "cn")
     content_cn = section_cn.render("cn")
-    assert "## 工作空间" in content_cn
-    assert "## 工作空间" in section_cn.render("en")  # fallback to cn
+    assert "# 工作空间" in content_cn
+    assert f"你的工作目录是：`{tmp_path}`" in content_cn
+    assert "# 工作空间" in section_cn.render("en")  # fallback to cn
 
     section_en = await build_workspace_section(sys_operation, workspace, "en")
-    assert "## Workspace" in section_en.render("en")
-    assert "## Workspace" in section_en.render("cn")  # fallback to en
+    assert "# Workspace" in section_en.render("en")
+    assert f"Your working directory is: `{tmp_path}`" in section_en.render("en")
+    assert "# Workspace" in section_en.render("cn")  # fallback to en
 
 
 @pytest.mark.asyncio
@@ -226,18 +228,18 @@ async def test_build_workspace_section_returns_none_when_workspace_is_none():
 async def test_build_context_section(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config")
-    await sys_operation.fs().write_file(f"{tmp_path}/SOUL.md", "# Soul Content")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
+    await sys_operation.fs().write_file(f"{tmp_path}/SOUL.md", "# Soul Content\nreal body")
     await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/{date}.md", "# Today")
 
     workspace = Workspace(root_path=str(tmp_path))
     section_cn = await build_context_section(
         sys_operation, workspace, "cn", timezone="Asia/Shanghai"
     )
-    assert section_cn.priority == 96
+    assert section_cn.priority == 80
     cn_content = section_cn.render("cn")
     assert "## AGENT.md - 智能体配置" in cn_content
-    assert "### 文件内容" in cn_content
+    assert "以下文件已加载到上下文中，无需再次读取。" in cn_content
     assert "# Agent Config" in cn_content
     assert "## SOUL.md" in cn_content
     assert "## daily_memory/" in cn_content
@@ -246,7 +248,7 @@ async def test_build_context_section(tmp_path: Path):
     )
     en_content = section_en.render("en")
     assert "## AGENT.md - Agent Configuration" in en_content
-    assert "### File Contents" in en_content
+    assert "already loaded into context" in en_content
 
 
 @pytest.mark.asyncio
@@ -257,7 +259,7 @@ async def test_build_context_section_returns_none_when_workspace_is_none():
 @pytest.mark.asyncio
 async def test_build_context_section_skips_empty_daily_memory_dir(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
-    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
     (tmp_path / "memory" / "daily_memory").mkdir(parents=True, exist_ok=True)
 
     workspace = Workspace(root_path=str(tmp_path))
@@ -272,7 +274,7 @@ async def test_build_context_section_skips_empty_daily_memory_dir(tmp_path: Path
 @pytest.mark.asyncio
 async def test_build_context_section_skips_when_today_daily_memory_missing(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
-    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
     await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/2026-04-02.md", "# Yesterday")
 
     workspace = Workspace(root_path=str(tmp_path))
@@ -293,7 +295,23 @@ def test_build_tools_content():
     """build_tools_content should return correct format per language."""
     mock_manager = Mock()
     mock_manager.list.return_value = [
-        ToolCard(name="t1", description="d1"),
+        ToolCard(name="free_search", description="verbose desc"),
+        ToolCard(name="read_file", description="read"),
+        ToolCard(name="write_file", description="write"),
+        ToolCard(name="edit_file", description="edit"),
+        ToolCard(name="bash", description="执行 Shell 命令并返回输出。"),
+        ToolCard(name="code", description="执行代码（Python 或 JavaScript）。"),
+        ToolCard(name="list_skill", description="list"),
+        ToolCard(
+            name="task_tool",
+            description=(
+                "启动临时子代理。\n\n"
+                "可用代理类型及对应工具：\n"
+                "\"browser_agent\": 专用浏览器子代理，使用 Playwright 执行网页任务\n\n"
+                "重要：使用时必须指定参数。"
+            ),
+        ),
+        ToolCard(name="cron_list_jobs", description="legacy"),
         ToolCard(name="", description="skip - no name"),
         ToolCard(name="t2", description=""),
     ]
@@ -305,15 +323,36 @@ def test_build_tools_content():
     # Valid cn
     cn = build_tools_content(mock_manager, "cn")
     assert cn is not None
-    assert "## 可用工具\n" in cn
-    assert "**t1**" in cn
-    assert "**t2**" not in cn
+    assert "# 可用工具\n" in cn
+    assert "- free_search: 免费搜索（DuckDuckGo 等）" in cn
+    assert "- read_file / write_file / edit_file: 文件读写编辑" in cn
+    assert "- bash: 执行 Shell 命令" in cn
+    assert "- code: 执行 Python 或 JavaScript 代码" in cn
+    assert "- list_skill: 列出可用技能" in cn
+    assert "## bash 使用原则" in cn
+    assert (
+        "不要用 bash 替代 `glob` / `grep` / `read_file` / `edit_file` / `write_file`"
+        in cn
+    )
+    assert "## task_tool 使用原则" in cn
+    assert "可用代理类型：" in cn
+    assert '- "browser_agent": 专用浏览器子代理，使用 Playwright 执行网页任务' in cn
+    assert cn.index("- bash: 执行 Shell 命令") < cn.index("## bash 使用原则")
+    assert cn.index("- list_skill: 列出可用技能") < cn.index("## task_tool 使用原则")
+    assert "cron_list_jobs" not in cn
+    assert "t2" not in cn
     assert "skip" not in cn
     assert cn.endswith("\n")
     # Valid en
     en = build_tools_content(mock_manager, "en")
     assert en is not None
-    assert "## Available Tools\n" in en
+    assert "# Available Tools\n" in en
+    assert "- free_search: Free web search" in en
+    assert "- read_file / write_file / edit_file: Read, write, and edit files" in en
+    assert "- bash: Run shell commands" in en
+    assert "- code: Run Python or JavaScript code" in en
+    assert "## bash Guidelines" in en
+    assert "## task_tool Guidelines" in en
 
 
 @pytest.mark.asyncio
@@ -334,8 +373,8 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
         tools_content=tools_cn,
         timezone="Asia/Shanghai",
     )
-    assert "## 可用工具" in section_cn.render("cn")
-    assert "**MyTool**" in section_cn.render("cn")
+    assert "# 可用工具" in section_cn.render("cn")
+    assert "MyTool" in section_cn.render("cn")
 
     section_en = await build_context_section(
         sys_operation,
@@ -344,15 +383,15 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
         tools_content=tools_en,
         timezone="Asia/Shanghai",
     )
-    assert "## Available Tools" in section_en.render("en")
-    assert "**MyTool**" in section_en.render("en")
+    assert "# Available Tools" in section_en.render("en")
+    assert "MyTool" in section_en.render("en")
 
 
 @pytest.mark.asyncio
 async def test_build_context_section_without_tools(tmp_path: Path):
     """build_context_section without tools_content should not include tools section."""
     sys_operation = _make_sys_operation(tmp_path)
-    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# AGENT")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# AGENT\nreal body")
     workspace = Workspace(root_path=str(tmp_path))
     section = await build_context_section(
         sys_operation,
@@ -363,8 +402,8 @@ async def test_build_context_section_without_tools(tmp_path: Path):
     )
     content = section.render("cn")
     assert "## AGENT.md" in content
-    assert "## 可用工具" not in content
-    assert "## Available Tools" not in content
+    assert "# 可用工具" not in content
+    assert "# Available Tools" not in content
 
 
 # =============================================================================
@@ -398,9 +437,9 @@ async def test_before_model_call_injects_sections(tmp_path: Path):
     ctx_section = builder.get_section("context")
     assert ws is not None
     assert ctx_section is not None
-    assert "## 工作空间" in ws.render("cn")
+    assert "# 工作空间" in ws.render("cn")
     assert "## AGENT.md" in ctx_section.render("cn")
-    assert "## 可用工具" not in ctx_section.render("cn")  # no tools
+    assert "# 可用工具" not in ctx_section.render("cn")  # no tools
 
 
 @pytest.mark.asyncio

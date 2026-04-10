@@ -184,6 +184,8 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     assert "xlsx-writer" in content
     assert "Parse invoice pdf files" in content
     assert "Write xlsx reports" in content
+    assert "Path:" in content
+    assert "list_skill" not in content
 
 
 @pytest.mark.asyncio
@@ -291,6 +293,10 @@ async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path
     content = builder.build()
     assert "Base system prompt." in content
     assert "list_skill" in content
+    assert "invoice-parser" not in content
+    assert "read_file" in content
+    assert "code" in content
+    assert "bash" in content
 
 
 @pytest.mark.asyncio

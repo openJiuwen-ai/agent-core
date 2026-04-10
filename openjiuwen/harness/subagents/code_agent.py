@@ -19,6 +19,8 @@ from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 
+CODE_AGENT_FACTORY_NAME = "code_agent"
+
 
 DEFAULT_CODE_AGENT_SYSTEM_PROMPT_EN = (
     "Rules: Use tools whenever possible (read/write/edit/grep/list/bash/code), don't guess file contents;"
@@ -45,6 +47,53 @@ DEFAULT_CODE_AGENT_DESCRIPTION: Dict[str, str] = {
     "cn": DEFAULT_CODE_AGENT_DESCRIPTION_CN,
     "en": DEFAULT_CODE_AGENT_DESCRIPTION_EN,
 }
+
+
+def build_code_agent_config(
+    model: Model,
+    *,
+    card: Optional[AgentCard] = None,
+    system_prompt: Optional[str] = None,
+    tools: Optional[List[Tool | ToolCard]] = None,
+    mcps: Optional[List[McpServerConfig]] = None,
+    rails: Optional[List[AgentRail]] = None,
+    enable_task_loop: bool = False,
+    max_iterations: int = 15,
+    workspace: Optional[str | Workspace] = None,
+    skills: Optional[List[str]] = None,
+    backend: Optional[Any] = None,
+    sys_operation: Optional[SysOperation] = None,
+    language: Optional[str] = None,
+    prompt_mode: Optional[str] = None,
+) -> SubAgentConfig:
+    """Build a SubAgentConfig that materializes as create_code_agent()."""
+    resolved_language = resolve_language(language)
+    return SubAgentConfig(
+        agent_card=card or AgentCard(
+            name="code_agent",
+            description=DEFAULT_CODE_AGENT_DESCRIPTION.get(
+                resolved_language,
+                DEFAULT_CODE_AGENT_DESCRIPTION["cn"],
+            ),
+        ),
+        system_prompt=system_prompt or DEFAULT_CODE_AGENT_SYSTEM_PROMPT.get(
+            resolved_language,
+            DEFAULT_CODE_AGENT_SYSTEM_PROMPT["cn"],
+        ),
+        tools=tools,
+        mcps=mcps,
+        model=model,
+        rails=rails,
+        skills=skills,
+        backend=backend,
+        workspace=workspace,
+        sys_operation=sys_operation,
+        language=resolved_language,
+        prompt_mode=prompt_mode,
+        enable_task_loop=enable_task_loop,
+        max_iterations=max_iterations,
+        factory_name=CODE_AGENT_FACTORY_NAME,
+    )
 
 
 def create_code_agent(
@@ -126,3 +175,12 @@ def create_code_agent(
         prompt_mode=prompt_mode,
         **config_kwargs,
     )
+
+
+__all__ = [
+    "CODE_AGENT_FACTORY_NAME",
+    "DEFAULT_CODE_AGENT_DESCRIPTION",
+    "DEFAULT_CODE_AGENT_SYSTEM_PROMPT",
+    "build_code_agent_config",
+    "create_code_agent",
+]
