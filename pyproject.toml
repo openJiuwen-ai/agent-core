@@ -19,6 +19,7 @@ dependencies = [
     # HTTP clients
     "aiohttp>=3.11.12",
     "requests>=2.32.3",
+    "a2a-sdk==1.0.0a0",
     # Date & time
     "python-dateutil>=2.9.0.post0",
     # File & locking
@@ -90,6 +91,9 @@ test = [
     "pytest-mock>=3.14.0",
     "pytest-cov>=7.0.0",
     "coverage>=7.7.1",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "sse-starlette>=2.1.3",
 ]
 # Linting & formatting
 lint = [
@@ -97,6 +101,7 @@ lint = [
     "pylint>=3.0.0",
     "mypy>=1.12.0",
     "codespell>=2.2.4",
+    "httpx>=0.28.1",
 ]
 # Documentation
 docs = [

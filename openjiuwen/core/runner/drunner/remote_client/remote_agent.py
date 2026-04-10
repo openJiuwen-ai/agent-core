@@ -2,23 +2,26 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.runner.drunner.remote_client.a2a_remote_client import A2ARemoteClient
 from openjiuwen.core.runner.drunner.remote_client.mq_remote_clent import MqRemoteClient
 from openjiuwen.core.runner.drunner.remote_client.remote_client import RemoteClient
 from openjiuwen.core.runner.drunner.remote_client.remote_client_config import RemoteClientConfig, ProtocolEnum
 from openjiuwen.core.runner.runner_config import get_runner_config
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
 class RemoteAgent:
 
     def __init__(self, agent_id: str, version: str = "", description: str = None, topic: str = None,
-                 protocol: str = ProtocolEnum.MQ, config: dict = None, ):
+                 protocol: str = ProtocolEnum.MQ, config: dict = None, card: AgentCard = None):
         self.agent_id = agent_id
         self.version = version
         self.description = description
+        self.card = card
         # Use template if topic not provided
         self.topic = topic or get_runner_config().agent_topic_template().format(agent_id=agent_id,
                                                                                 version=self.version)
@@ -29,6 +32,9 @@ class RemoteAgent:
     def _create_client(self) -> RemoteClient | None:
         if self.protocol == ProtocolEnum.MQ:
             client = MqRemoteClient(config=self.config)
+            return client
+        if self.protocol == ProtocolEnum.A2A:
+            client = A2ARemoteClient(config=self.config, card=self.card)
             return client
         return None
 
