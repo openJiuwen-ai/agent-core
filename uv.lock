@@ -2685,7 +2685,7 @@ wheels = [
 
 [[package]]
 name = "openjiuwen"
-version = "0.1.9"
+version = "0.1.10"
 source = { virtual = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -2758,6 +2758,11 @@ chromadb = [
     { name = "chromadb" },
     { name = "opentelemetry-proto" },
     { name = "protobuf" },
+]
+cli = [
+    { name = "click" },
+    { name = "prompt-toolkit" },
+    { name = "rich" },
 ]
 gaussvector = [
     { name = "psycopg2-binary" },
@@ -2835,6 +2840,7 @@ requires-dist = [
     { name = "cacheout", specifier = ">=0.16.0" },
     { name = "charset-normalizer", specifier = ">=3.4.4" },
     { name = "chromadb", marker = "extra == 'chromadb'", specifier = ">=1.5.4" },
+    { name = "click", marker = "extra == 'cli'", specifier = ">=8.0" },
     { name = "dashscope", specifier = ">=1.25.6" },
     { name = "docx2txt", specifier = ">=0.8" },
     { name = "fastmcp", specifier = ">=2.14.2,<3.0" },
@@ -2856,6 +2862,7 @@ requires-dist = [
     { name = "pdfplumber", specifier = ">=0.11.8" },
     { name = "pgvector", marker = "extra == 'pgvector'", specifier = ">=0.2.0" },
     { name = "portalocker", specifier = ">=3.2.0" },
+    { name = "prompt-toolkit", marker = "extra == 'cli'", specifier = ">=3.0" },
     { name = "protobuf", marker = "extra == 'chromadb'", specifier = ">=5.0,<7.0" },
     { name = "psycopg2-binary", marker = "extra == 'gaussvector'", specifier = ">=2.9.10" },
     { name = "pulsar-client", marker = "extra == 'pulsar'", specifier = ">=3.5.0" },
@@ -2868,6 +2875,7 @@ requires-dist = [
     { name = "pyzmq", marker = "extra == 'zmq'", specifier = ">=26.0.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=7.1.0" },
     { name = "requests", specifier = ">=2.32.3" },
+    { name = "rich", marker = "extra == 'cli'", specifier = ">=13.0" },
     { name = "sqlalchemy", specifier = ">=2.0.41" },
     { name = "sqlmodel", specifier = ">=0.0.37" },
     { name = "tenacity", specifier = ">=9.1.2" },
@@ -2875,7 +2883,7 @@ requires-dist = [
     { name = "tornado", marker = "extra == 'zmq'", specifier = ">=6.1" },
     { name = "transformers", specifier = ">=4.52.4" },
 ]
-provides-extras = ["pulsar", "redis", "sqlite", "mysql", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "all-mq", "all-storage", "all-vector", "default", "all"]
+provides-extras = ["pulsar", "redis", "sqlite", "mysql", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3353,6 +3361,18 @@ source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/f0/58/a794d23feb6b00fc0c72787d7e87d872a6730dd9ed7c7b3e954637d8f280/prometheus_client-0.24.1.tar.gz", hash = "sha256:7e0ced7fbbd40f7b84962d5d2ab6f17ef88a72504dcf7c0b40737b43b2a461f9" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/74/c3/24a2f845e3917201628ecaba4f18bab4d18a337834c1df2a159ee9d22a42/prometheus_client-0.24.1-py3-none-any.whl", hash = "sha256:150db128af71a5c2482b36e588fc8a6b95e498750da4b17065947c16070f4055" },
+]
+
+[[package]]
+name = "prompt-toolkit"
+version = "3.0.52"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "wcwidth" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/a1/96/06e01a7b38dce6fe1db213e061a4602dd6032a8a97ef6c1a862537732421/prompt_toolkit-3.0.52.tar.gz", hash = "sha256:28cde192929c8e7321de85de1ddbe736f1375148b02f2e17edd840042b1be855" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/84/03/0d3ce49e2505ae70cf43bc5bb3033955d2fc9f932163e84dc0779cc47f48/prompt_toolkit-3.0.52-py3-none-any.whl", hash = "sha256:9aac639a3bbd33284347de5ad8d68ecc044b91a762dc39b7c21095fcd6a19955" },
 ]
 
 [[package]]
@@ -5494,6 +5514,15 @@ wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/bd/95/615e72cd27b85b61eec764a5ca51bd94d40b5adea5ff47567d9ebc4d275a/watchfiles-1.1.1-pp311-pypy311_pp73-macosx_11_0_arm64.whl", hash = "sha256:89eef07eee5e9d1fda06e38822ad167a044153457e6fd997f8a858ab7564a336" },
     { url = "https://mirrors.aliyun.com/pypi/packages/c9/81/e7fe958ce8a7fb5c73cc9fb07f5aeaf755e6aa72498c57d760af760c91f8/watchfiles-1.1.1-pp311-pypy311_pp73-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ce19e06cbda693e9e7686358af9cd6f5d61312ab8b00488bc36f5aabbaf77e24" },
     { url = "https://mirrors.aliyun.com/pypi/packages/6e/d4/ed38dd3b1767193de971e694aa544356e63353c33a85d948166b5ff58b9e/watchfiles-1.1.1-pp311-pypy311_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:3e6f39af2eab0118338902798b5aa6664f46ff66bc0280de76fca67a7f262a49" },
+]
+
+[[package]]
+name = "wcwidth"
+version = "0.6.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/35/a2/8e3becb46433538a38726c948d3399905a4c7cabd0df578ede5dc51f0ec2/wcwidth-0.6.0.tar.gz", hash = "sha256:cdc4e4262d6ef9a1a57e018384cbeb1208d8abbc64176027e2c2455c81313159" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/68/5a/199c59e0a824a3db2b89c5d2dade7ab5f9624dbf6448dc291b46d5ec94d3/wcwidth-0.6.0-py3-none-any.whl", hash = "sha256:1a3a1e510b553315f8e146c54764f4fb6264ffad731b3d78088cdb1478ffbdad" },
 ]
 
 [[package]]
