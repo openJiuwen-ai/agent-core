@@ -22,7 +22,7 @@ from openjiuwen.core.context_engine.processor.offloader.message_offloader import
     MessageOffloaderConfig
 )
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
-from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, build_tools_content
+from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, build_tools_content, build_tools_section
 
 logger = logging.getLogger(__name__)
 
@@ -318,19 +318,22 @@ class ContextEngineeringRail(DeepAgentRail):
             workspace,
             lang,
         )
-        tools_cn = build_tools_content(self._ability_manager, "cn")
-        tools_en = build_tools_content(self._ability_manager, "en")
+        tools_section = build_tools_section(self._ability_manager, lang)
         context_section = await _build_context(
             self.sys_operation,
             workspace,
             lang,
-            tools_content=tools_cn if lang == "cn" else tools_en,
         )
 
         if workspace_section is not None:
             self.system_prompt_builder.add_section(workspace_section)
         else:
             self.system_prompt_builder.remove_section("workspace")
+
+        if tools_section is not None:
+            self.system_prompt_builder.add_section(tools_section)
+        else:
+            self.system_prompt_builder.remove_section("tools")
 
         if context_section is not None:
             self.system_prompt_builder.add_section(context_section)

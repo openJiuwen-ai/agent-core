@@ -153,29 +153,30 @@ async def build_workspace_content(
         workspace,
         language: str = "cn",
 ) -> str:
-    """Build the workspace directory structure content with header.
+    """Build the workspace content with header and path declaration.
 
     Args:
-        sys_operation: SysOperation instance.
+        sys_operation: SysOperation instance (unused, kept for API compat).
         workspace: Workspace object with root_path attribute.
         language: 'cn' or 'en'.
 
     Returns:
-        Formatted workspace content string with header.
+        Formatted workspace content string with header and path.
     """
     root_path = str(getattr(workspace, "root_path", "") or "")
 
     header = WORKSPACE_HEADER.get(language, WORKSPACE_HEADER["cn"])
 
-    lines: List[str] = []
-
-    if sys_operation is not None:
-        nodes = await _scan_directory_structure(
-            sys_operation, root_path, max_depth=2, language=language
+    if language == "cn":
+        path_line = (
+            f"你的工作目录是：`{root_path}`\n"
         )
-        lines = _format_tree(nodes, language=language)
+    else:
+        path_line = (
+            f"Your working directory is: `{root_path}`\n"
+        )
 
-    return header + "\n".join(lines)
+    return header + path_line
 
 
 async def build_workspace_section(
@@ -203,5 +204,5 @@ async def build_workspace_section(
     return PromptSection(
         name="workspace",
         content={language: content},
-        priority=95,
+        priority=70,
     )
