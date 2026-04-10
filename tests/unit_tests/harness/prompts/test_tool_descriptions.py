@@ -49,7 +49,7 @@ from openjiuwen.harness.tools.audio import (
     AudioTranscriptionTool,
 )
 from openjiuwen.harness.tools.code import CodeTool
-from openjiuwen.harness.tools.filesystem import ReadFileTool
+from openjiuwen.harness.tools.filesystem import EditFileTool, ReadFileTool
 from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.powershell import PowerShellTool
 from openjiuwen.harness.tools.vision import (
@@ -148,6 +148,9 @@ class TestToolClassesUseBilingualDescriptions:
         assert ReadFileTool(MagicMock(), language="en").card.description == (
             READ_FILE_DESCRIPTION["en"]
         )
+        assert EditFileTool(MagicMock(), language="en").card.description == (
+ 	             EDIT_FILE_DESCRIPTION["en"]
+)
 
     @staticmethod
     def test_vision_tools_en():
