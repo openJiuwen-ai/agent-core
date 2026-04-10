@@ -15,23 +15,19 @@ from typing import Dict, Optional
 # ---------------------------------------------------------------------------
 # Task system prompt (bilingual) - for system message injection
 # ---------------------------------------------------------------------------
-TASK_SYSTEM_PROMPT_EN = """## `task_tool` (subagent spawner) 
-You have access to a `task_tool` tool to launch short-lived subagents that handle isolated tasks. These agents are ephemeral — they live only for the duration of the task and return a single result.
-
-When to use the task_tool:
-- Tasks that are complex, multi-step, and can be executed independently
-- Scenarios requiring parallel processing, focused reasoning, or large context/token usage
-- Tasks that require sandboxed execution (e.g., code execution, search, formatting)
-- When only the final output is needed and intermediate steps are not required
-
-When NOT to use the task tool:
-- Tasks are simple
-- Intermediate steps need to be observed
-- Task decomposition provides no benefit and only adds latency
-
-Usage Guidelines:
-- Execute independent tasks in parallel whenever possible
-- Use sub-agents to isolate complex tasks and improve efficiency
+TASK_SYSTEM_PROMPT_EN = """## task_tool — launch ephemeral subagents for isolated tasks.
+When to use:
+    - Complex, multi-step tasks that can run independently
+    - Parallel processing, focused reasoning, or large context/token usage
+    - Sandboxed execution (code, search, formatting)
+    - Only the final output is needed, not intermediate steps
+When NOT to use:
+    - Simple tasks
+    - Intermediate steps need to be observed
+    - Splitting provides no benefit, only adds latency
+Guidelines:
+    - Run independent tasks in parallel whenever possible
+    - Use sub-agents to isolate complex tasks and improve efficiency
 """
 
 TASK_SYSTEM_PROMPT_CN = """## task_tool 用于创建临时子代理，独立完成复杂任务并返回最终结果。

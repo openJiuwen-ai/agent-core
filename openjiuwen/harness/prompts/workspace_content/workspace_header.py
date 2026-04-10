@@ -8,8 +8,8 @@ from typing import Dict
 # ---------------------------------------------------------------------------
 # Workspace header
 # ---------------------------------------------------------------------------
-WORKSPACE_HEADER_CN = "## 工作空间\n\n### 目录结构\n\n"
-WORKSPACE_HEADER_EN = "## Workspace\n\n### directory structure\n\n"
+WORKSPACE_HEADER_CN = "# 工作空间\n\n"
+WORKSPACE_HEADER_EN = "# Workspace\n\n"
 
 WORKSPACE_HEADER: Dict[str, str] = {
     "cn": WORKSPACE_HEADER_CN,
@@ -20,8 +20,12 @@ WORKSPACE_HEADER: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Context header
 # ---------------------------------------------------------------------------
-CONTEXT_HEADER_CN = "## Context\n\n### 文件内容\n\n"
-CONTEXT_HEADER_EN = "## Context\n\n### File Contents\n\n"
+CONTEXT_HEADER_CN = "# 项目上下文\n\n以下文件已加载到上下文中，无需再次读取。\n\n"
+CONTEXT_HEADER_EN = (
+    "# Project Context\n\n"
+    "The following files are already loaded into context, so you do not need to "
+    "read them again.\n\n"
+)
 
 CONTEXT_HEADER: Dict[str, str] = {
     "cn": CONTEXT_HEADER_CN,
@@ -115,5 +119,4 @@ CONTEXT_FILES = [
     "HEARTBEAT.md",
     "USER.md",
     "IDENTITY.md",
-    "MEMORY.md",
 ]

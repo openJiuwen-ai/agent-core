@@ -72,13 +72,13 @@ class TestPromptReport:
         assert report.sections[1].name == "b"
 
     @staticmethod
-    def test_minimal_mode_keeps_task_tool_section():
+    def test_minimal_mode_keeps_tools_section():
         builder = SystemPromptBuilder(language="cn", mode=PromptMode.MINIMAL)
         builder.add_section(PromptSection("identity", {"cn": "身份", "en": "id"}, priority=10))
-        builder.add_section(PromptSection("task_tool", {"cn": "子代理工具", "en": "task tool"}, priority=20))
+        builder.add_section(PromptSection("tools", {"cn": "工具\n## task_tool 使用原则", "en": "tools"}, priority=20))
         rendered = builder.build()
         assert "身份" in rendered
-        assert "子代理工具" in rendered
+        assert "## task_tool 使用原则" in rendered
 
 
 class TestBuildReport:

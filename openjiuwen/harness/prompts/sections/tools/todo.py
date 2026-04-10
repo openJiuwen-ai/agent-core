@@ -13,29 +13,71 @@ from openjiuwen.harness.prompts.sections.tools.base import (
 # Todo-create description
 # ---------------------------------------------------------------------------
 TODO_CREATE_DESCRIPTION_CN = """
-创建待办事项列表
+创建当前会话的待办事项列表，用于跟踪进度、组织复杂任务，帮助用户了解整体执行情况。
 
-使用分号(;)分隔多个任务：
+## 何时使用
+
+主动在以下场景调用：
+- 任务需要 3 个或更多步骤
+- 用户提供多个待完成事项（编号列表、逗号或分号分隔）
+- 用户明确要求使用待办清单
+- 任务具有规划性质（多步骤实现、功能开发等）
+
+识别到规划需求后，立即调用本工具。
+
+## 何时不使用
+
+- 单个简单任务
+- 纯信息查询或对话
+- 可在 3 步以内完成的琐碎任务
+
+## 使用方式
+
+用分号(;)分隔多个任务：
     {
         "tasks": "设计用户界面；实现接口集成；添加单元测试"
     }
 
-规则：
-- 第一个任务自动设为in_progress，其余为pending
-- 同一时间只能有一个in_progress任务
+## 规则
+
+- 第一个任务自动设为 in_progress，其余为 pending
+- 同一时间只能有一个 in_progress 任务
+- 任务描述必须具体、可执行、清晰明确
+- 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify
 """
 
 TODO_CREATE_DESCRIPTION_EN = """
-Create a todo list
+Create a todo list for the current session to track progress, organize complex tasks, and help the user understand overall execution status.
+
+## When to Use
+
+Call proactively in these scenarios:
+- Task requires 3 or more distinct steps
+- User provides multiple items to complete (numbered list, comma- or semicolon-separated)
+- User explicitly requests a todo list
+- Task has planning nature (multi-step implementation, feature development, etc.)
+
+Once you identify a planning need, call this tool immediately.
+
+## When NOT to Use
+
+- Single, straightforward task
+- Pure informational queries or conversation
+- Tasks completable in fewer than 3 trivial steps
+
+## Usage
 
 Use semicolons (;) to separate multiple tasks:
     {
         "tasks": "Design user interface;Implement API integration;Add unit tests"
     }
 
-Rules:
-- First task automatically set to in_progress, others to pending
-- Only one in_progress task at a time
+## Rules
+
+- First task is automatically set to in_progress, others to pending
+- Only one task can be in_progress at a time
+- Task descriptions must be specific, actionable, and clear
+- Calling this tool replaces the current session's task list; use todo_modify to append tasks
 """
 
 TODO_CREATE_DESCRIPTION: Dict[str, str] = {
@@ -47,11 +89,31 @@ TODO_CREATE_DESCRIPTION: Dict[str, str] = {
 # Todo-list description
 # ---------------------------------------------------------------------------
 TODO_LIST_DESCRIPTION_CN = """
-检索并显示所有待办事项
+检索并显示当前会话的所有待办事项。
+
+## 何时使用 todo_list（而非 todo_modify）
+
+使用 todo_list 的场景：
+- 需要查看当前任务全貌和各任务ID，再决定如何更新
+- 不确定当前有哪些任务处于 in_progress 或 pending
+
+使用 todo_modify 的场景（不需要先调用 todo_list）：
+- 已知任务 ID，直接更新状态、内容或追加新任务
+- 任务刚完成，立即标记为 completed
 """
 
 TODO_LIST_DESCRIPTION_EN = """
-Retrieve and display all todo items
+Retrieve and display all todo items for the current session
+
+## When to Use todo_list (vs. todo_modify)
+
+Use todo_list when:
+- You need an overview of all tasks and their IDs before deciding how to update
+- You are unsure which tasks are currently in_progress or pending
+
+Use todo_modify directly (no need to call todo_list first) when:
+- You already know the task ID and want to update status, content, or append new tasks
+- A task just finished and you want to mark it completed immediately
 """
 
 TODO_LIST_DESCRIPTION: Dict[str, str] = {
@@ -63,177 +125,121 @@ TODO_LIST_DESCRIPTION: Dict[str, str] = {
 # Todo-modify description
 # ---------------------------------------------------------------------------
 TODO_MODIFY_DESCRIPTION_CN = """
-用于给智能体的待办事项修改的工具
-核心用途：修改待办事项，执行动作包含：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）
+修改当前会话的待办事项。支持批量操作，尽量将多个变更合并为一次调用。
+
+核心用途：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）
+
 重要说明：
-    - 本工具支持通过 'action' 与对应字段组合来修改待办事项
-    - 若需重新规划待办事项列表，请调用 todo_create 工具
-    - action 字段决定操作类型及对应的必填字段
+- 若需重新规划整个任务列表，请调用 todo_create
+- 支持批量操作，尽量将多个变更合并为一次调用，避免连续多次调用
+
 action 支持的操作类型：
-update：修改现有待办任务属性（任务 id 不可修改）：
+
+update：修改现有任务的状态或内容（id 不可修改，支持部分字段更新）：
     {
         "action": "update",
         "todos": [
-            {
-                "id": "123e4567-e89b-12d3-a456-426614174000",
-                "content": "更新后的任务内容",
-                "activeForm": "执行更新后的任务",
-                "status": "in_progress"
-            }
+            {"id": "uuid-1", "status": "completed"},
+            {"id": "uuid-2", "status": "in_progress"}
         ]
     }
-delete：根据任务 id 删除指定待办任务：
-    {
-        "action": "delete",
-        "ids": [
-            "123e4567-e89b-12d3-a456-426614174000",
-            "890e4567-e89b-12d3-a456-426614174001"
-        ]
-    }
-cancel：根据任务 id 取消指定待办任务：
+
+cancel：将指定任务标记为 cancelled（任务将被忽略，不再执行）：
     {
         "action": "cancel",
-        "ids": [
-            "123e4567-e89b-12d3-a456-426614174000",
-            "890e4567-e89b-12d3-a456-426614174001"
-        ]
+        "ids": ["uuid-1", "uuid-2"]
     }
-append：在待办事项列表末尾新增任务（按传入顺序）：
+
+delete：从列表中永久删除指定任务：
+    {
+        "action": "delete",
+        "ids": ["uuid-1"]
+    }
+
+append：在列表末尾追加新任务：
     {
         "action": "append",
         "todos": [
-            {
-                "id": "456e4567-e89b-12d3-a456-426614174002",
-                "content": "新任务内容",
-                "activeForm": "执行新任务",
-                "status": "pending"
-            }
+            {"id": "uuid-new", "content": "新任务内容", "activeForm": "执行新任务", "status": "pending"}
         ]
     }
-insert_after：在指定任务 id 之后插入任务（按传入顺序）：
+
+insert_after：在指定任务之后插入新任务（目标任务状态须为 in_progress 或 pending）：
     {
         "action": "insert_after",
-        "todo_data": [
-            "123e4567-e89b-12d3-a456-426614174000",
-            [
-                {
-                    "id": "789e4567-e89b-12d3-a456-426614174003",
-                    "content": "插入的任务内容",
-                    "activeForm": "执行插入的任务",
-                    "status": "pending"
-                }
-            ]
-        ]
+        "todo_data": ["uuid-target", [{"id": "uuid-new", "content": "插入的任务", "activeForm": "执行插入的任务", "status": "pending"}]]
     }
-insert_before：在指定任务 id 之前插入任务（按传入顺序）：
+
+insert_before：在指定任务之前插入新任务（目标任务状态须为 pending）：
     {
         "action": "insert_before",
-        "todo_data": [
-            "123e4567-e89b-12d3-a456-426614174000",
-            [
-                {
-                    "id": "012e4567-e89b-12d3-a456-426614174004",
-                    "content": "插入的任务内容",
-                    "activeForm": "执行插入的任务",
-                    "status": "pending"
-                }
-            ]
-        ]
+        "todo_data": ["uuid-target", [{"id": "uuid-new", "content": "插入的任务", "activeForm": "执行插入的任务", "status": "pending"}]]
     }
+
 核心规则：
-    - 同一时间只能有一个任务处于 'in_progress' 状态
-    - 'update' 操作：id 字段不可修改
-    - 'delete' 操作：id对应的目标任务从待办事项中删除
-    - 'cancel' 操作： id对应的目标任务的状态将被设置成 'cancel', 该任务之后将被忽略，不会被执行
-    - 'insert_after' 操作：id对应的目标任务状态必须为 'in_progress' 或 'pending'
-    - 'insert_before' 操作：id对应的目标任务状态必须为 'pending'
+- 同一时间只能有一个任务处于 in_progress 状态
+- update 操作：id 字段不可修改，其他字段支持部分更新
+- insert_after：目标任务状态必须为 in_progress 或 pending
+- insert_before：目标任务状态必须为 pending
 """
 
 TODO_MODIFY_DESCRIPTION_EN = """
-Tool for modifying the agent's todo items.
-Core purpose: Modify todo items. Supported actions: update, delete, cancel, append, insert_after, insert_before.
+Modify todo items for the current session. Supports batch operations — consolidate multiple changes into a single call whenever possible.
+
+Core purpose: update, delete, cancel, append, insert_after, insert_before.
+
 Important notes:
-    - This tool supports modifying todo items by combining 'action' with corresponding fields
-    - To re-plan the todo list, call the todo_create tool
-    - The action field determines the operation type and required fields
+- To re-plan the entire task list, call todo_create instead
+- Batch multiple changes into one call; avoid calling todo_modify repeatedly in succession
+
 Supported action types:
-update: Modify existing todo item attributes (task id cannot be changed):
+
+update: Modify status or content of existing tasks (id cannot be changed; partial field updates supported):
     {
         "action": "update",
         "todos": [
-            {
-                "id": "123e4567-e89b-12d3-a456-426614174000",
-                "content": "Updated task content",
-                "activeForm": "Executing updated task",
-                "status": "in_progress"
-            }
+            {"id": "uuid-1", "status": "completed"},
+            {"id": "uuid-2", "status": "in_progress"}
         ]
     }
-delete: Delete specified todo items by task id:
-    {
-        "action": "delete",
-        "ids": [
-            "123e4567-e89b-12d3-a456-426614174000",
-            "890e4567-e89b-12d3-a456-426614174001"
-        ]
-    }
-cancel: Cancel specified todo items by task id:
+
+cancel: Mark specified tasks as cancelled (tasks will be ignored and not executed):
     {
         "action": "cancel",
-        "ids": [
-            "123e4567-e89b-12d3-a456-426614174000",
-            "890e4567-e89b-12d3-a456-426614174001"
-        ]
+        "ids": ["uuid-1", "uuid-2"]
     }
-append: Add new tasks at the end of the todo list (in order):
+
+delete: Permanently remove specified tasks from the list:
+    {
+        "action": "delete",
+        "ids": ["uuid-1"]
+    }
+
+append: Add new tasks at the end of the list:
     {
         "action": "append",
         "todos": [
-            {
-                "id": "456e4567-e89b-12d3-a456-426614174002",
-                "content": "New task content",
-                "activeForm": "Executing new task",
-                "status": "pending"
-            }
+            {"id": "uuid-new", "content": "New task content", "activeForm": "Executing new task", "status": "pending"}
         ]
     }
-insert_after: Insert tasks after the specified task id (in order):
+
+insert_after: Insert new tasks after the specified task (target must be in_progress or pending):
     {
         "action": "insert_after",
-        "todo_data": [
-            "123e4567-e89b-12d3-a456-426614174000",
-            [
-                {
-                    "id": "789e4567-e89b-12d3-a456-426614174003",
-                    "content": "Inserted task content",
-                    "activeForm": "Executing inserted task",
-                    "status": "pending"
-                }
-            ]
-        ]
+        "todo_data": ["uuid-target", [{"id": "uuid-new", "content": "Inserted task", "activeForm": "Executing inserted task", "status": "pending"}]]
     }
-insert_before: Insert tasks before the specified task id (in order):
+
+insert_before: Insert new tasks before the specified task (target must be pending):
     {
         "action": "insert_before",
-        "todo_data": [
-            "123e4567-e89b-12d3-a456-426614174000",
-            [
-                {
-                    "id": "012e4567-e89b-12d3-a456-426614174004",
-                    "content": "Inserted task content",
-                    "activeForm": "Executing inserted task",
-                    "status": "pending"
-                }
-            ]
-        ]
+        "todo_data": ["uuid-target", [{"id": "uuid-new", "content": "Inserted task", "activeForm": "Executing inserted task", "status": "pending"}]]
     }
+
 Core rules:
-    - Only one task can be 'in_progress' at a time
-    - 'update' action: id field cannot be modified
-    - 'delete' action: delete target tasks corresponding to the ID from the to-do list
-    - 'cancel' action: target tasks will be set to 'cancel', and tasks will be ignored and will not be executed.
-    - 'insert_after' action: target task status must be 'in_progress' or 'pending'
-    - 'insert_before' action: target task status must be 'pending'
+- Only one task can be in_progress at a time
+- update action: id field cannot be modified; other fields support partial updates
+- insert_after: target task status must be in_progress or pending
+- insert_before: target task status must be pending
 """
 
 TODO_MODIFY_DESCRIPTION: Dict[str, str] = {

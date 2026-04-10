@@ -124,8 +124,8 @@ async def test_before_model_call_injects_safety_section() -> None:
 
     section = builder.get_section(SectionName.SAFETY)
     assert section is not None
-    assert "Safety Principles" in section.render("en")
-    assert "Safety Principles" in builder.build()
+    assert "# Safety" in section.render("en")
+    assert "# Safety" in builder.build()
 
 
 @pytest.mark.asyncio
@@ -188,4 +188,4 @@ async def test_before_model_call_uses_updated_builder_language() -> None:
 
     section = builder.get_section(SectionName.SAFETY)
     assert section is not None
-    assert "Safety Principles" in section.render("en")
+    assert "# Safety" in section.render("en")

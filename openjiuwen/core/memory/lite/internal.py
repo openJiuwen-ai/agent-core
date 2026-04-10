@@ -64,7 +64,7 @@ def list_memory_files(
                         if os.path.isfile(filepath):
                             files.append(filepath)
     
-    user_md_path = workspace.get_node_path("User.md")
+    user_md_path = workspace.get_node_path("USER.md")
     if user_md_path and os.path.isfile(user_md_path):
         files.append(str(user_md_path))
     

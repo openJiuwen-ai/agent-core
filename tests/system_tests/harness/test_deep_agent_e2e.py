@@ -368,8 +368,8 @@ class TestDeepAgentE2E(unittest.IsolatedAsyncioTestCase):
                 enable_task_loop=False,
                 max_iterations=12,
                 workspace=work_dir,
+                sys_operation=fake_sys_operation,
             )
-            agent.deep_config.sys_operation = fake_sys_operation
 
             query = (
                 "请严格按顺序执行以下任务，并且每一步都必须调用工具：\n"

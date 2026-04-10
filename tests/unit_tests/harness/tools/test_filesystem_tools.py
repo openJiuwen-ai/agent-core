@@ -4,6 +4,7 @@
 import os
 import tempfile
 import shutil
+from types import MethodType
 
 import pytest
 import pytest_asyncio
@@ -11,7 +12,8 @@ import pytest_asyncio
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.tools.filesystem import (
-    ReadFileTool, WriteFileTool, EditFileTool, GlobTool, ListDirTool, GrepTool
+    ReadFileTool, WriteFileTool, EditFileTool,
+    GlobTool, ListDirTool, GrepTool, _FILE_READ_REGISTRY,
 )
 
 
@@ -53,26 +55,109 @@ async def test_file_read_write(sys_op, temp_dir):
 
     read_res = await read_tool.invoke({"file_path": file_path})
     assert read_res.success is True
-    assert read_res.data["content"] == content
+    assert "第一行" in read_res.data["content"]
+    assert "第二行" in read_res.data["content"]
+    assert "第三行" in read_res.data["content"]
     assert read_res.data["line_count"] == 3
 
-    read_partial = await read_tool.invoke({"file_path": file_path, "offset": 2, "limit": 1})
+    read_partial = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 1})
     assert read_partial.success is True
     assert "第二行" in read_partial.data["content"]
 
 
 @pytest.mark.asyncio
+async def test_write_file_tool_requires_read_before_overwrite(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "existing.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("existing content")
+
+    _FILE_READ_REGISTRY.pop(file_path, None)
+    res = await write_tool.invoke({"file_path": file_path, "content": "replacement"})
+
+    assert res.success is False
+    assert "read" in res.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_updates_existing_file_after_read(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "rewrite.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("old content")
+
+    await read_tool.invoke({"file_path": file_path})
+    res = await write_tool.invoke({"file_path": file_path, "content": "new content\n"})
+
+    assert res.success is True
+    assert res.data["type"] == "update"
+    assert res.data["created"] is False
+    assert res.data["original_file"] == "old content"
+    assert _FILE_READ_REGISTRY[file_path].content == "new content\n"
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_reads_existing_content_via_sys_operation_fs(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "rewrite_via_fs.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("old content")
+
+    await read_tool.invoke({"file_path": file_path})
+
+    fs = sys_op.fs()
+    original_read_file = fs.read_file
+    calls: list[tuple[str, str]] = []
+
+    async def tracked_read_file(self, path: str, *args, **kwargs):
+        calls.append((path, kwargs.get("mode", "text")))
+        return await original_read_file(path, *args, **kwargs)
+
+    fs.read_file = MethodType(tracked_read_file, fs)
+    try:
+        res = await write_tool.invoke({"file_path": file_path, "content": "new content"})
+    finally:
+        fs.read_file = original_read_file
+
+    assert res.success is True
+    assert (file_path, "bytes") in calls
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_rejects_externally_modified_existing_file(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "stale.txt")
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("before")
+
+    await read_tool.invoke({"file_path": file_path})
+    with open(file_path, "w", encoding="utf-8") as fh:
+        fh.write("changed externally")
+
+    res = await write_tool.invoke({"file_path": file_path, "content": "replacement"})
+
+    assert res.success is False
+    assert "modified since read" in res.error
+    assert file_path not in _FILE_READ_REGISTRY
+
+
+@pytest.mark.asyncio
 async def test_edit_file(sys_op, temp_dir):
     write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
     edit_tool = EditFileTool(sys_op)
     file_path = os.path.join(temp_dir, "edit.txt")
     content = "Hello Google DeepMind Antigravity"
     await write_tool.invoke({"file_path": file_path, "content": content})
+    await read_tool.invoke({"file_path": file_path})
 
     edit_res = await edit_tool.invoke({
         "file_path": file_path,
-        "old_string": "o",
-        "new_string": "0",
+        "old_string": "Hello",
+        "new_string": "Hell0",
         "replace_all": False
     })
     assert edit_res.success is True
@@ -122,3 +207,206 @@ async def test_grep_tool(sys_op, temp_dir):
     assert grep_res.success is True
     assert grep_res.data["count"] == 2
     assert "Other Line" not in grep_res.data["stdout"]
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_requires_read_first(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "max_edit.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "hello world"})
+
+    # Must fail without prior read_file call
+    _FILE_READ_REGISTRY.pop(file_path, None)
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "hello",
+        "new_string": "hi",
+    })
+    assert res.success is False
+    assert "read" in res.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_full_workflow(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "max_edit2.txt")
+    content = "alpha beta gamma\nalpha delta"
+    await write_tool.invoke({"file_path": file_path, "content": content})
+
+    # Read populates the registry
+    read_res = await read_tool.invoke({"file_path": file_path})
+    assert read_res.success is True
+    assert file_path in _FILE_READ_REGISTRY
+
+    # Unique match succeeds
+    edit_res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "beta gamma",
+        "new_string": "beta GAMMA",
+    })
+    assert edit_res.success is True
+    assert edit_res.data["replacements"] == 1
+
+    # Registry refreshed after write
+    assert file_path in _FILE_READ_REGISTRY
+
+    # Verify content
+    read2 = await read_tool.invoke({"file_path": file_path})
+    assert "beta GAMMA" in read2.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_reads_existing_content_via_sys_operation_fs(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "edit_via_fs.txt")
+    with open(file_path, "w", encoding="utf-8", newline="") as fh:
+        fh.write("alpha\r\nbeta\r\n")
+
+    await read_tool.invoke({"file_path": file_path})
+
+    fs = sys_op.fs()
+    original_read_file = fs.read_file
+    calls: list[tuple[str, str]] = []
+
+    async def tracked_read_file(self, path: str, *args, **kwargs):
+        calls.append((path, kwargs.get("mode", "text")))
+        return await original_read_file(path, *args, **kwargs)
+
+    fs.read_file = MethodType(tracked_read_file, fs)
+    try:
+        res = await edit_tool.invoke({
+            "file_path": file_path,
+            "old_string": "beta",
+            "new_string": "gamma",
+        })
+    finally:
+        fs.read_file = original_read_file
+
+    assert res.success is True
+    assert (file_path, "bytes") in calls
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_replace_all(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "max_replace_all.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "foo foo foo"})
+    await read_tool.invoke({"file_path": file_path})
+
+    # Multiple matches without replace_all → error
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "foo",
+        "new_string": "bar",
+    })
+    assert res.success is False
+    assert "3" in res.error
+
+    # replace_all=True → replaces all
+    res2 = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "foo",
+        "new_string": "bar",
+        "replace_all": True,
+    })
+    assert res2.success is True
+    assert res2.data["replacements"] == 3
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_new_file_creation(sys_op, temp_dir):
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "new_from_edit.txt")
+
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "",
+        "new_string": "created by edit",
+    })
+    assert res.success is True
+    assert res.data.get("created") is True
+    assert os.path.exists(file_path)
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_rejects_identical_strings(sys_op, temp_dir):
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "noop.txt")
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "same",
+        "new_string": "same",
+    })
+    assert res.success is False
+    assert "identical" in res.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_rejects_ipynb(sys_op, temp_dir):
+    edit_tool = EditFileTool(sys_op)
+    res = await edit_tool.invoke({
+        "file_path": os.path.join(temp_dir, "notebook.ipynb"),
+        "old_string": "x",
+        "new_string": "y",
+    })
+    assert res.success is False
+    assert "NotebookEdit" in res.error
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_html_desanitization(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "entities.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "a < b && c > d"})
+    await read_tool.invoke({"file_path": file_path})
+
+    # Pass HTML-escaped old_string (as the model might receive from XML tool calling)
+    res = await edit_tool.invoke({
+        "file_path": file_path,
+        "old_string": "a &lt; b &amp;&amp; c &gt; d",
+        "new_string": "x",
+    })
+    assert res.success is True
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_text_and_unchanged(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "max.txt")
+    content = "alpha\nbeta\ngamma\ndelta\n"
+    await write_tool.invoke({"file_path": file_path, "content": content})
+
+    first = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
+    assert first.success is True
+    assert first.data["unchanged"] is False
+    assert first.data["content"].startswith("     1\tbeta")
+    assert "     2\tgamma" in first.data["content"]
+
+    second = await read_tool.invoke({"file_path": file_path, "offset": 1, "limit": 2})
+    assert second.success is True
+    assert second.data["unchanged"] is True
+    assert "File unchanged since last read" in second.data["content"]
+
+    relative = await read_tool.invoke({"file_path": "max.txt"})
+    assert relative.success is False
+    assert "absolute path" in relative.error
+
+
+def test_read_file_tool_capability_flags_keep_backward_compatibility():
+    assert ReadFileTool.is_read_only() is True
+    assert ReadFileTool.is_concurrency_safe() is True
+    assert ReadFileTool.check_permissions() == "allow"
+
+    assert ReadFileTool.isReadOnly() is True
+    assert ReadFileTool.isConcurrencySafe() is True
+    assert ReadFileTool.checkPermissions() == "allow"

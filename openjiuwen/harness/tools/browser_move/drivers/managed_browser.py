@@ -22,7 +22,7 @@ from ..playwright_runtime.profiles import BrowserProfile
 def _default_chrome_user_data_dir() -> str:
     """Return the platform-standard Chrome user data directory path.
 
-    Does not guarantee the directory exists — only that this is where Chrome
+    Does not guarantee the directory exists 鈥?only that this is where Chrome
     stores its default profile on the current OS.
     """
     if os.name == "nt":
@@ -189,23 +189,29 @@ class ManagedBrowserDriver:
 
     def _resolve_binary(self) -> str:
         explicit = (self.profile.browser_binary or "").strip()
+        explicit_error = ""
         if explicit:
-            if not _is_chrome_identifier(explicit):
-                raise RuntimeError(
-                    "Managed mode supports Chrome only. Set BROWSER_MANAGED_BINARY to a Chrome executable."
+            if _is_chrome_identifier(explicit):
+                candidate = Path(explicit).expanduser()
+                if candidate.exists():
+                    return str(candidate)
+                resolved = shutil.which(explicit)
+                if resolved:
+                    return resolved
+                explicit_error = f"Configured Chrome binary not found: {explicit}"
+            else:
+                explicit_error = (
+                    "Managed mode supports Chrome only. "
+                    "Set BROWSER_MANAGED_BINARY to a Chrome executable."
                 )
-            candidate = Path(explicit).expanduser()
-            if candidate.exists():
-                return str(candidate)
-            resolved = shutil.which(explicit)
-            if resolved:
-                return resolved
-            raise RuntimeError(
-                f"Chrome needs to be installed. Configured Chrome binary not found: {explicit}"
-            )
 
         candidates = _candidate_chrome_binaries()
         if not candidates:
+            if explicit_error:
+                raise RuntimeError(
+                    f"Chrome needs to be installed. {explicit_error} "
+                    "No fallback Chrome binary was found on this machine."
+                )
             raise RuntimeError(
                 "Chrome needs to be installed. No Chrome binary was found on this machine."
             )

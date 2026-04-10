@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 
 class ProtocolEnum(str, Enum):
     MQ = "MQ"
+    A2A = "A2A"
 
 
 @dataclass

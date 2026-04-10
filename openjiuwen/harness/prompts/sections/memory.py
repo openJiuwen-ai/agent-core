@@ -14,7 +14,7 @@ def _get_beijing_date() -> str:
     beijing_tz = timezone(timedelta(hours=8))
     return datetime.now(tz=beijing_tz).strftime("%Y-%m-%d")
 
-MEMORY_PROMPT_CN_READ_ONLY = """## 持久化存储体系（只读模式）
+MEMORY_PROMPT_CN_READ_ONLY = """# 持久化存储体系（只读模式）
 
 ### 存储层级划分
 
@@ -34,7 +34,7 @@ MEMORY_PROMPT_CN_READ_ONLY = """## 持久化存储体系（只读模式）
    - 基于检索到的记忆信息回答问题，不要依赖预训练知识
 """
 
-MEMORY_PROMPT_EN_READ_ONLY = """## Persistent Storage System (Read-Only Mode)
+MEMORY_PROMPT_EN_READ_ONLY = """# Persistent Storage System (Read-Only Mode)
 
 ### Storage Hierarchy
 
@@ -53,7 +53,7 @@ MEMORY_PROMPT_EN_READ_ONLY = """## Persistent Storage System (Read-Only Mode)
 **Note:** In cron job mode, only reading and searching memories is supported. Writing or modifying memory files is not allowed.
 """
 
-MEMORY_PROMPT_CN = """## 持久化存储体系
+MEMORY_PROMPT_CN = """# 持久化存储体系
 
 每轮对话均从空白状态启动。跨会话的信息持久化依赖于工作区文件系统。记录悄悄进行就好，不需要让用户感知到。
 
@@ -117,7 +117,7 @@ MEMORY_PROMPT_CN = """## 持久化存储体系
 2. 完成后，再输出最终文字回复
 """
 
-MEMORY_PROMPT_EN = """## Persistent Storage System
+MEMORY_PROMPT_EN = """# Persistent Storage System
 
 Each conversation session starts from a blank state. Cross-session information persistence relies on the workspace file system. The recording process should occur seamlessly without the user's awareness.
 
@@ -196,17 +196,11 @@ MEMORY_MGMT_PROMPT_EN = """### Storage Management Guidelines
 4. **USER.md Field Deduplication:** Existing fields should be updated via `edit_memory`, non-existing fields should be appended via `write_memory`
 """
 
-MEMORY_DATE_PROMPT_CN = """## 当前日期
-
-**今日日期：** {today_date}
-
+MEMORY_DATE_PROMPT_CN = """
 在操作当天的会话日志时，请使用 `{today_date}.md` 作为文件名。
 """
 
-MEMORY_DATE_PROMPT_EN = """## Current Date
-
-**Today's Date:** {today_date}
-
+MEMORY_DATE_PROMPT_EN = """
 When operating today's session logs file, please use `{today_date}.md` as the filename.
 """
 
@@ -246,7 +240,7 @@ def build_memory_section(
     return PromptSection(
         name=SectionName.MEMORY,
         content={language: content},
-        priority=85,
+        priority=50,
     )
 
 

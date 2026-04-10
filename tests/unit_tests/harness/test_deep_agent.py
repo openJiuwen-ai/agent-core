@@ -27,7 +27,19 @@ from openjiuwen.harness import create_deep_agent, Workspace
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
-from openjiuwen.harness.subagents import create_code_agent
+from openjiuwen.harness.subagents import (
+    build_code_agent_config,
+    build_research_agent_config,
+    create_code_agent,
+)
+from openjiuwen.harness.subagents.code_agent import (
+    CODE_AGENT_FACTORY_NAME,
+    DEFAULT_CODE_AGENT_SYSTEM_PROMPT,
+)
+from openjiuwen.harness.subagents.research_agent import (
+    DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT,
+    RESEARCH_AGENT_FACTORY_NAME,
+)
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
 from openjiuwen.harness.tools.task_tool import create_task_tool
@@ -802,6 +814,78 @@ def test_create_code_agent_accepts_explicit_mcps() -> None:
 
     assert agent.deep_config is not None
     assert agent.deep_config.mcps == [mcp_config]
+
+
+def test_build_code_agent_config_uses_code_factory() -> None:
+    spec = build_code_agent_config(_create_dummy_model(), language="en")
+
+    assert isinstance(spec, SubAgentConfig)
+    assert spec.agent_card.name == "code_agent"
+    assert spec.system_prompt == DEFAULT_CODE_AGENT_SYSTEM_PROMPT["en"]
+    assert spec.factory_name == CODE_AGENT_FACTORY_NAME
+    assert spec.tools is None
+    assert spec.rails is None
+
+
+def test_build_research_agent_config_uses_research_factory() -> None:
+    spec = build_research_agent_config(_create_dummy_model(), language="en")
+
+    assert isinstance(spec, SubAgentConfig)
+    assert spec.agent_card.name == "research_agent"
+    assert spec.system_prompt == DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT["en"]
+    assert spec.factory_name == RESEARCH_AGENT_FACTORY_NAME
+    assert spec.tools is None
+    assert spec.rails is None
+
+
+def test_create_subagent_uses_code_agent_factory() -> None:
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path="./parent_workspace"),
+        subagents=[build_code_agent_config(_create_dummy_model(), language="en")],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=factory_result,
+    ) as mock_create_code_agent:
+        sub = parent.create_subagent("code_agent", "sub_session_id")
+
+    assert sub is factory_result
+    mock_create_code_agent.assert_called_once()
+    call_kwargs = mock_create_code_agent.call_args.kwargs
+    assert call_kwargs["card"].name == "code_agent"
+    assert call_kwargs["tools"] is None
+    assert call_kwargs["rails"] is None
+    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
+
+
+def test_create_subagent_uses_research_agent_factory() -> None:
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path="./parent_workspace"),
+        subagents=[build_research_agent_config(_create_dummy_model(), language="en")],
+    )
+    factory_result = object()
+
+    with patch(
+        "openjiuwen.harness.subagents.research_agent.create_research_agent",
+        return_value=factory_result,
+    ) as mock_create_research_agent:
+        sub = parent.create_subagent("research_agent", "sub_session_id")
+
+    assert sub is factory_result
+    mock_create_research_agent.assert_called_once()
+    call_kwargs = mock_create_research_agent.call_args.kwargs
+    assert call_kwargs["card"].name == "research_agent"
+    assert call_kwargs["tools"] is None
+    assert call_kwargs["rails"] is None
+    assert call_kwargs["workspace"].root_path.endswith("/sub_session_id")
 
 
 @pytest.mark.asyncio

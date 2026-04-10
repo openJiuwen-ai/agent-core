@@ -30,7 +30,6 @@ class SystemPromptBuilder(BaseSystemPromptBuilder):
         SectionName.SAFETY,
         SectionName.SKILLS,
         SectionName.TOOLS,
-        SectionName.TASK_TOOL,
         SectionName.RUNTIME,
         SectionName.MEMORY,
     })

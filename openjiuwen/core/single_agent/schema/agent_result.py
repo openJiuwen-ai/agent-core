@@ -2,12 +2,21 @@ from typing import Optional, List, Dict, Any
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.core.common.schema.part import Part
-from openjiuwen.core.common.schema.task import TaskStatus
+from openjiuwen.core.controller.schema.task import TaskStatus
+
+
+class Part(BaseModel):
+    text: Optional[str] = None
+    raw: Optional[bytes] = None
+    url: Optional[str] = None
+    data: Any = None
+    filename: Optional[str] = None
+    media_type: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class Artifact(BaseModel):
-    artifactId: str = None
+    artifactId: Optional[str] = None
     name: Optional[str] = None  # Semantic name, e.g. "summary", "chart"
     description: Optional[str] = None
     parts: List[Part] = Field(default_factory=list)
@@ -15,7 +24,7 @@ class Artifact(BaseModel):
 
 
 class AgentResult(BaseModel):
-    task_id: str = None
+    task_id: Optional[str] = None
     sessionId: Optional[str] = None
     status: TaskStatus = None
     artifacts: List[Artifact] = Field(default_factory=list)

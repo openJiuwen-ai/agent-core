@@ -632,13 +632,13 @@ def test_list_tool_call_interval_default() -> None:
 def test_build_todo_system_prompt_chinese() -> None:
     """build_todo_system_prompt returns Chinese prompt."""
     prompt = build_todo_system_prompt(language="cn")
-    assert "任务规划助手" in prompt
+    assert "任务规划" in prompt
 
 
 def test_build_todo_system_prompt_english() -> None:
     """build_todo_system_prompt returns English prompt."""
     prompt = build_todo_system_prompt(language="en")
-    assert "Todo assistant" in prompt
+    assert "task planning" in prompt
 
 
 def test_build_progress_reminder_user_prompt_chinese() -> None:
