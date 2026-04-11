@@ -80,7 +80,7 @@ class SessionRail(DeepAgentRail):
         """
         if self.tools:
             for tool in self.tools:
-                name = getattr(tool, "name", None)
+                name = getattr(tool.card, 'name', None)
                 if name:
                     agent.ability_manager.remove(name)
                 Runner.resource_mgr.remove_tool(tool.card.id)

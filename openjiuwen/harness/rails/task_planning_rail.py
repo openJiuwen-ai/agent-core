@@ -106,7 +106,7 @@ class TaskPlanningRail(DeepAgentRail):
                 self.system_prompt_builder.remove_section("todo")
             if self.tools and hasattr(agent, "ability_manager"):
                 for tool in self.tools:
-                    name = getattr(tool, "name", None)
+                    name = getattr(tool.card, 'name', None)
                     if name:
                         agent.ability_manager.remove(name)
                     tool_id = tool.card.id
