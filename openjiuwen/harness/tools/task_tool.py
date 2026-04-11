@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncIterator, List
+from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
 
 if TYPE_CHECKING:
@@ -127,6 +127,7 @@ def create_task_tool(
     parent_agent: "DeepAgent",
     available_agents: str,
     language: str = "cn",
+    agent_id: Optional[str] = None,
 ) -> List[Tool]:
     """Create TaskTool instance for the given parent agent.
 
@@ -134,16 +135,17 @@ def create_task_tool(
         parent_agent: Parent DeepAgent instance.
         available_agents: Formatted string describing available subagent types.
         language: Language for tool parameters ('cn' or 'en').
+        agent_id: Optional agent ID for unique tool ID.
 
     Returns:
         List containing a single TaskTool instance.
     """
-    # 使用统一的 build_tool_card，传递格式化参数
     card = build_tool_card(
         name="task_tool",
         tool_id="task_tool",
         language=language,
         format_args={"available_agents": available_agents},
+        agent_id=agent_id,
     )
 
     return [TaskTool(card=card, parent_agent=parent_agent, language=language)]

@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from typing import Dict, Any, AsyncIterator
+from typing import Dict, Any, AsyncIterator, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.tool.base import Tool
@@ -12,8 +12,8 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 
 class CodeTool(Tool):
 
-    def __init__(self, operation: SysOperation, language: str = "cn"):
-        super().__init__(build_tool_card("code", "CodeTool", language))
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(build_tool_card("code", "CodeTool", language, agent_id=agent_id))
         self.operation = operation
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:

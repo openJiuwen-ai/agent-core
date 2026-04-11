@@ -10,6 +10,7 @@ from typing import (
     Any,
     AsyncIterator,
     Dict,
+    Optional,
 )
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -65,8 +66,9 @@ class BashTool(Tool):
         permission_mode: str = "auto",
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
+        agent_id: Optional[str] = None,
     ) -> None:
-        super().__init__(build_tool_card("bash", "BashTool", language))
+        super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self._operation = operation
         self._workspace: Path | None = Path(workspace).resolve() if workspace else None
         self._permission = PermissionConfig(

@@ -42,6 +42,17 @@ class SessionDeltaState:
     pending_messages: int = 0
 
 
+@dataclass
+class MemoryManagerParams:
+    """Parameters for creating or retrieving a MemoryIndexManager instance."""
+    agent_id: str
+    workspace: "Workspace"
+    settings: Optional[MemorySettings] = None
+    embedding_config: Optional[Any] = None
+    sys_operation: Optional["SysOperation"] = None
+    node_name: str = "memory"
+
+
 def vector_to_blob(embedding: List[float]) -> bytes:
     """Convert vector to binary blob."""
     return struct.pack(f'{len(embedding)}f', *embedding)
@@ -136,11 +147,13 @@ class MemoryIndexManager:
             self,
             agent_id: str,
             workspace: "Workspace",
-            settings: MemorySettings
+            settings: MemorySettings,
+            node_name: str = "memory",
     ):
         self.agent_id = agent_id
         self.workspace = workspace
-        self.memory_dir = str(workspace.get_node_path("memory")) if workspace.get_node_path("memory") else ""
+        self.node_name = node_name
+        self.memory_dir = str(workspace.get_node_path(node_name)) if workspace.get_node_path(node_name) else ""
         self.settings = settings
 
         self.db: Optional[sqlite3.Connection] = None
@@ -182,36 +195,29 @@ class MemoryIndexManager:
     @classmethod
     async def get(
             cls,
-            agent_id: str,
-            workspace: "Workspace",
-            settings: Optional[MemorySettings] = None,
-            embedding_config=None,
-            sys_operation: Optional["SysOperation"] = None,
+            params: MemoryManagerParams,
     ) -> Optional['MemoryIndexManager']:
         """Get or create memory index manager.
-        
+
         Args:
-            agent_id: Agent identifier.
-            workspace: Workspace instance.
-            settings: Memory settings instance.
-            embedding_config: Optional EmbeddingConfig for embedding API.
-            sys_operation: Optional SysOperation for file operations.
-        
+            params: MemoryManagerParams containing all initialization parameters.
+
         Returns:
             MemoryIndexManager instance, or None if memory is disabled.
         """
-        memory_dir = str(workspace.get_node_path("memory")) if workspace.get_node_path("memory") else ""
-        cache_key = f"{agent_id}:{memory_dir}"
+        node_path = params.workspace.get_node_path(params.node_name)
+        memory_dir = str(node_path) if node_path else ""
+        cache_key = f"{params.agent_id}:{params.node_name}:{memory_dir}"
 
         if cache_key in INDEX_CACHE:
             manager = INDEX_CACHE[cache_key]
             if not manager.closed:
                 return manager
 
-        settings = settings or MemorySettings()
-        manager = cls(agent_id, workspace, settings)
-        manager.embedding_config = embedding_config
-        manager.sys_operation = sys_operation
+        settings = params.settings or MemorySettings()
+        manager = cls(params.agent_id, params.workspace, settings, params.node_name)
+        manager.embedding_config = params.embedding_config
+        manager.sys_operation = params.sys_operation
 
         try:
             await manager.initialize()
@@ -1280,13 +1286,16 @@ async def get_memory_manager(
         settings: Optional[MemorySettings] = None
 ) -> Optional[MemoryIndexManager]:
     """Get or create memory manager.
-    
+
     Args:
         agent_id: Agent identifier.
         workspace: Workspace instance.
         settings: Memory settings instance.
     """
     settings = settings or MemorySettings()
-    return await MemoryIndexManager.get(
-        agent_id, workspace, settings
+    params = MemoryManagerParams(
+        agent_id=agent_id,
+        workspace=workspace,
+        settings=settings
     )
+    return await MemoryIndexManager.get(params)

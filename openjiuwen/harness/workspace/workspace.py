@@ -58,6 +58,7 @@ class WorkspaceNode(Enum):
     IDENTITY_MD = "IDENTITY.md"
     USER_MD = "USER.md"
     MEMORY = "memory"
+    CODING_MEMORY = "coding_memory"
     TODO = "todo"
     MESSAGES = "messages"
     SKILLS = "skills"
@@ -388,6 +389,21 @@ DEFAULT_WORKSPACE_SCHEMA: List[DirectoryNode] = [
                 "description": "每日结构化记忆",
                 "path": "daily_memory",
                 "children": [],
+            },
+        ],
+    },
+    {
+        "name": "coding_memory",
+        "description": "Coding Agent 记忆模块",
+        "path": "coding_memory",
+        "children": [
+            {
+                "name": "MEMORY.md",
+                "description": "Coding 记忆索引",
+                "path": "MEMORY.md",
+                "children": [],
+                "is_file": True,
+                "default_content": "",
             },
         ],
     },

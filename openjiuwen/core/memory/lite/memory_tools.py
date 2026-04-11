@@ -11,7 +11,7 @@ from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.common.logging import memory_logger as logger
 from openjiuwen.harness.workspace.workspace import WorkspaceNode, Workspace
 
-from .manager import MemoryIndexManager
+from .manager import MemoryIndexManager, MemoryManagerParams
 from .config import MemorySettings, create_memory_settings, is_memory_enabled
 
 if TYPE_CHECKING:
@@ -112,19 +112,20 @@ async def init_memory_manager_async(
     _global_sys_operation = sys_operation
     
     try:
-        _global_manager = await MemoryIndexManager.get(
+        params = MemoryManagerParams(
             agent_id=agent_id,
             workspace=workspace,
             settings=settings,
             embedding_config=embedding_config,
             sys_operation=sys_operation,
         )
-        
+        _global_manager = await MemoryIndexManager.get(params)
+
         if _global_manager:
             logger.info(f"Memory manager initialized for: {memory_dir}")
-        
+
         return _global_manager
-        
+
     except Exception as e:
         logger.error(f"Failed to initialize memory manager: {e}")
         return None
@@ -133,18 +134,19 @@ async def init_memory_manager_async(
 async def _ensure_global_manager() -> bool:
     """Ensure global memory manager is initialized."""
     global _global_manager, _global_settings, _global_workspace, _global_agent_id
-    
+
     if _global_manager is not None:
         return True
-    
+
     try:
         _global_settings = _global_settings or MemorySettings()
-        _global_manager = await MemoryIndexManager.get(
+        params = MemoryManagerParams(
             agent_id=_global_agent_id,
             workspace=_global_workspace,
             settings=_global_settings,
             sys_operation=_global_sys_operation,
         )
+        _global_manager = await MemoryIndexManager.get(params)
         return True
     except Exception as e:
         logger.error(f"Failed to initialize global memory manager: {e}")

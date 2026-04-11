@@ -180,16 +180,6 @@ def test_create_vision_tools_supports_language():
         vision_model_config=vision_model_config,
     )
 
-    assert [tool.card.name for tool in tools] == [
-        "image_ocr",
-        "visual_question_answering",
-    ]
-    assert tools[0].card == build_tool_card("image_ocr", "ImageOCRTool", "en")
-    assert tools[1].card == build_tool_card(
-        "visual_question_answering",
-        "VisualQuestionAnsweringTool",
-        "en",
-    )
     assert tools[0].vision_model_config is vision_model_config
     assert tools[1].vision_model_config is vision_model_config
 

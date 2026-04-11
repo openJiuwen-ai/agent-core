@@ -182,8 +182,9 @@ class ImageOCRTool(Tool):
         self,
         language: str = "cn",
         vision_model_config: Optional[VisionModelConfig] = None,
+        agent_id: Optional[str] = None,
     ):
-        super().__init__(build_tool_card("image_ocr", "ImageOCRTool", language))
+        super().__init__(build_tool_card("image_ocr", "ImageOCRTool", language, agent_id=agent_id))
         self.vision_model_config = vision_model_config
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
@@ -220,12 +221,14 @@ class VisualQuestionAnsweringTool(Tool):
         self,
         language: str = "cn",
         vision_model_config: Optional[VisionModelConfig] = None,
+        agent_id: Optional[str] = None,
     ):
         super().__init__(
             build_tool_card(
                 "visual_question_answering",
                 "VisualQuestionAnsweringTool",
                 language,
+                agent_id=agent_id,
             )
         )
         self.vision_model_config = vision_model_config
@@ -279,15 +282,18 @@ class VisualQuestionAnsweringTool(Tool):
 def create_vision_tools(
     language: str = "cn",
     vision_model_config: Optional[VisionModelConfig] = None,
+    agent_id: Optional[str] = None,
 ) -> list[Tool]:
     return [
         ImageOCRTool(
             language=language,
             vision_model_config=vision_model_config,
+            agent_id=agent_id,
         ),
         VisualQuestionAnsweringTool(
             language=language,
             vision_model_config=vision_model_config,
+            agent_id=agent_id,
         ),
     ]
 

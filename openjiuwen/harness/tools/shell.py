@@ -22,8 +22,9 @@ def _clip_text(value: str, max_chars: int) -> str:
 
 class BashTool(Tool):
 
-    def __init__(self, operation: SysOperation, language: str = "cn", workspace: Optional[str] = None):
-        super().__init__(build_tool_card("bash", "BashTool", language))
+    def __init__(self, operation: SysOperation, language: str = "cn",
+                 workspace: Optional[str] = None, agent_id: Optional[str] = None):
+        super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self.operation = operation
         self._workspace: Optional[Path] = Path(workspace).resolve() if workspace else None
 

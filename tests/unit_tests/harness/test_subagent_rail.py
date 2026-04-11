@@ -88,8 +88,8 @@ class TestSubagentRail:
     def test_uninit_with_tools():
         """Test uninit method when tools are registered."""
         mock_tool = Mock()
-        mock_tool.name = "test_tool"
         mock_tool.card = Mock()
+        mock_tool.card.name = "test_tool"
         mock_tool.card.id = "test_tool_id"
 
         mock_agent = Mock()

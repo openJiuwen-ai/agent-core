@@ -421,12 +421,14 @@ class AudioTranscriptionTool(Tool):
         self,
         language: str = "cn",
         audio_model_config: Optional[AudioModelConfig] = None,
+        agent_id: Optional[str] = None,
     ):
         super().__init__(
             build_tool_card(
                 "audio_transcription",
                 "AudioTranscriptionTool",
                 language,
+                agent_id=agent_id,
             )
         )
         self.audio_model_config = audio_model_config
@@ -475,12 +477,14 @@ class AudioQuestionAnsweringTool(Tool):
         self,
         language: str = "cn",
         audio_model_config: Optional[AudioModelConfig] = None,
+        agent_id: Optional[str] = None,
     ):
         super().__init__(
             build_tool_card(
                 "audio_question_answering",
                 "AudioQuestionAnsweringTool",
                 language,
+                agent_id=agent_id,
             )
         )
         self.audio_model_config = audio_model_config
@@ -532,12 +536,14 @@ class AudioMetadataTool(Tool):
         self,
         language: str = "cn",
         audio_model_config: Optional[AudioModelConfig] = None,
+        agent_id: Optional[str] = None,
     ):
         super().__init__(
             build_tool_card(
                 "audio_metadata",
                 "AudioMetadataTool",
                 language,
+                agent_id=agent_id,
             )
         )
         self.audio_model_config = audio_model_config
@@ -576,19 +582,23 @@ class AudioMetadataTool(Tool):
 def create_audio_tools(
     language: str = "cn",
     audio_model_config: Optional[AudioModelConfig] = None,
+    agent_id: Optional[str] = None,
 ) -> list[Tool]:
     return [
         AudioTranscriptionTool(
             language=language,
             audio_model_config=audio_model_config,
+            agent_id=agent_id,
         ),
         AudioQuestionAnsweringTool(
             language=language,
             audio_model_config=audio_model_config,
+            agent_id=agent_id,
         ),
         AudioMetadataTool(
             language=language,
             audio_model_config=audio_model_config,
+            agent_id=agent_id,
         ),
     ]
 

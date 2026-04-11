@@ -53,16 +53,19 @@ class ProgressiveToolRail(DeepAgentRail):
     def init(self, agent) -> None:
         """Register progressive meta tools to resource manager and ability manager."""
         language = getattr(self._config, "language", "cn") or "cn"
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
 
         tools = [
             SearchToolsTool(
                 search_tools=self._search_tools,
                 append_trace=self._append_trace,
                 language=language,
+                agent_id=agent_id,
             ),
             LoadToolsTool(
                 load_tools=self._load_tools,
                 language=language,
+                agent_id=agent_id,
             ),
         ]
 

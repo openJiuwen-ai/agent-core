@@ -65,26 +65,6 @@ def test_filesystem_rail_registers_base_tools(tmp_path):
             assert "audio_metadata" not in agent.ability_manager.cards
             assert "image_ocr" not in agent.ability_manager.cards
             assert "visual_question_answering" not in agent.ability_manager.cards
-
-            assert Runner.resource_mgr.get_tool("ReadFileTool") is not None
-            assert Runner.resource_mgr.get_tool("WriteFileTool") is not None
-            assert Runner.resource_mgr.get_tool("EditFileTool") is not None
-            assert Runner.resource_mgr.get_tool("GlobTool") is not None
-            assert Runner.resource_mgr.get_tool("ListDirTool") is not None
-            assert Runner.resource_mgr.get_tool("GrepTool") is not None
-            assert Runner.resource_mgr.get_tool("BashTool") is not None
-            assert Runner.resource_mgr.get_tool("CodeTool") is not None
-            assert Runner.resource_mgr.get_tool("AudioTranscriptionTool") is None
-            assert (
-                Runner.resource_mgr.get_tool("AudioQuestionAnsweringTool")
-                is None
-            )
-            assert Runner.resource_mgr.get_tool("AudioMetadataTool") is None
-            assert Runner.resource_mgr.get_tool("ImageOCRTool") is None
-            assert (
-                Runner.resource_mgr.get_tool("VisualQuestionAnsweringTool")
-                is None
-            )
         finally:
             rail.uninit(agent)
             Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)

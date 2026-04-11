@@ -11,7 +11,7 @@ from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.common.logging import memory_logger as logger
 from openjiuwen.harness.workspace.workspace import Workspace
 
-from .manager import MemoryIndexManager
+from .manager import MemoryIndexManager, MemoryManagerParams
 from .config import MemorySettings, create_memory_settings, is_memory_enabled
 from .frontmatter import parse_frontmatter, validate_frontmatter
 
@@ -173,19 +173,20 @@ async def init_memory_manager_async(
     _global_coding_memory_dir = coding_memory_dir
     
     try:
-        _global_manager = await MemoryIndexManager.get(
+        params = MemoryManagerParams(
             agent_id=agent_id,
             workspace=workspace,
             settings=settings,
             embedding_config=embedding_config,
             sys_operation=sys_operation,
         )
-        
+        _global_manager = await MemoryIndexManager.get(params)
+
         if _global_manager:
             logger.info(f"Coding Memory manager initialized for: {coding_memory_dir}")
-        
+
         return _global_manager
-        
+
     except Exception as e:
         logger.error(f"Failed to initialize Coding Memory manager: {e}")
         return None

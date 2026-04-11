@@ -87,9 +87,9 @@ class SessionToolkit:
 class SessionsListTool(Tool):
     """List registered async spawn tasks in SessionToolkit."""
 
-    def __init__(self, toolkit: SessionToolkit, language: str = "cn") -> None:
+    def __init__(self, toolkit: SessionToolkit, language: str = "cn", agent_id: Optional[str] = None) -> None:
         super().__init__(
-            build_tool_card("sessions_list", "sessions_list", language)
+            build_tool_card("sessions_list", "sessions_list", language, agent_id=agent_id)
         )
         self._toolkit = toolkit
         self._language = language
@@ -129,12 +129,14 @@ class SessionsCancelTool(Tool):
         parent_agent: "DeepAgent",
         toolkit: SessionToolkit,
         language: str = "cn",
+        agent_id: Optional[str] = None,
     ) -> None:
         super().__init__(
             build_tool_card(
                 name="sessions_cancel",
                 tool_id="sessions_cancel",
                 language=language,
+                agent_id=agent_id,
             )
         )
         self._parent_agent = parent_agent
@@ -239,6 +241,7 @@ class SessionsSpawnTool(Tool):
         toolkit: SessionToolkit,
         language: str = "cn",
         available_agents: str = "",
+        agent_id: Optional[str] = None,
     ) -> None:
         super().__init__(
             build_tool_card(
@@ -246,6 +249,7 @@ class SessionsSpawnTool(Tool):
                 tool_id="sessions_spawn",
                 language=language,
                 format_args={"available_agents": available_agents} if available_agents else None,
+                agent_id=agent_id,
             )
         )
         self._parent_agent = parent_agent
@@ -331,6 +335,7 @@ def build_session_tools(
     toolkit: SessionToolkit,
     language: str = "cn",
     available_agents: str = "",
+    agent_id: Optional[str] = None,
 ) -> List[Tool]:
     """Build session tools (list, spawn, and cancel).
     
@@ -339,22 +344,25 @@ def build_session_tools(
         toolkit: SessionToolkit for tracking tasks.
         language: Language for tool descriptions ('cn' or 'en').
         available_agents: Formatted string describing available subagent types.
+        agent_id: Optional agent ID for unique tool IDs.
     
     Returns:
         List of session tools.
     """
     return [
-        SessionsListTool(toolkit=toolkit, language=language),
+        SessionsListTool(toolkit=toolkit, language=language, agent_id=agent_id),
         SessionsSpawnTool(
             parent_agent=parent_agent,
             toolkit=toolkit,
             language=language,
             available_agents=available_agents,
+            agent_id=agent_id,
         ),
         SessionsCancelTool(
             parent_agent=parent_agent,
             toolkit=toolkit,
             language=language,
+            agent_id=agent_id,
         ),
     ]
 

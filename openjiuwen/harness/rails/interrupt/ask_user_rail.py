@@ -29,12 +29,13 @@ class AskUserRequest(BaseModel):
 
 
 class AskUserTool(Tool):
-    def __init__(self, language: str = "cn"):
+    def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
             build_tool_card(
                 name="ask_user",
                 tool_id="ask_user",
                 language=language,
+                agent_id=agent_id,
             )
         )
 
@@ -66,8 +67,9 @@ class AskUserRail(BaseInterruptRail):
     def init(self, agent):
         """Initialize the ask_user tool."""
         language = resolve_language()
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
         self.tools = [
-            AskUserTool(language=language),
+            AskUserTool(language=language, agent_id=agent_id),
         ]
         from openjiuwen.core.runner.runner import Runner
         Runner.resource_mgr.add_tool(self.tools)

@@ -84,10 +84,12 @@ class TaskPlanningRail(DeepAgentRail):
             self.set_workspace(agent.deep_config.workspace)
 
         workspace_dir = str(self.workspace.get_node_path(WorkspaceNode.TODO))
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
         tools = create_todos_tool(
             self.sys_operation,
             workspace_dir,
             self.system_prompt_builder.language,
+            agent_id,
         )
         self.tools = tools
         try:
@@ -104,7 +106,7 @@ class TaskPlanningRail(DeepAgentRail):
                 self.system_prompt_builder.remove_section("todo")
             if self.tools and hasattr(agent, "ability_manager"):
                 for tool in self.tools:
-                    name = getattr(tool, "name", None)
+                    name = getattr(tool.card, 'name', None)
                     if name:
                         agent.ability_manager.remove(name)
                     tool_id = tool.card.id

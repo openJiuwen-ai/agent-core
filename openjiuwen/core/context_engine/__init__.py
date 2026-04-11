@@ -13,9 +13,17 @@ from openjiuwen.core.context_engine.processor.offloader.message_offloader import
     MessageOffloader,
     MessageOffloaderConfig
 )
+from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_processor import (
+    ToolResultBudgetProcessor,
+    ToolResultBudgetProcessorConfig,
+)
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
     MessageSummaryOffloader,
     MessageSummaryOffloaderConfig
+)
+from openjiuwen.core.context_engine.processor.compressor.micro_compact_processor import (
+    MicroCompactProcessor,
+    MicroCompactProcessorConfig,
 )
 from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
     DialogueCompressor,
@@ -28,6 +36,10 @@ from openjiuwen.core.context_engine.processor.compressor.current_round_compresso
 from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
     RoundLevelCompressor,
     RoundLevelCompressorConfig
+)
+from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+    FullCompactProcessor,
+    FullCompactProcessorConfig,
 )
 
 # context base classes
@@ -48,13 +60,18 @@ _TOKEN_COUNTER = [
 
 _PROCESSORS_CLASSES = [
     # base process class
-    "ContextProcessor"
+    "ContextProcessor",
+    "ToolResultBudgetProcessor",
+    "ToolResultBudgetProcessorConfig",
     # message offloader
     "MessageOffloader",
     "MessageOffloaderConfig",
     # message summary offloader
     "MessageSummaryOffloader",
     "MessageSummaryOffloaderConfig",
+    # micro compact
+    "MicroCompactProcessor",
+    "MicroCompactProcessorConfig",
     # dialogue compressor
     "DialogueCompressor",
     "DialogueCompressorConfig",
@@ -64,6 +81,9 @@ _PROCESSORS_CLASSES = [
     # round level compressor
     "RoundLevelCompressor",
     "RoundLevelCompressorConfig",
+    # full compact processor
+    "FullCompactProcessor",
+    "FullCompactProcessorConfig",
 ]
 
 

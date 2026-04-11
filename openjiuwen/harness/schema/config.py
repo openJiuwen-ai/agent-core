@@ -18,6 +18,7 @@ from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
 from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.harness.schema.agent_mode import AgentMode
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
@@ -172,6 +173,7 @@ class DeepAgentConfig:
         completion_timeout: Max seconds to wait for a
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
+        enable_plan_mode: Whether to enable plan mode.
     """
 
     model: Optional[Model] = None
@@ -196,6 +198,7 @@ class DeepAgentConfig:
     vision_model_config: Optional[VisionModelConfig] = None
     audio_model_config: Optional[AudioModelConfig] = None
     rails: Optional[List[AgentRail]] = None
+    enable_plan_mode: bool = False
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False
@@ -206,6 +209,9 @@ class DeepAgentConfig:
         default_factory=list
     )
     progressive_tool_max_loaded_tools: int = 12
+
+    # Plan mode config
+    default_mode: AgentMode = AgentMode.AUTO
 
 
 @dataclass
@@ -228,3 +234,4 @@ class SubAgentConfig:
     max_iterations: Optional[int] = None
     factory_name: Optional[str] = None
     factory_kwargs: dict[str, Any] = field(default_factory=dict)
+    enable_plan_mode: bool = False

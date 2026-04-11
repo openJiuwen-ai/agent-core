@@ -643,7 +643,8 @@ class DeepAgent(BaseAgent):
             ),
             "subagents": None,
             "enable_async_subagent": False,
-            "add_general_purpose_agent": False
+            "add_general_purpose_agent": False,
+            "enable_plan_mode": spec.enable_plan_mode
         }
 
         if spec.factory_name:
@@ -1042,6 +1043,55 @@ class DeepAgent(BaseAgent):
         self._clear_runtime_state(session)
         if clear_persisted:
             session.update_state({_SESSION_STATE_KEY: None})
+
+    def switch_mode(self, session: Session, mode: str) -> None:
+        """Switch agent mode, updating session-scoped PlanModeState.
+
+        Args:
+            session: Current session.
+            mode: Target mode string — ``"plan"`` or ``"auto"``.
+        """
+        state = self.load_state(session)
+        if state.plan_mode.mode == mode:
+            return
+        if mode == "plan":
+            state.plan_mode.pre_plan_mode = state.plan_mode.mode
+        state.plan_mode.mode = mode
+        self.save_state(session, state)
+
+    def restore_mode_after_plan_exit(self, session: Session) -> None:
+        """Restore the mode that was active before entering plan mode.
+
+        Does **not** clear ``plan_slug`` so that the execution phase can
+        still reference the plan file.
+
+        Args:
+            session: Current session.
+        """
+        state = self.load_state(session)
+        state.plan_mode.mode = state.plan_mode.pre_plan_mode or "auto"
+        state.plan_mode.pre_plan_mode = None
+        self.save_state(session, state)
+
+    def get_plan_file_path(self, session: Session) -> Path | None:
+        """Derive the plan file path from the slug stored in session state.
+
+        Args:
+            session: Current session.
+
+        Returns:
+            Resolved ``Path`` to the plan Markdown file, or ``None`` if
+            no slug has been set or the workspace is unavailable.
+        """
+        from openjiuwen.harness.tools.plan_mode_tools import resolve_plan_file_path
+
+        state = self.load_state(session)
+        slug = state.plan_mode.plan_slug
+        if not slug or not self._deep_config or not self._deep_config.workspace:
+            return None
+        return resolve_plan_file_path(
+            self._deep_config.workspace.root_path, slug
+        )
 
     def _has_remaining_tasks(self, session: Session) -> bool:
         """Check whether the task plan still has pending tasks."""

@@ -81,12 +81,14 @@ class VideoUnderstandingTool(Tool):
         default_timeout_seconds: int = 120,
         default_max_tokens: int = 2048,
         default_temperature: float = 0.2,
+        agent_id: Optional[str] = None,
     ):
         super().__init__(
             build_tool_card(
                 "video_understanding",
                 "VideoUnderstandingTool",
                 language,
+                agent_id=agent_id,
             )
         )
         self.language = language
