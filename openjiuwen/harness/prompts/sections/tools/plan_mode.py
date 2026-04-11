@@ -1,0 +1,115 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Plan mode tool metadata providers.
+
+Provides bilingual descriptions and parameter schemas for
+``enter_plan_mode`` and ``exit_plan_mode`` tools.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict
+
+from openjiuwen.harness.prompts.sections.tools.base import ToolMetadataProvider
+
+
+# ---------------------------------------------------------------------------
+# enter_plan_mode
+# ---------------------------------------------------------------------------
+
+ENTER_PLAN_MODE_DESCRIPTION_CN = (
+    "初始化 plan 文件并返回文件路径。在 plan 模式下，这必须是你的第一个操作。"
+    "该工具会创建一个新的 plan 文件（幂等：若已存在则直接返回路径）。"
+)
+
+ENTER_PLAN_MODE_DESCRIPTION_EN = (
+    "Initialize the plan file and return its path. In plan mode this must be "
+    "your very first action. Creates a new plan file (idempotent: returns the "
+    "existing path if already created)."
+)
+
+ENTER_PLAN_MODE_INPUT_PARAMS_CN: Dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+}
+
+ENTER_PLAN_MODE_INPUT_PARAMS_EN: Dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+}
+
+
+class EnterPlanModeMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for the ``enter_plan_mode`` tool."""
+
+    def get_name(self) -> str:
+        return "enter_plan_mode"
+
+    def get_description(self, language: str = "cn") -> str:
+        if language == "en":
+            return ENTER_PLAN_MODE_DESCRIPTION_EN
+        return ENTER_PLAN_MODE_DESCRIPTION_CN
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        if language == "en":
+            return ENTER_PLAN_MODE_INPUT_PARAMS_EN
+        return ENTER_PLAN_MODE_INPUT_PARAMS_CN
+
+    def validate(self) -> None:
+        """No-parameter tools skip the standard bilingual schema check."""
+
+
+# ---------------------------------------------------------------------------
+# exit_plan_mode
+# ---------------------------------------------------------------------------
+
+EXIT_PLAN_MODE_DESCRIPTION_CN = (
+    "读取 plan 文件全文并直接返回给用户，结束规划阶段。"
+    "当你对最终 plan 文件满意时，必须调用此工具结束规划阶段。"
+    "tool_result 中包含完整计划内容。"
+)
+
+EXIT_PLAN_MODE_DESCRIPTION_EN = (
+    "Read the full plan file and return the plan directly, ending the planning phase. "
+    "Call this when you are satisfied with the final plan. "
+    "The tool result contains the complete plan content."
+)
+
+EXIT_PLAN_MODE_INPUT_PARAMS_CN: Dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+}
+
+EXIT_PLAN_MODE_INPUT_PARAMS_EN: Dict[str, Any] = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+}
+
+
+class ExitPlanModeMetadataProvider(ToolMetadataProvider):
+    """Metadata provider for the ``exit_plan_mode`` tool."""
+
+    def get_name(self) -> str:
+        return "exit_plan_mode"
+
+    def get_description(self, language: str = "cn") -> str:
+        if language == "en":
+            return EXIT_PLAN_MODE_DESCRIPTION_EN
+        return EXIT_PLAN_MODE_DESCRIPTION_CN
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        if language == "en":
+            return EXIT_PLAN_MODE_INPUT_PARAMS_EN
+        return EXIT_PLAN_MODE_INPUT_PARAMS_CN
+
+    def validate(self) -> None:
+        """No-parameter tools skip the standard bilingual schema check."""
+
+
+__all__ = [
+    "EnterPlanModeMetadataProvider",
+    "ExitPlanModeMetadataProvider",
+]

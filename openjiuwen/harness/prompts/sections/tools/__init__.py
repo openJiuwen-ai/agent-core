@@ -80,6 +80,10 @@ from openjiuwen.harness.prompts.sections.tools.web_tools import (
     PaidSearchMetadataProvider,
     FetchWebpageMetadataProvider,
 )
+from openjiuwen.harness.prompts.sections.tools.plan_mode import (
+    EnterPlanModeMetadataProvider,
+    ExitPlanModeMetadataProvider,
+)
 
 # ---------------------------------------------------------------------------
 # Provider registry
@@ -115,6 +119,8 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     FreeSearchMetadataProvider(),
     PaidSearchMetadataProvider(),
     FetchWebpageMetadataProvider(),
+    EnterPlanModeMetadataProvider(),
+    ExitPlanModeMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {

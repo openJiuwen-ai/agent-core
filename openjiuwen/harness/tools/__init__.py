@@ -43,6 +43,13 @@ from openjiuwen.harness.tools.web_tools import (
     WebFreeSearchTool,
     WebPaidSearchTool,
 )
+from openjiuwen.harness.tools.plan_mode_tools import (
+    EnterPlanModeTool,
+    ExitPlanModeTool,
+    generate_word_slug,
+    get_or_create_plan_slug,
+    resolve_plan_file_path,
+)
 
 __all__ = [
     "AudioMetadataTool",
@@ -81,4 +88,9 @@ __all__ = [
     "create_audio_tools",
     "create_todos_tool",
     "create_vision_tools",
+    "EnterPlanModeTool",
+    "ExitPlanModeTool",
+    "generate_word_slug",
+    "get_or_create_plan_slug",
+    "resolve_plan_file_path",
 ]
