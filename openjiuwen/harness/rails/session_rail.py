@@ -53,12 +53,14 @@ class SessionRail(DeepAgentRail):
             agent.deep_config.subagents if agent.deep_config else []
         )
 
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
         # Build session tools
         self.tools = build_session_tools(
             parent_agent=agent,
             toolkit=self._toolkit,
             language=self.system_prompt_builder.language,
             available_agents=available_agents,
+            agent_id=agent_id,
         )
 
         # Register tools in resource manager

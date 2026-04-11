@@ -198,10 +198,12 @@ def create_cron_tools(
     target_channels: Sequence[str] | None = None,
     default_target_channel: str | None = None,
     include_legacy_compat: bool = True,
+    agent_id: str | None = None,
 ) -> list[Tool]:
     """Create the unified cron tool plus optional legacy compatibility tools."""
 
     scope = _tool_scope(context)
+    final_agent_id = agent_id or scope
 
     async def cron_tool_wrapper(**kwargs: Any) -> Any:
         return await _dispatch_cron_action(backend, context=context, **kwargs)
@@ -229,7 +231,7 @@ def create_cron_tools(
 
     tools: list[Tool] = [
         LocalFunction(
-            card=build_tool_card("cron", f"cron_{scope}", language),
+            card=build_tool_card("cron", f"cron_{scope}", language, agent_id=final_agent_id),
             func=cron_tool_wrapper,
         )
     ]

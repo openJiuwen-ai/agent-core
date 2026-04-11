@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -34,9 +34,10 @@ class LoadToolsTool(Tool):
         self,
         load_tools: Callable[[Any, List[str], bool], Awaitable[Dict[str, Any]]],
         language: str = "cn",
+        agent_id: Optional[str] = None,
     ):
         super().__init__(
-            build_tool_card(self.TOOL_NAME, self.TOOL_ID, language)
+            build_tool_card(self.TOOL_NAME, self.TOOL_ID, language, agent_id=agent_id)
         )
         self._load_tools = load_tools
 

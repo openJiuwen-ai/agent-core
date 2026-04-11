@@ -108,8 +108,8 @@ class ReadFileTool(Tool):
     FILE_UNCHANGED_STUB: str = "File unchanged since last read. Reuse the previously returned content."
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
-    def __init__(self, operation: SysOperation, language: str = "cn"):
-        super().__init__(build_tool_card("read_file", "ReadFileTool", language))
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(build_tool_card("read_file", "ReadFileTool", language, agent_id=agent_id))
         self.operation = operation
         self._snapshots: Dict[Tuple[str, int, int, str], _ReadSnapshot] = {}
 
@@ -623,9 +623,9 @@ class WriteFileTool(Tool):
 
     MAX_FILE_SIZE: int = 1 * 1024 * 1024 * 1024  # 1 GiB
 
-    def __init__(self, operation: SysOperation, language: str = "cn"):
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
-            build_tool_card("write_file", "WriteFileTool", language))
+            build_tool_card("write_file", "WriteFileTool", language, agent_id=agent_id))
         self.operation = operation
 
     @staticmethod
@@ -772,8 +772,8 @@ class EditFileTool(Tool):
     _STRAIGHT_TO_CURLY: dict = str.maketrans({'"': '\u201c', '\u201c': '"', '\u201d': '"',
                                                "'": '\u2018', '\u2018': "'", '\u2019': "'"})
 
-    def __init__(self, operation: SysOperation, language: str = "cn"):
-        super().__init__(build_tool_card("edit_file", "EditFileTool", language))
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(build_tool_card("edit_file", "EditFileTool", language, agent_id=agent_id))
         self.operation = operation
 
     # ------------------------------------------------------------------
@@ -1147,9 +1147,9 @@ class EditFileTool(Tool):
 
 class GlobTool(Tool):
 
-    def __init__(self, operation: SysOperation, language: str = "cn"):
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
-            build_tool_card("glob", "GlobTool", language))
+            build_tool_card("glob", "GlobTool", language, agent_id=agent_id))
         self.operation = operation
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
@@ -1174,9 +1174,9 @@ class GlobTool(Tool):
 
 class ListDirTool(Tool):
 
-    def __init__(self, operation: SysOperation, language: str = "cn"):
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
-            build_tool_card("list_files", "ListDirTool", language))
+            build_tool_card("list_files", "ListDirTool", language, agent_id=agent_id))
         self.operation = operation
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
@@ -1215,9 +1215,9 @@ class ListDirTool(Tool):
 
 class GrepTool(Tool):
 
-    def __init__(self, operation: SysOperation, language: str = "cn"):
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
         super().__init__(
-            build_tool_card("grep", "GrepTool", language))
+            build_tool_card("grep", "GrepTool", language, agent_id=agent_id))
         self.operation = operation
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:

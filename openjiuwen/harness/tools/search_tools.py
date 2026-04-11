@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -33,9 +33,10 @@ class SearchToolsTool(Tool):
         search_tools: Callable[[str, int, int], Awaitable[List[Dict[str, Any]]]],
         append_trace: Callable[[Any, Dict[str, Any]], None],
         language: str = "cn",
+        agent_id: Optional[str] = None,
     ):
         super().__init__(
-            build_tool_card(self.TOOL_NAME, self.TOOL_ID, language)
+            build_tool_card(self.TOOL_NAME, self.TOOL_ID, language, agent_id=agent_id)
         )
         self._search_tools = search_tools
         self._append_trace = append_trace

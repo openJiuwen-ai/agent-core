@@ -47,11 +47,13 @@ class SubagentRail(DeepAgentRail):
         # Build available_agents description for tool registration
         available_agents = self._build_available_agents_description(agent.deep_config.subagents)
 
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
         # Create and register task tool (使用统一的 build_tool_card)
         tools = create_task_tool(
             parent_agent=agent,
             available_agents=available_agents,
             language=self.system_prompt_builder.language,
+            agent_id=agent_id,
         )
         self.tools = tools
 

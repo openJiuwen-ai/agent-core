@@ -11,7 +11,7 @@ import re
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import requests
@@ -491,8 +491,8 @@ def _extract_bing_answer_cards(soup: BeautifulSoup, fallback_url: str) -> list[d
 class WebFreeSearchTool(Tool):
     """Free search via DuckDuckGo. Input query and return ranked URLs with snippets."""
 
-    def __init__(self, language: str = "cn"):
-        super().__init__(build_tool_card("free_search", "WebFreeSearchTool", language))
+    def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(build_tool_card("free_search", "WebFreeSearchTool", language, agent_id=agent_id))
 
     @staticmethod
     def _is_ddg_challenge_page(status_code: int, html: str) -> bool:
@@ -919,8 +919,8 @@ class WebFreeSearchTool(Tool):
 class WebPaidSearchTool(Tool):
     """Paid search via Bocha/Perplexity/SERPER/JINA. Support provider=auto|bocha|perplexity|serper|jina."""
 
-    def __init__(self, language: str = "cn"):
-        super().__init__(build_tool_card("paid_search", "WebPaidSearchTool", language))
+    def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(build_tool_card("paid_search", "WebPaidSearchTool", language, agent_id=agent_id))
 
     @staticmethod
     def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
@@ -1176,8 +1176,8 @@ class WebPaidSearchTool(Tool):
 class WebFetchWebpageTool(Tool):
     """Fetch webpage text content from URL. Returns status/title/plain text content."""
 
-    def __init__(self, language: str = "cn"):
-        super().__init__(build_tool_card("fetch_webpage", "WebFetchWebpageTool", language))
+    def __init__(self, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(build_tool_card("fetch_webpage", "WebFetchWebpageTool", language, agent_id=agent_id))
 
     @staticmethod
     def _extract_declared_charset(response: requests.Response) -> str:

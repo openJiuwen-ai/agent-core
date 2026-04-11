@@ -231,12 +231,13 @@ class SkillUseRail(DeepAgentRail):
         tools = []
 
         lang = agent.system_prompt_builder.language
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
         if self.include_tools:
             tools.extend(
                 [
-                    ReadFileTool(self.sys_operation, language=lang),
-                    CodeTool(self.sys_operation, language=lang),
-                    BashTool(self.sys_operation, language=lang),
+                    ReadFileTool(self.sys_operation, language=lang, agent_id=agent_id),
+                    CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
+                    BashTool(self.sys_operation, language=lang, agent_id=agent_id),
                 ]
             )
 
@@ -246,6 +247,7 @@ class SkillUseRail(DeepAgentRail):
                     get_skills=lambda: self.skills,
                     list_skill_model=self.list_skill_model,
                     language=lang,
+                    agent_id=agent_id,
                 )
             )
 

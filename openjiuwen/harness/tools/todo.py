@@ -259,16 +259,18 @@ class TodoTool(Tool):
 class TodoCreateTool(TodoTool):
     """Todo Create Tool - Create new todo items with session"""
 
-    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None,
+                 language: str = "cn", agent_id: Optional[str] = None):
         """Initialize TodoCreate tool
 
         Args:
             operation: System operation for file system access
             workspace: Path for file system operations
             language: Prompt language ("cn" or "en")
+            agent_id: Optional agent ID for unique tool ID
         """
         super().__init__(
-            build_tool_card("todo_create", "TodoCreateTool", language),
+            build_tool_card("todo_create", "TodoCreateTool", language, agent_id=agent_id),
             operation,
             workspace
         )
@@ -406,16 +408,18 @@ class TodoListTool(TodoTool):
     2. Format output for human-readable display
     """
 
-    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None,
+                 language: str = "cn", agent_id: Optional[str] = None):
         """Initialize TodoList tool with persistence layer
 
         Args:
             operation: System operation for file system access
             workspace: Path for file system operations
             language: Prompt language ("cn" or "en")
+            agent_id: Optional agent ID for unique tool ID
         """
         super().__init__(
-            build_tool_card("todo_list", "TodoListTool", language),
+            build_tool_card("todo_list", "TodoListTool", language, agent_id=agent_id),
             operation,
             workspace
         )
@@ -525,16 +529,18 @@ class TodoModifyTool(TodoTool):
     update/delete/cancel/append/insert_after/insert_before action operations todo items with session
     """
 
-    def __init__(self, operation: SysOperation, workspace: Optional[str] = None, language: str = "cn"):
+    def __init__(self, operation: SysOperation, workspace: Optional[str] = None,
+                 language: str = "cn", agent_id: Optional[str] = None):
         """Initialize TodoModify tool with persistence layer
 
         Args:
             operation: System operation for file system access
             workspace: Path for file system operations
             language: Prompt language ("cn" or "en")
+            agent_id: Optional agent ID for unique tool ID
         """
         super().__init__(
-            build_tool_card("todo_modify", "TodoModifyTool", language),
+            build_tool_card("todo_modify", "TodoModifyTool", language, agent_id=agent_id),
             operation,
             workspace
         )
@@ -1069,9 +1075,9 @@ class TodoModifyTool(TodoTool):
 
 
 def create_todos_tool(operation: SysOperation, workspace: Optional[str] = None,
-                      language: str = "cn") -> List[TodoTool]:
+                      language: str = "cn", agent_id: Optional[str] = None) -> List[TodoTool]:
     return [
-        TodoCreateTool(operation, workspace, language),
-        TodoListTool(operation, workspace, language),
-        TodoModifyTool(operation, workspace, language)
+        TodoCreateTool(operation, workspace, language, agent_id),
+        TodoListTool(operation, workspace, language, agent_id),
+        TodoModifyTool(operation, workspace, language, agent_id)
     ]

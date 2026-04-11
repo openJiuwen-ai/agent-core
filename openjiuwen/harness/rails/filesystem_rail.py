@@ -29,14 +29,15 @@ class FileSystemRail(DeepAgentRail):
 
     def init(self, agent) -> None:
         lang = agent.system_prompt_builder.language
-        read_tool = ReadFileTool(self.sys_operation, lang)
-        write_tool = WriteFileTool(self.sys_operation, lang)
-        edit_tool = EditFileTool(self.sys_operation, lang)
-        glob_tool = GlobTool(self.sys_operation, lang)
-        list_dir_tool = ListDirTool(self.sys_operation, lang)
-        grep_tool = GrepTool(self.sys_operation, lang)
-        bash_tool = BashTool(self.sys_operation, lang)
-        code_tool = CodeTool(self.sys_operation, lang)
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
+        read_tool = ReadFileTool(self.sys_operation, lang, agent_id)
+        write_tool = WriteFileTool(self.sys_operation, lang, agent_id)
+        edit_tool = EditFileTool(self.sys_operation, lang, agent_id)
+        glob_tool = GlobTool(self.sys_operation, lang, agent_id)
+        list_dir_tool = ListDirTool(self.sys_operation, lang, agent_id)
+        grep_tool = GrepTool(self.sys_operation, lang, agent_id)
+        bash_tool = BashTool(self.sys_operation, lang, agent_id=agent_id)
+        code_tool = CodeTool(self.sys_operation, lang, agent_id)
 
         self.tools = [
             read_tool,

@@ -84,10 +84,12 @@ class TaskPlanningRail(DeepAgentRail):
             self.set_workspace(agent.deep_config.workspace)
 
         workspace_dir = str(self.workspace.get_node_path(WorkspaceNode.TODO))
+        agent_id = getattr(getattr(agent, "card", None), "id", None)
         tools = create_todos_tool(
             self.sys_operation,
             workspace_dir,
             self.system_prompt_builder.language,
+            agent_id,
         )
         self.tools = tools
         try:
