@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
     BaseMessage, SystemMessage, UserMessage,
     ModelRequestConfig, ModelClientConfig, Model
@@ -344,7 +345,6 @@ class MessageSummaryOffloader(MessageOffloader):
             The offloaded (summarized) message.
         """
         if not self.config.enable_adaptive_compression:
-            # Use simple LLM-based summary (original MessageSummaryOffloader behavior)
             return await self._offload_message_simple_summary(message, context)
         return await self._offload_message_adaptive(message, context)
 
@@ -405,7 +405,6 @@ class MessageSummaryOffloader(MessageOffloader):
 
         if self.config.enable_precise_step:
             step = await self._get_step_from_chain_precise(context_messages + [message])
-            # 如果 precise 返回空字符串（过滤后消息不足），fallback 到 default
             if step == "":
                 step = self._get_step_from_chain_default(context_messages)
         else:
@@ -530,7 +529,7 @@ class MessageSummaryOffloader(MessageOffloader):
                 continue
             tool_calls = getattr(message, "tool_calls", None) or []
             for tool_call in tool_calls:
-                if self._tool_call_matches_id(tool_call, getattr(tool_message, "tool_call_id", None)):
+                if ContextUtils.tool_call_matches_id(tool_call, getattr(tool_message, "tool_call_id", None)):
                     return tool_call
         return None
 
@@ -580,8 +579,6 @@ class MessageSummaryOffloader(MessageOffloader):
         """
         messages_to_use = self._select_messages_for_step_summary(context_messages)
 
-        # 如果过滤后消息数 <= 1，跳过 LLM 调用，直接返回空字符串
-        # 调用方会 fallback 到 _get_step_from_chain_default
         if messages_to_use == "":
             return ""
 
@@ -635,14 +632,14 @@ class MessageSummaryOffloader(MessageOffloader):
     def _select_messages_for_step_summary(self, context_messages: list[BaseMessage]) -> list[BaseMessage] | str:
         """Select recent messages for step extraction.
 
-        **过滤规则（adaptive 模式启用时）：**
-        - 只保留 role == 'user' 的消息
-        - 只保留 role == 'assistant' 且不带 tool_calls 的消息（纯对话回复）
-        - 不计入：ToolMessage、带 tool_calls 的 AssistantMessage
+        **Filtering rules (when adaptive mode is enabled):**
+        - Only keep messages with role == 'user'
+        - Only keep messages with role == 'assistant' and no tool_calls (pure conversational responses)
+        - Excluded: ToolMessage, AssistantMessage with tool_calls
 
-        **退避逻辑：**
-        - 过滤后如果消息数 <= 1，跳过 precise step，直接走 fallback
-        - 返回空字符串 ("")，调用方应使用 _get_step_from_chain_default
+        **Fallback logic:**
+        - If filtered message count <= 1, skip precise step and use fallback
+        - Returns empty string (""), caller should use _get_step_from_chain_default
 
         Args:
             context_messages: All messages in the conversation context.
@@ -651,14 +648,11 @@ class MessageSummaryOffloader(MessageOffloader):
             Subset of messages for step extraction, filtered by type.
             Returns empty string ("") when filtered count <= 1 to trigger fallback.
         """
-        # 1. 类型过滤：只保留 user 和不带 tool_call 的 assistant
         filtered = [msg for msg in context_messages if self._is_valid_for_step_summary(msg)]
 
-        # 2. 数目检查：<= 1 条时退避到 fallback 逻辑，返回空字符串
         if len(filtered) <= 1:
             return ""
 
-        # 3. 数目限制：按配置取最近 N 条
         max_messages = self.config.step_summary_max_context_messages
         if len(filtered) <= max_messages:
             return list(filtered)

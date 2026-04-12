@@ -195,7 +195,7 @@ class ContextEngineeringRail(DeepAgentRail):
                     tokens_threshold=60000,
                     large_message_threshold=20000,
                     offload_message_type=["tool"],
-                    protected_tool_names=["view_file", "reload_original_context_messages"],
+                    protected_tool_names=["read_file:*SKILL.md", "reload_original_context_messages"],
                     messages_to_keep=None,
                     keep_last_round=False,
                     model=model_cfg,

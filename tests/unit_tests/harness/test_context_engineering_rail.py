@@ -168,7 +168,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert off.tokens_threshold == 60000
     assert off.large_message_threshold == 20000
     assert off.offload_message_type == ["tool"]
-    assert off.protected_tool_names == ["view_file", "reload_original_context_messages"]
+    assert off.protected_tool_names == ["read_file:*SKILL.md", "reload_original_context_messages"]
     assert off.enable_adaptive_compression is True
     assert off.summary_max_tokens == 900
 

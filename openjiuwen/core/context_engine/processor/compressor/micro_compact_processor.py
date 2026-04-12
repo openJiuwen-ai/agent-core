@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context_engine import ContextEngine
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage
 
@@ -107,32 +108,9 @@ class MicroCompactProcessor(ContextProcessor):
                 continue
             tool_calls = getattr(context_message, "tool_calls", None) or []
             for tool_call in tool_calls:
-                if self._tool_call_matches_id(tool_call, tool_call_id):
-                    return self._extract_tool_name(tool_call)
+                if ContextUtils.tool_call_matches_id(tool_call, tool_call_id):
+                    return ContextUtils.extract_tool_name(tool_call)
         return None
-
-    @staticmethod
-    def _tool_call_matches_id(tool_call: Any, tool_call_id: str) -> bool:
-        if isinstance(tool_call, dict):
-            return tool_call.get("id") == tool_call_id
-        return getattr(tool_call, "id", None) == tool_call_id
-
-    @staticmethod
-    def _extract_tool_name(tool_call: Any) -> Optional[str]:
-        if isinstance(tool_call, dict):
-            function = tool_call.get("function")
-            if isinstance(function, dict):
-                function_name = function.get("name")
-                if isinstance(function_name, str) and function_name:
-                    return function_name
-            name = tool_call.get("name")
-            return name if isinstance(name, str) and name else None
-        function = getattr(tool_call, "function", None)
-        function_name = getattr(function, "name", None) if function is not None else None
-        if isinstance(function_name, str) and function_name:
-            return function_name
-        name = getattr(tool_call, "name", None)
-        return name if isinstance(name, str) and name else None
 
     def load_state(self, state: Dict[str, Any]) -> None:
         return

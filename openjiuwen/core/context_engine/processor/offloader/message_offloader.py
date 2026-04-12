@@ -1,6 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import fnmatch
+import json
 from typing import List, Dict, Any, Literal, Tuple, Optional
 from pydantic import BaseModel, Field
 
@@ -94,11 +96,9 @@ class MessageOffloader(ContextProcessor):
         config = self.config
         all_messages = context.get_messages() + messages_to_add
         message_size = len(all_messages)
-        # Skip if total length is below the keep-floor
         if config.messages_to_keep and message_size <= config.messages_to_keep:
             return False
 
-        # Trigger when message count exceeds hard ceiling
         if config.messages_threshold and message_size > config.messages_threshold:
             if not self._has_offload_candidate(all_messages, context):
                 return False
@@ -106,7 +106,6 @@ class MessageOffloader(ContextProcessor):
                         f"exceeds threshold of {config.messages_threshold}")
             return True
 
-        # Fall back to token budget
         token_counter = context.token_counter()
         tokens = 0
         if token_counter:
@@ -223,16 +222,39 @@ class MessageOffloader(ContextProcessor):
     ) -> bool:
         if not isinstance(message, ToolMessage):
             return False
-        tool_name = self._resolve_tool_name_from_message(message, context_messages)
-        if not tool_name:
+        tool_call = self._resolve_tool_call_from_message(message, context_messages)
+        if not tool_call:
             return False
-        return tool_name in set(self.config.protected_tool_names)
 
-    def _resolve_tool_name_from_message(
+        tool_name = ContextUtils.extract_tool_name(tool_call)
+        tool_args = self._extract_tool_args(tool_call)
+
+        for protected in self.config.protected_tool_names:
+            if ":" in protected:
+                protected_tool, protected_pattern = protected.split(":", 1)
+                if tool_name == protected_tool:
+                    if self._match_pattern(tool_args, protected_pattern):
+                        return True
+            else:
+                if tool_name == protected:
+                    return True
+
+        return False
+
+    def _resolve_tool_call_from_message(
         self,
         message: BaseMessage,
         context_messages: List[BaseMessage],
-    ) -> Optional[str]:
+    ) -> Optional[Any]:
+        """Look up the tool_call object that corresponds to a tool message by traversing context backwards.
+
+        Args:
+            message: ToolMessage to look up.
+            context_messages: Context message list.
+
+        Returns:
+            The matching tool_call object, or None if not found.
+        """
         if not isinstance(message, ToolMessage):
             return None
         tool_call_id = getattr(message, "tool_call_id", None)
@@ -243,30 +265,88 @@ class MessageOffloader(ContextProcessor):
                 continue
             tool_calls = getattr(context_message, "tool_calls", None) or []
             for tool_call in tool_calls:
-                if not self._tool_call_matches_id(tool_call, tool_call_id):
-                    continue
-                return self._extract_tool_name(tool_call)
+                if ContextUtils.tool_call_matches_id(tool_call, tool_call_id):
+                    return tool_call
         return None
 
-    @staticmethod
-    def _tool_call_matches_id(tool_call: Any, tool_call_id: str) -> bool:
-        if isinstance(tool_call, dict):
-            return tool_call.get("id") == tool_call_id
-        return getattr(tool_call, "id", None) == tool_call_id
+    def _resolve_tool_name_from_message(
+        self,
+        message: BaseMessage,
+        context_messages: List[BaseMessage],
+    ) -> Optional[str]:
+        """Look up the tool name that corresponds to a tool message by traversing context backwards.
+
+        Args:
+            message: ToolMessage to look up.
+            context_messages: Context message list.
+
+        Returns:
+            Tool name string, or None if not found.
+        """
+        tool_call = self._resolve_tool_call_from_message(message, context_messages)
+        if not tool_call:
+            return None
+        return ContextUtils.extract_tool_name(tool_call)
 
     @staticmethod
-    def _extract_tool_name(tool_call: Any) -> Optional[str]:
+    def _extract_tool_args(tool_call: Any) -> dict[str, Any]:
+        """Extract argument dictionary from a tool_call object.
+
+        Args:
+            tool_call: tool_call object (dict or object with attributes).
+
+        Returns:
+            Argument dict, or empty dict on failure.
+        """
         if isinstance(tool_call, dict):
             function = tool_call.get("function")
             if isinstance(function, dict):
-                function_name = function.get("name")
-                if isinstance(function_name, str) and function_name:
-                    return function_name
-            name = tool_call.get("name")
-            return name if isinstance(name, str) and name else None
+                args_str = function.get("arguments")
+                if isinstance(args_str, str):
+                    try:
+                        return json.loads(args_str)
+                    except json.JSONDecodeError:
+                        return {}
+                if isinstance(args_str, dict):
+                    return args_str
+            args_str = tool_call.get("arguments")
+            if isinstance(args_str, str):
+                try:
+                    return json.loads(args_str)
+                except json.JSONDecodeError:
+                    return {}
+            if isinstance(args_str, dict):
+                return args_str
+
+        # Attribute-based access
         function = getattr(tool_call, "function", None)
-        function_name = getattr(function, "name", None) if function is not None else None
-        if isinstance(function_name, str) and function_name:
-            return function_name
-        name = getattr(tool_call, "name", None)
-        return name if isinstance(name, str) and name else None
+        if function is not None:
+            args_str = getattr(function, "arguments", None)
+        else:
+            args_str = getattr(tool_call, "arguments", None)
+
+        if isinstance(args_str, dict):
+            return args_str
+        if isinstance(args_str, str):
+            try:
+                return json.loads(args_str)
+            except json.JSONDecodeError:
+                return {}
+        return {}
+
+    @staticmethod
+    def _match_pattern(args: dict[str, Any], pattern: str) -> bool:
+        """Check if any argument value matches a fnmatch wildcard pattern.
+
+        Args:
+            args: Argument dictionary.
+            pattern: fnmatch wildcard pattern, e.g. "*.md", "path/to/*.py".
+
+        Returns:
+            True if any argument value matches the pattern.
+        """
+
+        for value in args.values():
+            if isinstance(value, str) and fnmatch.fnmatch(value, pattern):
+                return True
+        return False
